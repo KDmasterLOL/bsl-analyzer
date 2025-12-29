@@ -14,16 +14,22 @@
 - Документация (архитектура, правила разработки, логирование)
 - **Tracing инфраструктура** (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 
-### 🔄 В процессе (Iteration 3):
-- SDBL (Query language) parsing - **TODO**
+### 🔄 В процессе (Iteration 4):
+- **Syntax Trees (Rowan)** - интеграция CST/AST - **IN PROGRESS**
+  - ✅ SyntaxKind enum (120+ variants)
+  - ✅ BslLanguage trait
+  - ✅ SyntaxTreeBuilder
+  - ✅ Базовые AST wrappers
+  - ⏳ Адаптация parser для генерации событий
+  - ⏳ Полный набор AST wrappers
+  - ⏳ SyntaxNodePtr
 
 ### 📋 Следующие шаги (Iteration 4+):
-1. **Syntax Trees (Rowan)** - интеграция CST/AST
-2. **SDBL parsing** - для поддержки встроенных запросов
-3. **Base Infrastructure** - VFS, Salsa, SourceDatabase
+1. **SDBL parsing** - для поддержки встроенных запросов (Iteration 3)
+2. **Base Infrastructure** - VFS, Salsa, SourceDatabase (Iteration 5)
 
 ### 📊 Прогресс по фазам:
-- Phase 1 (Foundation): **66% завершено** (Iterations 1-2 ✅, 3 🔄)
+- Phase 1 (Foundation): **80% завершено** (Iterations 1-2 ✅, 3-4 🔄)
 - Phase 2 (Semantic Analysis): 0%
 - Phase 3 (Diagnostics): 0%
 - Phase 4 (LSP Integration): 0%
@@ -193,15 +199,33 @@
 - Release: 225.80 MB/s (4.6ms для 1.04 MB файла)
 - ✅ Превышает цель (50 MB/s) в 4.5 раза
 
-### Iteration 4: Syntax Trees (Rowan)
+### Iteration 4: Syntax Trees (Rowan) 🔄 IN PROGRESS
 **Источники:** rust-analyzer (syntax/)
 
-- [ ] Интеграция с Rowan
+**Статус:** Базовая инфраструктура реализована, осталась адаптация parser
+
+- [x] Интеграция с Rowan 0.15.17
+  - BslLanguage trait реализован
   - Референс: `rust-analyzer/crates/syntax/src/lib.rs`
-- [ ] GreenNode / SyntaxNode
-- [ ] AST typed wrappers
+- [x] SyntaxKind enum
+  - 120+ variants (токены + composite nodes)
+  - Все BSL keywords, operators, literals, statements, expressions
+  - Preprocessor directives и annotations
+- [x] GreenNode / SyntaxNode / SyntaxToken
+  - SyntaxTreeBuilder для построения деревьев
+  - Parse<T> result type
+  - SyntaxError with text ranges
+- [x] Базовые AST typed wrappers
+  - AstNode и AstToken traits
+  - SourceFile, ProcedureDef, FunctionDef
   - Референс: `rust-analyzer/crates/syntax/src/ast/`
-- [ ] SyntaxNodePtr
+- [ ] SyntaxNodePtr (pointer to syntax node)
+- [ ] Адаптация parser для генерации событий
+  - Нужно перевести parser на Output со событиями для SyntaxTreeBuilder
+- [ ] Полный набор AST wrappers
+  - Statements, expressions, preprocessor nodes
+
+**Тесты:** 6/6 проходят
 
 ### Iteration 5: Base Infrastructure
 **Источники:** rust-analyzer (base-db/, vfs/)
