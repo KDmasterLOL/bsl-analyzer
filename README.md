@@ -72,23 +72,112 @@ Compatible with `.bslls.json` format from bsl-language-server.
 
 ## Development
 
-### Running tests
+### Quick Start
+
+**Requirements:**
+- Rust 1.75+ (`rustup install stable`)
+- Git
+- jq (для скрипта проверки CI)
+
+**Setup:**
 
 ```bash
+# Clone repository
+git clone http://gitlab.runsystems.ru/proit/bsl-analyzer.git
+cd bsl-analyzer
+
+# Install pre-commit hooks (автоматический fmt и clippy)
+./scripts/setup-hooks.sh
+
+# Build
+cargo build
+
+# Run tests
 cargo test --all
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Run clippy
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Project structure
+### Helper Scripts
 
-- `crates/bsl-analyzer` - Main LSP server binary
-- `crates/lexer` - Lexical analysis
-- `crates/parser` - Parsing
-- `crates/syntax` - Syntax trees (Rowan-based)
-- `crates/hir` - High-level IR
-- `crates/ide` - IDE features
-- `crates/ide-diagnostics` - All 181 diagnostics
-- `docs/` - Documentation
+- **`./scripts/setup-hooks.sh`** — установка git pre-commit hooks
+- **`./scripts/ci-status.sh`** — проверка статуса GitLab CI
+
+**Проверка CI:**
+```bash
+# Последний pipeline
+./scripts/ci-status.sh
+
+# Конкретный pipeline
+./scripts/ci-status.sh 564
+```
+
+### Contributing
+
+См. [CONTRIBUTING.md](CONTRIBUTING.md) для детальной информации о процессе разработки.
+
+**Обязательно к прочтению:**
+- [DEVELOPMENT_RULES.md](docs/contributing/DEVELOPMENT_RULES.md) — правила написания кода
+- [VERSIONING.md](docs/contributing/VERSIONING.md) — политика версионирования
+- [ROADMAP.md](docs/planning/ROADMAP.md) — план разработки (30 итераций)
+- [SOURCES.md](docs/planning/SOURCES.md) — проекты-источники
+
+### Project Structure
+
+```
+bsl-analyzer/
+├── crates/
+│   ├── bsl-analyzer/      # Main LSP server binary
+│   ├── lexer/             # Lexical analysis
+│   ├── parser/            # Parsing (event-based)
+│   ├── syntax/            # Syntax trees (Rowan-based)
+│   ├── hir/               # High-level IR
+│   ├── hir-def/           # HIR definitions
+│   ├── ide/               # IDE features API
+│   ├── ide-db/            # IDE database
+│   ├── ide-diagnostics/   # All 181 diagnostics
+│   ├── ide-assists/       # Code actions
+│   ├── base-db/           # Base database (Salsa)
+│   ├── vfs/               # Virtual file system
+│   ├── project-model/     # Project configuration
+│   ├── profile/           # Profiling utilities
+│   └── test-*/            # Testing infrastructure
+├── docs/
+│   ├── planning/          # Roadmap, iterations, migration plans
+│   ├── architecture/      # Architecture documentation
+│   └── contributing/      # Development rules, versioning
+├── scripts/
+│   ├── setup-hooks.sh     # Setup git hooks
+│   ├── ci-status.sh       # Check GitLab CI status
+│   └── pre-commit         # Pre-commit hook
+└── xtask/                 # Build automation
+
+```
+
+### Code Quality
+
+Проект использует:
+- **rustfmt** — автоматическое форматирование
+- **clippy** — линтинг
+- **EditorConfig** — консистентные настройки редактора
+- **Pre-commit hooks** — автоматические проверки перед коммитом
+- **GitLab CI** — автоматическая проверка на каждый push
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

@@ -2,6 +2,29 @@
 
 Вспомогательные скрипты для разработки bsl-analyzer.
 
+## setup-hooks.sh
+
+Установка git pre-commit hooks.
+
+**Использование:**
+
+```bash
+./scripts/setup-hooks.sh
+```
+
+**Что делает:**
+- Устанавливает pre-commit hook в `.git/hooks/`
+- Hook автоматически запускает перед каждым коммитом:
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+
+**Обход hook:**
+```bash
+git commit --no-verify  # пропустить проверки (не рекомендуется)
+```
+
+---
+
 ## ci-status.sh
 
 Проверка статуса GitLab CI/CD pipeline.
