@@ -536,11 +536,10 @@ fn benchmark_parser_performance() {
 #[test]
 fn debug_tokens_around_1905() {
     use lexer::tokenize;
-    let input =
-        std::fs::read_to_string("/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl")
-            .unwrap();
+    // Test file from bsl-parser project (grammar reference)
+    let input = include_str!("fixtures/Module.bsl");
 
-    let tokens = tokenize(&input);
+    let tokens = tokenize(input);
 
     println!("\nTokens around position 1905:");
     for i in 1895..1915 {
@@ -554,11 +553,10 @@ fn debug_tokens_around_1905() {
 #[test]
 fn debug_tokens_around_14467() {
     use lexer::tokenize;
-    let input =
-        std::fs::read_to_string("/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl")
-            .unwrap();
+    // Test file from bsl-parser project (grammar reference)
+    let input = include_str!("fixtures/Module.bsl");
 
-    let tokens = tokenize(&input);
+    let tokens = tokenize(input);
 
     println!("\nTokens around position 14467:");
     for i in 14457..14477 {
@@ -571,11 +569,10 @@ fn debug_tokens_around_14467() {
 #[test]
 fn debug_tokens_around_68041() {
     use lexer::tokenize;
-    let input =
-        std::fs::read_to_string("/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl")
-            .unwrap();
+    // Test file from bsl-parser project (grammar reference)
+    let input = include_str!("fixtures/Module.bsl");
 
-    let tokens = tokenize(&input);
+    let tokens = tokenize(input);
 
     println!("\nTotal tokens: {}", tokens.len());
     println!("\nTokens around position 68041 (wider context):");
@@ -590,15 +587,15 @@ fn debug_tokens_around_68041() {
 
 #[test]
 fn test_large_file_performance() {
-    let input =
-        std::fs::read_to_string("/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl")
-            .unwrap();
+    // Test file from bsl-parser project (grammar reference)
+    // Large real-world BSL module for performance testing
+    let input = include_str!("fixtures/Module.bsl");
 
     println!("\nLarge file performance:");
     println!("File size: {} bytes ({:.2} MB)", input.len(), input.len() as f64 / 1_048_576.0);
 
     let start = Instant::now();
-    let result = parse(&input);
+    let result = parse(input);
     let elapsed = start.elapsed();
 
     println!("Parse time: {:?}", elapsed);
