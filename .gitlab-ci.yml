@@ -7,6 +7,10 @@ stages:
   - test
   - build
 
+default:
+  tags:
+    - linux
+
 variables:
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   RUSTFLAGS: "-D warnings"
