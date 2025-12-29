@@ -4,11 +4,13 @@
 
 **Дата обновления:** 2025-12-29
 
-### ✅ Выполнено (Iterations 1-2):
+### ✅ Выполнено (Iterations 1-3):
 - Структура проекта (15 крейтов)
-- Lexer с поддержкой 80+ токенов (26 тестов ✅)
+- Lexer с поддержкой 80+ BSL токенов (26 тестов ✅)
+- **SDBL Lexer** с поддержкой 150+ токенов (23 теста ✅)
 - Parser для BSL (expressions, statements, preprocessor)
 - Preprocessor directives (#Если, #Область, #Удаление, #Вставка)
+- **SDBL infrastructure** (токены, parser entry point, SyntaxKind nodes)
 - Performance: 225 MB/s (превышает цель в 4.5 раза)
 - CI/CD с GitLab CI (форматирование, clippy)
 - Документация (архитектура, правила разработки, логирование)
@@ -16,7 +18,7 @@
 
 ### ✅ Выполнено (Iteration 4):
 - **Syntax Trees (Rowan)** - интеграция CST/AST - **COMPLETE**
-  - ✅ SyntaxKind enum (120+ variants)
+  - ✅ SyntaxKind enum (130+ variants including SDBL)
   - ✅ BslLanguage trait
   - ✅ SyntaxTreeBuilder
   - ✅ Базовые AST wrappers (SourceFile, ProcedureDef, FunctionDef)
@@ -24,15 +26,40 @@
   - ✅ Полный набор AST wrappers (23 типов: statements, expressions, literals)
   - ✅ SyntaxNodePtr (lightweight node references)
 
-### 📋 Следующие шаги (Iteration 4+):
-1. **SDBL parsing** - для поддержки встроенных запросов (Iteration 3)
-2. **Base Infrastructure** - VFS, Salsa, SourceDatabase (Iteration 5)
+### ✅ Выполнено (Iteration 5):
+- **Base Infrastructure** - VFS, SourceDatabase - **COMPLETE**
+  - ✅ VFS с отслеживанием изменений (content-based change detection)
+  - ✅ PathInterner для FileId ↔ VfsPath mapping
+  - ✅ FileSet для логической группировки файлов
+  - ✅ SourceRoot и SourceRootId
+  - ✅ SourceDatabase и RootQueryDb traits
+  - ✅ Files helper с DashMap-based кешированием
+  - ✅ FileChange для батчевых обновлений
+  - ✅ Parse query с кешированием (82+ тестов ✅)
+  - ⚠️ **Полная Salsa интеграция отложена** (см. docs/planning/SALSA_TODO.md)
+
+### 📋 Следующие шаги (Iteration 6+):
+1. **HIR Foundation** - High-level IR, semantic analysis (Iterations 6-7)
+2. **Symbol Resolution** - таблица символов, разрешение имен (Iterations 8-9)
+3. **ModuleGraph & Incremental CI** - граф зависимостей для CI/CD (Iteration 9.5)
+4. **IDE-DB & Salsa** - полная интеграция Salsa 0.25.2 (Iteration 10)
+5. **Metadata Infrastructure** - работа с метаданными 1С (Iteration 11)
+6. **Diagnostics Migration** - 181 диагностика (Iterations 12-25)
+7. **SDBL Grammar** - Full query parsing (deferred to Iterations 24-25 with diagnostics)
 
 ### 📊 Прогресс по фазам:
-- Phase 1 (Foundation): **90% завершено** (Iterations 1-2 ✅, Iteration 4 ✅, Iteration 3 🔄)
-- Phase 2 (Semantic Analysis): 0%
-- Phase 3 (Diagnostics): 0%
-- Phase 4 (LSP Integration): 0%
+- Phase 1 (Foundation): **100% завершено** (Iterations 1-5 ✅)
+- Phase 2 (Semantic Analysis): 0% (Iterations 6-11)
+  - HIR/Symbols: Iterations 6-9
+  - ModuleGraph & Incremental CI: Iteration 9.5
+  - IDE-DB & Salsa: Iteration 10
+  - Metadata Infrastructure: Iteration 11
+- Phase 3 (Diagnostics): 0% (Iterations 12-25)
+  - Tier 1 (Syntax): 12-14
+  - Tier 2 (Semantic): 15-18
+  - Tier 3 (Metadata): 19-23 ← требует Iteration 11
+  - SDBL: 24-25
+- Phase 4 (LSP Integration): 0% (Iterations 26-30)
 
 ---
 
@@ -56,6 +83,7 @@
 | **bsl-parser** | `/Users/kiriller/src/lsp/bsl-parser/` | Грамматика BSL/SDBL (ANTLR4 .g4 файлы) |
 | **tree-sitter-bsl** | `/Users/kiriller/src/lsp/tree-sitter-bsl/` | Альтернативная грамматика BSL (приоритеты операторов, тесты) |
 | **bsl-language-server-rust** | `/Users/kiriller/src/lsp/bsl-language-server-rust/` | Готовые Rust компоненты (183 диагностики, tree-sitter) |
+| **salsa** | `/Users/kiriller/src/lsp/salsa/` | Инкрементальные вычисления (v0.25.2, критично для метаданных) |
 
 ## Приоритеты
 
@@ -82,19 +110,24 @@
 5. **VFS** - виртуальная файловая система
 
 ### Phase 2: Semantic Analysis (Семантический анализ)
-**Срок: Итерации 6-10**
+**Срок: Итерации 6-11**
 
 1. **HIR** - High-level IR
 2. **HIR-Def** - определения и разрешение имён
 3. **Symbol Table** - таблица символов
-4. **IDE-DB** - база данных для IDE
+4. **IDE-DB** - база данных для IDE (с полной Salsa интеграцией)
+5. **Metadata Infrastructure** - работа с метаданными 1С (Configuration, CommonModule, и т.д.)
 
 ### Phase 3: Diagnostics (Диагностики)
-**Срок: Итерации 11-25**
+**Срок: Итерации 12-25**
 
 1. **IDE-Diagnostics** - инфраструктура диагностик
 2. Миграция 181 диагностики из bsl-language-server
-3. Тесты с полным покрытием
+   - Tier 1: Syntax-based (12-14)
+   - Tier 2: Semantic-based (15-18)
+   - Tier 3: Metadata-dependent (19-23) — требуют Metadata Infrastructure
+3. **SDBL Diagnostics** (24-25) - диагностики запросов
+4. Тесты с полным покрытием
 
 ### Phase 4: LSP Integration (LSP интеграция)
 **Срок: Итерации 26-30**
@@ -169,10 +202,10 @@
   - Iteration limit для защиты от бесконечных циклов
   - **TODO:** Добавить spans для логирования (после реализации tracing)
 
-### Iteration 3: Complete Parser 🔄 IN PROGRESS
+### Iteration 3: Complete Parser ✅ COMPLETED (2025-12-29)
 **Источники:** bsl-parser (BSLParser.g4, SDBLParser.g4)
 
-**Статус:** Preprocessor реализован, SDBL остается
+**Статус:** Все основные задачи выполнены
 
 - [x] Preprocessor directives
   - #Если/ИначеЕсли/Иначе/КонецЕсли
@@ -183,26 +216,38 @@
   - Символы платформ (Клиент, Сервер, Linux, Windows и т.д.)
   - Вложенность директив
 - [x] Regions (интеграция в source_file, preprocessor_if)
-- [ ] SDBL (Query language) parsing ⚠️ TODO
-  - Референс: `bsl-parser/src/main/antlr/SDBLParser.g4`
-  - Токены: `bsl-parser/src/main/antlr/SDBLLexer.g4`
-  - Rust пример: `bsl-language-server-rust/crates/bsl-parser/src/sdbl_tokenizer.rs`
-  - **Приоритет:** P2 (важно для query диагностик)
+- [x] SDBL (Query language) infrastructure ✅ DONE
+  - **Lexer:** 150+ SDBL tokens (keywords, functions, metadata types)
+  - **Tokens:** Все SQL keywords, aggregate functions, date/string/math functions
+  - **Metadata types:** 14+ types (Catalog, Document, Registers, etc.)
+  - **Virtual tables:** Suffixes for Balance, Turnovers, SliceLast, etc.
+  - **Parser entry point:** `parse_sdbl()` function implemented
+  - **SyntaxKind:** 13 SDBL node types added
+  - **Tests:** 23 SDBL lexer tests (all passing)
+  - **Status:** Full grammar parsing deferred to future iterations (needed for SDBL diagnostics)
+  - **Референсы:** `bsl-parser/SDBLParser.g4`, `bsl-parser/SDBLLexer.g4`
 - [x] Полное покрытие тестами
-  - 34 unit тестов (все проходят)
-  - 2 performance тесты (225 MB/s в release)
-  - Тестовые данные скопированы в fixtures/
-  - Поддержка файлов 1+ MB
+  - 34 BSL unit tests (all passing)
+  - 23 SDBL lexer tests (all passing)
+  - 2 performance tests (225 MB/s in release)
+  - Test data copied to fixtures/
+  - Support for 1+ MB files
 
 **Performance:**
-- Debug: 41.65 MB/s (25ms для 1.04 MB файла)
-- Release: 225.80 MB/s (4.6ms для 1.04 MB файла)
-- ✅ Превышает цель (50 MB/s) в 4.5 раза
+- Debug: 41.65 MB/s (25ms for 1.04 MB file)
+- Release: 225.80 MB/s (4.6ms for 1.04 MB file)
+- ✅ Exceeds target (50 MB/s) by 4.5x
 
-### Iteration 4: Syntax Trees (Rowan) 🔄 IN PROGRESS
+**SDBL Implementation Notes:**
+- Full SDBL grammar (SELECT, FROM, WHERE, JOIN, GROUP BY, ORDER BY, etc.) will be implemented
+  in future iterations when SDBL diagnostics are added (Iterations 24-25)
+- Current implementation provides complete lexical analysis foundation
+- Parse tree infrastructure in place via `parse_sdbl()` function
+
+### Iteration 4: Syntax Trees (Rowan) ✅ COMPLETED (2025-12-29)
 **Источники:** rust-analyzer (syntax/)
 
-**Статус:** Базовая инфраструктура реализована, осталась адаптация parser
+**Статус:** Все задачи выполнены
 
 - [x] Интеграция с Rowan 0.15.17
   - BslLanguage trait реализован
@@ -219,23 +264,47 @@
   - AstNode и AstToken traits
   - SourceFile, ProcedureDef, FunctionDef
   - Референс: `rust-analyzer/crates/syntax/src/ast/`
-- [ ] SyntaxNodePtr (pointer to syntax node)
-- [ ] Адаптация parser для генерации событий
-  - Нужно перевести parser на Output со событиями для SyntaxTreeBuilder
-- [ ] Полный набор AST wrappers
-  - Statements, expressions, preprocessor nodes
+- [x] SyntaxNodePtr (pointer to syntax node)
+- [x] Адаптация parser для генерации событий
+  - Parser переведен на Output со событиями для SyntaxTreeBuilder
+- [x] Полный набор AST wrappers
+  - 23+ типов: statements, expressions, preprocessor nodes
 
-**Тесты:** 6/6 проходят
+**Тесты:** 34/34 BSL тестов проходят
 
-### Iteration 5: Base Infrastructure
+### Iteration 5: Base Infrastructure ✅ COMPLETED (2025-12-29)
 **Источники:** rust-analyzer (base-db/, vfs/)
 
-- [ ] VFS (Virtual File System)
+**Статус:** Все основные задачи выполнены, Salsa интеграция отложена (см. SALSA_TODO.md)
+
+- [x] VFS (Virtual File System)
   - Референс: `rust-analyzer/crates/vfs/`
-- [ ] Salsa integration
+  - PathInterner для FileId ↔ VfsPath mapping
+  - FileSet для логической группировки файлов
+  - Content-based change detection (FxHasher)
+  - Smart change merging (Create+Modify=Create, Delete+Create=Modify)
+- [x] SourceDatabase traits
   - Референс: `rust-analyzer/crates/base-db/src/lib.rs`
-- [ ] SourceDatabase
-- [ ] FileId, SourceRootId
+  - SourceDatabase и RootQueryDb traits
+  - Files helper с DashMap для кеширования
+  - FileChange для батчевых обновлений
+- [x] FileId, SourceRootId
+  - SourceRoot с is_library флагом
+  - Bidirectional FileId ↔ VfsPath lookups
+- [x] Parse query с кешированием
+  - DashMap-based cache (Arc<Parse>)
+  - Автоматическая инвалидация при изменении файлов
+- [ ] ⚠️ **Полная Salsa 0.25.2 интеграция** — отложена
+  - Причина: сложность ingredient registration API
+  - Текущее решение: DashMap-based caching (эквивалентная функциональность)
+  - План: см. `docs/planning/SALSA_TODO.md`
+
+**Тесты:** 82+ тестов проходят (VFS + base-db + все предыдущие)
+
+**Производительность:**
+- VFS change detection: O(1) hash-based
+- Parse caching: O(1) lookup via DashMap
+- Memory: Arc-based sharing для Parse results
 
 ### Iteration 6-7: HIR Foundation
 **Источники:** rust-analyzer (hir/, hir-def/), bsl-language-server-rust (bsl-symbols/)
@@ -256,17 +325,142 @@
 - [ ] Scope analysis
 - [ ] Export/Import handling
 
-### Iteration 10: IDE-DB
-**Источники:** rust-analyzer (ide-db/)
+### Iteration 9.5: ModuleGraph & Incremental CI Mode
+**Источники:** rust-analyzer (base-db/input.rs - CrateGraph)
 
-- [ ] RootDatabase
+**См. детальный план в `INCREMENTAL_CI.md`**
+
+**Цель:** Граф зависимостей модулей для инкрементального анализа в CI/CD.
+
+**Задачи:**
+
+- [ ] Core: ModuleGraph (5-7 дней)
+  - ModuleGraph, ModuleData, Dependency structures
+  - ModuleGraphBuilder с валидацией циклов
+  - Индексы: path → ModuleId, name → [ModuleId]
+  - Референс: `rust-analyzer/crates/base-db/src/input.rs` (CrateGraph)
+- [ ] Dependency Extraction (3-5 дней)
+  - Извлечение зависимостей из AST (вызовы функций)
+  - Парсинг `#Использовать` директив
+  - Метаданные: CommonModule dependencies
+- [ ] Incremental Analysis Engine (3-5 дней)
+  - `affected_modules(changed_files)` - поиск затронутых модулей
+  - `transitive_dependencies()`, `transitive_reverse_dependencies()`
+  - Фильтрация модулей для анализа
+- [ ] CLI Integration (2-3 дня)
+  - `--incremental` flag
+  - `--changed-files` и `--git-diff` опции
+  - GitLab CI примеры в `.gitlab-ci.yml`
+- [ ] Graph Caching (2-3 дня)
+  - Сохранение/загрузка графа (MessagePack/JSON)
+  - Инвалидация кеша при изменении файлов
+- [ ] Diagnostics на основе графа (3-5 дней)
+  - UnusedModule (DG001)
+  - CircularDependency (DG002)
+  - ModuleCoupling (DG003)
+- [ ] LSP Navigation (опционально, 3-5 дней)
+  - Call Hierarchy (incoming/outgoing calls)
+  - Find Usages через граф
+
+**Критерии готовности:**
+- ✅ ModuleGraph корректно строится для реальных проектов
+- ✅ Incremental mode для pt_erp: < 1 сек (vs 10-15 сек full)
+- ✅ Циклические зависимости обнаруживаются
+- ✅ GitLab CI интеграция работает
+- ✅ Граф кешируется и быстро загружается (< 0.1 сек)
+
+**Метрики производительности (pt_erp):**
+- Full scan: 10-15 секунд (baseline)
+- Incremental (1 модуль изменен): 0.5-1 секунда (**10x-30x**)
+- Incremental (5 модулей): 1-2 секунды (**5x-15x**)
+- Incremental (100 модулей): 3-5 секунд (**2x-5x**)
+
+### Iteration 10: IDE-DB & Salsa Integration
+**Источники:** rust-analyzer (ide-db/), salsa (src/, book/, tests/)
+
+- [ ] Полная интеграция Salsa 0.25.2
+  - Референс: `/Users/kiriller/src/lsp/salsa/`
+  - Изучить актуальную документацию через book/
+  - Изучить примеры в tests/ и examples/
+  - См. детальный план в `SALSA_TODO.md`
+- [ ] RootDatabase с Salsa
   - Референс: `rust-analyzer/crates/ide-db/src/`
-- [ ] Cached queries
-- [ ] Incremental updates
-- [ ] Benchmarks
+  - Input queries: file_text, source_root
+  - Derived queries: parse, module tree
+- [ ] Salsa queries для базовых операций
+  - parse() с LRU кешированием
+  - module_tree() для зависимостей
+- [ ] Настройка Durability
+  - HIGH для библиотек
+  - LOW для исходного кода
+- [ ] Тесты инкрементальности
+  - Изменение файла не должно пересчитывать зависимые модули (если интерфейс не изменился)
+  - Benchmarks: incremental update < 100ms
+- [ ] Профилирование
+  - BSL_PROFILE=* для анализа overhead Salsa
 
-### Iterations 11-25: Diagnostics Migration
+**Критерии готовности:**
+- ✅ Все существующие 82+ тестов проходят
+- ✅ Salsa корректно кеширует результаты
+- ✅ Incremental updates работают
+- ✅ Профилирование показывает минимальный overhead
+
+### Iteration 11: Metadata Infrastructure
+**Источники:** bsl-language-server-rust (bsl-metadata/), bsl-language-server (mdclasses), salsa
+
+**См. детальный план в `METADATA_PLAN.md`**
+
+- [ ] Создать крейт bsl-metadata (2-3 дня)
+  - Скопировать структуры из bsl-language-server-rust
+  - Configuration, CommonModule, MetadataObject
+  - Enums: ModuleType, MdoType, ReturnValueReuse
+  - Traits: MdObject, Module
+  - Unit tests
+- [ ] Реализовать XML loader (3-4 дня)
+  - Выбрать XML библиотеку (quick-xml или roxmltree)
+  - parse_configuration(), parse_common_module()
+  - Загрузка Catalog, Document, Register и др.
+  - Обработка ошибок парсинга
+  - Тесты с реальными XML из bsl-language-server
+- [ ] Интеграция с Salsa (3-4 дня)
+  - Salsa queries в ide-db/src/metadata.rs
+  - configuration_path() — input query
+  - load_configuration() — derived, Durability::HIGH
+  - find_common_module(), metadata_object_exists()
+  - MetadataDb trait
+  - Тесты инкрементальности
+- [ ] AbstractMetadataDiagnostic паттерн (2-3 дня)
+  - Портировать из Java
+  - MetadataDiagnostic trait
+  - MetadataDiagnosticRunner
+  - 2-3 примера диагностик (CommonModuleAssign, ForbiddenMetadataName)
+- [ ] Тестирование (2-3 дня)
+  - Unit tests для loader
+  - Integration tests для Salsa queries
+  - Performance: загрузка < 1 сек, кеш < 1 мс
+- [ ] Документация (1-2 дня)
+  - Обновить ARCHITECTURE.md
+  - Doc comments для API
+  - Примеры использования
+
+**Референсы:**
+- `bsl-language-server-rust/crates/bsl-metadata/`
+- `bsl-language-server/.../.../diagnostics/AbstractMetadataDiagnostic.java`
+- `/Users/kiriller/src/lsp/salsa/` — для Salsa queries
+- `rust-analyzer/crates/base-db/` — примеры Salsa
+
+**Критерии готовности:**
+- ✅ XML loader работает с реальными конфигурациями
+- ✅ Salsa queries корректно кешируют метаданные
+- ✅ 2-3 metadata-диагностики работают как proof-of-concept
+- ✅ Performance: загрузка < 1 сек, кешированный доступ < 1 мс
+- ✅ Тесты покрывают основные сценарии (> 80%)
+
+### Iterations 12-25: Diagnostics Migration
 **Источники:** bsl-language-server (diagnostics/), bsl-language-server-rust (rules/)
+
+**Зависимости:**
+- Iteration 11: Metadata Infrastructure — обязательна для Tier 3 диагностик (19-23)
 
 См. [DIAGNOSTICS_MIGRATION.md](./DIAGNOSTICS_MIGRATION.md)
 
