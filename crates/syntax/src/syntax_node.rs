@@ -50,6 +50,70 @@ pub type SyntaxNodeChildren = rowan::SyntaxNodeChildren<BslLanguage>;
 #[allow(dead_code)]
 pub type SyntaxElementChildren = rowan::SyntaxElementChildren<BslLanguage>;
 
+/// A "pointer" to a [`SyntaxNode`], via its absolute offset and text range.
+///
+/// This is a more compact representation than a full `SyntaxNode` which keeps
+/// the entire tree alive. It can be resolved back to a `SyntaxNode` by finding
+/// the node at the stored position.
+///
+/// # Example
+///
+/// ```no_run
+/// use syntax::SyntaxNodePtr;
+/// # use syntax::SyntaxNode;
+/// # fn example(node: &SyntaxNode, root: &SyntaxNode) {
+/// let ptr = SyntaxNodePtr::new(node);
+/// // ... later ...
+/// let resolved = ptr.to_node(root);
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SyntaxNodePtr {
+    kind: SyntaxKind,
+    range: rowan::TextRange,
+}
+
+impl SyntaxNodePtr {
+    /// Create a new pointer to the given node.
+    pub fn new(node: &SyntaxNode) -> Self {
+        Self { kind: node.kind(), range: node.text_range() }
+    }
+
+    /// Resolve this pointer back to a syntax node.
+    ///
+    /// Returns `None` if the node can't be found (e.g., the tree has been modified).
+    pub fn to_node(&self, root: &SyntaxNode) -> Option<SyntaxNode> {
+        // Fast path: check if root itself matches
+        if root.kind() == self.kind && root.text_range() == self.range {
+            return Some(root.clone());
+        }
+
+        // Search descendants for matching node
+        root.descendants().find(|n| n.kind() == self.kind && n.text_range() == self.range)
+    }
+
+    /// Try to cast this pointer to a typed AST node.
+    pub fn try_to_node<N: crate::ast::AstNode>(&self, root: &SyntaxNode) -> Option<N> {
+        self.to_node(root).and_then(N::cast)
+    }
+
+    /// Get the syntax kind this pointer refers to.
+    pub fn kind(&self) -> SyntaxKind {
+        self.kind
+    }
+
+    /// Get the text range this pointer refers to.
+    pub fn range(&self) -> rowan::TextRange {
+        self.range
+    }
+}
+
+impl From<&SyntaxNode> for SyntaxNodePtr {
+    fn from(node: &SyntaxNode) -> Self {
+        Self::new(node)
+    }
+}
+
 /// Builder for constructing syntax trees.
 ///
 /// The parser generates events, which are then processed into a tree
@@ -135,5 +199,41 @@ mod tests {
         assert!(parse.has_errors());
         assert_eq!(parse.errors().len(), 1);
         assert_eq!(parse.errors()[0].message(), "unexpected token");
+    }
+
+    #[test]
+    fn test_syntax_node_ptr() {
+        let mut builder = SyntaxTreeBuilder::new();
+
+        builder.start_node(SyntaxKind::SOURCE_FILE);
+        builder.start_node(SyntaxKind::PROCEDURE_DEF);
+        builder.token(SyntaxKind::KW_PROCEDURE, "Процедура");
+        builder.token(SyntaxKind::IDENT, "Тест");
+        builder.finish_node(); // PROCEDURE_DEF
+        builder.finish_node(); // SOURCE_FILE
+
+        let parse = builder.finish();
+        let root = parse.syntax_node();
+
+        // Find the procedure node
+        let proc_node = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::PROCEDURE_DEF)
+            .expect("procedure node should exist");
+
+        // Create a pointer to it
+        let ptr = SyntaxNodePtr::new(&proc_node);
+
+        // Verify pointer properties
+        assert_eq!(ptr.kind(), SyntaxKind::PROCEDURE_DEF);
+
+        // Resolve the pointer back to a node
+        let resolved = ptr.to_node(&root).expect("should resolve successfully");
+        assert_eq!(resolved.kind(), SyntaxKind::PROCEDURE_DEF);
+        assert_eq!(resolved.text_range(), proc_node.text_range());
+
+        // Test From trait
+        let ptr2 = SyntaxNodePtr::from(&proc_node);
+        assert_eq!(ptr, ptr2);
     }
 }

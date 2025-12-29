@@ -23,7 +23,9 @@ use rowan::GreenNode;
 
 pub use crate::{
     syntax_kind::SyntaxKind,
-    syntax_node::{BslLanguage, SyntaxElement, SyntaxNode, SyntaxToken, SyntaxTreeBuilder},
+    syntax_node::{
+        BslLanguage, SyntaxElement, SyntaxNode, SyntaxNodePtr, SyntaxToken, SyntaxTreeBuilder,
+    },
 };
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 
