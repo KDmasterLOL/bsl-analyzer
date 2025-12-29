@@ -13,10 +13,7 @@ pub struct Profile {
 
 impl Profile {
     pub fn new(label: &'static str) -> Self {
-        Self {
-            label,
-            start: Instant::now(),
-        }
+        Self { label, start: Instant::now() }
     }
 
     pub fn elapsed(&self) -> Duration {

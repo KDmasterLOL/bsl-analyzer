@@ -25,14 +25,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Test => {
-            std::process::Command::new("cargo")
-                .args(["test", "--all"])
-                .status()?;
+            std::process::Command::new("cargo").args(["test", "--all"]).status()?;
         }
         Commands::Build => {
-            std::process::Command::new("cargo")
-                .args(["build", "--release"])
-                .status()?;
+            std::process::Command::new("cargo").args(["build", "--release"]).status()?;
         }
         Commands::Codegen => {
             println!("Codegen not yet implemented");

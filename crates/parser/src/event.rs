@@ -6,16 +6,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Start a new node.
-    Start {
-        kind: NodeKind,
-        forward_parent: Option<usize>,
-    },
+    Start { kind: NodeKind, forward_parent: Option<usize> },
     /// Finish the current node.
     Finish,
     /// Add a token to the current node.
-    Token {
-        kind: lexer::TokenKind,
-    },
+    Token { kind: lexer::TokenKind },
     /// Placeholder for nodes that will be replaced.
     Placeholder,
 }

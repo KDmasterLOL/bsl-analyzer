@@ -57,7 +57,9 @@ pub fn statement(p: &mut Parser) {
         Some(TokenKind::KwGoto) => goto_stmt(p),
         Some(TokenKind::Label) => label_stmt(p),
         Some(TokenKind::KwVar) => super::items::var_declaration(p),
-        Some(TokenKind::KwBeginTransaction) | Some(TokenKind::KwCommitTransaction) | Some(TokenKind::KwRollbackTransaction) => {
+        Some(TokenKind::KwBeginTransaction)
+        | Some(TokenKind::KwCommitTransaction)
+        | Some(TokenKind::KwRollbackTransaction) => {
             let m = p.start();
             p.bump();
             p.skip_trivia();
@@ -88,7 +90,10 @@ fn return_stmt(p: &mut Parser) {
     p.skip_trivia();
 
     // Optional return value
-    if !p.at(TokenKind::Semicolon) && !p.at(TokenKind::KwEndFunction) && !p.at(TokenKind::KwEndProcedure) {
+    if !p.at(TokenKind::Semicolon)
+        && !p.at(TokenKind::KwEndFunction)
+        && !p.at(TokenKind::KwEndProcedure)
+    {
         expressions::expression(p);
     }
 

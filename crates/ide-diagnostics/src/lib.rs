@@ -82,7 +82,6 @@ pub enum DiagnosticCode {
     CommitTransactionOutsideTryCatch,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
-
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }

@@ -59,15 +59,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Analyze { project, output, format }) => {
-            analyze(project, output, format)
-        }
-        Some(Commands::CheckConfig { config }) => {
-            check_config(config)
-        }
-        Some(Commands::Lsp) | None => {
-            run_lsp_server()
-        }
+        Some(Commands::Analyze { project, output, format }) => analyze(project, output, format),
+        Some(Commands::CheckConfig { config }) => check_config(config),
+        Some(Commands::Lsp) | None => run_lsp_server(),
     }
 }
 

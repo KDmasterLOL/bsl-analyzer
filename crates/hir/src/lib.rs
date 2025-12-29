@@ -2,7 +2,9 @@
 //!
 //! This crate provides a high-level API for semantic analysis.
 
-pub use hir_def::{MethodData, MethodId, ModuleData, ModuleId, ParameterData, VariableData, VariableId};
+pub use hir_def::{
+    MethodData, MethodId, ModuleData, ModuleId, ParameterData, VariableData, VariableId,
+};
 
 /// A module in the HIR.
 #[derive(Debug)]

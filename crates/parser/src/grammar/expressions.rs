@@ -49,12 +49,8 @@ fn comparison_expr(p: &mut Parser) {
     additive_expr(p);
 
     match p.current() {
-        Some(TokenKind::Eq)
-        | Some(TokenKind::Neq)
-        | Some(TokenKind::Lt)
-        | Some(TokenKind::Le)
-        | Some(TokenKind::Gt)
-        | Some(TokenKind::Ge) => {
+        Some(TokenKind::Eq) | Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le)
+        | Some(TokenKind::Gt) | Some(TokenKind::Ge) => {
             p.bump();
             p.skip_trivia();
             additive_expr(p);

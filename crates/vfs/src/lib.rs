@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use rustc_hash::{FxHashMap, FxBuildHasher};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 /// Unique identifier for a file in the VFS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

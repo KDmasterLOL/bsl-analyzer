@@ -3,8 +3,8 @@
 //! This crate parses BSL tokens into a syntax tree.
 //! The parser uses an event-based approach similar to rust-analyzer.
 
-pub mod grammar;
 mod event;
+pub mod grammar;
 mod parser;
 mod sink;
 

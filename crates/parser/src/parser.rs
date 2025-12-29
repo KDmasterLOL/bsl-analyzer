@@ -13,11 +13,7 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Self {
-            tokens,
-            pos: 0,
-            events: Vec::new(),
-        }
+        Self { tokens, pos: 0, events: Vec::new() }
     }
 
     pub fn finish(self) -> Vec<Event> {
@@ -108,10 +104,7 @@ impl Marker {
     /// Completes the node with the given kind.
     pub fn complete(self, p: &mut Parser, kind: NodeKind) -> CompletedMarker {
         let event = &mut p.events[self.pos];
-        *event = Event::Start {
-            kind,
-            forward_parent: None,
-        };
+        *event = Event::Start { kind, forward_parent: None };
         p.events.push(Event::Finish);
         CompletedMarker { pos: self.pos }
     }
