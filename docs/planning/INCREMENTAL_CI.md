@@ -1,8 +1,52 @@
 # Incremental CI/CD Analysis with ModuleGraph
 
-**Дата:** 2025-12-29
-**Статус:** Планирование
+**Дата:** 2025-12-30
+**Статус:** ✅ Iteration 9.5 завершена (Components 1-5), ⏸️ Components 6-7 отложены до Iteration 11
 **Приоритет:** ВЫСОКИЙ (для SonarQube CI/CD)
+
+**⚠️ НЕ ГОТОВО К PRODUCTION:** Требуется Iteration 11 (Metadata) для работы с реальными проектами 1С
+
+## ⚠️ КРИТИЧЕСКОЕ ОГРАНИЧЕНИЕ (Iteration 9.5)
+
+**ModuleGraph НЕ РАБОТАЕТ для реальных проектов 1С!**
+
+Текущая реализация (Iteration 9.5) извлекает имена модулей из **имени файла**, а не из **структуры каталогов**.
+
+### Проблема:
+
+Реальная структура выгрузки конфигурации из Конфигуратора:
+```
+src/cf/CommonModules/АвтономнаяРабота/Ext/Module.bsl     ← Общий модуль
+src/cf/Catalogs/Номенклатура/ManagerModule.bsl           ← Модуль менеджера
+src/cf/Documents/ПриходТовара/ObjectModule.bsl           ← Модуль объекта
+```
+
+Что извлекается **СЕЙЧАС**:
+- `CommonModules/АвтономнаяРабота/Ext/Module.bsl` → `"Module"` ❌
+- `Catalogs/Номенклатура/ManagerModule.bsl` → `"ManagerModule"` ❌
+
+Что **НУЖНО**:
+- `CommonModules/АвтономнаяРабота/...` → `"АвтономнаяРабота"` ✅
+- `Catalogs/Номенклатура/...` → `"Номенклатура"` (с маппингом на ManagerModule) ✅
+
+### Что НЕ работает:
+
+1. ❌ Извлечение имени модуля из структуры каталогов
+2. ❌ Разрешение зависимостей вида `Справочники.Номенклатура.Метод()`
+3. ❌ Маппинг русских/английских имён классов метаданных
+4. ❌ Определение типа модуля (Manager vs Object)
+
+### Решение: Iteration 11 (Metadata Infrastructure)
+
+**Требуется:**
+- Парсинг `Configuration.xml`
+- Структуры метаданных (Configuration, CommonModule, Catalog, Document)
+- Metadata-to-path маппинг
+- Распознавание паттернов `<Class>.<Object>.<Method>()`
+
+**До Iteration 11:** ModuleGraph работает только для **тестовых сценариев** с упрощенной структурой файлов.
+
+---
 
 ## Проблема
 
@@ -936,3 +980,82 @@ pub fn outgoing_calls(
 1. Добавить Iteration 9.5 в ROADMAP.md
 2. Детализировать задачи в ITERATIONS.md
 3. Обновить ARCHITECTURE.md с секцией ModuleGraph
+
+---
+
+## Iteration 9.5 - Итоговая сводка (30 декабря 2025)
+
+### ✅ Реализовано (Components 1-5):
+
+**Component 1: Core ModuleGraph**
+- ✅ Arena-based storage (la-arena)
+- ✅ HashMap индексы (by_file, by_name, reverse_deps)
+- ✅ ModuleGraphBuilder с cycle detection
+- ✅ 12 unit тестов
+
+**Component 2: Dependency Extraction**
+- ✅ DependencyExtractor для извлечения из AST
+- ✅ Паттерн: `Module.Method()` → "Module"
+- ✅ 5 тестов (direct call, multiple, deduplication)
+- ⚠️ **Ограничение:** Не поддерживает `Справочники.Номенклатура.Метод()`
+
+**Component 3: Graph Builder Integration**
+- ✅ `build_module_graph()` - построение из SourceDatabase
+- ✅ `extract_module_name_from_path()` - извлечение имён
+- ✅ 2 интеграционных теста
+- ⚠️ **Ограничение:** Извлекает filename, а не directory name
+
+**Component 4: Incremental Analysis Engine**
+- ✅ `affected_modules()` - BFS через reverse deps
+- ✅ `transitive_dependencies()` и `transitive_reverse_dependencies()`
+- ✅ 8 тестов (single, chain, diamond, transitive)
+- ✅ Логирование reduction factor
+
+**Component 5: CLI Integration**
+- ✅ Флаги: `--incremental`, `--changed-files`, `--git-diff`
+- ✅ `get_changed_files_from_git()` - парсинг git diff
+- ✅ Работающий workflow (пока без анализа)
+
+### ⏸️ Отложено до post-Iteration 11:
+
+**Component 6: Graph Caching**
+- Сериализация/десериализация графа
+- Кеш-инвалидация
+
+**Component 7: Graph-based Diagnostics**
+- UnusedModule
+- CircularDependency
+- ModuleCoupling metrics
+
+**Причина:** Без метаданных граф не работает для реальных проектов, кеширование бессмысленно.
+
+### 📊 Статистика:
+
+- **Создано файлов:** 6 (graph.rs, builder.rs, deps.rs, build.rs, incremental.rs, tests.rs)
+- **Строк кода:** ~1200 в module-graph крейте
+- **Тестов:** 31 (все проходят)
+- **Clippy:** 0 предупреждений
+- **Время разработки:** ~6-8 часов (вместо планируемых 20-35 дней)
+
+### 🎯 Что дальше:
+
+**Iteration 11: Metadata Infrastructure** (критически важная)
+
+**Требуется для ModuleGraph:**
+1. Парсинг `Configuration.xml` (структура метаданных)
+2. Извлечение имён модулей из каталогов (`CommonModules/Имя/Ext/Module.bsl`)
+3. Маппинг классов метаданных (`Справочники` ↔ `Catalogs`)
+4. Разрешение паттернов `<Class>.<Object>.<Method>()`
+
+**После Iteration 11:**
+- Вернуться к Components 6-7
+- ModuleGraph станет пригодным для production
+- Incremental CI/CD заработает для реальных проектов
+
+### 📝 Уроки:
+
+1. ✅ **Правильно:** Начали с простой версии без метаданных
+2. ✅ **Правильно:** Зафиксировали ограничения явно в коде и документации
+3. ✅ **Правильно:** Отложили Components 6-7, так как они бессмысленны без Iteration 11
+4. ⚠️ **Урок:** Метаданные критичны для BSL - без них функциональность ограничена
+

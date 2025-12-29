@@ -2,7 +2,7 @@
 //!
 //! This is the main entry point for the LSP server.
 
-use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
+use std::{env, error::Error, fs, io, path::PathBuf, process::Command, sync::Arc};
 
 use clap::{Parser, Subcommand};
 
@@ -30,6 +30,18 @@ enum Commands {
         /// Output format (json, sarif, generic)
         #[arg(short, long, default_value = "json")]
         format: String,
+
+        /// Enable incremental analysis (only analyze affected modules)
+        #[arg(long)]
+        incremental: bool,
+
+        /// Comma-separated list of changed files (for incremental mode)
+        #[arg(long, value_delimiter = ',', requires = "incremental")]
+        changed_files: Option<Vec<PathBuf>>,
+
+        /// Git ref to compare against (e.g., HEAD~1, main) for incremental mode
+        #[arg(long, requires = "incremental", conflicts_with = "changed_files")]
+        git_diff: Option<String>,
     },
 
     /// Check configuration file
@@ -50,7 +62,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Analyze { project, output, format }) => analyze(project, output, format),
+        Some(Commands::Analyze {
+            project,
+            output,
+            format,
+            incremental,
+            changed_files,
+            git_diff,
+        }) => analyze(project, output, format, incremental, changed_files, git_diff),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -66,20 +85,82 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn analyze(
-    project: std::path::PathBuf,
-    output: Option<std::path::PathBuf>,
+    project: PathBuf,
+    output: Option<PathBuf>,
     format: String,
+    incremental: bool,
+    changed_files: Option<Vec<PathBuf>>,
+    git_diff: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Analyzing project: {:?}", project);
     tracing::info!("Output format: {}", format);
+    tracing::info!("Incremental mode: {}", incremental);
 
-    // TODO: Implement analysis
+    // TODO: Full analysis implementation will be in later iterations
+    // For now, we demonstrate the incremental workflow
+
+    if incremental {
+        tracing::info!("Running incremental analysis");
+
+        // Resolve changed files
+        let changed_paths = if let Some(files) = changed_files {
+            tracing::info!("Using explicitly provided changed files: {} files", files.len());
+            files
+        } else if let Some(git_ref) = git_diff {
+            tracing::info!("Getting changed files from git diff {}", git_ref);
+            get_changed_files_from_git(&project, &git_ref)?
+        } else {
+            return Err("Incremental mode requires either --changed-files or --git-diff".into());
+        };
+
+        tracing::info!("Changed files: {} files", changed_paths.len());
+        for path in &changed_paths {
+            tracing::debug!("  - {:?}", path);
+        }
+
+        // TODO: Build module graph, compute affected modules, run analysis
+        // This will be implemented when we integrate with ide-diagnostics
+        println!(
+            "Incremental analysis would process {} changed files + affected modules",
+            changed_paths.len()
+        );
+    } else {
+        tracing::info!("Running full analysis");
+        println!("Full analysis mode");
+    }
 
     if let Some(output) = output {
-        tracing::info!("Writing results to: {:?}", output);
+        tracing::info!("Results would be written to: {:?}", output);
+        println!("Output: {:?} (format: {})", output, format);
     }
 
     Ok(())
+}
+
+/// Retrieves changed files from git diff.
+fn get_changed_files_from_git(
+    project_root: &PathBuf,
+    git_ref: &str,
+) -> Result<Vec<PathBuf>, Box<dyn Error + Send + Sync>> {
+    let output = Command::new("git")
+        .current_dir(project_root)
+        .args(["diff", "--name-only", git_ref])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git diff failed: {}", stderr).into());
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let files: Vec<PathBuf> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter(|line| line.ends_with(".bsl")) // Only BSL files
+        .map(|line| project_root.join(line))
+        .collect();
+
+    Ok(files)
 }
 
 fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send + Sync>> {

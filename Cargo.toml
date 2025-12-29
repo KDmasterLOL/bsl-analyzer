@@ -26,6 +26,7 @@ ide-diagnostics = { path = "crates/ide-diagnostics" }
 ide-assists = { path = "crates/ide-assists" }
 hir = { path = "crates/hir" }
 hir-def = { path = "crates/hir-def" }
+module-graph = { path = "crates/module-graph" }
 vfs = { path = "crates/vfs" }
 project-model = { path = "crates/project-model" }
 intern = { path = "crates/intern" }

@@ -753,6 +753,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "module-graph"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "la-arena",
+ "parser",
+ "rustc-hash 2.1.1",
+ "syntax",
+ "tracing",
+ "vfs",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
