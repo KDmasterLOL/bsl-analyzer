@@ -14,22 +14,22 @@
 - Документация (архитектура, правила разработки, логирование)
 - **Tracing инфраструктура** (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 
-### 🔄 В процессе (Iteration 4):
-- **Syntax Trees (Rowan)** - интеграция CST/AST - **IN PROGRESS**
+### ✅ Выполнено (Iteration 4):
+- **Syntax Trees (Rowan)** - интеграция CST/AST - **COMPLETE**
   - ✅ SyntaxKind enum (120+ variants)
   - ✅ BslLanguage trait
   - ✅ SyntaxTreeBuilder
-  - ✅ Базовые AST wrappers
+  - ✅ Базовые AST wrappers (SourceFile, ProcedureDef, FunctionDef)
   - ✅ Адаптация parser для генерации событий (34/36 тестов ✅)
-  - ⏳ Полный набор AST wrappers
-  - ⏳ SyntaxNodePtr
+  - ✅ Полный набор AST wrappers (23 типов: statements, expressions, literals)
+  - ✅ SyntaxNodePtr (lightweight node references)
 
 ### 📋 Следующие шаги (Iteration 4+):
 1. **SDBL parsing** - для поддержки встроенных запросов (Iteration 3)
 2. **Base Infrastructure** - VFS, Salsa, SourceDatabase (Iteration 5)
 
 ### 📊 Прогресс по фазам:
-- Phase 1 (Foundation): **80% завершено** (Iterations 1-2 ✅, 3-4 🔄)
+- Phase 1 (Foundation): **90% завершено** (Iterations 1-2 ✅, Iteration 4 ✅, Iteration 3 🔄)
 - Phase 2 (Semantic Analysis): 0%
 - Phase 3 (Diagnostics): 0%
 - Phase 4 (LSP Integration): 0%
