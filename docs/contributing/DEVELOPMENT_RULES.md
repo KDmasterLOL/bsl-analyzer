@@ -229,6 +229,177 @@ BSL_LOG_FILE=/tmp/bsl.log BSL_LOG=debug cargo run
 
 ---
 
+### 8. Self-documenting code (минимум комментариев)
+
+**Правило:** Код должен быть самодокументируемым. Комментарии в коде нежелательны и допустимы только для описания сложной неочевидной логики.
+
+**Философия:**
+- Хороший код не нуждается в комментариях
+- Имена функций, переменных и типов должны объяснять намерение
+- Если нужен комментарий - возможно код нужно рефакторить
+
+**Запрещено:**
+```rust
+// ❌ Комментарии, дублирующие код
+// Парсим выражение
+let expr = parse_expression(p);
+
+// ❌ Устаревшие комментарии
+// TODO: this needs refactoring (без даты, без issue)
+// FIXME: broken (без объяснения что и почему)
+
+// ❌ Закомментированный код
+// let old_value = calculate_old_way();
+// process(old_value);
+
+// ❌ Очевидные комментарии
+// Increment counter
+counter += 1;
+
+// ❌ Разделители и декоративные комментарии
+// ==========================================
+// Section: Helper Functions
+// ==========================================
+```
+
+**Допустимо:**
+```rust
+// ✅ Объяснение сложной неочевидной логики
+// BSL allows implicit conversions in ternary operator right operand:
+// `x = ?(cond, value1, value2)` where value2 can have different type.
+// This is legacy 1C behavior that we must preserve for compatibility.
+if in_ternary_context && types_mismatch {
+    allow_implicit_conversion();
+}
+
+// ✅ Пояснение магических чисел или алгоритма
+// UTF-8 BOM: EF BB BF
+const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+// ✅ Ссылка на спецификацию или issue
+// See: https://github.com/1c-syntax/bsl-language-server/issues/1234
+// BSL preprocessor symbols are case-insensitive (legacy behavior)
+
+// ✅ SAFETY комментарии для unsafe кода
+// SAFETY: pointer is guaranteed valid by the caller contract
+unsafe { *ptr }
+
+// ✅ NOTE/WARNING для важных ограничений
+// NOTE: This function assumes input is already validated.
+// Calling with invalid input leads to panic.
+
+// ✅ Doc comments (///) для публичного API
+/// Parses a BSL source file into a syntax tree.
+///
+/// # Errors
+/// Returns error if iteration limit exceeded.
+pub fn parse(input: &str) -> Result<Parse> { ... }
+```
+
+**Альтернативы комментариям:**
+
+Вместо комментариев используйте:
+
+1. **Выразительные имена:**
+   ```rust
+   // ❌ До
+   let x = t * 1000; // convert to milliseconds
+
+   // ✅ После
+   let duration_ms = duration_secs * 1000;
+   ```
+
+2. **Извлечение функций:**
+   ```rust
+   // ❌ До
+   // Check if token is a keyword
+   if matches!(token, Token::KwFunction | Token::KwProcedure | ...) {
+       ...
+   }
+
+   // ✅ После
+   if is_keyword(token) {
+       ...
+   }
+
+   fn is_keyword(token: Token) -> bool {
+       matches!(token, Token::KwFunction | Token::KwProcedure | ...)
+   }
+   ```
+
+3. **Описательные типы:**
+   ```rust
+   // ❌ До
+   fn process(offset: usize) -> usize { ... } // returns new offset
+
+   // ✅ После
+   struct ByteOffset(usize);
+   fn process(offset: ByteOffset) -> ByteOffset { ... }
+   ```
+
+4. **Pattern matching вместо if-else с комментариями:**
+   ```rust
+   // ❌ До
+   if state == 0 {
+       // Initial state - waiting for input
+   } else if state == 1 {
+       // Processing state
+   } else {
+       // Error state
+   }
+
+   // ✅ После
+   enum ParserState {
+       WaitingForInput,
+       Processing,
+       Error,
+   }
+
+   match state {
+       ParserState::WaitingForInput => { ... }
+       ParserState::Processing => { ... }
+       ParserState::Error => { ... }
+   }
+   ```
+
+**Исключения:**
+
+1. **Атрибуты с объяснением:**
+   ```rust
+   #[allow(clippy::too_many_arguments)]
+   // Required for LSP protocol compatibility - matches TextDocumentPositionParams
+   pub fn goto_definition(...) { ... }
+   ```
+
+2. **Временные маркеры (с обязательным контекстом):**
+   ```rust
+   // TODO(username): Implement after #123 is merged
+   // FIXME(username): Temporary workaround for upstream bug rust-lang/rust#12345
+   // HACK(username): Required for 1C:Enterprise 8.3.10 compatibility, remove in v2.0
+   ```
+   - Обязательно указывать автора и контекст
+   - Желательно ссылка на issue
+   - Обязательно план исправления
+
+3. **Комментарии для источников тестовых данных:**
+   ```rust
+   // Source: bsl-parser/src/test/resources/Module.bsl
+   let input = include_str!("fixtures/Module.bsl");
+   ```
+
+**Обоснование:**
+- Комментарии быстро устаревают и вводят в заблуждение
+- Self-documenting код улучшает читаемость
+- Рефакторинг для ясности лучше комментария
+- Doc comments (///) остаются для документации API
+- Код должен говорить "что" и "как", комментарии - только "почему"
+
+**Code review:**
+- Каждый комментарий в PR должен быть обоснован
+- Рецензент может попросить убрать комментарий и переписать код
+
+---
+
 ## Специфичные правила
 
 ### Работа с Rowan (CST/AST)
