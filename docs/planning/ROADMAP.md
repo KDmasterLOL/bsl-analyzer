@@ -12,15 +12,15 @@
 - Performance: 225 MB/s (превышает цель в 4.5 раза)
 - CI/CD с GitLab CI (форматирование, clippy)
 - Документация (архитектура, правила разработки, логирование)
+- **Tracing инфраструктура** (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 
 ### 🔄 В процессе (Iteration 3):
 - SDBL (Query language) parsing - **TODO**
 
 ### 📋 Следующие шаги (Iteration 4+):
-1. **Реализовать tracing инфраструктуру** (документация готова)
-2. **Syntax Trees (Rowan)** - интеграция CST/AST
-3. **SDBL parsing** - для поддержки встроенных запросов
-4. **Base Infrastructure** - VFS, Salsa, SourceDatabase
+1. **Syntax Trees (Rowan)** - интеграция CST/AST
+2. **SDBL parsing** - для поддержки встроенных запросов
+3. **Base Infrastructure** - VFS, Salsa, SourceDatabase
 
 ### 📊 Прогресс по фазам:
 - Phase 1 (Foundation): **66% завершено** (Iterations 1-2 ✅, 3 🔄)
@@ -117,7 +117,11 @@
   - Архитектура описана в ARCHITECTURE.md
   - Правила использования в DEVELOPMENT_RULES.md #7
   - План внедрения в ROADMAP.md
-  - **TODO:** Реализовать `bsl-analyzer/src/tracing.rs` (следующая итерация)
+- [x] Реализовать tracing инфраструктуру
+  - Config с поддержкой фильтров и writers
+  - Hierarchical profiler (hprof) с агрегацией
+  - Environment переменные: BSL_LOG, BSL_PROFILE, BSL_LOG_FILE
+  - Интеграция в main.rs
 - [x] Реализовать базовый лексер BSL (26 тестов, все проходят)
   - Поддержка 80+ токенов (keywords, operators, literals)
   - Билингвальные ключевые слова (RU/EN)
