@@ -7,24 +7,33 @@ mod event;
 pub mod grammar;
 mod parser;
 mod sink;
+mod syntax_kind;
 
 use lexer::tokenize;
 
 pub use crate::parser::Parser;
 
-/// Parse BSL source code and return parsing events.
-pub fn parse(input: &str) -> Parse {
+/// Parse BSL source code into a Rowan syntax tree.
+///
+/// This is the main entry point for parsing. It tokenizes the input,
+/// runs the parser, and builds a lossless syntax tree.
+///
+/// # Example
+///
+/// ```
+/// let parse = parser::parse("Процедура Тест() КонецПроцедуры");
+/// assert!(!parse.has_errors());
+/// ```
+pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     let tokens = tokenize(input);
     let mut p = Parser::new(&tokens);
     grammar::source_file(&mut p);
     let events = p.finish();
-    Parse { events }
-}
 
-/// The result of parsing.
-#[derive(Debug)]
-pub struct Parse {
-    pub events: Vec<event::Event>,
+    // Build syntax tree from events
+    let sink = sink::Sink::new(&tokens);
+    let builder = sink.finish(events);
+    builder.finish()
 }
 
 #[cfg(test)]
@@ -33,7 +42,15 @@ mod tests {
 
     #[test]
     fn test_parse_simple() {
-        let result = parse("Процедура Тест() КонецПроцедуры");
-        assert!(!result.events.is_empty());
+        let parse = parse("Процедура Тест() КонецПроцедуры");
+        assert!(!parse.has_errors());
+        let root = parse.syntax_node();
+        assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
+    }
+
+    #[test]
+    fn test_parse_with_trivia() {
+        let parse = parse("// Comment\nПроцедура Тест()\nКонецПроцедуры");
+        assert!(!parse.has_errors());
     }
 }
