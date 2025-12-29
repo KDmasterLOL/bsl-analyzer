@@ -156,6 +156,79 @@ let path = "/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl";
 
 ---
 
+### 7. Единообразное логирование
+
+**Правило:** Использовать только `tracing` ecosystem для логирования и профилирования. Запрещено использовать другие способы вывода отладочной информации.
+
+**Требования:**
+- Использовать только `tracing` macros: `trace!`, `debug!`, `info!`, `warn!`, `error!`
+- Использовать spans для профилирования значимых операций
+- Следовать паттернам из rust-analyzer
+
+**Разрешено:**
+```rust
+use tracing::{trace, debug, info, warn, error};
+
+// Логирование с полями (structured logging)
+info!("parsing started");
+debug!(file_id = ?file_id, "parsing file");
+warn!(line = line_number, column = column, "syntax error");
+error!("failed to parse");
+
+// Spans для профилирования
+pub fn parse_file(input: &str) -> Parse {
+    let _span = tracing::info_span!("parse_file", len = input.len()).entered();
+    // ... parsing logic ...
+}
+```
+
+**Запрещено:**
+```rust
+// ❌ println! / eprintln! для отладки
+println!("Debug: {:?}", value);
+eprintln!("Error: {}", error);
+
+// ❌ dbg! macro
+dbg!(some_value);
+
+// ❌ log crate
+log::info!("message");
+
+// ❌ Временный отладочный код
+// TODO: remove debug print
+println!("value = {:?}", value);
+```
+
+**Обоснование:**
+- Единообразие кодовой базы
+- Возможность управления уровнем логирования через `BSL_LOG`
+- Профилирование через `BSL_PROFILE` без изменения кода
+- Структурированное логирование с полями
+- Нет необходимости удалять отладочный код
+
+**Исключения:**
+- `println!` в тестах допустимо (но лучше использовать assertions)
+- `println!` в бинарниках для CLI вывода (не для отладки)
+
+**Управление логированием:**
+```bash
+# Включить debug логи для парсера
+BSL_LOG=parser=debug cargo run
+
+# Включить все логи
+BSL_LOG=trace cargo run
+
+# Профилирование
+BSL_PROFILE=* cargo run
+
+# Запись в файл
+BSL_LOG_FILE=/tmp/bsl.log BSL_LOG=debug cargo run
+```
+
+См. [ARCHITECTURE.md](../architecture/ARCHITECTURE.md#логирование) для детальной информации.
+
+---
+
 ## Специфичные правила
 
 ### Работа с Rowan (CST/AST)

@@ -77,13 +77,19 @@
 ## Детальная декомпозиция по итерациям
 
 ### Iteration 1: Project Setup & Lexer Foundation
-**Источники:** bsl-parser (BSLLexer.g4), bsl-language-server-rust (bsl_tokenizer.rs), tree-sitter-bsl (grammar.js)
+**Источники:** bsl-parser (BSLLexer.g4), bsl-language-server-rust (bsl_tokenizer.rs), tree-sitter-bsl (grammar.js), rust-analyzer (tracing/)
 
 - [x] Создать структуру проекта
 - [ ] Настроить CI/CD (GitHub Actions)
+- [ ] Настроить систему логирования (tracing)
+  - Добавить зависимости: `tracing`, `tracing-subscriber`, `tracing-tree`
+  - Создать `bsl-analyzer/src/tracing.rs` с `Config` и инициализацией
+  - Поддержка environment variables: `BSL_LOG`, `BSL_LOG_FILE`, `BSL_PROFILE`
+  - Референс: `rust-analyzer/crates/rust-analyzer/src/tracing/`
 - [ ] Реализовать базовый лексер BSL
   - Референс: `bsl-parser/src/main/antlr/BSLLexer.g4` (40+ токенов)
   - Rust пример: `bsl-language-server-rust/crates/bsl-parser/src/bsl_tokenizer.rs`
+  - Добавить spans для профилирования: `let _p = tracing::info_span!("lex").entered();`
 - [ ] Покрыть лексер тестами
 - [ ] Документация по токенам BSL
 
@@ -93,12 +99,15 @@
 - [ ] Реализовать грамматику BSL (top-level)
   - Референс: `bsl-parser/src/main/antlr/BSLParser.g4` (правила file, subs, procedure, function)
   - Архитектура: `rust-analyzer/crates/parser/src/grammar/`
+  - Добавить spans: `let _p = tracing::info_span!("parse").entered();`
 - [ ] Expressions parsing
   - Референс: BSLParser.g4 (expression, member, operation)
+  - Логирование: `tracing::debug!("parsing expression")`
 - [ ] Statements parsing
   - Референс: BSLParser.g4 (statement, ifStatement, whileStatement, forStatement)
 - [ ] Error recovery базовый
   - Паттерн: rust-analyzer Marker pattern
+  - Логирование ошибок: `tracing::warn!(offset = p.offset(), "syntax error")`
 
 ### Iteration 3: Complete Parser
 **Источники:** bsl-parser (BSLParser.g4, SDBLParser.g4)

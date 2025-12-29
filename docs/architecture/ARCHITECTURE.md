@@ -257,6 +257,175 @@ pub struct InFile<T> {
 | Concurrency | ForkJoinPool | Rayon / async |
 | AST | ANTLR generated | Rowan + typed wrappers |
 
+## Логирование
+
+### Трассировка и профилирование (tracing)
+
+Используем **tracing ecosystem** по примеру rust-analyzer:
+
+```toml
+[workspace.dependencies]
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "registry",
+    "fmt",
+    "std",
+    "tracing-log",
+] }
+tracing-tree = "0.4"
+```
+
+### Архитектура логирования
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Application Code                       │
+│  tracing::info!("message", field = ?value)              │
+│  let _span = tracing::info_span!("operation").entered() │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                  tracing Registry                        │
+│  (координирует несколько слоев)                         │
+└─────────────────────────────────────────────────────────┘
+            │               │               │
+            ▼               ▼               ▼
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│Format Layer │  │Profiler Layer│  │JSON Layer  │
+│(stderr/file)│  │(timing tree) │  │(metrics)   │
+└─────────────┘  └─────────────┘  └─────────────┘
+```
+
+### Инициализация логирования
+
+Инициализация в `bsl-analyzer/src/bin/main.rs`:
+
+```rust
+fn setup_logging(log_file: Option<PathBuf>) -> anyhow::Result<()> {
+    let writer = match log_file {
+        Some(file) => BoxMakeWriter::new(Arc::new(fs::File::create(&file)?)),
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
+
+    bsl_analyzer::tracing::Config {
+        writer,
+        filter: env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned()),
+        profile_filter: env::var("BSL_PROFILE").ok(),
+    }
+    .init()?;
+
+    Ok(())
+}
+```
+
+### Environment Variables
+
+- **BSL_LOG** - уровень логирования (default: "warn")
+  - `BSL_LOG=debug` - весь debug output
+  - `BSL_LOG=info` - общая информация
+  - `BSL_LOG=parser=debug` - debug только для parser
+  - Синтаксис: `target=level` (EnvFilter)
+
+- **BSL_LOG_FILE** - запись логов в файл
+  - `BSL_LOG_FILE=/tmp/bsl-analyzer.log`
+
+- **BSL_PROFILE** - иерархическое профилирование
+  - `BSL_PROFILE=*` - все spans
+  - `BSL_PROFILE=parse|analyze` - только parse и analyze spans
+  - `BSL_PROFILE=*@3>10` - глубина 3, > 10ms
+
+### Паттерны использования
+
+#### Базовое логирование
+
+```rust
+use tracing::{trace, debug, info, warn, error};
+
+// Простое сообщение
+info!("parsing started");
+
+// С полями (structured logging)
+debug!(file_id = ?file_id, "parsing file");
+
+// С несколькими полями
+warn!(
+    line = line_number,
+    column = column,
+    "syntax error"
+);
+```
+
+#### Spans для профилирования
+
+```rust
+// Span на время выполнения функции
+pub fn parse_file(input: &str) -> Parse {
+    let _span = tracing::info_span!("parse_file", len = input.len()).entered();
+
+    // ... parsing logic ...
+}
+
+// Span для измерения производительности
+pub fn run_diagnostics(&self, db: &dyn RootDatabase) {
+    let _p = tracing::info_span!("run_diagnostics").entered();
+
+    for diagnostic in &self.diagnostics {
+        let _d = tracing::debug_span!("diagnostic", code = %diagnostic.code()).entered();
+        diagnostic.check(db);
+    }
+}
+```
+
+#### Вложенные spans (иерархия)
+
+```rust
+fn analyze_project() {
+    let _p = tracing::info_span!("analyze_project").entered();
+
+    for module in modules {
+        let _m = tracing::debug_span!("analyze_module", name = %module.name()).entered();
+
+        for function in module.functions() {
+            let _f = tracing::trace_span!("analyze_function").entered();
+            // ...
+        }
+    }
+}
+```
+
+Вывод при `BSL_PROFILE=*`:
+```
+1234ms    analyze_project
+  456ms    analyze_module name="CommonModule"
+    12ms    analyze_function
+    23ms    analyze_function
+  234ms    analyze_module name="ObjectModule"
+```
+
+### Рекомендации
+
+1. **Использовать spans для всех значимых операций:**
+   - Parsing
+   - Semantic analysis
+   - Diagnostics
+   - LSP requests
+
+2. **Уровни логирования:**
+   - `error!` - критические ошибки
+   - `warn!` - предупреждения (default level)
+   - `info!` - общая информация (start/stop operations)
+   - `debug!` - детальная отладочная информация
+   - `trace!` - очень детальная информация (loop iterations)
+
+3. **Structured logging:**
+   - Использовать поля вместо string formatting
+   - `debug!(file = ?file_id, "parsing")` вместо `debug!("parsing {:?}", file_id)`
+
+4. **Guard pattern:**
+   - `let _span = ...` для автоматического drop при выходе из scope
+   - Имя переменной с `_` чтобы clippy не ругался
+
 ## Тестирование
 
 ### Unit Tests
