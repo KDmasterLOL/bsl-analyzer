@@ -70,7 +70,7 @@ impl Fixture {
         let vfs_path = VfsPath::new(path);
         let file_id = self.vfs.alloc_file_id(vfs_path.clone());
         let content: Arc<str> = Arc::from(content);
-        self.vfs.set_file_content(file_id, Some(content.clone()));
+        self.vfs.set_file_contents(vfs_path.clone(), Some(content.clone()));
         self.files.insert(file_id, FixtureFile { path: vfs_path, content });
     }
 

@@ -8,3 +8,5 @@ rust-version.workspace = true
 [dependencies]
 rustc-hash.workspace = true
 indexmap.workspace = true
+stdx.workspace = true
+tracing.workspace = true
