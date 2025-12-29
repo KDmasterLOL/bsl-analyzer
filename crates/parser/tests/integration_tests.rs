@@ -476,7 +476,6 @@ fn test_lexer_performance_large_file() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn benchmark_parser_performance() {
     // Source: bsl-parser/src/test/resources/Module.bsl
     let input = include_str!("fixtures/Module.bsl");
@@ -570,7 +569,6 @@ fn debug_tokens_around_68041() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_large_file_performance() {
     // Test file from bsl-parser project (grammar reference)
     // Large real-world BSL module for performance testing

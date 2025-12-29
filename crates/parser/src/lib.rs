@@ -53,4 +53,34 @@ mod tests {
         let parse = parse("// Comment\nПроцедура Тест()\nКонецПроцедуры");
         assert!(!parse.has_errors());
     }
+
+    #[test]
+    #[ignore] // Takes ~30ms, only run when investigating parser balance issues
+    fn test_event_balance_large_file() {
+        use crate::event::Event;
+
+        let input = include_str!("../tests/fixtures/Module.bsl");
+        let tokens = tokenize(input);
+
+        let mut p = Parser::new(&tokens);
+        grammar::source_file(&mut p);
+        let events = p.finish();
+
+        // Count event types
+        let start_count = events.iter().filter(|e| matches!(e, Event::Start { .. })).count();
+        let finish_count = events.iter().filter(|e| matches!(e, Event::Finish)).count();
+
+        eprintln!("\n=== Event Balance Analysis ===");
+        eprintln!("File size: {} bytes", input.len());
+        eprintln!("Total events: {}", events.len());
+        eprintln!("Start events: {}", start_count);
+        eprintln!("Finish events: {}", finish_count);
+        eprintln!("Balance: {} (should be 0)", start_count as i32 - finish_count as i32);
+
+        assert_eq!(
+            start_count, finish_count,
+            "Events must be balanced! Start: {}, Finish: {}",
+            start_count, finish_count
+        );
+    }
 }

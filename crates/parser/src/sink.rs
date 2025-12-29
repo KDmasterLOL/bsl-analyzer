@@ -30,10 +30,32 @@ impl<'t> Sink<'t> {
     pub fn finish(mut self, events: Vec<Event>) -> SyntaxTreeBuilder {
         // Process events with forward_parent resolution
         let mut forward_parents = Vec::new();
+        let mut skip = vec![false; events.len()];
 
+        // First pass: mark events that are forward parents as already processed
+        for i in 0..events.len() {
+            if let Event::Start { forward_parent: Some(fwd), .. } = &events[i] {
+                let mut idx = i + fwd;
+                while let Event::Start { forward_parent, .. } = &events[idx] {
+                    skip[idx] = true;
+                    if let Some(next_fwd) = forward_parent {
+                        idx += next_fwd;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Second pass: process events
         for i in 0..events.len() {
             match &events[i] {
                 Event::Start { kind, forward_parent } => {
+                    // Skip if this event was already processed as a forward_parent
+                    if skip[i] {
+                        continue;
+                    }
+
                     // Collect all forward parents
                     forward_parents.clear();
                     forward_parents.push(*kind);
