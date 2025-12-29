@@ -51,18 +51,28 @@
   - ✅ 40+ новых тестов (190 тестов всего ✅)
   - ✅ Clippy без предупреждений
 
-### 📋 Следующие шаги (Iteration 9+):
-1. **ModuleGraph & Incremental CI** - граф зависимостей для CI/CD (Iteration 9.5)
-2. **IDE-DB & Salsa** - полная интеграция Salsa 0.25.2 (Iteration 10)
-3. **Metadata Infrastructure** - работа с метаданными 1С (Iteration 11)
+### ✅ Выполнено (Iteration 9.5 - Components 1-5):
+- **ModuleGraph Infrastructure** - граф зависимостей для CI/CD - **PARTIALLY COMPLETE**
+  - ✅ Core ModuleGraph (Arena storage, cycle detection)
+  - ✅ Dependency extraction from AST (direct calls)
+  - ✅ Graph builder integration with SourceDatabase
+  - ✅ Incremental analysis engine (affected_modules algorithm)
+  - ✅ CLI integration (--incremental, --git-diff)
+  - ⚠️ **CRITICAL LIMITATION:** НЕ работает для реальных 1C проектов (требует Iteration 11)
+  - ⏸️ Components 6-7 отложены до post-Iteration 11 (Graph caching, Graph-based diagnostics)
+
+### 📋 Следующие шаги (Iteration 10+):
+1. **IDE-DB & Salsa** - полная интеграция Salsa 0.25.2 (Iteration 10)
+2. **Metadata Infrastructure** - работа с метаданными 1С (Iteration 11)
+3. **ModuleGraph Completion** - Components 6-7 после Iteration 11
 4. **Diagnostics Migration** - 181 диагностика (Iterations 12-25)
 5. **SDBL Grammar** - Full query parsing (deferred to Iterations 24-25 with diagnostics)
 
 ### 📊 Прогресс по фазам:
 - Phase 1 (Foundation): **100% завершено** (Iterations 1-5 ✅)
-- Phase 2 (Semantic Analysis): **50% завершено** (Iterations 6-11)
+- Phase 2 (Semantic Analysis): **62.5% завершено** (Iterations 6-11)
   - ✅ HIR/Symbols: Iterations 6-8 ✅
-  - [ ] ModuleGraph & Incremental CI: Iteration 9.5
+  - ✅ ModuleGraph & Incremental CI: Iteration 9.5 (Components 1-5) ✅
   - [ ] IDE-DB & Salsa: Iteration 10
   - [ ] Metadata Infrastructure: Iteration 11
 - Phase 3 (Diagnostics): 0% (Iterations 12-25)
@@ -377,55 +387,83 @@
 
 **Тесты:** 40+ новых тестов (190 тестов всего в проекте)
 
-### Iteration 9.5: ModuleGraph & Incremental CI Mode
+### Iteration 9.5: ModuleGraph & Incremental CI Mode ✅ PARTIALLY COMPLETED
 **Источники:** rust-analyzer (base-db/input.rs - CrateGraph)
 
 **См. детальный план в `INCREMENTAL_CI.md`**
 
 **Цель:** Граф зависимостей модулей для инкрементального анализа в CI/CD.
 
-**Задачи:**
+**Статус:** Components 1-5 завершены ✅, Components 6-7 отложены ⏸️
 
-- [ ] Core: ModuleGraph (5-7 дней)
-  - ModuleGraph, ModuleData, Dependency structures
-  - ModuleGraphBuilder с валидацией циклов
-  - Индексы: path → ModuleId, name → [ModuleId]
+**Выполненные задачи:**
+
+- [x] **Component 1: Core ModuleGraph** (завершено 2025-12-30)
+  - ModuleGraph, ModuleGraphData, Dependency structures
+  - ModuleGraphBuilder с DFS cycle detection
+  - Индексы: file_to_module, name_to_module, reverse_deps
+  - Arena-based storage (la-arena)
   - Референс: `rust-analyzer/crates/base-db/src/input.rs` (CrateGraph)
-- [ ] Dependency Extraction (3-5 дней)
-  - Извлечение зависимостей из AST (вызовы функций)
-  - Парсинг `#Использовать` директив
-  - Метаданные: CommonModule dependencies
-- [ ] Incremental Analysis Engine (3-5 дней)
-  - `affected_modules(changed_files)` - поиск затронутых модулей
+  - Файлы: `crates/module-graph/src/graph.rs`, `builder.rs`
+- [x] **Component 2: Dependency Extraction** (завершено 2025-12-30)
+  - Извлечение зависимостей из AST (direct function calls)
+  - ⚠️ `#Использовать` НЕ поддерживается (OneScript only, не 1C)
+  - ⚠️ Metadata dependencies отложены (требует Iteration 11)
+  - Файл: `crates/module-graph/src/deps.rs`
+- [x] **Component 3: Graph Builder Integration** (завершено 2025-12-30)
+  - Интеграция с SourceDatabase
+  - build_module_graph() для построения графа из проекта
+  - Case-insensitive name resolution
+  - Файл: `crates/module-graph/src/build.rs`
+- [x] **Component 4: Incremental Analysis Engine** (завершено 2025-12-30)
+  - `affected_modules(changed_files)` - BFS через reverse dependencies
   - `transitive_dependencies()`, `transitive_reverse_dependencies()`
-  - Фильтрация модулей для анализа
-- [ ] CLI Integration (2-3 дня)
+  - Logging reduction factor для метрик
+  - Файл: `crates/module-graph/src/incremental.rs`
+- [x] **Component 5: CLI Integration** (завершено 2025-12-30)
   - `--incremental` flag
   - `--changed-files` и `--git-diff` опции
-  - GitLab CI примеры в `.gitlab-ci.yml`
-- [ ] Graph Caching (2-3 дня)
-  - Сохранение/загрузка графа (MessagePack/JSON)
-  - Инвалидация кеша при изменении файлов
-- [ ] Diagnostics на основе графа (3-5 дней)
-  - UnusedModule (DG001)
-  - CircularDependency (DG002)
-  - ModuleCoupling (DG003)
-- [ ] LSP Navigation (опционально, 3-5 дней)
-  - Call Hierarchy (incoming/outgoing calls)
-  - Find Usages через граф
+  - Интеграция git diff --name-only
+  - Файл: `crates/bsl-analyzer/src/bin/main.rs`
 
-**Критерии готовности:**
-- ✅ ModuleGraph корректно строится для реальных проектов
-- ✅ Incremental mode для pt_erp: < 1 сек (vs 10-15 сек full)
+**Отложенные задачи (до post-Iteration 11):**
+
+- [ ] **Component 6: Graph Caching**
+  - Причина: нет смысла кешировать граф, который не работает для реальных проектов
+  - Будет реализовано после Iteration 11 (Metadata Infrastructure)
+- [ ] **Component 7: Graph-based Diagnostics**
+  - UnusedModule, CircularDependency, ModuleCoupling
+  - Будет реализовано после Iteration 11
+
+**⚠️ CRITICAL LIMITATIONS:**
+
+Текущая реализация **НЕ работает для реальных 1C проектов!**
+
+Проблемы:
+1. **Module name extraction** - извлекает "Module" вместо "АвтономнаяРабота"
+   - Real 1C: `src/cf/CommonModules/АвтономнаяРабота/Ext/Module.bsl`
+   - Current: extracts "Module" ❌
+   - Required: extract "АвтономнаяРабота" ✅
+2. **Metadata dependencies** - не поддерживаются
+   - `Справочники.Номенклатура.Метод()` → extracts "Справочники" ❌
+   - Should extract "Номенклатура" and map to ManagerModule ✅
+3. **Configuration.xml parsing** - отсутствует
+   - Требуется для metadata class mapping (Справочники ↔ Catalogs)
+
+**Решение:** Iteration 11 (Metadata Infrastructure) добавит необходимую поддержку.
+
+**Критерии готовности (частично выполнены):**
+- ⚠️ ModuleGraph строится только для простых test cases
+- ⏸️ Incremental mode - реализован, но требует Iteration 11 для реальных проектов
 - ✅ Циклические зависимости обнаруживаются
-- ✅ GitLab CI интеграция работает
-- ✅ Граф кешируется и быстро загружается (< 0.1 сек)
+- ⏸️ GitLab CI интеграция - CLI готов, но ограничен test cases
+- ⏸️ Граф caching - отложен
 
-**Метрики производительности (pt_erp):**
-- Full scan: 10-15 секунд (baseline)
-- Incremental (1 модуль изменен): 0.5-1 секунда (**10x-30x**)
-- Incremental (5 модулей): 1-2 секунды (**5x-15x**)
-- Incremental (100 модулей): 3-5 секунд (**2x-5x**)
+**Статистика реализации:**
+- Строк кода: ~1,884 insertions
+- Тесты: 31 passing в module-graph
+- Clippy warnings: 0
+- Файлы: 8 новых файлов в `crates/module-graph/`
 
 ### Iteration 10: IDE-DB & Salsa Integration
 **Источники:** rust-analyzer (ide-db/), salsa (src/, book/, tests/)

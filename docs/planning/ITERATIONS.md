@@ -386,7 +386,7 @@
 
 ---
 
-### Iteration 9.5: ModuleGraph & Incremental CI Mode
+### Iteration 9.5: ModuleGraph & Incremental CI Mode ✅ PARTIALLY COMPLETED (2025-12-30)
 
 **Источники:**
 - `rust-analyzer/crates/base-db/src/input.rs` — CrateGraph pattern (1187 lines)
@@ -395,94 +395,135 @@
 
 **Цель:** Граф зависимостей BSL модулей для инкрементального анализа в CI/CD.
 
-**См. детальный план в `INCREMENTAL_CI.md`**
+**Статус:** Components 1-5 завершены ✅, Components 6-7 отложены до post-Iteration 11 ⏸️
 
-**Задачи:**
+**См. детальный план и ограничения в `INCREMENTAL_CI.md`**
 
-1. **Core: ModuleGraph** (5-7 дней)
-   - [ ] Создать `crates/base-db/src/module_graph.rs`
-     - ModuleGraph (Arena-based, как CrateGraph)
-     - ModuleData (id, name, file_id, dependencies, metadata, kind)
-     - Dependency (module_id, kind: DirectCall/Import/Metadata)
+**Выполненные задачи:**
+
+1. **Core: ModuleGraph** ✅ COMPLETED
+   - [x] Создан новый крейт `crates/module-graph/`
+     - ModuleGraph (Arena-based с la-arena, как CrateGraph)
+     - ModuleGraphData (id, name, file_id, dependencies, kind)
+     - Dependency (target: ModuleGraphId, kind: DependencyKind)
      - ModuleKind (CommonModule, ObjectModule, FormModule, etc.)
-   - [ ] Создать `crates/base-db/src/module_graph/builder.rs`
-     - ModuleGraphBuilder с валидацией
-     - add_module(), add_dependency() с cycle detection
-     - build() с конвертацией в final graph
-   - [ ] Индексы для быстрого поиска
-     - path_to_module: FxHashMap<VfsPath, ModuleId>
-     - name_to_modules: FxHashMap<ModuleName, SmallVec<[ModuleId; 1]>>
-   - [ ] Unit tests: построение графа, циклы, транзитивные зависимости
+   - [x] ModuleGraphBuilder с DFS cycle detection
+     - add_module(), add_dependency() с проверкой циклов
+     - build() с конвертацией builder IDs → Arena indices
+     - CyclicDependencyError с path
+   - [x] Индексы для O(1) поиска
+     - file_to_module: FxHashMap<FileId, ModuleGraphId>
+     - name_to_module: FxHashMap<String, ModuleGraphId> (case-insensitive)
+     - reverse_deps: FxHashMap<ModuleGraphId, Vec<ModuleGraphId>>
+   - [x] Unit tests: 12 тестов (построение графа, циклы, транзитивные зависимости)
+   - Файлы: `graph.rs`, `builder.rs`, `lib.rs`
 
-2. **Dependency Extraction** (3-5 дней)
-   - [ ] Создать `crates/hir-def/src/module_deps.rs`
-     - extract_dependencies(parse: &Parse) → Vec<Dependency>
-     - Парсинг вызовов функций (прямые зависимости)
-     - Парсинг `#Использовать` директив
-   - [ ] Интеграция с метаданными
-     - CommonModule dependencies из XML
-     - Metadata-based dependencies (Server/Client/ServerAndClient)
-   - [ ] Tests: различные виды зависимостей, edge cases
+2. **Dependency Extraction** ✅ COMPLETED (с ограничениями)
+   - [x] Создан `crates/module-graph/src/deps.rs`
+     - DependencyExtractor::extract(root: &SyntaxNode) → Vec<String>
+     - Парсинг вызовов функций (CALL_STMT → IDENT.DOT pattern)
+     - ⚠️ `#Использовать` **НЕ** поддерживается (OneScript only, не 1C)
+   - [x] Интеграция с AST
+     - Рекурсивный walk() через SyntaxNode
+     - process_call_stmt() для извлечения module references
+     - Case-insensitive deduplication (FxHashSet)
+   - [ ] ⚠️ **Metadata dependencies отложены** (требует Iteration 11)
+     - `Справочники.Номенклатура.Метод()` → extracts "Справочники" ❌
+     - Requires metadata class mapping (Справочники ↔ Catalogs)
+   - [x] Tests: 5 тестов (direct calls, multiple calls, deduplication)
+   - Файл: `deps.rs` (202 lines)
 
-3. **Incremental Analysis Engine** (3-5 дней)
-   - [ ] Добавить в ModuleGraph:
-     - affected_modules(changed_files: &[FileId]) → Vec<ModuleId>
-     - transitive_dependencies(module_id) → Vec<ModuleId>
-     - transitive_reverse_dependencies(module_id) → Vec<ModuleId>
-   - [ ] BFS алгоритм для поиска затронутых модулей
-   - [ ] Tests: корректность affected_modules для различных сценариев
-   - [ ] Benchmarks: pt_erp (25,090 модулей)
+3. **Graph Builder Integration** ✅ COMPLETED (с ограничениями)
+   - [x] Создан `crates/module-graph/src/build.rs`
+     - build_module_graph(db, source_root) → ModuleGraph
+     - extract_module_name_from_path() для извлечения имен
+     - Интеграция с SourceDatabase и RootQueryDb
+   - [x] Алгоритм построения:
+     - Step 1: Build name index (path → name → FileId)
+     - Step 2: Add all modules to builder
+     - Step 3: Extract and add dependencies
+     - Step 4: Build final graph with reverse deps
+   - [ ] ⚠️ **Module name extraction НЕ работает для реальных 1C проектов!**
+     - Real 1C: `src/cf/CommonModules/АвтономнаяРабота/Ext/Module.bsl`
+     - Current: extracts "Module" ❌
+     - Required: extract "АвтономнаяРабота" ✅
+     - Requires Configuration.xml parsing (Iteration 11)
+   - [x] Tests: 2 integration tests с TestDatabase
+   - Файл: `build.rs` (200 lines)
 
-4. **CLI Integration** (2-3 дня)
-   - [ ] Обновить `crates/bsl-analyzer/src/cli/analyze.rs`
+4. **Incremental Analysis Engine** ✅ COMPLETED
+   - [x] Создан `crates/module-graph/src/incremental.rs`
+     - affected_modules(changed_files: &[FileId]) → Vec<ModuleGraphId>
+     - transitive_dependencies(module_id) → Vec<ModuleGraphId>
+     - transitive_reverse_dependencies(module_id) → Vec<ModuleGraphId>
+   - [x] BFS алгоритм для поиска затронутых модулей
+     - Step 1: Add directly changed modules
+     - Step 2: BFS через reverse dependencies
+     - Step 3: Add direct dependencies для контекста
+   - [x] Logging с метриками (reduction factor)
+   - [x] Tests: 8 тестов (single module, dependents, transitive, diamond)
+   - Файл: `incremental.rs` (402 lines)
+
+5. **CLI Integration** ✅ COMPLETED
+   - [x] Обновлен `crates/bsl-analyzer/src/bin/main.rs`
      - --incremental flag
      - --changed-files опция (comma-separated paths)
      - --git-diff опция (git reference: HEAD~1, main, etc.)
-   - [ ] Добавить `crates/bsl-analyzer/src/cli/graph.rs`
-     - Команда для визуализации графа (DOT format)
-     - Статистики: количество модулей, зависимостей, циклов
-   - [ ] E2E тесты с реальными проектами
+   - [x] get_changed_files_from_git() function
+     - Executes `git diff --name-only <ref>`
+     - Filters .bsl files only
+     - Returns Vec<PathBuf>
+   - [x] analyze() function integration
+     - Resolves changed files from CLI or git
+     - Logs changed files count
+     - TODO: Build graph, compute affected, run analysis
+   - [ ] ⚠️ Graph visualization (--graph-dot) отложена
+   - Файл: `main.rs` (updated)
 
-5. **Graph Caching** (2-3 дня)
-   - [ ] Создать `crates/base-db/src/module_graph/cache.rs`
-     - Сохранение графа (MessagePack или JSON)
-     - Загрузка графа
-     - Инвалидация кеша (проверка timestamps файлов)
-   - [ ] Интеграция с CLI (--cache-dir опция)
-   - [ ] Tests: сохранение/загрузка, корректность после десериализации
-   - [ ] Benchmark: загрузка графа < 0.1 сек для pt_erp
+**Отложенные задачи (до post-Iteration 11):**
 
-6. **Diagnostics на основе графа** (3-5 дней)
+6. **Graph Caching** ⏸️ DEFERRED
+   - Причина: нет смысла кешировать граф, который не работает для реальных проектов
+   - Будет реализовано после Iteration 11 (Metadata Infrastructure)
+   - [ ] Serialization/deserialization (JSON/MessagePack)
+   - [ ] Cache invalidation (file timestamps)
+   - [ ] CLI integration (--cache-dir)
+
+7. **Diagnostics на основе графа** ⏸️ DEFERRED
+   - Будет реализовано после Iteration 11
    - [ ] UnusedModule (DG001)
-     - `crates/ide-diagnostics/src/handlers/unused_module.rs`
-     - Модуль неиспользуемый, если нет обратных зависимостей и не экспортный
    - [ ] CircularDependency (DG002)
-     - `crates/ide-diagnostics/src/handlers/circular_dependency.rs`
-     - DFS для поиска циклов
    - [ ] ModuleCoupling (DG003)
-     - `crates/ide-diagnostics/src/handlers/module_coupling.rs`
-     - Метрики: afferent/efferent coupling, instability
-   - [ ] Tests для каждой диагностики
 
-7. **LSP Navigation (опционально)** (3-5 дней)
-   - [ ] Call Hierarchy
-     - `crates/ide/src/call_hierarchy.rs`
-     - incoming_calls() через reverse_dependencies
-     - outgoing_calls() через dependencies
-   - [ ] Find Usages
-     - `crates/ide/src/references.rs`
-     - Интеграция с ModuleGraph для cross-module usages
-   - [ ] Tests: call hierarchy, find usages
+**⚠️ CRITICAL LIMITATIONS:**
 
-**Критерии готовности:**
-- ✅ ModuleGraph корректно строится для реальных проектов (pt_erp: 25,090 модулей)
-- ✅ Incremental mode для pt_erp: < 1 сек (vs 10-15 сек full scan)
-- ✅ Циклические зависимости обнаруживаются
-- ✅ GitLab CI интеграция работает (примеры .gitlab-ci.yml)
-- ✅ Граф кешируется и быстро загружается (< 0.1 сек)
-- ✅ 3+ graph-based диагностики работают
+Текущая реализация **НЕ работает для реальных 1C проектов!**
 
-**Метрики производительности (pt_erp, 25,090 модулей):**
+**Проблемы:**
+1. **Module name extraction** - извлекает filename вместо directory name
+2. **Metadata dependencies** - не поддерживаются (Справочники.Номенклатура)
+3. **Configuration.xml parsing** - отсутствует
+
+**Решение:** Iteration 11 (Metadata Infrastructure) добавит необходимую поддержку.
+
+**Подробности в `INCREMENTAL_CI.md`** (section: "CRITICAL LIMITATION")
+
+**Критерии готовности (частично выполнены):**
+- ⚠️ ModuleGraph строится только для простых test cases
+- ⏸️ Incremental mode - реализован, но требует Iteration 11 для реальных проектов
+- ✅ Циклические зависимости обнаруживаются (DFS в builder)
+- ⏸️ GitLab CI интеграция - CLI готов, но ограничен test cases
+- ⏸️ Граф caching - отложен до post-Iteration 11
+- ⏸️ Graph-based диагностики - отложены до post-Iteration 11
+
+**Статистика реализации:**
+- Строк кода: ~1,884 insertions
+- Тесты: 31 passing (12 graph + 5 deps + 2 build + 8 incremental + 4 lib)
+- Clippy warnings: 0
+- Файлы: 8 новых файлов в `crates/module-graph/`
+- Крейты: 1 новый крейт (`module-graph`)
+
+**Метрики производительности (проектируемые для pt_erp, 25,090 модулей):**
 
 | Сценарий | Full scan | Incremental | Экономия |
 |----------|-----------|-------------|----------|
@@ -490,7 +531,9 @@
 | 5 модулей изменено | 10-15 сек | 1-2 сек | 5x-15x |
 | 100 модулей (большой MR) | 10-15 сек | 3-5 сек | 2x-5x |
 
-**GitLab CI пример:**
+⚠️ **Примечание:** Метрики проектируемые, так как текущая реализация не работает для реальных проектов.
+
+**GitLab CI пример (для будущего использования):**
 ```yaml
 bsl-analysis-incremental:
   script:
