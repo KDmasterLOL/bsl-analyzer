@@ -381,8 +381,10 @@ dependencies = [
  "base-db",
  "expect-test",
  "hir-def",
+ "ide-db",
  "stdx",
  "syntax",
+ "vfs",
 ]
 
 [[package]]
@@ -392,9 +394,16 @@ dependencies = [
  "base-db",
  "expect-test",
  "intern",
+ "la-arena",
+ "lexer",
+ "parser",
  "rustc-hash 2.1.1",
  "salsa",
+ "smol_str",
  "syntax",
+ "text-size",
+ "tracing",
+ "vfs",
 ]
 
 [[package]]
@@ -512,12 +521,15 @@ name = "ide-db"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "dashmap",
  "expect-test",
  "hir",
+ "hir-def",
  "indexmap",
  "rustc-hash 2.1.1",
  "salsa",
  "syntax",
+ "tracing",
  "vfs",
 ]
 
@@ -605,6 +617,12 @@ name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+
+[[package]]
+name = "la-arena"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3752f229dcc5a481d60f385fa479ff46818033d881d2d801aa27dffcfb5e8306"
 
 [[package]]
 name = "lazy_static"

@@ -7,12 +7,15 @@ rust-version.workspace = true
 
 [dependencies]
 hir.workspace = true
+hir-def.workspace = true
 base-db.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 salsa.workspace = true
 rustc-hash.workspace = true
+dashmap.workspace = true
 indexmap.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

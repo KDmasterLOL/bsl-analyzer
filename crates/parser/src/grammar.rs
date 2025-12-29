@@ -9,6 +9,56 @@ use lexer::TokenKind;
 use crate::event::NodeKind;
 use crate::parser::Parser;
 
+/// Parses an annotated item (procedure or function with compiler directives).
+fn annotated_item(p: &mut Parser) {
+    // Start the outer node for the procedure/function
+    let outer = p.start();
+
+    // Parse annotations as children
+    while matches!(
+        p.current(),
+        Some(TokenKind::AnnAtClient)
+            | Some(TokenKind::AnnAtServer)
+            | Some(TokenKind::AnnAtServerNoContext)
+            | Some(TokenKind::AnnAtClientAtServer)
+            | Some(TokenKind::AnnAtClientAtServerNoContext)
+    ) {
+        p.check_iteration_limit();
+        items::compiler_directive(p);
+        p.skip_trivia();
+    }
+
+    // Now parse the actual procedure/function
+    match p.current() {
+        Some(TokenKind::KwAsync) => match p.nth(1) {
+            Some(TokenKind::KwProcedure) => {
+                items::procedure_def_content(p);
+                outer.complete(p, NodeKind::ProcedureDef);
+            }
+            Some(TokenKind::KwFunction) => {
+                items::function_def_content(p);
+                outer.complete(p, NodeKind::FunctionDef);
+            }
+            _ => {
+                outer.abandon(p);
+                p.error();
+            }
+        },
+        Some(TokenKind::KwProcedure) => {
+            items::procedure_def_content(p);
+            outer.complete(p, NodeKind::ProcedureDef);
+        }
+        Some(TokenKind::KwFunction) => {
+            items::function_def_content(p);
+            outer.complete(p, NodeKind::FunctionDef);
+        }
+        _ => {
+            outer.abandon(p);
+            p.error();
+        }
+    }
+}
+
 /// Parses a source file.
 pub fn source_file(p: &mut Parser) {
     let m = p.start();
@@ -43,19 +93,8 @@ pub fn source_file(p: &mut Parser) {
             | Some(TokenKind::AnnAtServerNoContext)
             | Some(TokenKind::AnnAtClientAtServer)
             | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                items::compiler_directive(p);
-                // After compiler directive, can be more directives/annotations or procedure/function
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) => match p.nth(1) {
-                        Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                        Some(TokenKind::KwFunction) => items::function_def(p),
-                        _ => p.error(),
-                    },
-                    Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
-                }
+                // Parse annotated procedure/function as a single node
+                annotated_item(p);
             }
             // Custom annotations (&До, &После и т.д.)
             Some(TokenKind::AnnBefore)

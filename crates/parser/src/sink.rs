@@ -123,10 +123,11 @@ impl<'t> Sink<'t> {
         use lexer::TokenKind;
 
         while let Some(token) = self.tokens.get(self.token_pos) {
-            // Skip trivia tokens (comments and newlines)
-            // Note: whitespace is skipped by the lexer, so we only handle what's tokenized
+            // Skip only comments as trivia.
+            // Newlines are NOT trivia in BSL - they are significant tokens
+            // that the parser explicitly requests.
             match token.kind {
-                TokenKind::Comment | TokenKind::Newline => {
+                TokenKind::Comment => {
                     let syntax_kind = token_kind_to_syntax(token.kind);
                     self.builder.token(syntax_kind, &token.text);
                     self.token_pos += 1;
@@ -157,5 +158,39 @@ mod tests {
         assert!(!parse.has_errors());
         let root = parse.syntax_node();
         assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
+    }
+
+    #[test]
+    fn test_sink_multiple_variables() {
+        let source = r#"
+Перем Первая;
+Перем Вторая Экспорт;
+Перем Третья;
+"#;
+        eprintln!("=== Source ===\n{}", source);
+
+        let tokens = lexer::tokenize(source);
+        eprintln!("=== Tokens from lexer ===");
+        for (i, token) in tokens.iter().enumerate() {
+            eprintln!(
+                "{}: {:?} @ {}..{} = {:?}",
+                i,
+                token.kind,
+                token.offset,
+                token.offset + token.text.len(),
+                token.text
+            );
+        }
+
+        let mut parser = crate::Parser::new(&tokens);
+        grammar::source_file(&mut parser);
+        let events = parser.finish();
+
+        let sink = Sink::new(&tokens);
+        let builder = sink.finish(events);
+        let parse = builder.finish();
+
+        eprintln!("=== Final syntax tree ===");
+        eprintln!("{:#?}", parse.syntax_node());
     }
 }

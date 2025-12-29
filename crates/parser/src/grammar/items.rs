@@ -118,7 +118,12 @@ fn annotation_param_value(p: &mut Parser) {
 /// Parses a procedure definition with optional Async.
 pub fn procedure_def(p: &mut Parser) {
     let m = p.start();
+    procedure_def_content(p);
+    m.complete(p, NodeKind::ProcedureDef);
+}
 
+/// Parses the content of a procedure definition (without creating the outer node).
+pub fn procedure_def_content(p: &mut Parser) {
     p.skip_trivia();
 
     // Optional Async keyword
@@ -153,14 +158,17 @@ pub fn procedure_def(p: &mut Parser) {
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndProcedure);
-
-    m.complete(p, NodeKind::ProcedureDef);
 }
 
 /// Parses a function definition with optional Async.
 pub fn function_def(p: &mut Parser) {
     let m = p.start();
+    function_def_content(p);
+    m.complete(p, NodeKind::FunctionDef);
+}
 
+/// Parses the content of a function definition (without creating the outer node).
+pub fn function_def_content(p: &mut Parser) {
     p.skip_trivia();
 
     // Optional Async keyword
@@ -195,8 +203,6 @@ pub fn function_def(p: &mut Parser) {
 
     p.skip_trivia();
     p.expect(TokenKind::KwEndFunction);
-
-    m.complete(p, NodeKind::FunctionDef);
 }
 
 /// Parses a parameter list.

@@ -67,6 +67,31 @@ impl ProcedureDef {
             .filter_map(|it| it.into_token())
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
+
+    pub fn export_keyword(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::KW_EXPORT)
+    }
+
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
+        self.0.children().filter_map(|node| {
+            if node.kind() == SyntaxKind::COMPILER_DIRECTIVE {
+                Some(Annotation(node))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn body(&self) -> Option<StmtList> {
+        self.0.children().find_map(StmtList::cast)
+    }
 }
 
 /// Function definition.
@@ -98,6 +123,31 @@ impl FunctionDef {
             .filter_map(|it| it.into_token())
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
+
+    pub fn export_keyword(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::KW_EXPORT)
+    }
+
+    pub fn param_list(&self) -> Option<ParamList> {
+        self.0.children().find_map(ParamList::cast)
+    }
+
+    pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
+        self.0.children().filter_map(|node| {
+            if node.kind() == SyntaxKind::COMPILER_DIRECTIVE {
+                Some(Annotation(node))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn body(&self) -> Option<StmtList> {
+        self.0.children().find_map(StmtList::cast)
+    }
 }
 
 // ==================== Variable declarations ====================
@@ -124,6 +174,32 @@ impl AstNode for VarDef {
     }
 }
 
+impl VarDef {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::IDENT)
+    }
+
+    /// Get all variable names declared in this definition.
+    ///
+    /// BSL allows multiple variables in one declaration: Перем Имя1, Имя2, Имя3;
+    pub fn names(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|it| it.kind() == SyntaxKind::IDENT)
+    }
+
+    pub fn export_keyword(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::KW_EXPORT)
+    }
+}
+
 /// Parameter list.
 #[derive(Debug, Clone)]
 pub struct ParamList(SyntaxNode);
@@ -146,6 +222,12 @@ impl AstNode for ParamList {
     }
 }
 
+impl ParamList {
+    pub fn params(&self) -> impl Iterator<Item = Param> + '_ {
+        self.0.children().filter_map(Param::cast)
+    }
+}
+
 /// Parameter definition.
 #[derive(Debug, Clone)]
 pub struct Param(SyntaxNode);
@@ -165,6 +247,28 @@ impl AstNode for Param {
 
     fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+}
+
+impl Param {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::IDENT)
+    }
+
+    pub fn val_keyword(&self) -> Option<SyntaxToken> {
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::KW_VAL)
+    }
+
+    pub fn default_value(&self) -> bool {
+        // If parameter has assignment (=), it has a default value
+        // We check for the presence of additional children beyond just the name
+        self.0.children().next().is_some()
     }
 }
 
@@ -620,7 +724,7 @@ pub struct Annotation(SyntaxNode);
 
 impl AstNode for Annotation {
     fn can_cast(kind: SyntaxKind) -> bool {
-        kind == SyntaxKind::ANNOTATION
+        matches!(kind, SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -633,5 +737,58 @@ impl AstNode for Annotation {
 
     fn syntax(&self) -> &SyntaxNode {
         &self.0
+    }
+}
+
+impl Annotation {
+    /// Get the annotation kind token (e.g., &НаКлиенте, &AtServer).
+    pub fn kind_token(&self) -> Option<SyntaxToken> {
+        // For COMPILER_DIRECTIVE, the annotation token is a direct child
+        // For ANNOTATION, the first IDENT token after '&' is the annotation kind
+        self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::ANN_AT_CLIENT
+                    | SyntaxKind::ANN_AT_SERVER
+                    | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
+                    | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
+                    | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+                    | SyntaxKind::IDENT
+            )
+        })
+    }
+}
+
+// ==================== Statements ====================
+
+/// Statement list (body of a procedure/function or block).
+#[derive(Debug, Clone)]
+pub struct StmtList(SyntaxNode);
+
+impl AstNode for StmtList {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::STMT_LIST
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl StmtList {
+    /// Iterate over variable declarations (Перем declarations inside procedures).
+    ///
+    /// Note: In BSL, both module-level and local variables use the same syntax (Перем),
+    /// so they share the same AST node type (VarDef).
+    pub fn var_decls(&self) -> impl Iterator<Item = VarDef> + '_ {
+        self.0.children().filter_map(VarDef::cast)
     }
 }
