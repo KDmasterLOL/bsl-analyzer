@@ -14,10 +14,18 @@
 //! - Literals (numbers, strings, dates, booleans)
 //! - Comments
 //!
+//! ## SDBL Support
+//!
+//! The `sdbl` module provides a separate lexer for SDBL (query language) tokens.
+//! SDBL queries are embedded in BSL string literals.
+//!
 //! ## References
 //!
 //! - bsl-parser/src/main/antlr/BSLLexer.g4 (ANTLR grammar)
+//! - bsl-parser/src/main/antlr/SDBLLexer.g4 (SDBL grammar)
 //! - tree-sitter-bsl/grammar.js (tree-sitter grammar)
+
+pub mod sdbl;
 
 use logos::Logos;
 use smol_str::SmolStr;

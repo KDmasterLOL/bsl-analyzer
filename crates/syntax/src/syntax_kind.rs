@@ -218,6 +218,23 @@ pub enum SyntaxKind {
     PRE_SYMBOL,
     PRE_BOOL_OP,
 
+    // ========= SDBL (Query Language) =========
+    // Basic nodes for SDBL query parsing
+    // Full grammar will be expanded in future iterations
+    SDBL_QUERY,         // Root node for an SDBL query
+    SDBL_SELECT_QUERY,  // SELECT query statement
+    SDBL_SELECT_CLAUSE, // SELECT clause with fields
+    SDBL_FROM_CLAUSE,   // FROM clause with data sources
+    SDBL_WHERE_CLAUSE,  // WHERE clause with conditions
+    SDBL_JOIN_CLAUSE,   // JOIN clause
+    SDBL_GROUP_CLAUSE,  // GROUP BY clause
+    SDBL_ORDER_CLAUSE,  // ORDER BY clause
+    SDBL_TABLE_REF,     // Table reference (e.g., Catalog.Products)
+    SDBL_COLUMN_REF,    // Column reference
+    SDBL_FIELD_LIST,    // List of fields in SELECT
+    SDBL_EXPR,          // SDBL expression
+    SDBL_LITERAL,       // SDBL literal value
+
     // Error recovery
     ERROR,
 
