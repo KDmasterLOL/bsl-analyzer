@@ -42,8 +42,9 @@ lsp-types = "0.95"
 lsp-server = "0.7"
 
 # Parsing infrastructure (rowan for syntax trees)
-rowan = "0.16"
+rowan = "=0.15.17"
 logos = "0.14"
+text-size = "1.1.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -75,8 +76,8 @@ dashmap = "5.5"
 parking_lot = "0.12"
 indexmap = "2.1"
 itertools = "0.12"
-smol_str = "0.2"
-triomphe = "0.1"
+smol_str = "0.3.2"
+triomphe = { version = "0.1.14", default-features = false, features = ["std"] }
 rustc-hash = "2.0"
 crossbeam-channel = "0.5"
 

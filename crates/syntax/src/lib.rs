@@ -1,182 +1,105 @@
 //! Syntax trees for BSL language.
 //!
 //! This crate provides syntax tree infrastructure based on Rowan.
+//!
+//! ## Architecture
+//!
+//! - [`SyntaxKind`] - enum of all syntactic constructs (tokens + nodes)
+//! - [`BslLanguage`] - language definition for Rowan
+//! - [`SyntaxNode`], [`SyntaxToken`], [`SyntaxElement`] - untyped tree types
+//! - [`ast`] - typed AST wrappers over untyped syntax tree
+//!
+//! ## References
+//!
+//! Based on rust-analyzer's syntax crate architecture.
 
 pub mod ast;
+mod syntax_kind;
+mod syntax_node;
 
-use rowan::Language;
+use std::marker::PhantomData;
 
-/// BSL language definition for Rowan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BslLanguage {}
+use rowan::GreenNode;
 
-impl Language for BslLanguage {
-    type Kind = SyntaxKind;
+pub use crate::{
+    syntax_kind::SyntaxKind,
+    syntax_node::{BslLanguage, SyntaxElement, SyntaxNode, SyntaxToken, SyntaxTreeBuilder},
+};
+pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 
-    fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
-        SyntaxKind::from(raw.0)
-    }
-
-    fn kind_to_raw(kind: Self::Kind) -> rowan::SyntaxKind {
-        rowan::SyntaxKind(kind.into())
-    }
-}
-
-/// Syntax node type for BSL.
-pub type SyntaxNode = rowan::SyntaxNode<BslLanguage>;
-/// Syntax token type for BSL.
-pub type SyntaxToken = rowan::SyntaxToken<BslLanguage>;
-/// Syntax element type for BSL.
-pub type SyntaxElement = rowan::SyntaxElement<BslLanguage>;
-
-/// All syntax kinds in BSL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u16)]
-pub enum SyntaxKind {
-    // Tokens
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-    Dot,
-    Comma,
-    Semicolon,
-    Colon,
-    Eq,
-    Neq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Percent,
-    Question,
-    Tilde,
-    Number,
-    String,
-    Date,
-    Ident,
-    Comment,
-    Newline,
-    Whitespace,
-
-    // Keywords
-    KwProcedure,
-    KwEndProcedure,
-    KwFunction,
-    KwEndFunction,
-    KwIf,
-    KwThen,
-    KwElse,
-    KwElsIf,
-    KwEndIf,
-    KwFor,
-    KwEach,
-    KwIn,
-    KwTo,
-    KwWhile,
-    KwDo,
-    KwEndDo,
-    KwReturn,
-    KwVar,
-    KwTry,
-    KwExcept,
-    KwEndTry,
-    KwRaise,
-    KwNew,
-    KwExport,
-    KwVal,
-    KwAnd,
-    KwOr,
-    KwNot,
-    KwTrue,
-    KwFalse,
-    KwUndefined,
-    KwNull,
-    KwBreak,
-    KwContinue,
-    KwGoto,
-
-    // Nodes
-    SourceFile,
-    ProcedureDef,
-    FunctionDef,
-    VarDef,
-    ParamList,
-    Param,
-    Annotation,
-    StmtList,
-    AssignStmt,
-    CallStmt,
-    ReturnStmt,
-    IfStmt,
-    ElseIfClause,
-    ElseClause,
-    WhileStmt,
-    ForStmt,
-    ForEachStmt,
-    TryStmt,
-    ExceptClause,
-    RaiseStmt,
-    BreakStmt,
-    ContinueStmt,
-    GotoStmt,
-    LabelStmt,
-    EmptyStmt,
-    Expr,
-    BinaryExpr,
-    UnaryExpr,
-    TernaryExpr,
-    CallExpr,
-    IndexExpr,
-    FieldExpr,
-    NewExpr,
-    ParenExpr,
-    Literal,
-    ArgList,
-
-    // Preprocessor
-    PreIfDir,
-    PreRegionDir,
-
-    // Special
-    Error,
-
-    // Must be last
-    __LAST,
-}
-
-impl From<u16> for SyntaxKind {
-    fn from(value: u16) -> Self {
-        assert!(value < SyntaxKind::__LAST as u16);
-        // SAFETY: We checked that value is in range
-        unsafe { std::mem::transmute(value) }
-    }
-}
-
-impl From<SyntaxKind> for u16 {
-    fn from(kind: SyntaxKind) -> Self {
-        kind as u16
-    }
-}
-
-/// Result of parsing.
-#[derive(Debug)]
+/// Result of parsing BSL source code.
+///
+/// Contains a syntax tree (green node) and a list of errors.
+/// Note that we always produce a syntax tree, even for completely invalid files.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parse<T> {
-    green: rowan::GreenNode,
-    errors: Vec<String>,
-    _marker: std::marker::PhantomData<T>,
+    green: GreenNode,
+    errors: Vec<SyntaxError>,
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<T> Parse<T> {
-    pub fn syntax(&self) -> SyntaxNode {
+    /// Create a new parse result.
+    pub(crate) fn new(green: GreenNode, errors: Vec<SyntaxError>) -> Self {
+        Self { green, errors, _marker: PhantomData }
+    }
+
+    /// Get the syntax tree root.
+    pub fn syntax_node(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())
     }
 
-    pub fn errors(&self) -> &[String] {
+    /// Get parsing errors.
+    pub fn errors(&self) -> &[SyntaxError] {
         &self.errors
     }
+
+    /// Check if there are any errors.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
 }
+
+impl Parse<SyntaxNode> {
+    /// Cast this parse result to a typed AST node.
+    pub fn tree(&self) -> SyntaxNode {
+        self.syntax_node()
+    }
+}
+
+/// A syntax error.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SyntaxError {
+    message: String,
+    range: TextRange,
+}
+
+impl SyntaxError {
+    /// Create a new syntax error.
+    pub fn new(message: impl Into<String>, range: TextRange) -> Self {
+        Self { message: message.into(), range }
+    }
+
+    /// Create a syntax error at a specific offset.
+    pub fn new_at_offset(message: impl Into<String>, offset: TextSize) -> Self {
+        Self::new(message, TextRange::empty(offset))
+    }
+
+    /// Get the error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Get the text range of the error.
+    pub fn range(&self) -> TextRange {
+        self.range
+    }
+}
+
+impl std::fmt::Display for SyntaxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} at {:?}", self.message, self.range)
+    }
+}
+
+impl std::error::Error for SyntaxError {}

@@ -17,7 +17,7 @@ pub struct SourceFile(SyntaxNode);
 
 impl AstNode for SourceFile {
     fn can_cast(kind: SyntaxKind) -> bool {
-        kind == SyntaxKind::SourceFile
+        kind == SyntaxKind::SOURCE_FILE
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -39,7 +39,7 @@ pub struct ProcedureDef(SyntaxNode);
 
 impl AstNode for ProcedureDef {
     fn can_cast(kind: SyntaxKind) -> bool {
-        kind == SyntaxKind::ProcedureDef
+        kind == SyntaxKind::PROCEDURE_DEF
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -60,7 +60,7 @@ impl ProcedureDef {
         self.0
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find(|it| it.kind() == SyntaxKind::Ident)
+            .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 }
 
@@ -70,7 +70,7 @@ pub struct FunctionDef(SyntaxNode);
 
 impl AstNode for FunctionDef {
     fn can_cast(kind: SyntaxKind) -> bool {
-        kind == SyntaxKind::FunctionDef
+        kind == SyntaxKind::FUNCTION_DEF
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {
@@ -91,7 +91,7 @@ impl FunctionDef {
         self.0
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find(|it| it.kind() == SyntaxKind::Ident)
+            .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 }
 
