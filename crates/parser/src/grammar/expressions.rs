@@ -5,6 +5,40 @@ use lexer::TokenKind;
 use crate::event::NodeKind;
 use crate::parser::Parser;
 
+/// Checks if current token is an identifier or keyword (keywords can be property names)
+fn is_ident_or_keyword(p: &Parser) -> bool {
+    matches!(
+        p.current(),
+        Some(TokenKind::Ident)
+            // Keywords that can be used as property/method names
+            | Some(TokenKind::KwProcedure)
+            | Some(TokenKind::KwFunction)
+            | Some(TokenKind::KwFor)
+            | Some(TokenKind::KwTo)
+            | Some(TokenKind::KwWhile)
+            | Some(TokenKind::KwDo)
+            | Some(TokenKind::KwIf)
+            | Some(TokenKind::KwThen)
+            | Some(TokenKind::KwElse)
+            | Some(TokenKind::KwElsIf)
+            | Some(TokenKind::KwTry)
+            | Some(TokenKind::KwExcept)
+            | Some(TokenKind::KwReturn)
+            | Some(TokenKind::KwBreak)
+            | Some(TokenKind::KwContinue)
+            | Some(TokenKind::KwVar)
+            | Some(TokenKind::KwNew)
+            | Some(TokenKind::KwExecute)
+            | Some(TokenKind::KwAnd)
+            | Some(TokenKind::KwOr)
+            | Some(TokenKind::KwNot)
+            | Some(TokenKind::KwTrue)
+            | Some(TokenKind::KwFalse)
+            | Some(TokenKind::KwAsync)
+            | Some(TokenKind::KwAwait)
+    )
+}
+
 /// Parses an expression.
 pub fn expression(p: &mut Parser) {
     or_expr(p);
@@ -15,6 +49,7 @@ fn or_expr(p: &mut Parser) {
     and_expr(p);
 
     while p.at(TokenKind::KwOr) {
+        p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
         p.skip_trivia();
@@ -29,6 +64,7 @@ fn and_expr(p: &mut Parser) {
     not_expr(p);
 
     while p.at(TokenKind::KwAnd) {
+        p.check_iteration_limit();
         p.bump();
         p.skip_trivia();
         not_expr(p);
@@ -63,6 +99,7 @@ fn additive_expr(p: &mut Parser) {
     multiplicative_expr(p);
 
     while matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+        p.check_iteration_limit();
         p.bump();
         p.skip_trivia();
         multiplicative_expr(p);
@@ -76,6 +113,7 @@ fn multiplicative_expr(p: &mut Parser) {
         p.current(),
         Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
     ) {
+        p.check_iteration_limit();
         p.bump();
         p.skip_trivia();
         unary_expr(p);
@@ -97,13 +135,18 @@ fn postfix_expr(p: &mut Parser) {
     primary_expr(p);
 
     loop {
+        p.check_iteration_limit();
         p.skip_trivia();
         match p.current() {
             Some(TokenKind::Dot) => {
                 p.bump();
                 p.skip_trivia();
-                if p.at(TokenKind::Ident) {
+                // After dot, accept identifiers OR keywords as property names
+                // (e.g., Объект.По, Объект.Для - keywords used as property names)
+                if is_ident_or_keyword(p) {
                     p.bump();
+                } else {
+                    p.error(); // Expected property name after dot
                 }
             }
             Some(TokenKind::LBracket) => {
@@ -123,14 +166,38 @@ fn postfix_expr(p: &mut Parser) {
 
 fn primary_expr(p: &mut Parser) {
     match p.current() {
-        Some(TokenKind::Number) | Some(TokenKind::String) | Some(TokenKind::Date) => {
+        Some(TokenKind::Decimal) | Some(TokenKind::Float) | Some(TokenKind::Date) => {
             p.bump();
+        }
+        Some(TokenKind::String) => {
+            p.bump(); // Single-line string
+        }
+        Some(TokenKind::StringStart) => {
+            // Multi-line string: StringStart (Newline|StringPart)* StringTail
+            p.bump(); // StringStart
+            while matches!(p.current(), Some(TokenKind::Newline) | Some(TokenKind::StringPart)) {
+                p.check_iteration_limit();
+                p.bump();
+            }
+            // Expect StringTail to close the string
+            if p.at(TokenKind::StringTail) {
+                p.bump();
+            } else {
+                p.error(); // Unclosed string
+            }
+        }
+        Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
+            // These should only appear after StringStart
+            p.error(); // Unexpected string fragment
         }
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => {
             p.bump();
         }
         Some(TokenKind::KwUndefined) | Some(TokenKind::KwNull) => {
             p.bump();
+        }
+        Some(TokenKind::KwAwait) => {
+            await_expr(p);
         }
         Some(TokenKind::Ident) => {
             p.bump();
@@ -152,6 +219,12 @@ fn primary_expr(p: &mut Parser) {
             // Error recovery
         }
     }
+}
+
+fn await_expr(p: &mut Parser) {
+    p.bump(); // Await
+    p.skip_trivia();
+    expression(p);
 }
 
 fn new_expr(p: &mut Parser) {
@@ -200,6 +273,7 @@ fn arg_list(p: &mut Parser) {
         }
 
         while p.eat(TokenKind::Comma) {
+            p.check_iteration_limit();
             p.skip_trivia();
             if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                 expression(p);

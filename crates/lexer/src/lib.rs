@@ -1,218 +1,273 @@
 //! Lexer for BSL (1C:Enterprise) language.
 //!
-//! This crate tokenizes BSL source code into a stream of tokens.
-//! It supports both Russian and English keywords.
+//! Based on BSLLexer.g4 from bsl-parser project.
+//! Supports both Russian and English keywords (case-insensitive).
+//!
+//! ## Token Structure
+//!
+//! The lexer recognizes the following token categories:
+//! - Keywords (bilingual: Russian/English)
+//! - Preprocessor directives (#If, #Region, etc.)
+//! - Annotations (&AtClient, &AtServer, etc.)
+//! - Operators (arithmetic, comparison, logical)
+//! - Punctuation
+//! - Literals (numbers, strings, dates, booleans)
+//! - Comments
+//!
+//! ## References
+//!
+//! - bsl-parser/src/main/antlr/BSLLexer.g4 (ANTLR grammar)
+//! - tree-sitter-bsl/grammar.js (tree-sitter grammar)
 
 use logos::Logos;
 use smol_str::SmolStr;
 
 /// Token kinds for BSL language.
+///
+/// Each token represents a lexical element in BSL source code.
+/// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t\r]+")]
 pub enum TokenKind {
-    // Keywords (Russian)
-    #[token("Процедура", ignore(ascii_case))]
-    #[token("Procedure", ignore(ascii_case))]
+    // ========= Keywords (bilingual: Russian/English) =========
+    // Note: Using regex with (?i) for case-insensitive matching of both ASCII and Cyrillic
+
+    // Procedure/Function keywords
+    #[regex(r"(?i)процедура|(?i)procedure")]
     KwProcedure,
 
-    #[token("КонецПроцедуры", ignore(ascii_case))]
-    #[token("EndProcedure", ignore(ascii_case))]
+    #[regex(r"(?i)конецпроцедуры|(?i)endprocedure")]
     KwEndProcedure,
 
-    #[token("Функция", ignore(ascii_case))]
-    #[token("Function", ignore(ascii_case))]
+    #[regex(r"(?i)функция|(?i)function")]
     KwFunction,
 
-    #[token("КонецФункции", ignore(ascii_case))]
-    #[token("EndFunction", ignore(ascii_case))]
+    #[regex(r"(?i)конецфункции|(?i)endfunction")]
     KwEndFunction,
 
-    #[token("Если", ignore(ascii_case))]
-    #[token("If", ignore(ascii_case))]
-    KwIf,
-
-    #[token("Тогда", ignore(ascii_case))]
-    #[token("Then", ignore(ascii_case))]
-    KwThen,
-
-    #[token("Иначе", ignore(ascii_case))]
-    #[token("Else", ignore(ascii_case))]
-    KwElse,
-
-    #[token("ИначеЕсли", ignore(ascii_case))]
-    #[token("ElsIf", ignore(ascii_case))]
-    KwElsIf,
-
-    #[token("КонецЕсли", ignore(ascii_case))]
-    #[token("EndIf", ignore(ascii_case))]
-    KwEndIf,
-
-    #[token("Для", ignore(ascii_case))]
-    #[token("For", ignore(ascii_case))]
-    KwFor,
-
-    #[token("Каждого", ignore(ascii_case))]
-    #[token("Each", ignore(ascii_case))]
-    KwEach,
-
-    #[token("Из", ignore(ascii_case))]
-    #[token("In", ignore(ascii_case))]
-    KwIn,
-
-    #[token("По", ignore(ascii_case))]
-    #[token("To", ignore(ascii_case))]
-    KwTo,
-
-    #[token("Пока", ignore(ascii_case))]
-    #[token("While", ignore(ascii_case))]
-    KwWhile,
-
-    #[token("Цикл", ignore(ascii_case))]
-    #[token("Do", ignore(ascii_case))]
-    KwDo,
-
-    #[token("КонецЦикла", ignore(ascii_case))]
-    #[token("EndDo", ignore(ascii_case))]
-    KwEndDo,
-
-    #[token("Возврат", ignore(ascii_case))]
-    #[token("Return", ignore(ascii_case))]
-    KwReturn,
-
-    #[token("Перем", ignore(ascii_case))]
-    #[token("Var", ignore(ascii_case))]
-    KwVar,
-
-    #[token("Попытка", ignore(ascii_case))]
-    #[token("Try", ignore(ascii_case))]
-    KwTry,
-
-    #[token("Исключение", ignore(ascii_case))]
-    #[token("Except", ignore(ascii_case))]
-    KwExcept,
-
-    #[token("КонецПопытки", ignore(ascii_case))]
-    #[token("EndTry", ignore(ascii_case))]
-    KwEndTry,
-
-    #[token("ВызватьИсключение", ignore(ascii_case))]
-    #[token("Raise", ignore(ascii_case))]
-    KwRaise,
-
-    #[token("Новый", ignore(ascii_case))]
-    #[token("New", ignore(ascii_case))]
-    KwNew,
-
-    #[token("Экспорт", ignore(ascii_case))]
-    #[token("Export", ignore(ascii_case))]
+    #[regex(r"(?i)экспорт|(?i)export")]
     KwExport,
 
-    #[token("Знач", ignore(ascii_case))]
-    #[token("Val", ignore(ascii_case))]
+    #[regex(r"(?i)знач|(?i)val")]
     KwVal,
 
-    #[token("И", ignore(ascii_case))]
-    #[token("And", ignore(ascii_case))]
-    KwAnd,
+    // Control flow keywords
+    #[regex(r"(?i)если|(?i)if")]
+    KwIf,
 
-    #[token("Или", ignore(ascii_case))]
-    #[token("Or", ignore(ascii_case))]
-    KwOr,
+    #[regex(r"(?i)тогда|(?i)then")]
+    KwThen,
 
-    #[token("Не", ignore(ascii_case))]
-    #[token("Not", ignore(ascii_case))]
-    KwNot,
+    #[regex(r"(?i)иначеесли|(?i)elsif")]
+    KwElsIf,
 
-    #[token("Истина", ignore(ascii_case))]
-    #[token("True", ignore(ascii_case))]
-    KwTrue,
+    #[regex(r"(?i)иначе|(?i)else")]
+    KwElse,
 
-    #[token("Ложь", ignore(ascii_case))]
-    #[token("False", ignore(ascii_case))]
-    KwFalse,
+    #[regex(r"(?i)конецесли|(?i)endif")]
+    KwEndIf,
 
-    #[token("Неопределено", ignore(ascii_case))]
-    #[token("Undefined", ignore(ascii_case))]
-    KwUndefined,
+    // Loop keywords
+    #[regex(r"(?i)для|(?i)for")]
+    KwFor,
 
-    #[token("Null", ignore(ascii_case))]
-    KwNull,
+    #[regex(r"(?i)каждого|(?i)each")]
+    KwEach,
 
-    #[token("Прервать", ignore(ascii_case))]
-    #[token("Break", ignore(ascii_case))]
-    KwBreak,
+    #[regex(r"(?i)из|(?i)in")]
+    KwIn,
 
-    #[token("Продолжить", ignore(ascii_case))]
-    #[token("Continue", ignore(ascii_case))]
+    #[regex(r"(?i)по|(?i)to")]
+    KwTo,
+
+    #[regex(r"(?i)пока|(?i)while")]
+    KwWhile,
+
+    #[regex(r"(?i)цикл|(?i)do")]
+    KwDo,
+
+    #[regex(r"(?i)конеццикла|(?i)enddo")]
+    KwEndDo,
+
+    #[regex(r"(?i)возврат|(?i)return")]
+    KwReturn,
+
+    #[regex(r"(?i)продолжить|(?i)continue")]
     KwContinue,
 
-    #[token("Перейти", ignore(ascii_case))]
-    #[token("Goto", ignore(ascii_case))]
+    #[regex(r"(?i)прервать|(?i)break")]
+    KwBreak,
+
+    #[regex(r"(?i)перейти|(?i)goto")]
     KwGoto,
 
-    #[token("НачатьТранзакцию", ignore(ascii_case))]
-    #[token("BeginTransaction", ignore(ascii_case))]
-    KwBeginTransaction,
+    // Exception handling
+    #[regex(r"(?i)попытка|(?i)try")]
+    KwTry,
 
-    #[token("ЗафиксироватьТранзакцию", ignore(ascii_case))]
-    #[token("CommitTransaction", ignore(ascii_case))]
-    KwCommitTransaction,
+    #[regex(r"(?i)исключение|(?i)except")]
+    KwExcept,
 
-    #[token("ОтменитьТранзакцию", ignore(ascii_case))]
-    #[token("RollbackTransaction", ignore(ascii_case))]
-    KwRollbackTransaction,
+    #[regex(r"(?i)конецпопытки|(?i)endtry")]
+    KwEndTry,
 
-    // Preprocessor
-    #[token("#Если", ignore(ascii_case))]
-    #[token("#If", ignore(ascii_case))]
+    #[regex(r"(?i)вызватьисключение|(?i)raise")]
+    KwRaise,
+
+    // Variable and value keywords
+    #[regex(r"(?i)перем|(?i)var")]
+    KwVar,
+
+    #[regex(r"(?i)новый|(?i)new")]
+    KwNew,
+
+    #[regex(r"(?i)выполнить|(?i)execute")]
+    KwExecute,
+
+    // Event handlers
+    #[regex(r"(?i)добавитьобработчик|(?i)addhandler")]
+    KwAddHandler,
+
+    #[regex(r"(?i)удалитьобработчик|(?i)removehandler")]
+    KwRemoveHandler,
+
+    // Async/Await
+    #[regex(r"(?i)асинх|(?i)async")]
+    KwAsync,
+
+    #[regex(r"(?i)ждать|(?i)await")]
+    KwAwait,
+
+    // Logical operators
+    #[regex(r"(?i)и|(?i)and")]
+    KwAnd,
+
+    #[regex(r"(?i)или|(?i)or")]
+    KwOr,
+
+    #[regex(r"(?i)не|(?i)not")]
+    KwNot,
+
+    // Boolean literals
+    #[regex(r"(?i)истина|(?i)true")]
+    KwTrue,
+
+    #[regex(r"(?i)ложь|(?i)false")]
+    KwFalse,
+
+    // Special values
+    #[regex(r"(?i)неопределено|(?i)undefined")]
+    KwUndefined,
+
+    #[regex(r"(?i)null")]
+    KwNull,
+
+    // ========= Preprocessor directives =========
+    #[regex(r"#(?i)если|#(?i)if")]
     PreIf,
 
-    #[token("#Тогда", ignore(ascii_case))]
-    #[token("#Then", ignore(ascii_case))]
-    PreThen,
-
-    #[token("#ИначеЕсли", ignore(ascii_case))]
-    #[token("#ElsIf", ignore(ascii_case))]
+    #[regex(r"#(?i)иначеесли|#(?i)elsif")]
     PreElsIf,
 
-    #[token("#Иначе", ignore(ascii_case))]
-    #[token("#Else", ignore(ascii_case))]
+    #[regex(r"#(?i)иначе|#(?i)else")]
     PreElse,
 
-    #[token("#КонецЕсли", ignore(ascii_case))]
-    #[token("#EndIf", ignore(ascii_case))]
+    #[regex(r"#(?i)конецесли|#(?i)endif")]
     PreEndIf,
 
-    #[token("#Область", ignore(ascii_case))]
-    #[token("#Region", ignore(ascii_case))]
+    #[regex(r"#(?i)область|#(?i)region")]
     PreRegion,
 
-    #[token("#КонецОбласти", ignore(ascii_case))]
-    #[token("#EndRegion", ignore(ascii_case))]
+    #[regex(r"#(?i)конецобласти|#(?i)endregion")]
     PreEndRegion,
 
-    // Annotations
-    #[token("&НаКлиенте", ignore(ascii_case))]
-    #[token("&AtClient", ignore(ascii_case))]
+    #[regex(r"#(?i)использовать|#(?i)use")]
+    PreUse,
+
+    #[regex(r"#(?i)вставка|#(?i)insert")]
+    PreInsert,
+
+    #[regex(r"#(?i)конецвставки|#(?i)endinsert")]
+    PreEndInsert,
+
+    #[regex(r"#(?i)удаление|#(?i)delete")]
+    PreDelete,
+
+    #[regex(r"#(?i)конецудаления|#(?i)enddelete")]
+    PreEndDelete,
+
+    // NOTE: Preprocessor platform/OS symbols (Клиент, НаКлиенте, Сервер, Linux, etc.)
+    // are NOT separate tokens. They are recognized as Ident and checked by the parser
+    // in preprocessor expression context. This prevents false matches like "НаКлиенте"
+    // in "Процедура НаКлиенте()" being tokenized as PreAtClient instead of Ident.
+
+    // ========= Annotations (starting with &) =========
+    #[regex(r"&(?i)наклиенте|&(?i)atclient")]
     AnnAtClient,
 
-    #[token("&НаСервере", ignore(ascii_case))]
-    #[token("&AtServer", ignore(ascii_case))]
+    #[regex(r"&(?i)насервере|&(?i)atserver")]
     AnnAtServer,
 
-    #[token("&НаСервереБезКонтекста", ignore(ascii_case))]
-    #[token("&AtServerNoContext", ignore(ascii_case))]
+    #[regex(r"&(?i)насерверебезконтекста|&(?i)atservernocontext")]
     AnnAtServerNoContext,
 
-    #[token("&НаКлиентеНаСервереБезКонтекста", ignore(ascii_case))]
-    #[token("&AtClientAtServerNoContext", ignore(ascii_case))]
+    #[regex(r"&(?i)наклиентенасерверебезконтекста|&(?i)atclientatservernocontext")]
     AnnAtClientAtServerNoContext,
 
-    #[token("&НаКлиентеНаСервере", ignore(ascii_case))]
-    #[token("&AtClientAtServer", ignore(ascii_case))]
+    #[regex(r"&(?i)наклиентенасервере|&(?i)atclientatserver")]
     AnnAtClientAtServer,
 
-    // Punctuation
+    #[regex(r"&(?i)перед|&(?i)before")]
+    AnnBefore,
+
+    #[regex(r"&(?i)после|&(?i)after")]
+    AnnAfter,
+
+    #[regex(r"&(?i)вместо|&(?i)around")]
+    AnnAround,
+
+    #[regex(r"&(?i)изменениеиконтроль|&(?i)changeandvalidate")]
+    AnnChangeAndValidate,
+
+    // Custom annotation (any identifier after &)
+    #[regex(r"&[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
+    AnnCustom,
+
+    // ========= Operators =========
+    #[token("=")]
+    Eq,
+
+    #[token("<>")]
+    Neq,
+
+    #[token("<=")]
+    Le,
+
+    #[token("<")]
+    Lt,
+
+    #[token(">=")]
+    Ge,
+
+    #[token(">")]
+    Gt,
+
+    #[token("+")]
+    Plus,
+
+    #[token("-")]
+    Minus,
+
+    #[token("*")]
+    Star,
+
+    #[token("/")]
+    Slash,
+
+    #[token("%")]
+    Percent,
+
+    // ========= Punctuation =========
     #[token("(")]
     LParen,
 
@@ -237,60 +292,66 @@ pub enum TokenKind {
     #[token(":")]
     Colon,
 
-    #[token("=")]
-    Eq,
-
-    #[token("<>")]
-    Neq,
-
-    #[token("<")]
-    Lt,
-
-    #[token("<=")]
-    Le,
-
-    #[token(">")]
-    Gt,
-
-    #[token(">=")]
-    Ge,
-
-    #[token("+")]
-    Plus,
-
-    #[token("-")]
-    Minus,
-
-    #[token("*")]
-    Star,
-
-    #[token("/")]
-    Slash,
-
-    #[token("%")]
-    Percent,
-
     #[token("?")]
     Question,
 
     #[token("~")]
-    Tilde,
+    Tilde, // For labels: ~LabelName:
 
-    // Literals
-    #[regex(r"[0-9]+(\.[0-9]+)?")]
-    Number,
+    #[token("|", priority = 1)]
+    Bar, // For multiline strings (lower priority than StringPart/StringTail)
 
-    #[regex(r#""([^"]|"")*""#)]
+    #[token("#")]
+    Hash, // Generic preprocessor marker
+
+    #[token("&")]
+    Ampersand, // For annotations
+
+    #[token("!")]
+    Exclamation, // Used in preprocessor (e.g., #!)
+
+    // ========= Literals =========
+
+    // Numbers: floats must come before integers to match correctly
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float,
+
+    #[regex(r"[0-9]+")]
+    Decimal,
+
+    // Strings: "..." with "" escaping
+    #[regex(r#""([^"\n\r]|"")*""#)]
     String,
 
-    #[regex(r"'[^']*'")]
+    // String start (for multiline strings): "...
+    // Without closing quote before newline
+    #[regex(r#""([^"\n\r]|"")*"#)]
+    StringStart,
+
+    // String tail: |..."
+    #[regex(r#"\|([^"\n\r]|"")*""#, priority = 3)]
+    StringTail,
+
+    // String continuation: |...
+    #[regex(r#"\|([^"\n\r]|"")*"#, priority = 2)]
+    StringPart,
+
+    // Date literals: '20240101' or '20240101120000'
+    // Format: 'YYYYMMDD' or 'YYYYMMDDHHMMSS' (8-14 digits)
+    #[regex(r"'[0-9]{8,14}'")]
     Date,
 
-    // Identifiers
-    #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
+    // ========= Identifiers =========
+
+    // Identifier: Unicode letters, digits, underscore
+    // Must start with letter or underscore
+    // Lower priority than keywords to ensure keywords are matched first
+    #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*", priority = 1)]
     Ident,
 
-    // Comments
+    // ========= Comments and whitespace =========
+
+    // Line comment: // ...
     #[regex(r"//[^\n]*")]
     Comment,
 
@@ -298,23 +359,31 @@ pub enum TokenKind {
     #[token("\n")]
     Newline,
 
-    // Label (for Goto)
-    #[regex(r"~[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*:")]
-    Label,
-
     // Error token for unrecognized input
     Error,
 }
 
-/// A token with its kind and text.
+/// A token with its kind, text, and position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
+    /// The kind of token
     pub kind: TokenKind,
+    /// The original text of the token
     pub text: SmolStr,
+    /// The byte offset in the source code
     pub offset: usize,
 }
 
-/// Tokenizes BSL source code.
+/// Tokenizes BSL source code into a stream of tokens.
+///
+/// # Example
+///
+/// ```
+/// use lexer::tokenize;
+///
+/// let tokens = tokenize("Процедура Тест() КонецПроцедуры");
+/// assert_eq!(tokens.len(), 5);
+/// ```
 pub fn tokenize(input: &str) -> Vec<Token> {
     let mut lexer = TokenKind::lexer(input);
     let mut tokens = Vec::new();
@@ -334,7 +403,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_keywords() {
+    fn test_keywords_russian() {
         let tokens = tokenize("Процедура Тест() КонецПроцедуры");
         assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
@@ -344,10 +413,19 @@ mod tests {
     }
 
     #[test]
-    fn test_english_keywords() {
+    fn test_keywords_english() {
         let tokens = tokenize("Procedure Test() EndProcedure");
         assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].kind, TokenKind::LParen);
+        assert_eq!(tokens[3].kind, TokenKind::RParen);
+        assert_eq!(tokens[4].kind, TokenKind::KwEndProcedure);
+    }
+
+    #[test]
+    fn test_keywords_case_insensitive() {
+        let tokens = tokenize("пРоЦеДуРа тЕсТ() кОнЕцПрОцЕдУрЫ");
+        assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
         assert_eq!(tokens[4].kind, TokenKind::KwEndProcedure);
     }
 
@@ -355,12 +433,50 @@ mod tests {
     fn test_string_literal() {
         let tokens = tokenize(r#""Hello, World!""#);
         assert_eq!(tokens[0].kind, TokenKind::String);
+        assert_eq!(tokens[0].text.as_str(), r#""Hello, World!""#);
     }
 
     #[test]
-    fn test_number() {
+    fn test_string_with_escaped_quotes() {
+        let tokens = tokenize(r#""Hello ""World""!""#);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+    }
+
+    #[test]
+    fn test_multiline_string_parts() {
+        let tokens = tokenize("\"Line1\n|Line2\"");
+        // "Line1 -> StringStart
+        // \n -> Newline
+        // |Line2" -> StringTail
+        assert_eq!(tokens[0].kind, TokenKind::StringStart);
+        assert_eq!(tokens[1].kind, TokenKind::Newline);
+        assert_eq!(tokens[2].kind, TokenKind::StringTail);
+    }
+
+    #[test]
+    fn test_decimal_number() {
+        let tokens = tokenize("123");
+        assert_eq!(tokens[0].kind, TokenKind::Decimal);
+        assert_eq!(tokens[0].text.as_str(), "123");
+    }
+
+    #[test]
+    fn test_float_number() {
         let tokens = tokenize("123.456");
-        assert_eq!(tokens[0].kind, TokenKind::Number);
+        assert_eq!(tokens[0].kind, TokenKind::Float);
+        assert_eq!(tokens[0].text.as_str(), "123.456");
+    }
+
+    #[test]
+    fn test_date_literal() {
+        let tokens = tokenize("'20240101'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
+    }
+
+    #[test]
+    fn test_datetime_literal() {
+        let tokens = tokenize("'20240101120000'");
+        assert_eq!(tokens[0].kind, TokenKind::Date);
     }
 
     #[test]
@@ -372,10 +488,137 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor() {
+    fn test_preprocessor_region() {
         let tokens = tokenize("#Область Тест\n#КонецОбласти");
         assert_eq!(tokens[0].kind, TokenKind::PreRegion);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].kind, TokenKind::Newline);
         assert_eq!(tokens[3].kind, TokenKind::PreEndRegion);
+    }
+
+    #[test]
+    fn test_preprocessor_if() {
+        let tokens = tokenize("#Если Клиент Тогда\n#КонецЕсли");
+        assert_eq!(tokens[0].kind, TokenKind::PreIf);
+        assert_eq!(tokens[1].kind, TokenKind::Ident); // "Клиент" is now Ident, checked by parser
+        assert_eq!(tokens[2].kind, TokenKind::KwThen);
+    }
+
+    #[test]
+    fn test_annotations() {
+        let tokens = tokenize("&НаКлиенте");
+        assert_eq!(tokens[0].kind, TokenKind::AnnAtClient);
+    }
+
+    #[test]
+    fn test_custom_annotation() {
+        let tokens = tokenize("&МояАннотация");
+        assert_eq!(tokens[0].kind, TokenKind::AnnCustom);
+    }
+
+    #[test]
+    fn test_logical_operators() {
+        let tokens = tokenize("И ИЛИ НЕ");
+        assert_eq!(tokens[0].kind, TokenKind::KwAnd);
+        assert_eq!(tokens[1].kind, TokenKind::KwOr);
+        assert_eq!(tokens[2].kind, TokenKind::KwNot);
+    }
+
+    #[test]
+    fn test_comparison_operators() {
+        let tokens = tokenize("< <= > >= = <>");
+        assert_eq!(tokens[0].kind, TokenKind::Lt);
+        assert_eq!(tokens[1].kind, TokenKind::Le);
+        assert_eq!(tokens[2].kind, TokenKind::Gt);
+        assert_eq!(tokens[3].kind, TokenKind::Ge);
+        assert_eq!(tokens[4].kind, TokenKind::Eq);
+        assert_eq!(tokens[5].kind, TokenKind::Neq);
+    }
+
+    #[test]
+    fn test_arithmetic_operators() {
+        let tokens = tokenize("+ - * / %");
+        assert_eq!(tokens[0].kind, TokenKind::Plus);
+        assert_eq!(tokens[1].kind, TokenKind::Minus);
+        assert_eq!(tokens[2].kind, TokenKind::Star);
+        assert_eq!(tokens[3].kind, TokenKind::Slash);
+        assert_eq!(tokens[4].kind, TokenKind::Percent);
+    }
+
+    #[test]
+    fn test_async_await() {
+        let tokens = tokenize("Асинх Функция Тест() Ждать Результат; КонецФункции");
+        // tokens: Асинх(0) Функция(1) Тест(2) ((3) )(4) Ждать(5) Результат(6) ;(7) КонецФункции(8)
+        assert_eq!(tokens[0].kind, TokenKind::KwAsync);
+        assert_eq!(tokens[1].kind, TokenKind::KwFunction);
+        assert_eq!(tokens[5].kind, TokenKind::KwAwait);
+    }
+
+    #[test]
+    fn test_event_handlers() {
+        let tokens = tokenize("ДобавитьОбработчик УдалитьОбработчик");
+        assert_eq!(tokens[0].kind, TokenKind::KwAddHandler);
+        assert_eq!(tokens[1].kind, TokenKind::KwRemoveHandler);
+    }
+
+    #[test]
+    fn test_tilde_for_label() {
+        let tokens = tokenize("~Метка:");
+        assert_eq!(tokens[0].kind, TokenKind::Tilde);
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].kind, TokenKind::Colon);
+    }
+
+    #[test]
+    fn test_goto_label() {
+        let tokens = tokenize("Перейти ~Метка;\n~Метка:\nВозврат;");
+        assert_eq!(tokens[0].kind, TokenKind::KwGoto);
+        assert_eq!(tokens[1].kind, TokenKind::Tilde);
+        assert_eq!(tokens[2].kind, TokenKind::Ident);
+        assert_eq!(tokens[3].kind, TokenKind::Semicolon);
+    }
+
+    #[test]
+    fn test_boolean_literals() {
+        let tokens = tokenize("Истина Ложь True False");
+        assert_eq!(tokens[0].kind, TokenKind::KwTrue);
+        assert_eq!(tokens[1].kind, TokenKind::KwFalse);
+        assert_eq!(tokens[2].kind, TokenKind::KwTrue);
+        assert_eq!(tokens[3].kind, TokenKind::KwFalse);
+    }
+
+    #[test]
+    fn test_undefined_null() {
+        let tokens = tokenize("Неопределено Null");
+        assert_eq!(tokens[0].kind, TokenKind::KwUndefined);
+        assert_eq!(tokens[1].kind, TokenKind::KwNull);
+    }
+
+    #[test]
+    fn test_execute_keyword() {
+        let tokens = tokenize("Выполнить");
+        assert_eq!(tokens[0].kind, TokenKind::KwExecute);
+    }
+
+    #[test]
+    fn test_complete_procedure() {
+        let code = r#"
+Процедура Тест(Знач Параметр)
+    Если Параметр > 0 Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецПроцедуры
+"#;
+        let tokens = tokenize(code);
+
+        // Verify we get expected tokens
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwProcedure));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwVal));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwIf));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwReturn));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwTrue));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwFalse));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::KwEndProcedure));
     }
 }

@@ -28,6 +28,9 @@ pub enum NodeKind {
     ParamList,
     Param,
     Annotation,
+    AnnotationParams,
+    AnnotationParam,
+    CompilerDirective,
 
     // Statements
     StmtList,
@@ -43,10 +46,13 @@ pub enum NodeKind {
     TryStmt,
     ExceptClause,
     RaiseStmt,
+    ExecuteStmt,
     BreakStmt,
     ContinueStmt,
     GotoStmt,
     LabelStmt,
+    AddHandlerStmt,
+    RemoveHandlerStmt,
     EmptyStmt,
 
     // Expressions
@@ -65,7 +71,16 @@ pub enum NodeKind {
 
     // Preprocessor
     PreIfDir,
+    PreElsIfClause,
+    PreElseClause,
     PreRegionDir,
+    PreDeleteDir,
+    PreInsertDir,
+    PreExpr,
+    PreLogicalExpr,
+    PreLogicalOperand,
+    PreSymbol,
+    PreBoolOp,
 
     // Other
     Error,

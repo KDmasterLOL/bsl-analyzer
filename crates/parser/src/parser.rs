@@ -4,16 +4,32 @@ use lexer::{Token, TokenKind};
 
 use crate::event::{Event, NodeKind};
 
+/// Maximum number of iterations to prevent infinite loops
+const MAX_ITERATIONS: usize = 1_000_000;
+
+/// How many recent positions to track for debugging infinite loops
+const POSITION_HISTORY_SIZE: usize = 100;
+
 /// Parser for BSL language.
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     events: Vec<Event>,
+    /// Iteration counter to detect infinite loops
+    iteration_count: usize,
+    /// Recent positions to detect stuck loops
+    recent_positions: Vec<usize>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0, events: Vec::new() }
+        Self {
+            tokens,
+            pos: 0,
+            events: Vec::new(),
+            iteration_count: 0,
+            recent_positions: Vec::with_capacity(POSITION_HISTORY_SIZE),
+        }
     }
 
     pub fn finish(self) -> Vec<Event> {
@@ -91,6 +107,44 @@ impl<'a> Parser<'a> {
                 TokenKind::Comment | TokenKind::Newline => self.bump(),
                 _ => break,
             }
+        }
+    }
+
+    /// Checks iteration limit to prevent infinite loops.
+    /// Call this at the start of every loop in grammar functions.
+    pub fn check_iteration_limit(&mut self) {
+        self.iteration_count += 1;
+
+        // Track recent positions
+        if self.recent_positions.len() >= POSITION_HISTORY_SIZE {
+            self.recent_positions.remove(0);
+        }
+        self.recent_positions.push(self.pos);
+
+        if self.iteration_count >= MAX_ITERATIONS {
+            // Analyze position history to determine if truly stuck
+            let unique_positions: std::collections::HashSet<_> =
+                self.recent_positions.iter().collect();
+            let stuck = unique_positions.len() < 5; // Less than 5 unique positions = stuck
+
+            let last_10: Vec<_> =
+                self.recent_positions.iter().rev().take(10).rev().copied().collect();
+
+            panic!(
+                "Parser exceeded maximum iteration limit ({} iterations).\n\
+                Position: {}, Token: {:?}\n\
+                Status: {}\n\
+                Last 10 positions: {:?}\n\
+                Unique positions in last {}: {}\n\
+                This is a bug - the parser should always make progress.",
+                MAX_ITERATIONS,
+                self.pos,
+                self.current(),
+                if stuck { "STUCK (infinite loop)" } else { "SLOW (making progress)" },
+                last_10,
+                POSITION_HISTORY_SIZE,
+                unique_positions.len()
+            );
         }
     }
 }

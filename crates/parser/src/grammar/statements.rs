@@ -12,6 +12,7 @@ pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
     let m = p.start();
 
     while !p.at_end() && !p.at(terminator) {
+        p.check_iteration_limit();
         p.skip_trivia();
 
         if p.at_end() || p.at(terminator) {
@@ -55,17 +56,15 @@ pub fn statement(p: &mut Parser) {
             m.complete(p, NodeKind::ContinueStmt);
         }
         Some(TokenKind::KwGoto) => goto_stmt(p),
-        Some(TokenKind::Label) => label_stmt(p),
+        Some(TokenKind::Tilde) => label_stmt(p),
+        Some(TokenKind::KwExecute) => execute_stmt(p),
+        Some(TokenKind::KwAddHandler) => add_handler_stmt(p),
+        Some(TokenKind::KwRemoveHandler) => remove_handler_stmt(p),
         Some(TokenKind::KwVar) => super::items::var_declaration(p),
-        Some(TokenKind::KwBeginTransaction)
-        | Some(TokenKind::KwCommitTransaction)
-        | Some(TokenKind::KwRollbackTransaction) => {
-            let m = p.start();
-            p.bump();
-            p.skip_trivia();
-            p.eat(TokenKind::Semicolon);
-            m.complete(p, NodeKind::CallStmt);
-        }
+        Some(TokenKind::PreRegion) => super::preprocessor_region(p),
+        Some(TokenKind::PreIf) => super::preprocessor_if(p),
+        Some(TokenKind::PreDelete) => super::preprocessor_delete(p),
+        Some(TokenKind::PreInsert) => super::preprocessor_insert(p),
         Some(TokenKind::Ident) => {
             // Could be assignment or call
             assignment_or_call(p);
@@ -118,6 +117,7 @@ fn if_stmt(p: &mut Parser) {
 
     // ElsIf clauses
     while p.at(TokenKind::KwElsIf) {
+        p.check_iteration_limit();
         let em = p.start();
         p.bump();
         p.skip_trivia();
@@ -300,8 +300,71 @@ fn goto_stmt(p: &mut Parser) {
 
 fn label_stmt(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Label
+    p.bump(); // ~
+    p.expect(TokenKind::Ident); // label name
+    p.expect(TokenKind::Colon); // :
     m.complete(p, NodeKind::LabelStmt);
+}
+
+fn execute_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(); // Выполнить/Execute
+
+    p.skip_trivia();
+
+    // Expression or call
+    expressions::expression(p);
+
+    p.skip_trivia();
+    p.eat(TokenKind::Semicolon);
+
+    m.complete(p, NodeKind::ExecuteStmt);
+}
+
+fn add_handler_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(); // ДобавитьОбработчик/AddHandler
+
+    p.skip_trivia();
+
+    // Event expression
+    expressions::expression(p);
+
+    p.skip_trivia();
+    p.expect(TokenKind::Comma);
+
+    p.skip_trivia();
+
+    // Handler expression
+    expressions::expression(p);
+
+    p.skip_trivia();
+    p.eat(TokenKind::Semicolon);
+
+    m.complete(p, NodeKind::AddHandlerStmt);
+}
+
+fn remove_handler_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(); // УдалитьОбработчик/RemoveHandler
+
+    p.skip_trivia();
+
+    // Event expression
+    expressions::expression(p);
+
+    p.skip_trivia();
+    p.expect(TokenKind::Comma);
+
+    p.skip_trivia();
+
+    // Handler expression
+    expressions::expression(p);
+
+    p.skip_trivia();
+    p.eat(TokenKind::Semicolon);
+
+    m.complete(p, NodeKind::RemoveHandlerStmt);
 }
 
 fn assignment_or_call(p: &mut Parser) {
@@ -327,6 +390,7 @@ fn stmt_list_inner(p: &mut Parser, terminators: &[TokenKind]) {
     let m = p.start();
 
     while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) {
+        p.check_iteration_limit();
         p.skip_trivia();
 
         if p.at_end() || terminators.iter().any(|t| p.at(*t)) {
