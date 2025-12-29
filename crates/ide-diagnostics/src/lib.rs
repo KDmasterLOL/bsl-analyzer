@@ -167,11 +167,8 @@ pub struct DiagnosticsContext<'a> {
 }
 
 /// Runs all diagnostics on a file.
-pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let mut result = Vec::new();
-
+pub fn diagnostics(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // TODO: Run all enabled diagnostics
     // Each handler will check the config and add diagnostics
-
-    result
+    Vec::new()
 }

@@ -2,7 +2,7 @@
 //!
 //! Checks that keywords are spelled in canonical form.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticsContext};
 
 /// Runs the CanonicalSpellingKeywords diagnostic.
 pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {

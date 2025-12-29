@@ -8,7 +8,7 @@ mod event;
 mod parser;
 mod sink;
 
-use lexer::{tokenize, Token};
+use lexer::tokenize;
 
 pub use crate::parser::Parser;
 

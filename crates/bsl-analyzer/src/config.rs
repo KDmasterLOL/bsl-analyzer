@@ -1,3 +1,3 @@
 //! Server configuration.
 
-pub use project_model::ProjectConfig;
+// TODO: Server configuration will be implemented here

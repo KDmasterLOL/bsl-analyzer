@@ -2,8 +2,6 @@
 //!
 //! This crate provides the database for IDE functionality.
 
-use std::sync::Arc;
-
 use base_db::SourceDatabase;
 use vfs::FileId;
 

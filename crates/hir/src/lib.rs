@@ -55,6 +55,7 @@ impl Variable {
 /// Semantics API for IDE features.
 #[derive(Debug)]
 pub struct Semantics<'db, DB> {
+    #[allow(dead_code)] // TODO: будет использоваться в semantic analysis
     db: &'db DB,
 }
 

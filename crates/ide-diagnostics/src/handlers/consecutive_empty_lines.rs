@@ -2,7 +2,7 @@
 //!
 //! Checks for too many consecutive empty lines.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticsContext};
 
 /// Runs the ConsecutiveEmptyLines diagnostic.
 pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
