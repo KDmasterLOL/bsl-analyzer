@@ -4,7 +4,6 @@ use parser::parse;
 use std::time::Instant;
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_async_procedure() {
     let input = "Асинх Процедура Тест() КонецПроцедуры";
     let result = parse(input);
@@ -12,7 +11,6 @@ fn test_async_procedure() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_async_function() {
     let input = "Асинх Функция Тест() КонецФункции";
     let result = parse(input);
@@ -20,7 +18,6 @@ fn test_async_function() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_compiler_directive() {
     let input = "&НаКлиенте\nПроцедура Тест() КонецПроцедуры";
     let result = parse(input);
@@ -28,7 +25,6 @@ fn test_compiler_directive() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_multiple_compiler_directives() {
     let input = "&НаКлиентеНаСервере\nПроцедура Тест() КонецПроцедуры";
     let result = parse(input);
@@ -36,7 +32,6 @@ fn test_multiple_compiler_directives() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_annotation_without_params() {
     let input = "&До\nПроцедура Тест() КонецПроцедуры";
     let result = parse(input);
@@ -44,7 +39,6 @@ fn test_annotation_without_params() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_annotation_with_params() {
     let input = r#"&До("Модуль.Метод", Параметр1 = Истина)
 Процедура Тест() КонецПроцедуры"#;
@@ -53,7 +47,6 @@ fn test_annotation_with_params() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_annotation_nested() {
     let input = r#"&До(&Вокруг("Тест"))
 Процедура Тест() КонецПроцедуры"#;
@@ -62,7 +55,6 @@ fn test_annotation_nested() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_execute_statement() {
     let input = r#"Процедура Тест()
     Выполнить("Сообщить('Привет')");
@@ -72,7 +64,6 @@ fn test_execute_statement() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_add_handler_statement() {
     let input = r#"Процедура Тест()
     ДобавитьОбработчик Форма.Кнопка.Нажатие, ОбработчикНажатия;
@@ -82,7 +73,6 @@ fn test_add_handler_statement() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_remove_handler_statement() {
     let input = r#"Процедура Тест()
     УдалитьОбработчик Форма.Кнопка.Нажатие, ОбработчикНажатия;
@@ -92,7 +82,6 @@ fn test_remove_handler_statement() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_await_expression() {
     let input = r#"Асинх Функция Тест()
     Результат = Ждать ВыполнитьАсинх();
@@ -103,7 +92,6 @@ fn test_await_expression() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_multiline_string() {
     let input = r#"Процедура Тест()
     Текст = "Строка1
@@ -115,7 +103,6 @@ fn test_multiline_string() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_complex_procedure() {
     let input = r#"&НаКлиентеНаСервере
 &После("Модуль.Метод")
@@ -135,7 +122,6 @@ fn test_complex_procedure() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_all_statement_types() {
     let input = r#"Процедура Тест()
     // Присваивание
@@ -201,7 +187,6 @@ fn test_all_statement_types() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_all_expression_types() {
     let input = r#"Функция Тест()
     // Литералы
@@ -262,7 +247,6 @@ fn test_all_expression_types() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_simple_platform_symbol() {
     let input = r#"#Если Клиент Тогда
     Процедура ТестНаКлиенте() КонецПроцедуры
@@ -272,7 +256,6 @@ fn test_preprocessor_simple_platform_symbol() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_and_operator() {
     let input = r#"#Если Клиент И НЕ Сервер Тогда
     Процедура Тест() КонецПроцедуры
@@ -282,7 +265,6 @@ fn test_preprocessor_and_operator() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_or_operator() {
     let input = r#"#Если ВебКлиент ИЛИ МобильныйКлиент Тогда
     Процедура Тест() КонецПроцедуры
@@ -292,7 +274,6 @@ fn test_preprocessor_or_operator() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_complex_expression() {
     let input = r#"#Если (Клиент И НЕ МобильныйКлиент) ИЛИ (Сервер И Windows) Тогда
     Процедура Тест() КонецПроцедуры
@@ -302,7 +283,6 @@ fn test_preprocessor_complex_expression() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_elsif_else() {
     let input = r#"#Если Клиент Тогда
     Процедура НаКлиенте() КонецПроцедуры
@@ -316,7 +296,6 @@ fn test_preprocessor_elsif_else() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_multiple_elsif() {
     let input = r#"#Если ТонкийКлиент Тогда
     Процедура Тонкий() КонецПроцедуры
@@ -330,7 +309,6 @@ fn test_preprocessor_multiple_elsif() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_not_expression() {
     let input = r#"#Если НЕ (Клиент ИЛИ Сервер) Тогда
     Процедура Тест() КонецПроцедуры
@@ -340,7 +318,6 @@ fn test_preprocessor_not_expression() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_os_symbols() {
     let input = r#"#Если Windows Тогда
     Процедура НаWindows() КонецПроцедуры
@@ -354,7 +331,6 @@ fn test_preprocessor_os_symbols() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_all_platform_symbols() {
     let input = r#"#Если ТолстыйКлиентОбычноеПриложение Тогда
     Процедура Тест1() КонецПроцедуры
@@ -372,7 +348,6 @@ fn test_preprocessor_all_platform_symbols() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_metadata_access() {
     let input = r#"Функция Тест() Экспорт
     Ссылка = Справочник.Номенклатура.НайтиПоКоду("001");
@@ -385,7 +360,6 @@ fn test_metadata_access() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_built_in_functions() {
     let input = r#"Функция Тест() Экспорт
     СтрРазделитель = Символы.ПС;
@@ -399,7 +373,6 @@ fn test_built_in_functions() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_real_bsl_code_sample() {
     // Real BSL code from 1C:Enterprise
     let input = r#"#Область ПрограммныйИнтерфейс
@@ -431,7 +404,6 @@ fn test_real_bsl_code_sample() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_region_minimal() {
     // Minimal test - just region with function
     let input = r#"#Область Test
@@ -444,7 +416,6 @@ fn test_region_minimal() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_preprocessor_not_without_parens() {
     // Test the fix for НЕ without parentheses - this was causing infinite loop
     let input = r#"#Если НЕ Клиент Тогда
@@ -456,7 +427,6 @@ fn test_preprocessor_not_without_parens() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_small_file_performance() {
     // Test with small code to verify parser is fast on simple cases
     let input = r#"Функция Тест() Экспорт
@@ -485,7 +455,6 @@ fn test_small_file_performance() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn test_lexer_performance_large_file() {
     use lexer::tokenize;
 
@@ -549,7 +518,6 @@ fn benchmark_parser_performance() {
     }
 }
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn debug_tokens_around_1905() {
     use lexer::tokenize;
     // Test file from bsl-parser project (grammar reference)
@@ -567,7 +535,6 @@ fn debug_tokens_around_1905() {
     println!("\nToken 1905 is: {:?}", tokens.get(1905));
 }
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn debug_tokens_around_14467() {
     use lexer::tokenize;
     // Test file from bsl-parser project (grammar reference)
@@ -584,7 +551,6 @@ fn debug_tokens_around_14467() {
 }
 
 #[test]
-#[ignore] // FIXME: Parser generates unbalanced events for large files
 fn debug_tokens_around_68041() {
     use lexer::tokenize;
     // Test file from bsl-parser project (grammar reference)
