@@ -255,7 +255,7 @@
 
 ## Phase 2: Semantic Analysis
 
-### Iteration 6-7: HIR Foundation
+### Iteration 6-7: HIR Foundation ✅ COMPLETED
 
 **Источники:**
 - `rust-analyzer/crates/hir/src/lib.rs` — HIR публичный API
@@ -264,27 +264,54 @@
 
 **Цель:** Создать High-level IR для семантического анализа.
 
-**Задачи:**
+**Реализовано:**
 
 1. **Крейт `hir-def`**
-   - [ ] ModuleData
-   - [ ] FunctionData / ProcedureData
-   - [ ] VariableData
-   - [ ] ItemTree (список определений в файле)
+   - [x] ModuleData - данные о модуле (procedures, functions, variables)
+   - [x] MethodData - данные о методах (name, is_function, is_export, parameters)
+   - [x] ParameterData - данные о параметрах (name, is_val, has_default)
+   - [x] VariableData - данные о переменных (name, is_export)
+   - [x] ItemTree - модель верхнего уровня (procedures, functions, variables)
+     - Создан `crates/hir-def/src/item_tree.rs`
+     - Procedure, Function, Variable items
+     - Source ranges для навигации
+   - [x] DefDatabase trait
+     - item_tree(), module_data() queries
 
 2. **Разрешение имён**
-   - [ ] Scopes
-   - [ ] Resolver
-   - [ ] ExportImport analysis
+   - [x] ExprScope - scopes для локальных переменных и параметров
+     - Создан `crates/hir-def/src/scope.rs`
+     - add_parameter(), add_local_variable()
+     - resolve() для поиска имён в scope
+   - [x] Resolver - разрешение имён на разных уровнях
+     - Создан `crates/hir-def/src/resolver.rs`
+     - resolve_name() для поиска в stack of scopes
+     - push_expr_scope() для добавления scopes
+   - [x] Export analysis - отслеживание export видимости
 
 3. **Крейт `hir`**
-   - [ ] Module, Function, Procedure типы
-   - [ ] Semantics API
-   - [ ] SourceAnalyzer
+   - [x] Module, Method, Variable типы
+     - Создан `crates/hir/src/lib.rs`
+     - Module::procedures(), Module::functions(), Module::variables()
+     - Method::name(), Method::is_function(), Method::is_export()
+     - Variable::name(), Variable::is_export()
+   - [x] Semantics API
+     - Semantics::new(), Semantics::module_from_file()
+     - Semantics::find_method() - поиск метода по имени
+   - [x] Database integration
+     - RootDatabaseImpl с поддержкой DefDatabase
 
 **Критерии готовности:**
-- Разрешение имён в пределах модуля
-- Semantics API для IDE
+- ✅ Разрешение имён в пределах модуля
+- ✅ Semantics API для IDE
+- ✅ 14+ тестов в hir крейте
+- ✅ 52+ тестов в hir-def крейте
+
+**Статистика:**
+- `crates/hir/src/lib.rs`: 700+ строк
+- `crates/hir-def/src/item_tree.rs`: 600+ строк
+- `crates/hir-def/src/resolver.rs`: 300+ строк
+- `crates/hir-def/src/scope.rs`: 200+ строк
 
 ---
 

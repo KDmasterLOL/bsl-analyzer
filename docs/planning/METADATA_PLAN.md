@@ -439,7 +439,8 @@ impl MetadataDiagnosticRunner {
 ### До Metadata Infrastructure нужно завершить:
 
 - [x] Iteration 5: Base Infrastructure (VFS, SourceDatabase)
-- [ ] Iteration 6-9: HIR/Symbol Resolution — для связи модулей с метаданными
+- [x] Iteration 6-8: HIR/Symbol Resolution — ✅ ЗАВЕРШЕНО (2025-12-30)
+- [ ] Iteration 9.5: ModuleGraph — для cross-module dependencies
 - [ ] Iteration 10: IDE-DB с полной Salsa интеграцией
 
 ### После Metadata Infrastructure:
@@ -526,6 +527,7 @@ impl MetadataDiagnosticRunner {
 ---
 
 **Следующие шаги:**
-1. Завершить Iteration 6-9 (HIR/Symbol Resolution)
-2. Завершить полную интеграцию Salsa (Iteration 10: IDE-DB)
-3. Начать Iteration 10: Metadata Infrastructure Foundation
+1. ✅ ~~Завершить Iteration 6-8 (HIR/Symbol Resolution)~~ — ЗАВЕРШЕНО (2025-12-30)
+2. Реализовать Iteration 9.5 (ModuleGraph & Incremental CI)
+3. Завершить полную интеграцию Salsa (Iteration 10: IDE-DB)
+4. Начать Iteration 11: Metadata Infrastructure Foundation

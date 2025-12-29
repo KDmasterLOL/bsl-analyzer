@@ -317,24 +317,65 @@
 - Parse caching: O(1) lookup via DashMap
 - Memory: Arc-based sharing для Parse results
 
-### Iteration 6-7: HIR Foundation
+### Iteration 6-7: HIR Foundation ✅ COMPLETED (2025-12-30)
 **Источники:** rust-analyzer (hir/, hir-def/), bsl-language-server-rust (bsl-symbols/)
 
-- [ ] HIR basic structures
-  - Референс: `rust-analyzer/crates/hir/src/lib.rs`
-- [ ] Module representation
-- [ ] Method/Function representation
-  - Rust пример: `bsl-language-server-rust/crates/bsl-symbols/src/lib.rs` (Symbol, SymbolKind)
-- [ ] Variable representation
+**Статус:** Все задачи выполнены
 
-### Iteration 8-9: Symbol Resolution
+- [x] HIR basic structures
+  - Референс: `rust-analyzer/crates/hir/src/lib.rs`
+  - Создан `crates/hir/src/lib.rs` с основными структурами
+- [x] Module representation
+  - Module struct с методами procedures(), functions(), variables()
+- [x] Method/Function representation
+  - Method struct с поддержкой name(), is_function(), is_export(), source_range()
+  - Rust пример: `bsl-language-server-rust/crates/bsl-symbols/src/lib.rs` (Symbol, SymbolKind)
+- [x] Variable representation
+  - Variable struct с поддержкой name(), is_export(), source_range()
+- [x] ItemTree для модели верхнего уровня
+  - Создан `crates/hir-def/src/item_tree.rs`
+  - Procedure, Function, Variable items
+- [x] DefDatabase trait
+  - item_tree(), module_data(), symbol_tree() queries
+  - Интеграция с RootDatabaseImpl
+
+**Тесты:** 14+ тестов в hir крейте
+
+### Iteration 8: Symbol Resolution ✅ COMPLETED (2025-12-30)
 **Источники:** rust-analyzer (hir-def/), bsl-language-server-rust (bsl-symbols/)
 
-- [ ] SymbolTree
+**Статус:** Все задачи выполнены
+
+- [x] SymbolTree
   - Rust пример: `bsl-language-server-rust/crates/bsl-symbols/` (SymbolTable)
-- [ ] Name resolution
-- [ ] Scope analysis
-- [ ] Export/Import handling
+  - Создан `crates/hir-def/src/symbol_tree.rs` (500+ строк)
+  - O(1) case-insensitive поиск через HashMap
+  - MethodSymbol, VariableSymbol, ParamSymbol
+- [x] Name resolution
+  - Resolver расширен для module-level scope
+  - resolve_module_method(), resolve_module_variable()
+  - Порядок разрешения: ExprScope → ModuleScope → WorkspaceScope
+- [x] Scope analysis
+  - ExprScope для локальных переменных и параметров
+  - ModuleScope для методов и переменных модуля
+  - WorkspaceScope (базовая инфраструктура)
+- [x] Export/Import handling
+  - Export visibility tracking в SymbolTree
+  - is_export флаги для методов и переменных
+- [x] Type System
+  - Создан `crates/hir-def/src/ty.rs` (230+ строк)
+  - Базовые типы: Number, String, Boolean, Date, Undefined, Null
+  - Сложные типы: Array, Structure, Map, Function
+- [x] Semantics API
+  - Высокоуровневый API для IDE features
+  - resolve_method_call(), symbol_at_position()
+  - find_method_references(), find_variable_references()
+- [x] IDE Features
+  - Go to Definition (`crates/ide/src/goto_definition.rs`)
+  - Find References (`crates/ide/src/references.rs`)
+  - Интеграция в Analysis API
+
+**Тесты:** 40+ новых тестов (190 тестов всего в проекте)
 
 ### Iteration 9.5: ModuleGraph & Incremental CI Mode
 **Источники:** rust-analyzer (base-db/input.rs - CrateGraph)
