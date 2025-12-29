@@ -393,6 +393,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "expect-test",
+ "ide-db",
  "intern",
  "la-arena",
  "lexer",

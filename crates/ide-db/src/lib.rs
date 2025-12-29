@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base_db::{Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use dashmap::DashMap;
-use hir_def::{DefDatabase, ItemTree, ModuleData, ModuleId};
+use hir_def::{DefDatabase, ItemTree, ModuleData, ModuleId, SymbolTree};
 use rustc_hash::FxHasher;
 use vfs::FileId;
 
@@ -51,8 +51,10 @@ pub struct RootDatabaseImpl {
     files: Files,
 
     /// HIR caches
-    item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
+    #[doc(hidden)]
+    pub item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
     module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
+    symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -68,6 +70,7 @@ impl RootDatabaseImpl {
             files: Files::new(),
             item_tree_cache: Arc::new(DashMap::default()),
             module_data_cache: Arc::new(DashMap::default()),
+            symbol_tree_cache: Arc::new(DashMap::default()),
         }
     }
 
@@ -77,6 +80,7 @@ impl RootDatabaseImpl {
     fn invalidate_file(&self, file_id: FileId) {
         self.item_tree_cache.remove(&file_id);
         self.module_data_cache.remove(&ModuleId::new(file_id));
+        self.symbol_tree_cache.remove(&ModuleId::new(file_id));
     }
 }
 
@@ -152,6 +156,23 @@ impl DefDatabase for RootDatabaseImpl {
         self.module_data_cache.insert(module_id, data.clone());
         data
     }
+
+    fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+        // Check cache first
+        if let Some(cached) = self.symbol_tree_cache.get(&module_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("symbol_tree", ?module_id).entered();
+
+        // Get ItemTree and build SymbolTree
+        let item_tree = self.item_tree(module_id.file_id);
+        let tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+        // Cache the result
+        self.symbol_tree_cache.insert(module_id, tree.clone());
+        tree
+    }
 }
 
 // ========== RootDatabase ==========
@@ -221,5 +242,364 @@ mod tests {
         );
         let tree2 = db.item_tree(file_id);
         assert_eq!(tree2.top_level_items().len(), 2);
+    }
+
+    #[test]
+    fn test_symbol_tree_query() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(
+            file_id,
+            r#"
+Процедура ПерваяПроцедура()
+КонецПроцедуры
+
+Функция ВтораяФункция() Экспорт
+КонецФункции
+
+Перем МодульнаяПеременная;
+        "#,
+        );
+
+        // Test symbol_tree query
+        let module_id = ModuleId::new(file_id);
+        let symbol_tree = db.symbol_tree(module_id);
+
+        assert_eq!(symbol_tree.methods().count(), 2);
+        assert_eq!(symbol_tree.variables().count(), 1);
+        assert_eq!(symbol_tree.exported_methods().count(), 1);
+    }
+
+    #[test]
+    fn test_symbol_tree_caching() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set initial content
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+        let module_id = ModuleId::new(file_id);
+        let tree1 = db.symbol_tree(module_id);
+        assert_eq!(tree1.methods().count(), 1);
+
+        // Second call should return cached result
+        let tree2 = db.symbol_tree(module_id);
+        assert_eq!(tree2.methods().count(), 1);
+
+        // Verify it's the same Arc (cached)
+        assert!(Arc::ptr_eq(&tree1, &tree2));
+    }
+
+    #[test]
+    fn test_symbol_tree_invalidation() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Initial content
+        db.set_file_text(file_id, "Процедура Тест1() КонецПроцедуры");
+
+        let module_id = ModuleId::new(file_id);
+        let tree1 = db.symbol_tree(module_id);
+        assert_eq!(tree1.methods().count(), 1);
+
+        // Change content - should invalidate cache
+        db.set_file_text(
+            file_id,
+            r#"
+Процедура Тест1() КонецПроцедуры
+Функция Тест2() КонецФункции
+        "#,
+        );
+
+        let tree2 = db.symbol_tree(module_id);
+        assert_eq!(tree2.methods().count(), 2);
+
+        // Should NOT be the same Arc (invalidated)
+        assert!(!Arc::ptr_eq(&tree1, &tree2));
+    }
+
+    #[test]
+    fn test_symbol_tree_case_insensitive() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, "Процедура МояПроцедура() КонецПроцедуры");
+
+        let module_id = ModuleId::new(file_id);
+        let symbol_tree = db.symbol_tree(module_id);
+
+        // Case-insensitive lookup
+        use hir_def::Name;
+        assert!(symbol_tree.find_method(&Name::new("МояПроцедура")).is_some());
+        assert!(symbol_tree.find_method(&Name::new("мояпроцедура")).is_some());
+        assert!(symbol_tree.find_method(&Name::new("МОЯПРОЦЕДУРА")).is_some());
+    }
+
+    #[test]
+    fn test_symbol_tree_multi_file() {
+        let mut db = RootDatabaseImpl::new();
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        let file1 = FileId(0);
+        let file2 = FileId(1);
+        file_set.insert(file1, VfsPath::new("/module1.bsl"));
+        file_set.insert(file2, VfsPath::new("/module2.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file1, SourceRootId(0));
+        db.set_file_source_root(file2, SourceRootId(0));
+
+        // File 1
+        db.set_file_text(file1, "Процедура Метод1() КонецПроцедуры");
+
+        // File 2
+        db.set_file_text(file2, "Функция Метод2() Экспорт КонецФункции");
+
+        // Check file 1
+        let module1 = ModuleId::new(file1);
+        let tree1 = db.symbol_tree(module1);
+        assert_eq!(tree1.methods().count(), 1);
+        assert_eq!(tree1.exported_methods().count(), 0);
+
+        // Check file 2
+        let module2 = ModuleId::new(file2);
+        let tree2 = db.symbol_tree(module2);
+        assert_eq!(tree2.methods().count(), 1);
+        assert_eq!(tree2.exported_methods().count(), 1);
+    }
+
+    // ========== Resolver integration tests ==========
+
+    #[test]
+    fn test_resolver_resolve_module_method() {
+        use hir_def::resolver::Resolver;
+        use hir_def::{ModuleId, Name};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Use actual BSL code instead of manually constructing ItemTree
+        db.set_file_text(
+            file_id,
+            r#"
+Процедура МояПроцедура()
+КонецПроцедуры
+
+Функция МояФункция() Экспорт
+КонецФункции
+        "#,
+        );
+
+        // Create resolver
+        let resolver = Resolver::for_module(module_id);
+
+        // Resolve procedure
+        let method_id = resolver.resolve_module_method(&db, &Name::new("МояПроцедура"));
+        assert!(method_id.is_some());
+        assert_eq!(method_id.unwrap().module, module_id);
+
+        // Resolve function
+        let method_id = resolver.resolve_module_method(&db, &Name::new("МояФункция"));
+        assert!(method_id.is_some());
+        assert_eq!(method_id.unwrap().module, module_id);
+
+        // Not found
+        let method_id = resolver.resolve_module_method(&db, &Name::new("НеСуществует"));
+        assert!(method_id.is_none());
+    }
+
+    #[test]
+    fn test_resolver_resolve_module_method_case_insensitive() {
+        use hir_def::resolver::Resolver;
+        use hir_def::{ModuleId, Name};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        // Set up
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, "Процедура МояПроцедура() КонецПроцедуры");
+
+        let resolver = Resolver::for_module(module_id);
+
+        // Different cases should all resolve
+        assert!(resolver.resolve_module_method(&db, &Name::new("МояПроцедура")).is_some());
+        assert!(resolver.resolve_module_method(&db, &Name::new("мояпроцедура")).is_some());
+        assert!(resolver.resolve_module_method(&db, &Name::new("МОЯПРОЦЕДУРА")).is_some());
+    }
+
+    #[test]
+    fn test_resolver_resolve_module_variable() {
+        use hir_def::resolver::Resolver;
+        use hir_def::{ModuleId, Name};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        // Set up
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, "Перем МодульнаяПеременная Экспорт;");
+
+        let resolver = Resolver::for_module(module_id);
+
+        // Resolve variable
+        let var_id = resolver.resolve_module_variable(&db, &Name::new("МодульнаяПеременная"));
+        assert!(var_id.is_some());
+        assert_eq!(var_id.unwrap().module, module_id);
+
+        // Not found
+        let var_id = resolver.resolve_module_variable(&db, &Name::new("НеСуществует"));
+        assert!(var_id.is_none());
+    }
+
+    #[test]
+    fn test_resolver_resolve_name_hierarchy() {
+        use hir_def::resolver::{Resolution, Resolver};
+        use hir_def::scope::ExprScopes;
+        use hir_def::{ModuleId, Name};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        // Set up
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Create module with method and variable
+        db.set_file_text(
+            file_id,
+            r#"
+Процедура Метод()
+КонецПроцедуры
+
+Перем Переменная;
+        "#,
+        );
+
+        // Create resolver with expression scope
+        let mut expr_scopes = ExprScopes::new();
+        expr_scopes.add_parameter(Name::new("Параметр"));
+
+        let root_scope = expr_scopes.root_scope();
+        let resolver =
+            Resolver::for_module(module_id).push_expr_scope(Arc::new(expr_scopes), root_scope);
+
+        // Resolve parameter (local scope)
+        let resolved = resolver.resolve_name(&db, &Name::new("Параметр"));
+        assert!(matches!(resolved, Some(Resolution::Local(_))));
+
+        // Resolve method (module scope)
+        let resolved = resolver.resolve_name(&db, &Name::new("Метод"));
+        assert!(matches!(resolved, Some(Resolution::Method(_))));
+
+        // Resolve variable (module scope)
+        let resolved = resolver.resolve_name(&db, &Name::new("Переменная"));
+        assert!(matches!(resolved, Some(Resolution::Variable(_))));
+
+        // Not found
+        let resolved = resolver.resolve_name(&db, &Name::new("НеСуществует"));
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_resolver_shadowing_local_over_module() {
+        use hir_def::resolver::{Resolution, Resolver};
+        use hir_def::scope::ExprScopes;
+        use hir_def::{ModuleId, Name};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        // Set up
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Create module variable with name "Значение"
+        db.set_file_text(file_id, "Перем Значение;");
+
+        // Create local variable with the same name
+        let mut expr_scopes = ExprScopes::new();
+        expr_scopes.add_local_variable(expr_scopes.root_scope(), Name::new("Значение"));
+
+        let root_scope = expr_scopes.root_scope();
+        let resolver =
+            Resolver::for_module(module_id).push_expr_scope(Arc::new(expr_scopes), root_scope);
+
+        // Should resolve to local variable (shadows module variable)
+        let resolved = resolver.resolve_name(&db, &Name::new("Значение"));
+        assert!(matches!(resolved, Some(Resolution::Local(_))));
+    }
+
+    #[test]
+    fn test_resolver_with_workspace_scope() {
+        use hir_def::resolver::Resolver;
+        use hir_def::ModuleId;
+
+        let file_id = FileId(0);
+        let module_id = ModuleId::new(file_id);
+
+        let resolver = Resolver::with_workspace_scope(module_id);
+
+        // Should have WorkspaceScope and ModuleScope
+        assert_eq!(resolver.scopes.len(), 2);
     }
 }

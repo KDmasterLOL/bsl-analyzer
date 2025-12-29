@@ -43,16 +43,16 @@ pub fn lower_file(db: &dyn RootQueryDb, file_id: FileId) -> Arc<ItemTree> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemTree {
     /// Top-level items in the order they appear in the file.
-    top_level: Vec<ModItem>,
+    pub(crate) top_level: Vec<ModItem>,
 
     /// Arena for procedures (compact storage with stable indices).
-    procedures: Arena<Procedure>,
+    pub(crate) procedures: Arena<Procedure>,
 
     /// Arena for functions.
-    functions: Arena<Function>,
+    pub(crate) functions: Arena<Function>,
 
     /// Arena for module variables.
-    variables: Arena<Variable>,
+    pub(crate) variables: Arena<Variable>,
 }
 
 impl Default for ItemTree {

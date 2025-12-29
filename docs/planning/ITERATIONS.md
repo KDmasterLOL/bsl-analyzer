@@ -2,7 +2,7 @@
 
 > **Примечание:** Для каждой итерации указаны проекты-источники. Подробное описание проектов см. в [SOURCES.md](./SOURCES.md).
 
-> **Последнее обновление:** 2025-12-29
+> **Последнее обновление:** 2025-12-30
 
 ## Phase 1: Foundation
 
@@ -288,32 +288,74 @@
 
 ---
 
-### Iteration 8-9: Symbol Resolution
+### Iteration 8: Symbol Resolution ✅ COMPLETED
 
 **Источники:**
 - `rust-analyzer/crates/hir-def/src/resolver.rs` — разрешение имён
 - `rust-analyzer/crates/hir-def/src/body/scope.rs` — scopes
 - `bsl-language-server-rust/crates/bsl-symbols/` — SymbolTable, scope analysis
+- `rust-analyzer/crates/hir/src/semantics.rs` — Semantics API pattern
 
-**Цель:** Полное разрешение символов и область видимости.
+**Цель:** Полное разрешение символов и область видимости внутри модуля.
 
-**Задачи:**
+**Реализовано:**
 
-1. **SymbolTree**
-   - [ ] Построение таблицы символов
-   - [ ] ModuleSymbol, MethodSymbol, VariableSymbol
+1. **SymbolTree** (Phase 1-2)
+   - [x] Построение таблицы символов (`crates/hir-def/src/symbol_tree.rs`)
+   - [x] MethodSymbol, VariableSymbol, ParamSymbol
+   - [x] Регистронезависимый поиск (case-insensitive HashMap)
+   - [x] Export visibility tracking
+   - [x] 15+ тестов
 
-2. **Cross-module resolution**
-   - [ ] Разрешение вызовов общих модулей
-   - [ ] Экспортируемые методы
+2. **Module-Level Resolution** (Phase 3)
+   - [x] Resolver расширен для module-level scope
+   - [x] `resolve_module_method()` и `resolve_module_variable()`
+   - [x] Порядок разрешения: ExprScope → ModuleScope → WorkspaceScope
+   - [x] 8+ тестов
 
-3. **Type information** (базовое)
-   - [ ] Примитивные типы
-   - [ ] Inferred types
+3. **Type Information** (Phase 4)
+   - [x] Базовые типы (`crates/hir-def/src/ty.rs`)
+   - [x] Примитивные типы: Number, String, Boolean, Date, Undefined, Null
+   - [x] Сложные типы: Array, Structure, Map, Function
+   - [x] Вывод типов из литералов
+   - [x] 8+ тестов
+
+4. **Semantics API** (Phase 5)
+   - [x] `Semantics::resolve_method_call()` — разрешение вызовов
+   - [x] `Semantics::symbol_at_position()` — символ в позиции курсора
+   - [x] `Semantics::find_method_references()` — поиск ссылок на методы
+   - [x] `Semantics::find_variable_references()` — поиск ссылок на переменные
+   - [x] `Symbol` enum (Method, Variable, Parameter)
+   - [x] 9+ тестов
+
+5. **IDE Features** (Phase 6)
+   - [x] Go to Definition (`crates/ide/src/goto_definition.rs`)
+     - Навигация к определению методов/функций/переменных
+     - 6 комплексных тестов
+   - [x] Find References (`crates/ide/src/references.rs`)
+     - Поиск всех использований методов/переменных
+     - 6 комплексных тестов
+   - [x] Интеграция в Analysis API
+   - [x] `Analysis::goto_definition()` и `Analysis::find_references()`
+
+6. **Cross-module resolution** (инфраструктура)
+   - [x] WorkspaceScope в Resolver (базовая инфраструктура)
+   - [ ] Полная реализация → Iteration 9.5 (ModuleGraph)
 
 **Критерии готовности:**
-- Go to Definition работает
-- Find References работает
+- ✅ Go to Definition работает (внутри файла)
+- ✅ Find References работает (внутри файла)
+- ✅ Регистронезависимое разрешение (BSL-специфика)
+- ✅ 40+ новых тестов (190 тестов всего в проекте)
+- ✅ Clippy без предупреждений
+
+**Статистика:**
+- `crates/hir-def/src/symbol_tree.rs`: 500+ строк
+- `crates/hir-def/src/ty.rs`: 230+ строк
+- `crates/ide/src/goto_definition.rs`: 242 строки
+- `crates/ide/src/references.rs`: 224 строки
+- Расширения `Semantics` API: ~150 строк
+- Всего: ~1350 строк нового кода
 
 ---
 

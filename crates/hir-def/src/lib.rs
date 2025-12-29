@@ -7,6 +7,8 @@ pub mod item_tree;
 pub mod name;
 pub mod resolver;
 pub mod scope;
+pub mod symbol_tree;
+pub mod ty;
 
 use std::sync::Arc;
 
@@ -15,6 +17,8 @@ use vfs::FileId;
 
 pub use item_tree::ItemTree;
 pub use name::Name;
+pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
+pub use ty::Ty;
 
 // ========== Database Traits ==========
 
@@ -32,6 +36,12 @@ pub trait DefDatabase: SourceDatabase {
     ///
     /// In BSL, 1 file = 1 module, so ModuleId contains FileId.
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData>;
+
+    /// Get symbol tree for a module (derived from ItemTree).
+    ///
+    /// SymbolTree provides fast O(1) case-insensitive lookup of methods and variables.
+    /// Built from ItemTree and cached.
+    fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
 }
 
 // ========== Module & Item Identifiers ==========

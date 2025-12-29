@@ -2,20 +2,35 @@
 //!
 //! This crate provides the high-level API for IDE features.
 
+mod goto_definition;
+mod references;
+
 pub use ide_assists::{Assist, AssistId, SourceChange};
-pub use ide_db::{RootDatabase, SymbolInfo, SymbolKind, TextRange};
+pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
 
+use std::sync::Arc;
+use syntax::TextSize;
 use vfs::FileId;
 
 /// The main analysis API.
 pub struct Analysis {
-    // TODO: Add database
+    db: Arc<RootDatabaseImpl>,
 }
 
 impl Analysis {
     pub fn new() -> Self {
-        Self {}
+        Self { db: Arc::new(RootDatabaseImpl::default()) }
+    }
+
+    /// Create Analysis with a specific database (for testing).
+    pub fn from_database(db: RootDatabaseImpl) -> Self {
+        Self { db: Arc::new(db) }
+    }
+
+    /// Get a reference to the database (for testing).
+    pub fn database(&self) -> &RootDatabaseImpl {
+        &self.db
     }
 
     /// Returns diagnostics for a file.
@@ -25,15 +40,15 @@ impl Analysis {
     }
 
     /// Goes to the definition of the symbol at the position.
-    pub fn goto_definition(&self, _file_id: FileId, _offset: u32) -> Option<NavigationTarget> {
-        // TODO: Implement
-        None
+    pub fn goto_definition(&self, file_id: FileId, offset: u32) -> Option<NavigationTarget> {
+        let offset = TextSize::from(offset);
+        goto_definition::goto_definition(self.db.as_ref(), file_id, offset)
     }
 
     /// Finds all references to the symbol at the position.
-    pub fn find_references(&self, _file_id: FileId, _offset: u32) -> Vec<Location> {
-        // TODO: Implement
-        Vec::new()
+    pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
+        let offset = TextSize::from(offset);
+        references::find_references(self.db.as_ref(), file_id, offset)
     }
 
     /// Returns hover information at the position.

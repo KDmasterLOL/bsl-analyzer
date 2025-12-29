@@ -2,7 +2,7 @@
 
 ## 🎯 Текущий статус проекта
 
-**Дата обновления:** 2025-12-29
+**Дата обновления:** 2025-12-30
 
 ### ✅ Выполнено (Iterations 1-3):
 - Структура проекта (15 крейтов)
@@ -38,22 +38,33 @@
   - ✅ Parse query с кешированием (82+ тестов ✅)
   - ⚠️ **Полная Salsa интеграция отложена** (см. docs/planning/SALSA_TODO.md)
 
-### 📋 Следующие шаги (Iteration 6+):
-1. **HIR Foundation** - High-level IR, semantic analysis (Iterations 6-7)
-2. **Symbol Resolution** - таблица символов, разрешение имен (Iterations 8-9)
-3. **ModuleGraph & Incremental CI** - граф зависимостей для CI/CD (Iteration 9.5)
-4. **IDE-DB & Salsa** - полная интеграция Salsa 0.25.2 (Iteration 10)
-5. **Metadata Infrastructure** - работа с метаданными 1С (Iteration 11)
-6. **Diagnostics Migration** - 181 диагностика (Iterations 12-25)
-7. **SDBL Grammar** - Full query parsing (deferred to Iterations 24-25 with diagnostics)
+### ✅ Выполнено (Iterations 6-8):
+- **HIR Foundation & Symbol Resolution** - **COMPLETE**
+  - ✅ ItemTree (Iteration 6-7): модель верхнего уровня (procedures, functions, variables)
+  - ✅ SymbolTree (Iteration 8): быстрая таблица символов с O(1) поиском
+  - ✅ Resolver: module-level scope resolution
+  - ✅ Type System: базовые типы (Number, String, Boolean, Array, Function, etc.)
+  - ✅ Semantics API: высокоуровневый API для IDE (resolve_method_call, symbol_at_position)
+  - ✅ **Go to Definition** (`crates/ide/src/goto_definition.rs`): навигация к определению символов
+  - ✅ **Find References** (`crates/ide/src/references.rs`): поиск всех использований символов
+  - ✅ Регистронезависимое разрешение (BSL case-insensitive)
+  - ✅ 40+ новых тестов (190 тестов всего ✅)
+  - ✅ Clippy без предупреждений
+
+### 📋 Следующие шаги (Iteration 9+):
+1. **ModuleGraph & Incremental CI** - граф зависимостей для CI/CD (Iteration 9.5)
+2. **IDE-DB & Salsa** - полная интеграция Salsa 0.25.2 (Iteration 10)
+3. **Metadata Infrastructure** - работа с метаданными 1С (Iteration 11)
+4. **Diagnostics Migration** - 181 диагностика (Iterations 12-25)
+5. **SDBL Grammar** - Full query parsing (deferred to Iterations 24-25 with diagnostics)
 
 ### 📊 Прогресс по фазам:
 - Phase 1 (Foundation): **100% завершено** (Iterations 1-5 ✅)
-- Phase 2 (Semantic Analysis): 0% (Iterations 6-11)
-  - HIR/Symbols: Iterations 6-9
-  - ModuleGraph & Incremental CI: Iteration 9.5
-  - IDE-DB & Salsa: Iteration 10
-  - Metadata Infrastructure: Iteration 11
+- Phase 2 (Semantic Analysis): **50% завершено** (Iterations 6-11)
+  - ✅ HIR/Symbols: Iterations 6-8 ✅
+  - [ ] ModuleGraph & Incremental CI: Iteration 9.5
+  - [ ] IDE-DB & Salsa: Iteration 10
+  - [ ] Metadata Infrastructure: Iteration 11
 - Phase 3 (Diagnostics): 0% (Iterations 12-25)
   - Tier 1 (Syntax): 12-14
   - Tier 2 (Semantic): 15-18

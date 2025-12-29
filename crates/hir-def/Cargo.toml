@@ -21,3 +21,4 @@ tracing.workspace = true
 expect-test.workspace = true
 lexer.workspace = true
 parser.workspace = true
+ide-db.workspace = true
