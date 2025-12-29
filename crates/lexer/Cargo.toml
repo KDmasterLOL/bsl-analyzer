@@ -1,0 +1,13 @@
+[package]
+name = "lexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+logos.workspace = true
+smol_str.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

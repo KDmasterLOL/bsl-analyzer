@@ -1,0 +1,20 @@
+[package]
+name = "ide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ide-db.workspace = true
+ide-diagnostics.workspace = true
+ide-assists.workspace = true
+hir.workspace = true
+syntax.workspace = true
+vfs.workspace = true
+stdx.workspace = true
+triomphe.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+test-fixture.workspace = true

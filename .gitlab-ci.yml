@@ -1,0 +1,106 @@
+# GitLab CI/CD для bsl-analyzer
+# Runner: Linux shell executor
+# Требования: установленный Rust toolchain на runner
+
+stages:
+  - check
+  - test
+  - build
+
+variables:
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+  RUSTFLAGS: "-D warnings"
+
+# Кеширование зависимостей Cargo
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cargo/
+    - target/
+
+# Проверка версии Rust перед всеми задачами
+before_script:
+  - rustc --version
+  - cargo --version
+
+# ============================================
+# Stage: check
+# ============================================
+
+fmt:
+  stage: check
+  script:
+    - cargo fmt --all -- --check
+  allow_failure: false
+
+clippy:
+  stage: check
+  script:
+    - cargo clippy --all-targets --all-features -- -D warnings
+  allow_failure: false
+
+# ============================================
+# Stage: test
+# ============================================
+
+test:
+  stage: test
+  script:
+    - cargo test --all --no-fail-fast
+  artifacts:
+    when: on_failure
+    paths:
+      - target/debug/deps/
+    expire_in: 1 week
+
+# ============================================
+# Stage: build
+# ============================================
+
+build:debug:
+  stage: build
+  script:
+    - cargo build --all
+  artifacts:
+    paths:
+      - target/debug/bsl-analyzer
+    expire_in: 1 week
+  only:
+    - main
+    - merge_requests
+
+build:release:
+  stage: build
+  script:
+    - cargo build --all --release
+  artifacts:
+    paths:
+      - target/release/bsl-analyzer
+    expire_in: 4 weeks
+  only:
+    - tags
+    - main
+
+# ============================================
+# Опциональные задачи
+# ============================================
+
+# Проверка документации
+doc:
+  stage: check
+  script:
+    - cargo doc --all --no-deps
+  allow_failure: true
+  only:
+    - main
+    - merge_requests
+
+# Аудит безопасности зависимостей (требует cargo-audit)
+# Раскомментировать когда cargo-audit будет установлен на runner
+# audit:
+#   stage: check
+#   script:
+#     - cargo audit
+#   allow_failure: true
+#   only:
+#     - schedules

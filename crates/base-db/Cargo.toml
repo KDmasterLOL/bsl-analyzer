@@ -1,0 +1,16 @@
+[package]
+name = "base-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+syntax.workspace = true
+vfs.workspace = true
+salsa.workspace = true
+triomphe.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
