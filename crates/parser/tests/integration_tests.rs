@@ -459,20 +459,14 @@ fn test_small_file_performance() {
 fn test_lexer_performance_large_file() {
     use lexer::tokenize;
 
-    let bsl_file_path = "/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl";
-    let input = match std::fs::read_to_string(bsl_file_path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Warning: Could not read file: {}", e);
-            return;
-        }
-    };
+    // Source: bsl-parser/src/test/resources/Module.bsl
+    let input = include_str!("fixtures/Module.bsl");
 
     println!("\nLexer performance test:");
     println!("File size: {} bytes", input.len());
 
     let start = Instant::now();
-    let tokens = tokenize(&input);
+    let tokens = tokenize(input);
     let elapsed = start.elapsed();
 
     println!("Tokens: {}", tokens.len());
@@ -485,23 +479,14 @@ fn test_lexer_performance_large_file() {
 #[test]
 #[ignore] // Run with: cargo test --release -- --ignored benchmark
 fn benchmark_parser_performance() {
-    // Read real BSL file from bsl-parser project
-    let bsl_file_path = "/Users/kiriller/src/lsp/bsl-parser/src/test/resources/Module.bsl";
-
-    let input = match std::fs::read_to_string(bsl_file_path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Warning: Could not read benchmark file: {}", e);
-            eprintln!("Skipping benchmark test");
-            return;
-        }
-    };
+    // Source: bsl-parser/src/test/resources/Module.bsl
+    let input = include_str!("fixtures/Module.bsl");
 
     let file_size_bytes = input.len();
     let file_size_mb = file_size_bytes as f64 / 1_000_000.0;
 
     println!("\n=== Parser Performance Benchmark ===");
-    println!("File: {}", bsl_file_path);
+    println!("File: fixtures/Module.bsl");
     println!("Size: {} bytes ({:.2} MB)", file_size_bytes, file_size_mb);
 
     // Warmup - skip to save time
@@ -513,7 +498,7 @@ fn benchmark_parser_performance() {
     println!("\nParsing file (this may take time)...");
     let start = Instant::now();
 
-    let result = parse(&input);
+    let result = parse(input);
     assert!(!result.events.is_empty());
 
     let elapsed = start.elapsed();
