@@ -2,13 +2,9 @@
 //!
 //! This is the main entry point for the LSP server.
 
-use std::error::Error;
+use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand};
-
-mod config;
-mod handlers;
-mod server;
 
 #[derive(Parser)]
 #[command(name = "bsl-analyzer")]
@@ -48,13 +44,8 @@ enum Commands {
 }
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    let log_file = env::var("BSL_LOG_FILE").ok().map(PathBuf::from);
+    setup_logging(log_file)?;
 
     let cli = Cli::parse();
 
@@ -67,9 +58,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Starting BSL Analyzer LSP server");
-
-    // TODO: Implement LSP server using lsp-server crate
-    // For now, just print a message
 
     eprintln!("BSL Analyzer LSP server is not yet fully implemented.");
     eprintln!("Please check the project roadmap for implementation status.");
@@ -101,6 +89,24 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     let _config: project_model::ProjectConfig = serde_json::from_str(&content)?;
 
     println!("Configuration is valid!");
+
+    Ok(())
+}
+
+fn setup_logging(log_file: Option<PathBuf>) -> anyhow::Result<()> {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+    let writer: BoxMakeWriter = match log_file {
+        Some(file) => BoxMakeWriter::new(Arc::new(fs::File::create(&file)?)),
+        None => BoxMakeWriter::new(io::stderr),
+    };
+
+    bsl_analyzer::tracing::Config {
+        writer,
+        filter: env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned()),
+        profile_filter: env::var("BSL_PROFILE").ok(),
+    }
+    .init()?;
 
     Ok(())
 }
