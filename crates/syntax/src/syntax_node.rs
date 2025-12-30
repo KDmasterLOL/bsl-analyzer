@@ -42,14 +42,6 @@ pub type SyntaxToken = rowan::SyntaxToken<BslLanguage>;
 /// Untyped BSL syntax element (either a node or a token).
 pub type SyntaxElement = rowan::SyntaxElement<BslLanguage>;
 
-/// Iterator over syntax node children.
-#[allow(dead_code)]
-pub type SyntaxNodeChildren = rowan::SyntaxNodeChildren<BslLanguage>;
-
-/// Iterator over syntax element children (both nodes and tokens).
-#[allow(dead_code)]
-pub type SyntaxElementChildren = rowan::SyntaxElementChildren<BslLanguage>;
-
 /// A "pointer" to a [`SyntaxNode`], via its absolute offset and text range.
 ///
 /// This is a more compact representation than a full `SyntaxNode` which keeps

@@ -89,6 +89,9 @@ pub enum DiagnosticCode {
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
+    // Tier 3: Metadata (requires 1C configuration metadata)
+    CachedPublic,
+
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
     // TODO: Add all 181 codes
@@ -129,6 +132,7 @@ impl DiagnosticCode {
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
+            Self::CachedPublic => "CachedPublic",
             _ => "Unknown",
         }
     }
@@ -203,6 +207,12 @@ pub struct DiagnosticsContext<'a> {
     pub db: &'a dyn RootDatabase,
     pub config: &'a DiagnosticsConfig,
     pub file_id: FileId,
+
+    // Workspace integration (for Tier 3 diagnostics)
+    /// Root directory of the workspace (for finding Configuration.xml)
+    pub workspace_root: Option<&'a std::path::Path>,
+    /// Direct path to Configuration.xml (if known)
+    pub configuration_path: Option<&'a std::path::Path>,
 }
 
 /// Runs all diagnostics on a file.
@@ -215,6 +225,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
     result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
+
+    // Tier 3: Metadata diagnostics
+    result.extend(handlers::cached_public::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));

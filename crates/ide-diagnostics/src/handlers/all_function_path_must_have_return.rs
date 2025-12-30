@@ -385,10 +385,17 @@ mod tests {
         }
 
         // Create diagnostics context
-        // Note: Using Rc instead of Arc since this is a test and doesn't cross thread boundaries
+        // RootDatabase trait object is not Send/Sync (Salsa is single-threaded).
+        // Arc is used for trait object lifetime management in tests, not thread-safety.
         #[allow(clippy::arc_with_non_send_sync)]
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext { db: db.as_ref(), config: &config, file_id };
+        let ctx = DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+        };
 
         // Run diagnostic
         let diagnostics = check(&ctx);

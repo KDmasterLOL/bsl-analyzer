@@ -12,6 +12,8 @@ use std::fmt;
 /// - All composite node kinds from parser
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
+// Allow non-camel-case for token names (EOF, KW_PROCEDURE, etc.) which follow
+// constant naming convention and are widely used in parser/lexer literature.
 #[allow(non_camel_case_types)]
 pub enum SyntaxKind {
     // ========= Special markers =========

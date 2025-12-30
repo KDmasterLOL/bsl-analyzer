@@ -24,6 +24,8 @@ impl<S> SpanTree<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
+    // Returns `impl Layer<S>` instead of Self to enable tracing layer composition.
+    // This is a common pattern in tracing ecosystem for building reusable layers.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(spec: &str) -> impl Layer<S> {
         let (write_filter, allowed_names) = WriteFilter::from_spec(spec);
@@ -128,6 +130,8 @@ impl Node {
         self.go(0, filter)
     }
 
+    // Profiling output intentionally goes to stderr to avoid mixing with normal output.
+    // This allows users to redirect profiling data separately from program output.
     #[allow(clippy::print_stderr)]
     fn go(&self, level: usize, filter: &WriteFilter) {
         if self.duration > filter.longer_than && level < filter.depth {

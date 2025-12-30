@@ -19,12 +19,15 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    // RootDatabaseImpl is not Send/Sync by design - it's a single-threaded Salsa database.
+    // Arc is used for cheap cloning and interior mutability, not for thread-safety.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         Self { db: Arc::new(RootDatabaseImpl::default()) }
     }
 
     /// Create Analysis with a specific database (for testing).
+    // RootDatabaseImpl is not Send/Sync by design - it's a single-threaded Salsa database.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn from_database(db: RootDatabaseImpl) -> Self {
         Self { db: Arc::new(db) }

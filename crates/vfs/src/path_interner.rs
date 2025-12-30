@@ -22,12 +22,6 @@ pub(crate) struct PathInterner {
 }
 
 impl PathInterner {
-    /// Create a new empty path interner.
-    #[allow(dead_code)]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Intern a path and return its FileId.
     ///
     /// If the path already exists, returns the existing FileId.
@@ -53,16 +47,18 @@ impl PathInterner {
         &self.map[id.0 as usize]
     }
 
-    /// Returns the number of interned paths.
-    #[allow(dead_code)]
-    pub(crate) fn len(&self) -> usize {
-        self.map.len()
+    // Test-only methods below
+
+    /// Create a new empty path interner (test helper).
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
 
-    /// Returns true if no paths have been interned.
-    #[allow(dead_code)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.map.is_empty()
+    /// Returns the number of interned paths (test helper).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
     }
 }
 

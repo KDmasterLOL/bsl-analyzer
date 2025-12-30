@@ -226,7 +226,13 @@ mod tests {
         // Use Rc instead of Arc since tests are single-threaded
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext { db: db.as_ref(), config: &config, file_id };
+        let ctx = DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+        };
 
         let diagnostics = check(&ctx);
         (diagnostics, file_content)

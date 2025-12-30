@@ -759,6 +759,76 @@ impl Annotation {
     }
 }
 
+// ==================== Preprocessor ====================
+
+/// Preprocessor region directive (#Область/#Region or #КонецОбласти/#EndRegion).
+///
+/// Regions are used to organize code into collapsible sections.
+#[derive(Debug, Clone)]
+pub struct PreRegionDir(SyntaxNode);
+
+impl AstNode for PreRegionDir {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::PRE_REGION_DIR
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl PreRegionDir {
+    /// Get region name (text after #Область/#Region).
+    ///
+    /// Returns None for region end directives (#КонецОбласти/#EndRegion).
+    ///
+    /// # Example
+    /// ```
+    /// #Область ПрограммныйИнтерфейс  // name() = Some("ПрограммныйИнтерфейс")
+    /// #Region Public                 // name() = Some("Public")
+    /// #КонецОбласти                  // name() = None
+    /// ```
+    pub fn name(&self) -> Option<String> {
+        let text = self.0.text().to_string();
+
+        if let Some(stripped) =
+            text.strip_prefix("#Область").or_else(|| text.strip_prefix("#область"))
+        {
+            Some(stripped.trim().to_string())
+        } else {
+            text.strip_prefix("#Region")
+                .or_else(|| text.strip_prefix("#region"))
+                .map(|stripped| stripped.trim().to_string())
+        }
+    }
+
+    /// Check if this is a region start (#Область / #Region).
+    pub fn is_start(&self) -> bool {
+        let text = self.0.text().to_string();
+        text.starts_with("#Область")
+            || text.starts_with("#область")
+            || text.starts_with("#Region")
+            || text.starts_with("#region")
+    }
+
+    /// Check if this is a region end (#КонецОбласти / #EndRegion).
+    pub fn is_end(&self) -> bool {
+        let text = self.0.text().to_string();
+        text.starts_with("#КонецОбласти")
+            || text.starts_with("#конецобласти")
+            || text.starts_with("#EndRegion")
+            || text.starts_with("#endregion")
+    }
+}
+
 // ==================== Statements ====================
 
 /// Statement list (body of a procedure/function or block).
