@@ -32,7 +32,7 @@ echo -e "${GREEN}✓ Pre-commit hook installed${NC}\n"
 # Информация
 echo -e "${GREEN}✓ Git hooks installed successfully!${NC}\n"
 echo "Pre-commit hook will now run before each commit:"
-echo "  - cargo fmt --all -- --check"
+echo "  - cargo fmt --all (auto-format and stage changes)"
 echo "  - cargo clippy --all-targets --all-features -- -D warnings"
 echo ""
 echo "To skip hooks temporarily, use: git commit --no-verify"

@@ -13,14 +13,11 @@ NC='\033[0m'
 echo -e "${YELLOW}Running pre-commit checks...${NC}\n"
 
 # 1. Cargo fmt
-echo -e "${YELLOW}[1/2] Checking code formatting...${NC}"
-if ! cargo fmt --all -- --check; then
-    echo -e "\n${RED}❌ Code formatting check failed!${NC}"
-    echo -e "${YELLOW}Run: cargo fmt --all${NC}"
-    echo -e "${YELLOW}Or add --no-verify to skip (not recommended)${NC}\n"
-    exit 1
-fi
-echo -e "${GREEN}✓ Formatting OK${NC}\n"
+echo -e "${YELLOW}[1/2] Auto-formatting code...${NC}"
+cargo fmt --all
+# Add formatted files back to staging area
+git add -u
+echo -e "${GREEN}✓ Code formatted and staged${NC}\n"
 
 # 2. Clippy
 echo -e "${YELLOW}[2/2] Running clippy...${NC}"
