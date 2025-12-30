@@ -13,6 +13,16 @@ use lexer::TokenKind;
 
 use super::expressions;
 
+/// Helper to check for bilingual SDBL keywords (English or Russian).
+fn at_sdbl_keyword(p: &Parser, en: &str, ru: &str) -> bool {
+    p.at_keyword(en) || p.at_keyword(ru)
+}
+
+/// Helper to consume bilingual SDBL keywords (English or Russian).
+fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
+    p.eat_keyword(en) || p.eat_keyword(ru)
+}
+
 /// Parse a SELECT query
 ///
 /// Grammar: `selectQuery: subquery (autoorder | orderBy | totalBy)?`
@@ -42,7 +52,18 @@ pub(super) fn subquery(p: &mut Parser) {
     query(p);
 
     // Parse UNION clauses
-    while p.at_keyword("UNION") {
+    loop {
+        p.skip_trivia(); // Must skip trivia before checking for UNION keyword
+
+        // Stop at semicolons (end of query package item)
+        if p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        if !at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ") {
+            break;
+        }
+
         union_clause(p);
     }
 
@@ -55,10 +76,12 @@ pub(super) fn subquery(p: &mut Parser) {
 fn union_clause(p: &mut Parser) {
     let m = p.start();
 
-    p.expect_keyword("UNION");
+    eat_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ");
+
+    p.skip_trivia(); // Skip whitespace before checking for ALL
 
     // Optional ALL keyword
-    p.eat_keyword("ALL");
+    eat_sdbl_keyword(p, "ALL", "ВСЕ");
 
     p.skip_trivia();
 
@@ -92,9 +115,9 @@ fn union_clause(p: &mut Parser) {
 fn query(p: &mut Parser) {
     let m = p.start();
 
-    // SELECT keyword (mandatory)
-    if !p.expect_keyword("SELECT") {
-        // Error recovery: try to continue parsing
+    // SELECT/ВЫБРАТЬ keyword (mandatory)
+    if !eat_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ") {
+        p.error(); // Expected SELECT/ВЫБРАТЬ
         m.complete(p, NodeKind::SdblQuery);
         return;
     }
@@ -111,12 +134,14 @@ fn query(p: &mut Parser) {
     // if p.at_keyword("INTO") { into_clause(p); }
 
     // FROM clause (optional)
-    if p.at_keyword("FROM") {
+    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for FROM
+    if at_sdbl_keyword(p, "FROM", "ИЗ") {
         from_clause(p);
     }
 
     // WHERE clause (optional)
-    if p.at_keyword("WHERE") {
+    p.skip_trivia(); // CRITICAL: Must skip trivia before checking for WHERE
+    if at_sdbl_keyword(p, "WHERE", "ГДЕ") {
         where_clause(p);
     }
 
@@ -168,7 +193,7 @@ fn selected_field(p: &mut Parser) {
     // Optional alias
     // Parse alias if we see AS keyword OR an identifier
     // (identifier could be implicit alias or explicit with AS)
-    if p.at_keyword("AS") || is_identifier_token(p) {
+    if at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p) {
         // Lookahead to avoid consuming keywords that start next clause
         if !is_clause_keyword(p) {
             alias(p);
@@ -235,7 +260,7 @@ fn alias(p: &mut Parser) {
     let m = p.start();
 
     // Optional AS keyword
-    p.eat_keyword("AS");
+    eat_sdbl_keyword(p, "AS", "КАК");
 
     p.skip_trivia();
 
@@ -256,7 +281,7 @@ fn alias(p: &mut Parser) {
 fn from_clause(p: &mut Parser) {
     let m = p.start();
 
-    p.expect_keyword("FROM");
+    eat_sdbl_keyword(p, "FROM", "ИЗ");
     p.skip_trivia();
 
     // Parse data sources (comma-separated)
@@ -295,15 +320,17 @@ fn data_source(p: &mut Parser) {
         p.skip_trivia();
 
         // Optional alias for subquery
-        if (p.at_keyword("AS") || is_identifier_token(p)) && !is_clause_keyword(p) {
+        if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
             alias(p);
         }
     } else {
         // Table reference
         table_ref(p);
 
+        p.skip_trivia(); // Skip whitespace before checking for alias
+
         // Optional alias for table
-        if (p.at_keyword("AS") || is_identifier_token(p)) && !is_clause_keyword(p) {
+        if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
             alias(p);
         }
     }
@@ -354,7 +381,7 @@ fn table_ref(p: &mut Parser) {
 fn where_clause(p: &mut Parser) {
     let m = p.start();
 
-    p.expect_keyword("WHERE");
+    eat_sdbl_keyword(p, "WHERE", "ГДЕ");
     p.skip_trivia();
 
     // Parse logical expression (AND, OR, NOT, predicates)
@@ -374,11 +401,12 @@ fn is_identifier_token(p: &Parser) -> bool {
 ///
 /// Used to avoid consuming keywords when parsing aliases
 fn is_clause_keyword(p: &Parser) -> bool {
-    p.at_keyword("FROM")
-        || p.at_keyword("WHERE")
+    at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
+        || at_sdbl_keyword(p, "FROM", "ИЗ")
+        || at_sdbl_keyword(p, "WHERE", "ГДЕ")
         || p.at_keyword("GROUP")
         || p.at_keyword("HAVING")
         || p.at_keyword("ORDER")
-        || p.at_keyword("UNION")
+        || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || p.at_keyword("INTO")
 }

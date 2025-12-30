@@ -20,7 +20,6 @@ use smol_str::SmolStr;
 /// Each token represents a lexical element in SDBL queries.
 /// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[logos(skip r"[ \t\r]+")]
 pub enum SdblTokenKind {
     // ========= DML Keywords (bilingual) =========
     #[regex(r"(?i)выбрать|(?i)select")]
@@ -509,6 +508,10 @@ pub enum SdblTokenKind {
     // Newline
     #[token("\n")]
     Newline,
+
+    // Whitespace (spaces, tabs, carriage returns)
+    #[regex(r"[ \t\r]+")]
+    Whitespace,
 
     // Error token for unrecognized input
     Error,

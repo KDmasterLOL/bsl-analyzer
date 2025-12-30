@@ -54,9 +54,10 @@ impl<'a> Parser<'a> {
     /// Checks if the current token matches the given kind and text (case-insensitive).
     ///
     /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
+    /// Uses Unicode-aware case comparison to support Russian keywords.
     pub fn at_keyword(&self, text: &str) -> bool {
         if let Some(token) = self.tokens.get(self.pos) {
-            token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case(text)
+            token.kind == TokenKind::Ident && token.text.to_lowercase() == text.to_lowercase()
         } else {
             false
         }

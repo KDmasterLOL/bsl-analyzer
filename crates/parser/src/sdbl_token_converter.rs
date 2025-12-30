@@ -199,9 +199,10 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         // Parameters (&Parameter)
         S::Parameter => T::Ampersand, // Will be converted to parameter syntax later
 
-        // Trivia (Note: Whitespace is skipped by logos in SDBL lexer, not a token variant)
+        // Trivia
         S::Newline => T::Newline,
         S::Comment => T::Comment,
+        S::Whitespace => T::Whitespace,
 
         // Error
         S::Error => T::Error,

@@ -61,27 +61,32 @@ fn test_alias_with_as_keyword() {
     check(
         "SELECT Name AS ProductName FROM Products",
         expect![[r#"
-            SDBL_QUERY_PACKAGE@0..35
-              SDBL_SELECT_QUERY@0..35
-                SDBL_SUBQUERY@0..35
-                  SDBL_QUERY@0..35
+            SDBL_QUERY_PACKAGE@0..40
+              SDBL_SELECT_QUERY@0..40
+                SDBL_SUBQUERY@0..40
+                  SDBL_QUERY@0..40
                     IDENT@0..6 "SELECT"
-                    SDBL_FIELD_LIST@6..23
-                      SDBL_SELECTED_FIELD@6..23
-                        SDBL_LOGICAL_OR_EXPR@6..10
-                          SDBL_LOGICAL_AND_EXPR@6..10
-                            SDBL_ADDITIVE_EXPR@6..10
-                              SDBL_MULTIPLICATIVE_EXPR@6..10
-                                SDBL_COLUMN_REF@6..10
-                                  IDENT@6..10 "Name"
-                        SDBL_ALIAS@10..23
-                          IDENT@10..12 "AS"
-                          IDENT@12..23 "ProductName"
-                    SDBL_FROM_CLAUSE@23..35
-                      IDENT@23..27 "FROM"
-                      SDBL_DATA_SOURCE@27..35
-                        SDBL_TABLE_REF@27..35
-                          IDENT@27..35 "Products"
+                    WHITESPACE@6..7 " "
+                    SDBL_FIELD_LIST@7..26
+                      SDBL_SELECTED_FIELD@7..26
+                        SDBL_LOGICAL_OR_EXPR@7..12
+                          SDBL_LOGICAL_AND_EXPR@7..12
+                            SDBL_ADDITIVE_EXPR@7..12
+                              SDBL_MULTIPLICATIVE_EXPR@7..12
+                                SDBL_COLUMN_REF@7..12
+                                  IDENT@7..11 "Name"
+                                  WHITESPACE@11..12 " "
+                        SDBL_ALIAS@12..26
+                          IDENT@12..14 "AS"
+                          WHITESPACE@14..15 " "
+                          IDENT@15..26 "ProductName"
+                    WHITESPACE@26..27 " "
+                    SDBL_FROM_CLAUSE@27..40
+                      IDENT@27..31 "FROM"
+                      WHITESPACE@31..32 " "
+                      SDBL_DATA_SOURCE@32..40
+                        SDBL_TABLE_REF@32..40
+                          IDENT@32..40 "Products"
         "#]],
     );
 }
@@ -394,4 +399,185 @@ fn test_ast_union_queries() {
     // Check that we have union queries
     let union_count = subquery.union_queries().count();
     assert_eq!(union_count, 1, "Should have 1 UNION query");
+}
+
+#[test]
+fn test_debug_semicolon_tokens() {
+    let query = r#"ВЫБРАТЬ
+	Валюты.Ссылка
+ИЗ
+	Справочник.Валюты КАК Валюты
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты"#;
+
+    // Parse SDBL
+    use lexer::sdbl::tokenize_sdbl;
+    let sdbl_tokens = tokenize_sdbl(query);
+
+    eprintln!("\n=== SDBL Tokens ===");
+    for (i, token) in sdbl_tokens.iter().enumerate() {
+        let text = &token.text;
+        eprintln!(
+            "  [{}] {:?} = {:?}",
+            i,
+            token.kind,
+            text.replace('\n', "\\n").replace('\t', "\\t")
+        );
+
+        // Print tokens around semicolon
+        if text.contains(';') {
+            eprintln!("\n  ^^^ SEMICOLON FOUND AT TOKEN {} ^^^", i);
+            eprintln!("\n  Next 10 tokens:");
+            for j in 1..=10.min(sdbl_tokens.len() - i - 1) {
+                let tok = &sdbl_tokens[i + j];
+                eprintln!(
+                    "    [{}] {:?} = {:?}",
+                    i + j,
+                    tok.kind,
+                    tok.text.replace('\n', "\\n").replace('\t', "\\t")
+                );
+            }
+            break;
+        }
+    }
+
+    let parse = parse_sdbl(query);
+    eprintln!("\n=== Parse Result ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    if let Some(package) = SdblQueryPackage::cast(root) {
+        let count = package.queries().count();
+        eprintln!("Number of queries in package: {}", count);
+        assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
+    } else {
+        panic!("Failed to cast to SdblQueryPackage");
+    }
+}
+
+#[test]
+fn test_union_with_semicolon_separator() {
+    // Test pattern from Java test: SELECT with UNION, semicolon, comment, SELECT with UNION
+    let query = r#"ВЫБРАТЬ
+	Валюты.Ссылка
+ИЗ
+	Справочник.Валюты КАК Валюты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+	Валюты.Ссылка
+ИЗ
+	Справочник.Валюты КАК Валюты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты"#;
+
+    let parse = parse_sdbl(query);
+    eprintln!("\n=== Union+Semicolon Test ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    if let Some(package) = SdblQueryPackage::cast(root) {
+        let count = package.queries().count();
+        eprintln!("Number of queries: {}", count);
+        assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
+    } else {
+        panic!("Failed to cast to SdblQueryPackage");
+    }
+}
+
+#[test]
+fn test_exact_java_query_structure() {
+    // Exact query from Java test (first string, 857 chars)
+    let query = r#"ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	Валюты.Код Код
+ИЗ
+	Справочник.Валюты КАК Валюты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка,
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	Валюты.Код Код
+ИЗ
+	Справочник.Валюты КАК Валюты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка,
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты"#;
+
+    // Tokenize to see what's happening
+    use lexer::sdbl::tokenize_sdbl;
+    let tokens = tokenize_sdbl(query);
+
+    eprintln!("\n=== SDBL Tokens 20-40 (around first UNION) ===");
+    for (i, token) in tokens.iter().enumerate().skip(20).take(20) {
+        eprintln!(
+            "[{}] {:?} = {:?}",
+            i,
+            token.kind,
+            token.text.replace('\n', "\\n").replace('\t', "\\t")
+        );
+    }
+    eprintln!("\n=== SDBL Tokens 45-65 (around semicolon at 56) ===");
+    for (i, token) in tokens.iter().enumerate().skip(45).take(20) {
+        eprintln!(
+            "[{}] {:?} = {:?}",
+            i,
+            token.kind,
+            token.text.replace('\n', "\\n").replace('\t', "\\t")
+        );
+    }
+    eprintln!("\nTotal SDBL tokens: {}", tokens.len());
+
+    let parse = parse_sdbl(query);
+    eprintln!("\n=== Exact Java Query Test ===");
+    eprintln!("Query length: {} chars", query.len());
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    if let Some(package) = SdblQueryPackage::cast(root) {
+        let count = package.queries().count();
+        eprintln!("Number of queries: {}", count);
+        assert_eq!(count, 2, "Should find 2 SELECT queries separated by semicolon");
+    } else {
+        panic!("Failed to cast to SdblQueryPackage");
+    }
 }

@@ -167,34 +167,59 @@ fn postfix_expr(p: &mut Parser) {
 fn primary_expr(p: &mut Parser) {
     match p.current() {
         Some(TokenKind::Decimal) | Some(TokenKind::Float) | Some(TokenKind::Date) => {
+            let m = p.start();
             p.bump();
+            m.complete(p, NodeKind::Literal);
         }
         Some(TokenKind::String) => {
+            let m = p.start();
             p.bump(); // Single-line string
+            m.complete(p, NodeKind::Literal);
         }
         Some(TokenKind::StringStart) => {
-            // Multi-line string: StringStart (Newline|StringPart)* StringTail
+            let m = p.start();
+            // Multi-line string: StringStart (Newline Whitespace? StringPart)* StringTail
+            // Don't call skip_trivia() - newlines are part of the string structure
             p.bump(); // StringStart
-            while matches!(p.current(), Some(TokenKind::Newline) | Some(TokenKind::StringPart)) {
+
+            // Consume everything until STRING_TAIL (without skipping trivia)
+            loop {
                 p.check_iteration_limit();
-                p.bump();
+                match p.current() {
+                    Some(TokenKind::StringTail) => {
+                        p.bump();
+                        break;
+                    }
+                    Some(TokenKind::Newline)
+                    | Some(TokenKind::Whitespace)
+                    | Some(TokenKind::StringPart) => {
+                        p.bump();
+                    }
+                    None => {
+                        p.error(); // Unclosed string (EOF)
+                        break;
+                    }
+                    _ => {
+                        p.error(); // Unexpected token in multiline string
+                        break;
+                    }
+                }
             }
-            // Expect StringTail to close the string
-            if p.at(TokenKind::StringTail) {
-                p.bump();
-            } else {
-                p.error(); // Unclosed string
-            }
+            m.complete(p, NodeKind::Literal);
         }
         Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
             // These should only appear after StringStart
             p.error(); // Unexpected string fragment
         }
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => {
+            let m = p.start();
             p.bump();
+            m.complete(p, NodeKind::Literal);
         }
         Some(TokenKind::KwUndefined) | Some(TokenKind::KwNull) => {
+            let m = p.start();
             p.bump();
+            m.complete(p, NodeKind::Literal);
         }
         Some(TokenKind::KwAwait) => {
             await_expr(p);

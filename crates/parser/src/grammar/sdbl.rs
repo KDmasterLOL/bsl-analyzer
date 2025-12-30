@@ -40,7 +40,16 @@ pub fn query_package(p: &mut Parser) {
     }
 
     // Parse additional queries (SEMICOLON queries)*
-    while p.eat(TokenKind::Semicolon) {
+    // Note: Must skip trivia BEFORE checking for semicolon, as queries may end with newlines
+    loop {
+        p.skip_trivia();
+
+        // Check for semicolon
+        if !p.at(TokenKind::Semicolon) {
+            break;
+        }
+
+        p.bump(); // consume semicolon
         p.skip_trivia();
 
         // Check for trailing semicolon (allowed but optional)

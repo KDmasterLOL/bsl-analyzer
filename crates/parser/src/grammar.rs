@@ -117,8 +117,10 @@ pub fn source_file(p: &mut Parser) {
                     _ => p.error(),
                 }
             }
+            // Module-level statements (assignments, expressions, etc.)
+            // This is common in BSL for module initialization code
             _ => {
-                p.error();
+                statements::statement(p);
             }
         }
     }
@@ -189,7 +191,10 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
                     _ => p.error(),
                 }
             }
-            _ => p.bump(),
+            // Module-level statements in regions
+            _ => {
+                statements::statement(p);
+            }
         }
     }
 
@@ -304,7 +309,10 @@ fn preproc_content(p: &mut Parser) {
                     _ => p.error(),
                 }
             }
-            _ => p.bump(),
+            // Module-level statements in preprocessor content
+            _ => {
+                statements::statement(p);
+            }
         }
     }
 }
