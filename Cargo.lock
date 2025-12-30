@@ -699,6 +699,7 @@ dependencies = [
  "hir",
  "ide-db",
  "itertools 0.12.1",
+ "parser",
  "serde_json",
  "stdx",
  "syntax",

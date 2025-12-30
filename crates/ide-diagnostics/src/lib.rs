@@ -84,6 +84,9 @@ pub enum DiagnosticCode {
     CommitTransactionOutsideTryCatch,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
+
+    // SDBL Diagnostics
+    AssignAliasFieldsInQuery,
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }
@@ -119,6 +122,7 @@ impl DiagnosticCode {
             Self::UnaryPlusInConcatenation => "UnaryPlusInConcatenation",
             Self::UselessTernaryOperator => "UselessTernaryOperator",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
+            Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             _ => "Unknown",
         }
     }
@@ -196,8 +200,17 @@ pub struct DiagnosticsContext<'a> {
 }
 
 /// Runs all diagnostics on a file.
-pub fn diagnostics(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // TODO: Run all enabled diagnostics
-    // Each handler will check the config and add diagnostics
-    Vec::new()
+pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut result = Vec::new();
+
+    // Tier 2: Semantic diagnostics
+    result.extend(handlers::all_function_path_must_have_return::check(ctx));
+
+    // SDBL diagnostics
+    result.extend(handlers::assign_alias_fields_in_query::check(ctx));
+
+    // TODO: Add all 181 diagnostics
+    // See DIAGNOSTICS_MIGRATION.md for full list
+
+    result
 }

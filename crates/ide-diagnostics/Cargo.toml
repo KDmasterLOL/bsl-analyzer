@@ -9,6 +9,7 @@ rust-version.workspace = true
 cfg.workspace = true
 ide-db.workspace = true
 hir.workspace = true
+parser.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true
