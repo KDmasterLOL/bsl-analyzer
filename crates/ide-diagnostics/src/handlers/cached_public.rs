@@ -46,7 +46,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::{traits::Module, ReturnValueReuse};
 use ide_db::TextRange;
 use syntax::ast::{AstNode, PreRegionDir};
-use syntax::{SyntaxKind, SyntaxNode, TextSize};
+use syntax::{SyntaxKind, SyntaxNode};
 
 /// Information about a region.
 #[derive(Debug, Clone)]
@@ -137,26 +137,20 @@ fn is_public_region(region_name: &str) -> bool {
 }
 
 /// Find all public regions with methods.
+///
+/// Note: Parser creates ONE PRE_REGION_DIR node per region (containing entire region from #Область to #КонецОбласти).
 fn find_public_regions(root: &SyntaxNode) -> Vec<RegionInfo> {
-    let mut stack: Vec<(String, TextSize)> = Vec::new();
     let mut regions = Vec::new();
 
     for node in root.descendants() {
         if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
-            if region_dir.is_start() {
-                if let Some(name) = region_dir.name() {
-                    let offset = region_dir.syntax().text_range().start();
-                    stack.push((name, offset));
-                }
-            } else if region_dir.is_end() {
-                if let Some((name, start)) = stack.pop() {
-                    let end = region_dir.syntax().text_range().end();
-                    let range = TextRange::new(start, end);
-
-                    if is_public_region(&name) {
-                        let has_methods = contains_methods(root, range);
-                        regions.push(RegionInfo { name: name.to_string(), range, has_methods });
-                    }
+            // Extract region name from first line
+            if let Some(name) = region_dir.name() {
+                // Check if this is a public region
+                if is_public_region(&name) {
+                    let range = region_dir.syntax().text_range();
+                    let has_methods = contains_methods(root, range);
+                    regions.push(RegionInfo { name: name.to_string(), range, has_methods });
                 }
             }
         }
@@ -206,6 +200,41 @@ fn file_uri(_db: &dyn ide_db::RootDatabase, _file_id: vfs::FileId) -> Option<Str
     // FIXME: Implement proper VFS path resolution
     // For now, return None (metadata loading is disabled anyway)
     None
+}
+
+/// Check code with specific module (test-only helper).
+///
+/// This function mimics Java's spy pattern - it skips metadata loading
+/// and uses provided module directly, allowing tests to override ReturnValueReuse.
+#[cfg(test)]
+fn check_with_module(
+    ctx: &DiagnosticsContext,
+    module: &bsl_metadata::CommonModule,
+) -> Vec<Diagnostic> {
+    // Check if module is cached
+    if !is_cached(module) {
+        return Vec::new();
+    }
+
+    // Analyze source code for public regions
+    let parse = ctx.db.parse(ctx.file_id);
+    let root = parse.syntax_node();
+    let regions = find_public_regions(&root);
+
+    // Generate diagnostics for public regions with methods
+    regions
+        .into_iter()
+        .filter(|r| r.has_methods)
+        .map(|r| Diagnostic {
+            code: DiagnosticCode::CachedPublic,
+            message: "Кэшируемый модуль не должен содержать методы в публичных областях"
+                .to_string(),
+            severity: Severity::Warning,
+            range: r.range,
+            tags: vec![],
+            fixes: vec![],
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -295,19 +324,109 @@ mod tests {
         assert_eq!(diagnostics.len(), 0);
     }
 
-    // Comprehensive test will be added when workspace integration is ready
-    // #[test]
-    // fn test_comprehensive() {
-    //     let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
-    //     let (diagnostics, file_content) = check_diagnostic_with_metadata(code);
-    //
-    //     // Expected: 2 diagnostics (lines 0 and 16 in 0-based)
-    //     assert_eq!(diagnostics.len(), 2);
-    //
-    //     // First: #Область ПрограммныйИнтерфейс
-    //     assert_diagnostic_range(&file_content, &diagnostics[0], 0, 0, 31);
-    //
-    //     // Second: #Область public
-    //     assert_diagnostic_range(&file_content, &diagnostics[1], 16, 0, 15);
-    // }
+    /// Helper to create mock CommonModule (mimics Java's spy pattern)
+    fn create_mock_module(
+        return_values_reuse: bsl_metadata::ReturnValueReuse,
+    ) -> bsl_metadata::CommonModule {
+        use bsl_metadata::CommonModule;
+
+        CommonModule::builder().name("TestModule").return_values_reuse(return_values_reuse).build()
+    }
+
+    #[test]
+    fn test_comprehensive_during_request() {
+        // Test with ReturnValueReuse::DuringRequest (like Java spy)
+        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = test_fixture::Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_file_text(file_id, code);
+        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+
+        let config = DiagnosticsConfig::default();
+        let ctx = DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+        };
+
+        // Create mock module with DuringRequest (mimics Java's spy)
+        let module = create_mock_module(bsl_metadata::ReturnValueReuse::DuringRequest);
+        let diagnostics = check_with_module(&ctx, &module);
+
+        // Expected: 2 diagnostics (lines 0 and 16 in 0-based)
+        assert_eq!(diagnostics.len(), 2, "Should find 2 public regions with methods");
+
+        // First: #Область ПрограммныйИнтерфейс (line 0)
+        let (first_line, _, _, _) =
+            crate::test_utils::range_to_line_col(code, diagnostics[0].range);
+        assert_eq!(first_line, 0, "First diagnostic should be at line 0");
+
+        // Second: #Область public (line 16)
+        let (second_line, _, _, _) =
+            crate::test_utils::range_to_line_col(code, diagnostics[1].range);
+        assert_eq!(second_line, 16, "Second diagnostic should be at line 16");
+    }
+
+    #[test]
+    fn test_comprehensive_during_session() {
+        // Test with ReturnValueReuse::DuringSession
+        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = test_fixture::Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_file_text(file_id, code);
+        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+
+        let config = DiagnosticsConfig::default();
+        let ctx = DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+        };
+
+        // Create mock module with DuringSession
+        let module = create_mock_module(bsl_metadata::ReturnValueReuse::DuringSession);
+        let diagnostics = check_with_module(&ctx, &module);
+
+        // Should also find 2 diagnostics (DuringSession is also cached)
+        assert_eq!(diagnostics.len(), 2, "Should find 2 public regions with methods");
+    }
+
+    #[test]
+    fn test_comprehensive_dont_use() {
+        // Test with ReturnValueReuse::DontUse (not cached - should skip)
+        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = test_fixture::Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_file_text(file_id, code);
+        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+
+        let config = DiagnosticsConfig::default();
+        let ctx = DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+        };
+
+        // Create mock module with DontUse (not cached)
+        let module = create_mock_module(bsl_metadata::ReturnValueReuse::DontUse);
+        let diagnostics = check_with_module(&ctx, &module);
+
+        // Should find NO diagnostics (module is not cached)
+        assert_eq!(diagnostics.len(), 0, "Should skip non-cached modules");
+    }
 }

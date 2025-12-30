@@ -799,13 +799,17 @@ impl PreRegionDir {
     pub fn name(&self) -> Option<String> {
         let text = self.0.text().to_string();
 
+        // Extract first line only (region name is on the first line)
+        let first_line = text.lines().next().unwrap_or(&text);
+
         if let Some(stripped) =
-            text.strip_prefix("#Область").or_else(|| text.strip_prefix("#область"))
+            first_line.strip_prefix("#Область").or_else(|| first_line.strip_prefix("#область"))
         {
             Some(stripped.trim().to_string())
         } else {
-            text.strip_prefix("#Region")
-                .or_else(|| text.strip_prefix("#region"))
+            first_line
+                .strip_prefix("#Region")
+                .or_else(|| first_line.strip_prefix("#region"))
                 .map(|stripped| stripped.trim().to_string())
         }
     }
