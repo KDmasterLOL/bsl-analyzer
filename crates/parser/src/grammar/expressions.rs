@@ -241,7 +241,8 @@ fn primary_expr(p: &mut Parser) {
             ternary_expr(p);
         }
         _ => {
-            // Error recovery
+            // Error recovery: consume unexpected token and create error node
+            p.error();
         }
     }
 }
