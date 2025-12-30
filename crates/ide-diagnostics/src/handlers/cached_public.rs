@@ -194,12 +194,31 @@ fn find_common_module_for_file(
 
 /// Get file URI from VFS.
 ///
-/// Helper function to convert FileId to URI string.
-#[allow(dead_code)]
-fn file_uri(_db: &dyn ide_db::RootDatabase, _file_id: vfs::FileId) -> Option<String> {
-    // FIXME: Implement proper VFS path resolution
-    // For now, return None (metadata loading is disabled anyway)
-    None
+/// Converts FileId to URI string by looking up the file path through SourceRoot.
+///
+/// Steps:
+/// 1. Get SourceRootId for file
+/// 2. Get SourceRoot for SourceRootId
+/// 3. Get FileSet from SourceRoot
+/// 4. Look up VfsPath for FileId
+/// 5. Convert Path to URI string
+fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
+    // Get source root for file
+    let source_root_input = db.file_source_root_input(file_id);
+    let source_root_id = source_root_input.source_root_id(db);
+
+    // Get source root
+    let source_root_input = db.source_root_input(source_root_id);
+    let source_root = source_root_input.root(db);
+
+    // Get file path from FileSet
+    let file_set = source_root.file_set();
+    let vfs_path = file_set.path_for_file(&file_id)?;
+
+    // Convert VfsPath to URI string
+    // Note: In 1C, URIs are typically file:// URLs, but metadata uses lowercase paths
+    let path_str = vfs_path.as_path().to_string_lossy().to_string();
+    Some(path_str)
 }
 
 /// Check code with specific module (test-only helper).
