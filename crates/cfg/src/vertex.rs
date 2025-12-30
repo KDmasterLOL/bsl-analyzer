@@ -192,8 +192,8 @@ impl WhileLoopVertex {
         use syntax::SyntaxKind;
 
         // Check if condition contains a True keyword
-        // Simple implementation: check descendants for KW_TRUE
-        self.condition.descendants().any(|n| n.kind() == SyntaxKind::KW_TRUE)
+        // Need to check tokens, not just nodes
+        self.condition.descendants_with_tokens().any(|elem| elem.kind() == SyntaxKind::KW_TRUE)
     }
 }
 

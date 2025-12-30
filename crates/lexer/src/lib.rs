@@ -35,7 +35,6 @@ use smol_str::SmolStr;
 /// Each token represents a lexical element in BSL source code.
 /// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[logos(skip r"[ \t\r]+")]
 pub enum TokenKind {
     // ========= Keywords (bilingual: Russian/English) =========
     // Note: Using regex with (?i) for case-insensitive matching of both ASCII and Cyrillic
@@ -367,6 +366,12 @@ pub enum TokenKind {
     #[token("\n")]
     Newline,
 
+    // Whitespace (spaces, tabs, carriage returns)
+    // Must have LOWEST priority to ensure it doesn't match identifiers or other tokens
+    // NOTE: We must tokenize whitespace explicitly for Rowan's full-fidelity trees
+    #[regex(r"[ \t\r]+", priority = 0)]
+    Whitespace,
+
     // Error token for unrecognized input
     Error,
 }
@@ -390,7 +395,8 @@ pub struct Token {
 /// use lexer::tokenize;
 ///
 /// let tokens = tokenize("Процедура Тест() КонецПроцедуры");
-/// assert_eq!(tokens.len(), 5);
+/// // 7 tokens: КwProcedure, Whitespace, Ident, LParen, RParen, Whitespace, KwEndProcedure
+/// assert_eq!(tokens.len(), 7);
 /// ```
 pub fn tokenize(input: &str) -> Vec<Token> {
     let mut lexer = TokenKind::lexer(input);
@@ -413,28 +419,34 @@ mod tests {
     #[test]
     fn test_keywords_russian() {
         let tokens = tokenize("Процедура Тест() КонецПроцедуры");
-        assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
-        assert_eq!(tokens[1].kind, TokenKind::Ident);
-        assert_eq!(tokens[2].kind, TokenKind::LParen);
-        assert_eq!(tokens[3].kind, TokenKind::RParen);
-        assert_eq!(tokens[4].kind, TokenKind::KwEndProcedure);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwProcedure);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Ident);
+        assert_eq!(non_whitespace[2].kind, TokenKind::LParen);
+        assert_eq!(non_whitespace[3].kind, TokenKind::RParen);
+        assert_eq!(non_whitespace[4].kind, TokenKind::KwEndProcedure);
     }
 
     #[test]
     fn test_keywords_english() {
         let tokens = tokenize("Procedure Test() EndProcedure");
-        assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
-        assert_eq!(tokens[1].kind, TokenKind::Ident);
-        assert_eq!(tokens[2].kind, TokenKind::LParen);
-        assert_eq!(tokens[3].kind, TokenKind::RParen);
-        assert_eq!(tokens[4].kind, TokenKind::KwEndProcedure);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwProcedure);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Ident);
+        assert_eq!(non_whitespace[2].kind, TokenKind::LParen);
+        assert_eq!(non_whitespace[3].kind, TokenKind::RParen);
+        assert_eq!(non_whitespace[4].kind, TokenKind::KwEndProcedure);
     }
 
     #[test]
     fn test_keywords_case_insensitive() {
         let tokens = tokenize("пРоЦеДуРа тЕсТ() кОнЕцПрОцЕдУрЫ");
-        assert_eq!(tokens[0].kind, TokenKind::KwProcedure);
-        assert_eq!(tokens[4].kind, TokenKind::KwEndProcedure);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwProcedure);
+        assert_eq!(non_whitespace[4].kind, TokenKind::KwEndProcedure);
     }
 
     #[test]
@@ -498,18 +510,22 @@ mod tests {
     #[test]
     fn test_preprocessor_region() {
         let tokens = tokenize("#Область Тест\n#КонецОбласти");
-        assert_eq!(tokens[0].kind, TokenKind::PreRegion);
-        assert_eq!(tokens[1].kind, TokenKind::Ident);
-        assert_eq!(tokens[2].kind, TokenKind::Newline);
-        assert_eq!(tokens[3].kind, TokenKind::PreEndRegion);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::PreRegion);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Ident);
+        assert_eq!(non_whitespace[2].kind, TokenKind::Newline);
+        assert_eq!(non_whitespace[3].kind, TokenKind::PreEndRegion);
     }
 
     #[test]
     fn test_preprocessor_if() {
         let tokens = tokenize("#Если Клиент Тогда\n#КонецЕсли");
-        assert_eq!(tokens[0].kind, TokenKind::PreIf);
-        assert_eq!(tokens[1].kind, TokenKind::Ident); // "Клиент" is now Ident, checked by parser
-        assert_eq!(tokens[2].kind, TokenKind::KwThen);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::PreIf);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Ident); // "Клиент" is now Ident, checked by parser
+        assert_eq!(non_whitespace[2].kind, TokenKind::KwThen);
     }
 
     #[test]
@@ -527,46 +543,55 @@ mod tests {
     #[test]
     fn test_logical_operators() {
         let tokens = tokenize("И ИЛИ НЕ");
-        assert_eq!(tokens[0].kind, TokenKind::KwAnd);
-        assert_eq!(tokens[1].kind, TokenKind::KwOr);
-        assert_eq!(tokens[2].kind, TokenKind::KwNot);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwAnd);
+        assert_eq!(non_whitespace[1].kind, TokenKind::KwOr);
+        assert_eq!(non_whitespace[2].kind, TokenKind::KwNot);
     }
 
     #[test]
     fn test_comparison_operators() {
         let tokens = tokenize("< <= > >= = <>");
-        assert_eq!(tokens[0].kind, TokenKind::Lt);
-        assert_eq!(tokens[1].kind, TokenKind::Le);
-        assert_eq!(tokens[2].kind, TokenKind::Gt);
-        assert_eq!(tokens[3].kind, TokenKind::Ge);
-        assert_eq!(tokens[4].kind, TokenKind::Eq);
-        assert_eq!(tokens[5].kind, TokenKind::Neq);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::Lt);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Le);
+        assert_eq!(non_whitespace[2].kind, TokenKind::Gt);
+        assert_eq!(non_whitespace[3].kind, TokenKind::Ge);
+        assert_eq!(non_whitespace[4].kind, TokenKind::Eq);
+        assert_eq!(non_whitespace[5].kind, TokenKind::Neq);
     }
 
     #[test]
     fn test_arithmetic_operators() {
         let tokens = tokenize("+ - * / %");
-        assert_eq!(tokens[0].kind, TokenKind::Plus);
-        assert_eq!(tokens[1].kind, TokenKind::Minus);
-        assert_eq!(tokens[2].kind, TokenKind::Star);
-        assert_eq!(tokens[3].kind, TokenKind::Slash);
-        assert_eq!(tokens[4].kind, TokenKind::Percent);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::Plus);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Minus);
+        assert_eq!(non_whitespace[2].kind, TokenKind::Star);
+        assert_eq!(non_whitespace[3].kind, TokenKind::Slash);
+        assert_eq!(non_whitespace[4].kind, TokenKind::Percent);
     }
 
     #[test]
     fn test_async_await() {
         let tokens = tokenize("Асинх Функция Тест() Ждать Результат; КонецФункции");
-        // tokens: Асинх(0) Функция(1) Тест(2) ((3) )(4) Ждать(5) Результат(6) ;(7) КонецФункции(8)
-        assert_eq!(tokens[0].kind, TokenKind::KwAsync);
-        assert_eq!(tokens[1].kind, TokenKind::KwFunction);
-        assert_eq!(tokens[5].kind, TokenKind::KwAwait);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwAsync);
+        assert_eq!(non_whitespace[1].kind, TokenKind::KwFunction);
+        assert_eq!(non_whitespace[5].kind, TokenKind::KwAwait);
     }
 
     #[test]
     fn test_event_handlers() {
         let tokens = tokenize("ДобавитьОбработчик УдалитьОбработчик");
-        assert_eq!(tokens[0].kind, TokenKind::KwAddHandler);
-        assert_eq!(tokens[1].kind, TokenKind::KwRemoveHandler);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwAddHandler);
+        assert_eq!(non_whitespace[1].kind, TokenKind::KwRemoveHandler);
     }
 
     #[test]
@@ -580,26 +605,32 @@ mod tests {
     #[test]
     fn test_goto_label() {
         let tokens = tokenize("Перейти ~Метка;\n~Метка:\nВозврат;");
-        assert_eq!(tokens[0].kind, TokenKind::KwGoto);
-        assert_eq!(tokens[1].kind, TokenKind::Tilde);
-        assert_eq!(tokens[2].kind, TokenKind::Ident);
-        assert_eq!(tokens[3].kind, TokenKind::Semicolon);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwGoto);
+        assert_eq!(non_whitespace[1].kind, TokenKind::Tilde);
+        assert_eq!(non_whitespace[2].kind, TokenKind::Ident);
+        assert_eq!(non_whitespace[3].kind, TokenKind::Semicolon);
     }
 
     #[test]
     fn test_boolean_literals() {
         let tokens = tokenize("Истина Ложь True False");
-        assert_eq!(tokens[0].kind, TokenKind::KwTrue);
-        assert_eq!(tokens[1].kind, TokenKind::KwFalse);
-        assert_eq!(tokens[2].kind, TokenKind::KwTrue);
-        assert_eq!(tokens[3].kind, TokenKind::KwFalse);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwTrue);
+        assert_eq!(non_whitespace[1].kind, TokenKind::KwFalse);
+        assert_eq!(non_whitespace[2].kind, TokenKind::KwTrue);
+        assert_eq!(non_whitespace[3].kind, TokenKind::KwFalse);
     }
 
     #[test]
     fn test_undefined_null() {
         let tokens = tokenize("Неопределено Null");
-        assert_eq!(tokens[0].kind, TokenKind::KwUndefined);
-        assert_eq!(tokens[1].kind, TokenKind::KwNull);
+        let non_whitespace: Vec<_> =
+            tokens.iter().filter(|t| t.kind != TokenKind::Whitespace).collect();
+        assert_eq!(non_whitespace[0].kind, TokenKind::KwUndefined);
+        assert_eq!(non_whitespace[1].kind, TokenKind::KwNull);
     }
 
     #[test]
@@ -628,5 +659,29 @@ mod tests {
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwTrue));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwFalse));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::KwEndProcedure));
+    }
+
+    #[test]
+    fn test_whitespace_tokenization() {
+        let code = "Функция ОпределитьСтавкуНДС(Знач Ставка)";
+        let tokens = tokenize(code);
+
+        eprintln!("=== Direct Lexer Output ===");
+        for (i, tok) in tokens.iter().enumerate() {
+            eprintln!(
+                "{}: {:?} @ {}..{} = {:?}",
+                i,
+                tok.kind,
+                tok.offset,
+                tok.offset + tok.text.len(),
+                tok.text
+            );
+        }
+
+        // Should have: KwFunction, Whitespace, Ident, LParen, KwVal, Whitespace, Ident, RParen
+        assert_eq!(tokens[0].kind, TokenKind::KwFunction);
+        assert_eq!(tokens[1].kind, TokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, TokenKind::Ident);
+        assert_eq!(tokens[2].text.as_str(), "ОпределитьСтавкуНДС");
     }
 }

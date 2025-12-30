@@ -134,14 +134,24 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Check a single function for missing returns on all paths
 fn check_function(func_node: &SyntaxNode, config: &Config) -> Option<Diagnostic> {
+    // Get function name for debugging (unused but kept for future debugging)
+    let _func_name = func_node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        .map(|tok| tok.text().to_string())
+        .unwrap_or_else(|| "<unnamed>".to_string());
+
     // Check if function has at least one return statement
     // (to avoid duplicating with FunctionShouldHaveReturn diagnostic)
-    if !has_return_statements(func_node) {
+    let has_returns = has_return_statements(func_node);
+    if !has_returns {
         return None;
     }
 
     // Find function body
-    let body = func_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST)?;
+    let body = func_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+    let body = body?;
 
     // Build CFG for this function
     let mut builder = CfgBuilder::new();
@@ -149,16 +159,22 @@ fn check_function(func_node: &SyntaxNode, config: &Config) -> Option<Diagnostic>
     let cfg = builder.build_graph(&body);
 
     // Check for missing returns
-    if !has_missing_return(&cfg, config) {
+    let has_missing = has_missing_return(&cfg, config);
+    if !has_missing {
         return None;
     }
 
     // Get function name for diagnostic range
-    let name_range = func_node
-        .children()
-        .find(|n| n.kind() == SyntaxKind::IDENT)
-        .map(|n| n.text_range())
-        .unwrap_or_else(|| func_node.text_range());
+    // The function name is the first IDENT token that appears before PARAM_LIST
+    let name_token = func_node
+        .children_with_tokens()
+        .take_while(|el| !matches!(el.kind(), SyntaxKind::PARAM_LIST))
+        .filter_map(|el| el.into_token())
+        .filter(|tok| !tok.kind().is_trivia()) // Skip trivia tokens
+        .find(|tok| tok.kind() == SyntaxKind::IDENT);
+
+    let name_range =
+        name_token.map(|tok| tok.text_range()).unwrap_or_else(|| func_node.text_range());
 
     Some(Diagnostic {
         code: DiagnosticCode::AllFunctionPathMustHaveReturn,
@@ -180,13 +196,17 @@ fn has_missing_return(cfg: &ControlFlowGraph, config: &Config) -> bool {
     let exit_point = cfg.exit_point();
 
     // Check all incoming edges to exit point
-    cfg.incoming_edges(exit_point).any(|(source_idx, edge_type)| {
-        if let Some(vertex) = cfg.vertex(source_idx) {
-            vertex_has_missing_return(source_idx, vertex, edge_type, cfg, config)
-        } else {
-            false
+    let incoming: Vec<_> = cfg.incoming_edges(exit_point).collect();
+
+    for (source_idx, edge_type) in incoming.iter() {
+        if let Some(v) = cfg.vertex(*source_idx) {
+            if vertex_has_missing_return(*source_idx, v, edge_type, cfg, config) {
+                return true;
+            }
         }
-    })
+    }
+
+    false
 }
 
 /// Check if a vertex represents a path with missing return
@@ -198,8 +218,44 @@ fn vertex_has_missing_return(
     config: &Config,
 ) -> bool {
     match vertex {
-        CfgVertex::BasicBlock(block) => basic_block_missing_return(vertex_idx, block, cfg, config),
-        CfgVertex::WhileLoop(_) | CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => {
+        CfgVertex::BasicBlock(block) => {
+            // Check if this block is a bypass of an endless loop
+            // or missing else path that should be ignored
+            let incoming_edges: Vec<_> = cfg.incoming_edges(vertex_idx).collect();
+
+            // Check if this is the bypass path (FalseBranch) of an endless loop
+            let from_endless_loop_false_branch = incoming_edges.iter().any(|(source_idx, edge)| {
+                matches!(edge, CfgEdgeType::FalseBranch)
+                    && matches!(
+                        cfg.vertex(*source_idx),
+                        Some(CfgVertex::WhileLoop(loop_v)) if loop_v.is_endless()
+                    )
+            });
+
+            if from_endless_loop_false_branch {
+                return false; // Endless loop bypass is unreachable
+            }
+
+            // Check if this is a missing else path that should be ignored
+            let from_conditional_false_branch = incoming_edges.iter().any(|(source_idx, edge)| {
+                matches!(edge, CfgEdgeType::FalseBranch)
+                    && matches!(cfg.vertex(*source_idx), Some(CfgVertex::Conditional(_)))
+            });
+
+            if from_conditional_false_branch && config.ignore_missing_else_on_exit {
+                return false; // Missing else is ignored by config
+            }
+
+            basic_block_missing_return(vertex_idx, block, cfg, config)
+        }
+        CfgVertex::WhileLoop(loop_vertex) => {
+            // Check if this is an endless loop (While Истина)
+            if loop_vertex.is_endless() {
+                return false; // Endless loops are assumed to always return inside
+            }
+            loop_vertex_missing_return(edge_type, config)
+        }
+        CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => {
             loop_vertex_missing_return(edge_type, config)
         }
         CfgVertex::Conditional(_) => conditional_vertex_missing_return(config),
@@ -212,15 +268,32 @@ fn basic_block_missing_return(
     vertex_idx: NodeIndex,
     block: &BasicBlockVertex,
     cfg: &ControlFlowGraph,
-    _config: &Config,
+    config: &Config,
 ) -> bool {
     // Empty blocks can occur in:
     // - Missing else branches
     // - Exception handlers without returns
     // - Merge points where both branches have returns
+    // - Loop exit points
     if block.is_empty() {
         // Check incoming edges to determine if this is truly a missing return
         let incoming_edges: Vec<_> = cfg.incoming_edges(vertex_idx).collect();
+
+        // Check if this empty block comes from a loop's false branch
+        // (loop didn't execute or completed without return)
+        let has_false_branch_from_loop = incoming_edges.iter().any(|(source_idx, edge)| {
+            matches!(edge, CfgEdgeType::FalseBranch)
+                && matches!(
+                    cfg.vertex(*source_idx),
+                    Some(
+                        CfgVertex::WhileLoop(_) | CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_)
+                    )
+                )
+        });
+
+        if has_false_branch_from_loop && config.loops_executed_at_least_once {
+            return false; // Loop assumed to execute at least once, false branch is OK
+        }
 
         // Check if this empty block comes from a conditional's false branch (missing else)
         let has_false_branch_from_conditional = incoming_edges.iter().any(|(source_idx, edge)| {
@@ -285,21 +358,41 @@ mod tests {
     use crate::DiagnosticsConfig;
     use ide_db::RootDatabase;
     use std::sync::Arc;
-    use vfs::Vfs;
-
-    /// Helper to create a test database
-    fn create_test_db() -> (Arc<dyn RootDatabase>, Vfs) {
-        // TODO: Initialize real database when ready
-        // For now, return mock to make tests compile
-        todo!("Parser integration required")
-    }
 
     /// Helper to run diagnostic on test code
-    fn check_diagnostic(_code: &str, _config: DiagnosticsConfig) -> Vec<Diagnostic> {
-        let (_db, _vfs) = create_test_db();
-        // TODO: Parse code and run diagnostic
-        // For now, return empty to make tests compile
-        todo!("Parser integration required")
+    /// Returns (diagnostics, file_content_from_db) - file content is needed for range conversion
+    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
+        use ide_db::base_db::SourceDatabase;
+        use ide_db::RootDatabaseImpl;
+        use test_fixture::Fixture;
+
+        // Create fixture with test file
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        // Create database
+        let mut db = RootDatabaseImpl::new();
+
+        // Set file content in database from fixture
+        // Also save the file content for range conversion
+        let mut file_content = String::new();
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+            if *fid == file_id {
+                file_content = file.content.to_string();
+            }
+        }
+
+        // Create diagnostics context
+        // Note: Using Rc instead of Arc since this is a test and doesn't cross thread boundaries
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+        let ctx = DiagnosticsContext { db: db.as_ref(), config: &config, file_id };
+
+        // Run diagnostic
+        let diagnostics = check(&ctx);
+        (diagnostics, file_content)
     }
 
     /// Helper to convert TextRange to (line, column) positions
@@ -312,21 +405,24 @@ mod tests {
 
         let mut line = 0;
         let mut col = 0;
+        let mut byte_offset = 0u32;
         let mut start_line = 0;
         let mut start_col = 0;
         let mut end_line = 0;
         let mut end_col = 0;
 
-        for (i, ch) in text.chars().enumerate() {
-            let offset = i as u32;
-
-            if offset == start_offset {
+        for ch in text.chars() {
+            if byte_offset == start_offset {
                 start_line = line;
                 start_col = col;
             }
-            if offset == end_offset {
+
+            byte_offset += ch.len_utf8() as u32;
+
+            if byte_offset == end_offset {
                 end_line = line;
-                end_col = col;
+                // End column is AFTER consuming this character
+                end_col = if ch == '\n' { 0 } else { col + 1 };
                 break;
             }
 
@@ -374,7 +470,6 @@ mod tests {
     /// Based on AllFunctionPathMustHaveReturnDiagnosticTest.java
     /// Uses the same test file: AllFunctionPathMustHaveReturnDiagnostic.bsl
     #[test]
-    #[ignore = "Requires BSL parser implementation"]
     fn test_all_function_path_must_have_return() {
         let code = include_str!("../../test_data/AllFunctionPathMustHaveReturnDiagnostic.bsl");
 
@@ -382,19 +477,19 @@ mod tests {
         // Expected: 2 diagnostics at lines 0 and 25
         {
             let config = DiagnosticsConfig::default();
-            let diagnostics = check_diagnostic(code, config);
+            let (diagnostics, _file_content) = check_diagnostic(code, config);
 
             assert_eq!(diagnostics.len(), 2, "Default config: expected 2 diagnostics");
 
             // Line 0, columns 8-27: function ОпределитьСтавкуНДС (missing else branch)
             assert_eq!(diagnostics[0].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
             assert_eq!(diagnostics[0].severity, Severity::Warning);
-            assert_diagnostic_range(code, &diagnostics[0], 0, 8, 27);
+            assert_diagnostic_range(&_file_content, &diagnostics[0], 0, 8, 27);
 
             // Line 25, columns 8-19: function СуммаСкидки (missing return in elsif)
             assert_eq!(diagnostics[1].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
             assert_eq!(diagnostics[1].severity, Severity::Warning);
-            assert_diagnostic_range(code, &diagnostics[1], 25, 8, 19);
+            assert_diagnostic_range(&_file_content, &diagnostics[1], 25, 8, 19);
         }
 
         // Test 2: loopsExecutedAtLeastOnce=false
@@ -408,7 +503,7 @@ mod tests {
                 serde_json::Value::Object(params),
             );
 
-            let diagnostics = check_diagnostic(code, config);
+            let (diagnostics, _file_content) = check_diagnostic(code, config);
 
             assert_eq!(
                 diagnostics.len(),
@@ -418,15 +513,15 @@ mod tests {
 
             // Line 0, columns 8-27: ОпределитьСтавкуНДС
             assert_eq!(diagnostics[0].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
-            assert_diagnostic_range(code, &diagnostics[0], 0, 8, 27);
+            assert_diagnostic_range(&_file_content, &diagnostics[0], 0, 8, 27);
 
             // Line 25, columns 8-19: СуммаСкидки
             assert_eq!(diagnostics[1].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
-            assert_diagnostic_range(code, &diagnostics[1], 25, 8, 19);
+            assert_diagnostic_range(&_file_content, &diagnostics[1], 25, 8, 19);
 
             // Line 36, columns 8-23: ЦиклДляПроверки (loop may not execute)
             assert_eq!(diagnostics[2].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
-            assert_diagnostic_range(code, &diagnostics[2], 36, 8, 23);
+            assert_diagnostic_range(&_file_content, &diagnostics[2], 36, 8, 23);
         }
 
         // Test 3: ignoreMissingElseOnExit=true
@@ -440,13 +535,13 @@ mod tests {
                 serde_json::Value::Object(params),
             );
 
-            let diagnostics = check_diagnostic(code, config);
+            let (diagnostics, _file_content) = check_diagnostic(code, config);
 
             assert_eq!(diagnostics.len(), 1, "ignoreMissingElseOnExit=true: expected 1 diagnostic");
 
             // Line 25, columns 8-19: СуммаСкидки (only this one, missing else is ignored)
             assert_eq!(diagnostics[0].code, DiagnosticCode::AllFunctionPathMustHaveReturn);
-            assert_diagnostic_range(code, &diagnostics[0], 25, 8, 19);
+            assert_diagnostic_range(&_file_content, &diagnostics[0], 25, 8, 19);
         }
 
         // Test 4: Diagnostic can be disabled
@@ -454,7 +549,7 @@ mod tests {
             let mut config = DiagnosticsConfig::default();
             config.disabled.push(DiagnosticCode::AllFunctionPathMustHaveReturn);
 
-            let diagnostics = check_diagnostic(code, config);
+            let (diagnostics, _file_content) = check_diagnostic(code, config);
 
             assert_eq!(diagnostics.len(), 0, "Disabled diagnostic should not run");
         }
@@ -462,7 +557,6 @@ mod tests {
 
     /// Test empty if bodies (from Java test: testEmptyIfBodies)
     #[test]
-    #[ignore = "Requires BSL parser implementation"]
     fn test_empty_if_bodies() {
         let code = r#"Функция Тест()
   Список = Новый СписокЗначений;
@@ -475,14 +569,13 @@ mod tests {
 КонецФункции"#;
         let config = DiagnosticsConfig::default();
 
-        let diagnostics = check_diagnostic(code, config);
+        let (diagnostics, _file_content) = check_diagnostic(code, config);
 
         assert_eq!(diagnostics.len(), 0, "Empty if bodies should not trigger diagnostic");
     }
 
     /// Test exit by raise exception (from Java test: testExitByRaiseException)
     #[test]
-    #[ignore = "Requires BSL parser implementation"]
     fn test_exit_by_raise_exception() {
         let code = r#"Функция Тест()
   #Если Не ВебКлиент Тогда
@@ -497,7 +590,7 @@ mod tests {
 КонецФункции"#;
         let config = DiagnosticsConfig::default();
 
-        let diagnostics = check_diagnostic(code, config);
+        let (diagnostics, _file_content) = check_diagnostic(code, config);
 
         assert_eq!(diagnostics.len(), 0, "Raise should count as exit");
     }

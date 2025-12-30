@@ -195,6 +195,7 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Ident => SK::IDENT,
 
         // Trivia
+        TokenKind::Whitespace => SK::WHITESPACE,
         TokenKind::Newline => SK::NEWLINE,
         TokenKind::Comment => SK::COMMENT,
 

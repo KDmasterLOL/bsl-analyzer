@@ -60,10 +60,16 @@ impl CfgBuilder {
         self.cfg.set_entry_point(entry);
         self.current_block = Some(entry);
 
-        // Walk the body - find statement list and process it
-        for child in body.children() {
-            if child.kind() == SyntaxKind::STMT_LIST {
-                self.walk_stmt_list(&child);
+        // Walk the body
+        // If body is already a STMT_LIST, walk it directly
+        // Otherwise, find STMT_LIST children and process them
+        if body.kind() == SyntaxKind::STMT_LIST {
+            self.walk_stmt_list(body);
+        } else {
+            for child in body.children() {
+                if child.kind() == SyntaxKind::STMT_LIST {
+                    self.walk_stmt_list(&child);
+                }
             }
         }
 
@@ -386,7 +392,8 @@ impl CfgBuilder {
             .find(|n| {
                 matches!(
                     n.kind(),
-                    SyntaxKind::BINARY_EXPR
+                    SyntaxKind::EXPR
+                        | SyntaxKind::BINARY_EXPR
                         | SyntaxKind::UNARY_EXPR
                         | SyntaxKind::PAREN_EXPR
                         | SyntaxKind::CALL_EXPR

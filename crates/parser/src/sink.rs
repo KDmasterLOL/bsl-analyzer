@@ -105,35 +105,16 @@ impl<'t> Sink<'t> {
         self.builder
     }
 
-    /// Process a single token, inserting trivia before it.
+    /// Process a single token.
+    ///
+    /// Note: Trivia (whitespace, comments) are already in the event stream from the parser
+    /// calling bump() on them, so we don't need to consume trivia here.
     fn token(&mut self, kind: lexer::TokenKind) {
-        // Insert whitespace trivia before the token
-        self.eat_trivia();
-
-        // Add the token itself
+        // Add the token
         if let Some(token) = self.tokens.get(self.token_pos) {
             let syntax_kind = token_kind_to_syntax(kind);
             self.builder.token(syntax_kind, &token.text);
             self.token_pos += 1;
-        }
-    }
-
-    /// Consume and insert whitespace/comments as trivia tokens.
-    fn eat_trivia(&mut self) {
-        use lexer::TokenKind;
-
-        while let Some(token) = self.tokens.get(self.token_pos) {
-            // Skip only comments as trivia.
-            // Newlines are NOT trivia in BSL - they are significant tokens
-            // that the parser explicitly requests.
-            match token.kind {
-                TokenKind::Comment => {
-                    let syntax_kind = token_kind_to_syntax(token.kind);
-                    self.builder.token(syntax_kind, &token.text);
-                    self.token_pos += 1;
-                }
-                _ => break,
-            }
         }
     }
 }

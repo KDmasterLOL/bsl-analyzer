@@ -104,7 +104,7 @@ impl<'a> Parser<'a> {
     pub fn skip_trivia(&mut self) {
         while let Some(kind) = self.current() {
             match kind {
-                TokenKind::Comment | TokenKind::Newline => self.bump(),
+                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline => self.bump(),
                 _ => break,
             }
         }

@@ -5,4 +5,6 @@
 pub mod all_function_path_must_have_return;
 pub mod canonical_spelling_keywords;
 pub mod consecutive_empty_lines;
+#[cfg(test)]
+mod debug_test;
 // TODO: Add all 181 handlers
