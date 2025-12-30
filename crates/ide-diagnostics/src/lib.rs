@@ -128,6 +128,7 @@ impl DiagnosticCode {
             Self::BadWords => "BadWords",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
+            Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             _ => "Unknown",
         }
     }
@@ -213,6 +214,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
+    result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));
