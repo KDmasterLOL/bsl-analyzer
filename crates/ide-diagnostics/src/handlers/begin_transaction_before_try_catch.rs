@@ -269,7 +269,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "Code between BeginTransaction and Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 23);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 22);
     }
 
     #[test]
@@ -286,7 +286,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "BeginTransaction inside Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 8, 27);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 8, 26);
     }
 
     #[test]
@@ -299,7 +299,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "BeginTransaction without Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 23);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 22);
     }
 
     #[test]
@@ -348,12 +348,12 @@ EndProcedure"#;
         // Verify exact positions match Java test expectations
         // Java format: .hasRange(line, startCol, line, endCol) where line is 1-indexed
         // Our format: assert_diagnostic_range(content, diag, line, startCol, endCol) where line is 0-indexed
-        assert_diagnostic_range(&file_content, &diagnostics[0], 29, 4, 23); // Line 30 in Java (НачатьТранзакцію)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 42, 8, 27); // Line 43 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[2], 55, 4, 23); // Line 56 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[3], 68, 8, 27); // Line 69 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[4], 77, 4, 23); // Line 78 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[5], 90, 4, 23); // Line 91 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[6], 102, 0, 19); // Line 103 in Java (НачатьТранзакцию)
+        assert_diagnostic_range(&file_content, &diagnostics[0], 29, 4, 22); // Line 30 in Java (НачатьТранзакцію)
+        assert_diagnostic_range(&file_content, &diagnostics[1], 42, 8, 26); // Line 43 in Java
+        assert_diagnostic_range(&file_content, &diagnostics[2], 55, 4, 22); // Line 56 in Java
+        assert_diagnostic_range(&file_content, &diagnostics[3], 68, 8, 26); // Line 69 in Java
+        assert_diagnostic_range(&file_content, &diagnostics[4], 77, 4, 22); // Line 78 in Java
+        assert_diagnostic_range(&file_content, &diagnostics[5], 90, 4, 22); // Line 91 in Java
+        assert_diagnostic_range(&file_content, &diagnostics[6], 102, 0, 18); // Line 103 in Java (НачатьТранзакцию)
     }
 }

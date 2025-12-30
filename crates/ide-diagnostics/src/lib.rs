@@ -85,6 +85,7 @@ pub enum DiagnosticCode {
     MissingCodeTryCatchEx,
     UsingGoto,
     BeginTransactionBeforeTryCatch,
+    CodeAfterAsyncCall,
     CommitTransactionOutsideTryCatch,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
@@ -133,6 +134,7 @@ impl DiagnosticCode {
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
+            Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             _ => "Unknown",
         }
     }
@@ -226,6 +228,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
     result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
+    result.extend(handlers::code_after_async_call::check(ctx));
 
     // Tier 3: Metadata diagnostics
     result.extend(handlers::cached_public::check(ctx));

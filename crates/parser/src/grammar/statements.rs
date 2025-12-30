@@ -75,8 +75,8 @@ pub fn statement(p: &mut Parser) {
                 let m = p.start();
                 expressions::expression(p);
                 p.skip_trivia();
-                p.eat(TokenKind::Semicolon);
                 m.complete(p, NodeKind::CallStmt);
+                p.eat(TokenKind::Semicolon);
             }
         }
     }
@@ -378,11 +378,11 @@ fn assignment_or_call(p: &mut Parser) {
         p.skip_trivia();
         expressions::expression(p);
         p.skip_trivia();
-        p.eat(TokenKind::Semicolon);
         m.complete(p, NodeKind::AssignStmt);
-    } else {
         p.eat(TokenKind::Semicolon);
+    } else {
         m.complete(p, NodeKind::CallStmt);
+        p.eat(TokenKind::Semicolon);
     }
 }
 
