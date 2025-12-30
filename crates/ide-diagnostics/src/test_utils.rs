@@ -30,16 +30,13 @@ pub fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
     let mut end_col = 0u32;
 
     for ch in text.chars() {
+        // Check for start position BEFORE processing character
         if byte_pos == start_offset {
             start_line = line;
             start_col = col;
         }
-        if byte_pos == end_offset {
-            end_line = line;
-            end_col = col;
-            break;
-        }
 
+        // Process character (update col and byte_pos)
         if ch == '\n' {
             line += 1;
             col = 0;
@@ -47,6 +44,14 @@ pub fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
         } else {
             col += 1; // Increment character position
             byte_pos += ch.len_utf8(); // Increment byte position by character's UTF-8 length
+        }
+
+        // Check for end position AFTER processing character
+        // LSP uses half-open ranges [start, end), so end points to position AFTER last character
+        if byte_pos == end_offset {
+            end_line = line;
+            end_col = col;
+            break;
         }
     }
 

@@ -189,12 +189,27 @@ fn is_statement(node: &SyntaxNode) -> bool {
 }
 
 /// Create a diagnostic for BeginTransaction violation.
+///
+/// Note: Java version uses BSLParser.StatementContext which includes the SEMICOLON.
+/// Our CALL_STMT does not include SEMICOLON (it's a separate token for `next_sibling()` logic).
+/// To match Java ranges, we extend the range to include the following SEMICOLON token if present.
 fn make_diagnostic(node: &SyntaxNode) -> Diagnostic {
+    use syntax::NodeOrToken;
+
+    let mut range = node.text_range();
+
+    // Extend range to include SEMICOLON token (for Java compatibility)
+    if let Some(NodeOrToken::Token(token)) = node.next_sibling_or_token() {
+        if token.kind() == SyntaxKind::SEMICOLON {
+            range = range.cover(token.text_range());
+        }
+    }
+
     Diagnostic {
         code: DiagnosticCode::BeginTransactionBeforeTryCatch,
         message: "Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'".to_string(),
         severity: Severity::Error,
-        range: node.text_range(),
+        range,
         tags: vec![],
         fixes: vec![],
     }
@@ -269,7 +284,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "Code between BeginTransaction and Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 22);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 23); // Now includes semicolon
     }
 
     #[test]
@@ -286,7 +301,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "BeginTransaction inside Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 8, 26);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 8, 27); // Now includes semicolon
     }
 
     #[test]
@@ -299,7 +314,7 @@ mod tests {
 
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "BeginTransaction without Try should be error");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 22);
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 4, 23); // Now includes semicolon
     }
 
     #[test]
@@ -346,14 +361,14 @@ EndProcedure"#;
         assert_eq!(diagnostics.len(), 7, "Should match Java implementation (7 diagnostics)");
 
         // Verify exact positions match Java test expectations
-        // Java format: .hasRange(line, startCol, line, endCol) where line is 1-indexed
+        // Java format: .hasRange(line, startCol, line, endCol) where line is 0-indexed
         // Our format: assert_diagnostic_range(content, diag, line, startCol, endCol) where line is 0-indexed
-        assert_diagnostic_range(&file_content, &diagnostics[0], 29, 4, 22); // Line 30 in Java (НачатьТранзакцію)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 42, 8, 26); // Line 43 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[2], 55, 4, 22); // Line 56 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[3], 68, 8, 26); // Line 69 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[4], 77, 4, 22); // Line 78 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[5], 90, 4, 22); // Line 91 in Java
-        assert_diagnostic_range(&file_content, &diagnostics[6], 102, 0, 18); // Line 103 in Java (НачатьТранзакцию)
+        assert_diagnostic_range(&file_content, &diagnostics[0], 29, 4, 23); // Java: .hasRange(29, 4, 29, 23)
+        assert_diagnostic_range(&file_content, &diagnostics[1], 42, 8, 27); // Java: .hasRange(42, 8, 42, 27)
+        assert_diagnostic_range(&file_content, &diagnostics[2], 55, 4, 23); // Java: .hasRange(55, 4, 55, 23)
+        assert_diagnostic_range(&file_content, &diagnostics[3], 68, 8, 27); // Java: .hasRange(68, 8, 68, 27)
+        assert_diagnostic_range(&file_content, &diagnostics[4], 77, 4, 23); // Java: .hasRange(77, 4, 77, 23)
+        assert_diagnostic_range(&file_content, &diagnostics[5], 90, 4, 23); // Java: .hasRange(90, 4, 90, 23)
+        assert_diagnostic_range(&file_content, &diagnostics[6], 102, 0, 19); // Java: .hasRange(102, 0, 102, 19)
     }
 }
