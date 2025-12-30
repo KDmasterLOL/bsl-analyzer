@@ -9,6 +9,7 @@ pub mod begin_transaction_before_try_catch;
 pub mod cached_public;
 pub mod canonical_spelling_keywords;
 pub mod code_after_async_call;
+pub mod code_block_before_sub;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;

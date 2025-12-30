@@ -105,6 +105,58 @@ pub fn assert_diagnostic_range(
     );
 }
 
+/// Assert that a diagnostic has the expected multi-line range.
+///
+/// Use this for diagnostics that span multiple lines.
+/// For single-line diagnostics, use `assert_diagnostic_range` instead.
+///
+/// # Arguments
+/// * `text` - The source text
+/// * `diagnostic` - The diagnostic to check
+/// * `expected_start_line` - Expected start line number (0-indexed)
+/// * `expected_start_col` - Expected start column (0-indexed, character position)
+/// * `expected_end_line` - Expected end line number (0-indexed)
+/// * `expected_end_col` - Expected end column (0-indexed, character position)
+///
+/// # Panics
+/// Panics if the diagnostic range doesn't match expectations.
+///
+/// # Example
+/// ```
+/// // Diagnostic spans from line 3, col 0 to line 5, col 13
+/// assert_diagnostic_range_multiline(&file_content, &diagnostic, 3, 0, 5, 13);
+/// ```
+pub fn assert_diagnostic_range_multiline(
+    text: &str,
+    diagnostic: &Diagnostic,
+    expected_start_line: u32,
+    expected_start_col: u32,
+    expected_end_line: u32,
+    expected_end_col: u32,
+) {
+    let (start_line, start_col, end_line, end_col) = range_to_line_col(text, diagnostic.range);
+    assert_eq!(
+        start_line, expected_start_line,
+        "Diagnostic start line mismatch: expected {}, got {}",
+        expected_start_line, start_line
+    );
+    assert_eq!(
+        start_col, expected_start_col,
+        "Diagnostic start column mismatch: expected {}, got {}",
+        expected_start_col, start_col
+    );
+    assert_eq!(
+        end_line, expected_end_line,
+        "Diagnostic end line mismatch: expected {}, got {}",
+        expected_end_line, end_line
+    );
+    assert_eq!(
+        end_col, expected_end_col,
+        "Diagnostic end column mismatch: expected {}, got {}",
+        expected_end_col, end_col
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
