@@ -118,6 +118,7 @@ impl DiagnosticCode {
             Self::TernaryOperatorUsage => "TernaryOperatorUsage",
             Self::UnaryPlusInConcatenation => "UnaryPlusInConcatenation",
             Self::UselessTernaryOperator => "UselessTernaryOperator",
+            Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             _ => "Unknown",
         }
     }
@@ -158,6 +159,33 @@ pub struct TextEdit {
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
     pub parameters: std::collections::HashMap<DiagnosticCode, serde_json::Value>,
+}
+
+impl DiagnosticsConfig {
+    /// Check if a diagnostic is disabled
+    pub fn is_disabled(&self, code: DiagnosticCode) -> bool {
+        self.disabled.contains(&code)
+    }
+
+    /// Get a boolean parameter for a diagnostic
+    pub fn get_bool(&self, code: DiagnosticCode, param: &str) -> Option<bool> {
+        self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_bool())
+    }
+
+    /// Get an integer parameter for a diagnostic
+    pub fn get_int(&self, code: DiagnosticCode, param: &str) -> Option<i64> {
+        self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_i64())
+    }
+
+    /// Get a string parameter for a diagnostic
+    pub fn get_string(&self, code: DiagnosticCode, param: &str) -> Option<&str> {
+        self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_str())
+    }
+
+    /// Get a float parameter for a diagnostic
+    pub fn get_float(&self, code: DiagnosticCode, param: &str) -> Option<f64> {
+        self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_f64())
+    }
 }
 
 /// Context for running diagnostics.

@@ -2,25 +2,167 @@
 
 ## Обзор
 
-Миграция 181 диагностики из bsl-language-server в bsl-analyzer.
+Миграция **180 диагностик** из bsl-language-server в bsl-analyzer.
+
+**Стратегия:**
+- ✅ Переносить **строго по алфавиту** (A→Z), по одной диагностике
+- ✅ При обнаружении необходимости доработки инфраструктуры - делать **немедленно**
+- ✅ Обеспечить **100% совместимость** с Java (номера строк, колонок, диапазоны)
+- ✅ Копировать и портировать все тесты из Java проекта
+
+## Детальные планы
+
+📋 **Полные детальные планы по каждой диагностике:**
+
+- **[diagnostics/README.md](./diagnostics/README.md)** - Индекс и обзор
+- **[diagnostics/CONFIGURATION.md](./diagnostics/CONFIGURATION.md)** - Схема конфигурации
+- **[diagnostics/MIGRATION_PLAN_A_C.md](./diagnostics/MIGRATION_PLAN_A_C.md)** - Диагностики A-C (30 штук)
+- **[diagnostics/MIGRATION_PLAN_D_M.md](./diagnostics/MIGRATION_PLAN_D_M.md)** - Диагностики D-M (48 штук)
+- **[diagnostics/MIGRATION_PLAN_N_S.md](./diagnostics/MIGRATION_PLAN_N_S.md)** - Диагностики N-S (45 штук)
+- **[diagnostics/MIGRATION_PLAN_T_Z.md](./diagnostics/MIGRATION_PLAN_T_Z.md)** - Диагностики T-Z (56 штук)
 
 ## Категоризация по сложности
 
-### Tier 1: Простые (Syntax-only) - 45 диагностик
+### Tier 1: Простые (Syntax-only) - ~60 диагностик
 Работают только с синтаксисом, не требуют семантического анализа.
+**Примеры:** CanonicalSpellingKeywords, LineLength, EmptyCodeBlock, SelfAssign, UsingGoto
 
-### Tier 2: Средние (Symbol table) - 80 диагностик
+### Tier 2: Средние (Symbol table) - ~60 диагностик
 Требуют таблицу символов, разрешение имён.
+**Примеры:** UnusedLocalVariable, FunctionShouldHaveReturn, DeprecatedCurrentDate
 
-### Tier 3: Сложные (Full semantic) - 40 диагностик
+### Tier 3: Сложные (Full semantic) - ~40 диагностик
 Требуют полный семантический анализ, метаданные.
+**Примеры:** CommonModule* (11), ForbiddenMetadataName, ScheduledJobHandler
 
-### Tier 4: SDBL (Query language) - 16 диагностик
+### Tier 4: SDBL (Query language) - ~16 диагностик
 Требуют парсинг и анализ SDBL запросов.
+**Примеры:** AssignAliasFieldsInQuery, JoinWithSubQuery, SelectTopWithoutOrderBy
+
+## Быстрая статистика
+
+| Категория | Количество | % |
+|-----------|------------|---|
+| **Tier 1: Syntax-only** | ~60 | 33% |
+| **Tier 2: Symbol Table** | ~60 | 33% |
+| **Tier 3: Metadata** | ~40 | 22% |
+| **Tier 4: SDBL** | ~16 | 9% |
+| **Special** | ~4 | 2% |
+
+| По серьезности | Количество | % |
+|----------------|------------|---|
+| **BLOCKER** | 12 | 7% |
+| **CRITICAL** | 30 | 17% |
+| **MAJOR** | 90 | 50% |
+| **MINOR** | 30 | 17% |
+| **INFO** | 18 | 10% |
+
+| По типу | Количество | % |
+|---------|------------|---|
+| **CODE_SMELL** | 109 | 61% |
+| **ERROR** | 56 | 31% |
+| **VULNERABILITY** | 7 | 4% |
+| **SECURITY_HOTSPOT** | 8 | 4% |
+
+**Отключены по умолчанию (~8 диагностик):**
+BadWords, CodeAfterAsyncCall, DenyIncompleteValues, FieldsFromJoinsWithoutIsNull, FileSystemAccess, FunctionNameStartsWithGet, FunctionOutParameter, InternetAccess, MissingTempStorageDeletion, TernaryOperatorUsage, TooManyReturns, UseSystemInformation, UsingLikeInQuery
 
 ---
 
-## Tier 1: Простые диагностики (Iteration 11-13)
+## Фазы реализации
+
+### Фаза 1: Быстрые победы (Iterations 12-13) - ~40 диагностик
+
+**Простые синтаксические проверки для валидации инфраструктуры:**
+
+1. CanonicalSpellingKeywords - проверка написания ключевых слов
+2. LineLength - длина строки
+3. EmptyCodeBlock - пустые блоки кода
+4. CodeBlockBeforeSub - код перед методами
+5. SelfAssign - самоприсваивание
+6. UsingGoto - использование Goto
+7. YoLetterUsage - буква "ё"
+8. И ещё ~33 простых диагностики
+
+**Зависимости:** Parser, AST, Token access
+
+---
+
+### Фаза 2: Таблица символов (Iterations 14-18) - ~50 диагностик
+
+**Семантический анализ:**
+
+1. UnusedLocalVariable - неиспользуемые переменные
+2. FunctionShouldHaveReturn - функция должна иметь return
+3. DeprecatedCurrentDate - устаревший ТекущаяДата()
+4. AllFunctionPathMustHaveReturn (требует CFG)
+5. CognitiveComplexity (требует CFG)
+6. И ещё ~45 диагностик
+
+**Зависимости:** Symbol table, type inference, CFG
+
+---
+
+### Фаза 3: Метаданные (Iterations 19-23) - ~40 диагностик
+
+**Интеграция с 1С метаданными:**
+
+1. Все CommonModule* диагностики (11 штук)
+2. ForbiddenMetadataName
+3. ScheduledJobHandler
+4. MissingCommonModuleMethod
+5. И ещё ~26 диагностик
+
+**Зависимости:** Metadata loader (Iteration 11), Configuration.xml parsing
+
+---
+
+### Фаза 4: SDBL (Iterations 24-25) - ~16 диагностик
+
+**Язык запросов:**
+
+1. AssignAliasFieldsInQuery
+2. JoinWithSubQuery
+3. SelectTopWithoutOrderBy
+4. LogicalOrInJoinQuerySection
+5. И ещё ~12 диагностик
+
+**Зависимости:** SDBL AST completion, semantic analysis
+
+---
+
+### Фаза 5: Продвинутые (позже) - ~10 диагностик
+
+**Специальная инфраструктура:**
+
+1. CommentedCode (эвристический анализатор кода)
+2. Typo (интеграция spell checker)
+3. DuplicateStringLiteral (кросс-файловый анализ)
+4. MultilingualString* (2 диагностики)
+5. Data flow диагностики (DuplicatedInsertionIntoCollection, FunctionOutParameter, MissingTemp*, RewriteMethodParameter)
+
+**Зависимости:** Кастомные алгоритмы, внешние инструменты
+
+---
+
+## Рекомендуемые "первые диагностики"
+
+Начните с этих простых, хорошо определённых диагностик для валидации инфраструктуры:
+
+1. **CanonicalSpellingKeywords** - простая проверка токенов
+2. **LineLength** - токен + отслеживание строк
+3. **EmptyCodeBlock** - простая проверка AST
+4. **CodeBlockBeforeSub** - простая проверка AST
+5. **SemicolonPresence** - проверка токенов
+6. **MagicNumber** - проверка литералов AST
+7. **SelfAssign** - проверка присваиваний AST
+8. **UsingGoto** - проверка операторов AST
+9. **YoLetterUsage** - сканирование текста идентификаторов
+10. **UnaryPlusInConcatenation** - проверка выражений AST
+
+---
+
+## Tier 1: Простые диагностики (Iteration 12-13)
 
 ### Iteration 11: Code Style
 | Код | Название | Сложность |
@@ -267,12 +409,68 @@ fn test_canonical_spelling_keywords() {
 
 ---
 
+## Конфигурация
+
+Все диагностики настраиваются через `.bsl-language-server.json`.
+
+**Пример:**
+```json
+{
+  "diagnostics": {
+    "parameters": {
+      "LineLength": {
+        "maxLineLength": 140
+      },
+      "MethodSize": false,
+      "CyclomaticComplexity": {
+        "complexityThreshold": 15
+      }
+    }
+  }
+}
+```
+
+**Режимы:**
+- `"on"` (по умолчанию): все включённые диагностики работают
+- `"off"`: все диагностики отключены
+- `"only"`: только указанные диагностики
+- `"except"`: все кроме указанных
+
+См. [diagnostics/CONFIGURATION.md](./diagnostics/CONFIGURATION.md) для полной документации.
+
+---
+
+## Источники
+
+**Java проект:** `/Users/kiriller/src/lsp/bsl-language-server/`
+
+- **Код диагностик:** `src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/`
+- **Тесты:** `src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/`
+- **Тестовые данные:** `src/test/resources/diagnostics/`
+- **Документация:** https://1c-syntax.github.io/bsl-language-server/diagnostics/
+
+---
+
 ## Трекинг прогресса
 
-| Tier | Всего | Готово | Прогресс |
+| Фаза | Всего | Готово | Прогресс |
 |------|-------|--------|----------|
-| Tier 1 | 45 | 0 | 0% |
-| Tier 2 | 80 | 0 | 0% |
-| Tier 3 | 40 | 0 | 0% |
-| Tier 4 | 16 | 0 | 0% |
-| **Итого** | **181** | **0** | **0%** |
+| Фаза 1 (Syntax) | 40 | 0 | 0% |
+| Фаза 2 (Semantic) | 50 | 0 | 0% |
+| Фаза 3 (Metadata) | 40 | 0 | 0% |
+| Фаза 4 (SDBL) | 16 | 0 | 0% |
+| Фаза 5 (Advanced) | 10 | 0 | 0% |
+| **Итого** | **156** | **0** | **0%** |
+
+*Примечание: 24 диагностики отложены на более поздние итерации (metadata, data flow)*
+
+---
+
+## Связанная документация
+
+- [diagnostics/README.md](./diagnostics/README.md) - Индекс детальных планов
+- [diagnostics/CONFIGURATION.md](./diagnostics/CONFIGURATION.md) - Схема конфигурации
+- [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) - Архитектура системы
+- [ROADMAP.md](./ROADMAP.md) - План на 30 итераций
+- [METADATA_PLAN.md](./METADATA_PLAN.md) - Инфраструктура метаданных (Iteration 11)
+- [SALSA_TODO.md](./SALSA_TODO.md) - Интеграция Salsa (Iteration 10)
