@@ -12,7 +12,6 @@ pub mod ty;
 
 use std::sync::Arc;
 
-use base_db::SourceDatabase;
 use vfs::FileId;
 
 pub use item_tree::ItemTree;
@@ -24,8 +23,8 @@ pub use ty::Ty;
 
 /// Database trait for HIR queries.
 ///
-/// This trait extends SourceDatabase with queries for ItemTree and module-level data.
-pub trait DefDatabase: SourceDatabase {
+/// This trait extends base_db::RootQueryDb with queries for ItemTree and module-level data.
+pub trait DefDatabase: base_db::RootQueryDb {
     /// Get ItemTree for a file (main query).
     ///
     /// ItemTree is the "invalidation barrier" - it only changes when signatures change,
@@ -144,3 +143,4 @@ pub struct VariableData {
 }
 
 // TODO: Add more HIR structures
+// TODO: Add Salsa tracked queries in future iteration when we solve the FileId/ModuleId parameter issue

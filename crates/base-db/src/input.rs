@@ -52,6 +52,49 @@ impl SourceRoot {
     pub fn iter(&self) -> impl Iterator<Item = FileId> + '_ {
         self.file_set.iter()
     }
+
+    /// Get Salsa durability level for this source root.
+    ///
+    /// Libraries (is_library = true) use HIGH durability - rarely change.
+    /// User code (is_library = false) uses LOW durability - changes frequently.
+    pub fn durability(&self) -> salsa::Durability {
+        if self.is_library {
+            salsa::Durability::HIGH
+        } else {
+            salsa::Durability::LOW
+        }
+    }
+}
+
+// ========== Salsa Input Structs ==========
+
+/// Salsa input for file text content.
+///
+/// This represents mutable base input that can be changed via setters.
+/// When file text changes, Salsa automatically invalidates dependent queries.
+#[salsa::input(debug)]
+pub struct FileTextInput {
+    /// The file text content (stored as String, Salsa handles efficiently)
+    pub text: String,
+}
+
+/// Salsa input for source root data.
+///
+/// This represents the logical grouping of files into source roots.
+/// Note: We store the SourceRoot directly, Salsa will intern it.
+#[salsa::input(debug)]
+pub struct SourceRootInput {
+    /// The source root data
+    pub root: SourceRoot,
+}
+
+/// Salsa input for file-to-source-root mapping.
+///
+/// This tracks which source root each file belongs to.
+#[salsa::input(debug)]
+pub struct FileSourceRootInput {
+    /// The source root ID this file belongs to
+    pub source_root_id: SourceRootId,
 }
 
 #[cfg(test)]

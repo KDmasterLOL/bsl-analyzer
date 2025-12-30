@@ -202,44 +202,58 @@ mod tests {
     use vfs::{FileId, FileSet, VfsPath};
 
     // Test database that implements RootQueryDb
-    #[derive(Debug, Default)]
+    #[salsa::db]
+    #[derive(Default, Clone)]
     struct TestDb {
+        storage: salsa::Storage<Self>,
         files: Files,
     }
 
+    #[salsa::db]
+    impl salsa::Database for TestDb {}
+
+    #[salsa::db]
     impl SourceDatabase for TestDb {
-        fn file_text(&self, file_id: FileId) -> Arc<str> {
+        fn file_text_input(&self, file_id: FileId) -> base_db::FileTextInput {
             self.files.file_text(file_id)
         }
 
-        fn file_source_root(&self, file_id: vfs::FileId) -> base_db::SourceRootId {
+        fn source_root_input(
+            &self,
+            source_root_id: base_db::SourceRootId,
+        ) -> base_db::SourceRootInput {
+            self.files.source_root(source_root_id)
+        }
+
+        fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
             self.files.file_source_root(file_id)
         }
 
-        fn source_root(&self, id: base_db::SourceRootId) -> Arc<base_db::SourceRoot> {
-            self.files.source_root(id)
-        }
-
         fn set_file_text(&mut self, file_id: FileId, text: &str) {
-            self.files.set_file_text(file_id, text);
+            let files = self.files.clone();
+            files.set_file_text(self, file_id, text);
         }
 
         fn set_file_source_root(&mut self, file_id: FileId, source_root_id: base_db::SourceRootId) {
-            self.files.set_file_source_root(file_id, source_root_id);
+            let files = self.files.clone();
+            files.set_file_source_root(self, file_id, source_root_id);
         }
 
         fn set_source_root(
             &mut self,
             source_root_id: base_db::SourceRootId,
-            source_root: Arc<base_db::SourceRoot>,
+            source_root: base_db::SourceRoot,
         ) {
-            self.files.set_source_root(source_root_id, source_root);
+            let files = self.files.clone();
+            files.set_source_root(self, source_root_id, source_root);
         }
     }
 
+    #[salsa::db]
     impl RootQueryDb for TestDb {
         fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
-            self.files.parse(self, file_id)
+            let input = self.file_text_input(file_id);
+            base_db::parse_query(self, input)
         }
     }
 
@@ -251,7 +265,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = base_db::SourceRoot::new_local(file_set);
-        db.set_source_root(base_db::SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(base_db::SourceRootId(0), source_root);
         db.set_file_source_root(file_id, base_db::SourceRootId(0));
 
         // Set file text

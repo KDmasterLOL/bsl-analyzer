@@ -36,7 +36,7 @@ test-fixture = { path = "crates/test-fixture" }
 test-utils = { path = "crates/test-utils" }
 
 # Salsa for incremental computation
-salsa = { version = "0.25.2", default-features = false, features = ["rayon", "salsa_unstable"] }
+salsa = { version = "0.25.2", features = ["rayon", "macros"] }
 salsa-macros = "0.25.2"
 
 # LSP protocol
@@ -86,6 +86,9 @@ crossbeam-channel = "0.5"
 
 # Testing
 expect-test = "1.4"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
 lto = "thin"

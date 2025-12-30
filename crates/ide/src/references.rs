@@ -64,7 +64,6 @@ mod tests {
     use super::*;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
-    use std::sync::Arc;
     use vfs::{file_set::FileSet, VfsPath};
 
     fn create_db_with_file(source: &str) -> (RootDatabaseImpl, FileId) {
@@ -75,7 +74,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Set file text

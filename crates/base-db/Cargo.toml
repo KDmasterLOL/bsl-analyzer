@@ -12,6 +12,7 @@ parser.workspace = true
 rustc-hash.workspace = true
 dashmap.workspace = true
 tracing.workspace = true
+salsa.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

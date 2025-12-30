@@ -1,47 +1,56 @@
 //! Integration tests for module graph.
 
-use std::sync::Arc;
-
 use crate::*;
 use base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use vfs::file_set::FileSet;
 use vfs::{FileId, VfsPath};
 
 // Test database implementation
-#[derive(Default, Clone)]
+#[salsa::db]
+#[derive(Clone, Default)]
 struct TestDatabase {
+    storage: salsa::Storage<Self>,
     files: base_db::Files,
 }
 
+#[salsa::db]
+impl salsa::Database for TestDatabase {}
+
+#[salsa::db]
 impl SourceDatabase for TestDatabase {
-    fn file_text(&self, file_id: FileId) -> Arc<str> {
+    fn file_text_input(&self, file_id: FileId) -> base_db::FileTextInput {
         self.files.file_text(file_id)
     }
 
-    fn file_source_root(&self, file_id: FileId) -> SourceRootId {
+    fn source_root_input(&self, source_root_id: SourceRootId) -> base_db::SourceRootInput {
+        self.files.source_root(source_root_id)
+    }
+
+    fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
         self.files.file_source_root(file_id)
     }
 
-    fn source_root(&self, id: SourceRootId) -> Arc<SourceRoot> {
-        self.files.source_root(id)
-    }
-
     fn set_file_text(&mut self, file_id: FileId, text: &str) {
-        self.files.set_file_text(file_id, text);
+        let files = self.files.clone();
+        files.set_file_text(self, file_id, text);
     }
 
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
-        self.files.set_file_source_root(file_id, source_root_id);
+        let files = self.files.clone();
+        files.set_file_source_root(self, file_id, source_root_id);
     }
 
-    fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: Arc<SourceRoot>) {
-        self.files.set_source_root(source_root_id, source_root);
+    fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot) {
+        let files = self.files.clone();
+        files.set_source_root(self, source_root_id, source_root);
     }
 }
 
+#[salsa::db]
 impl RootQueryDb for TestDatabase {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
-        self.files.parse(self, file_id)
+        let input = self.file_text_input(file_id);
+        base_db::parse_query(self, input)
     }
 }
 
@@ -183,7 +192,7 @@ fn test_build_graph_from_database() {
     let source_root = SourceRoot::new_local(file_set);
     let source_root_id = SourceRootId(0);
 
-    db.set_source_root(source_root_id, Arc::new(source_root.clone()));
+    db.set_source_root(source_root_id, source_root.clone());
     db.set_file_source_root(file1, source_root_id);
     db.set_file_source_root(file2, source_root_id);
     db.set_file_source_root(file3, source_root_id);
@@ -243,7 +252,7 @@ fn test_build_graph_with_external_reference() {
     let source_root = SourceRoot::new_local(file_set);
     let source_root_id = SourceRootId(0);
 
-    db.set_source_root(source_root_id, Arc::new(source_root.clone()));
+    db.set_source_root(source_root_id, source_root.clone());
     db.set_file_source_root(file1, source_root_id);
     db.set_file_text(file1, code1);
 

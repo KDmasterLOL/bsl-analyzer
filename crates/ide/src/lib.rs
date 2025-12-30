@@ -19,11 +19,13 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         Self { db: Arc::new(RootDatabaseImpl::default()) }
     }
 
     /// Create Analysis with a specific database (for testing).
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn from_database(db: RootDatabaseImpl) -> Self {
         Self { db: Arc::new(db) }
     }

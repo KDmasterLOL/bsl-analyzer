@@ -65,7 +65,7 @@ impl FileChange {
                 }
 
                 // Store the source root
-                db.set_source_root(root_id, Arc::new(root));
+                db.set_source_root(root_id, root);
             }
         }
 

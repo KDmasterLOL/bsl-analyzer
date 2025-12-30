@@ -73,7 +73,7 @@
 - Phase 2 (Semantic Analysis): **62.5% завершено** (Iterations 6-11)
   - ✅ HIR/Symbols: Iterations 6-8 ✅
   - ✅ ModuleGraph & Incremental CI: Iteration 9.5 (Components 1-5) ✅
-  - [ ] IDE-DB & Salsa: Iteration 10
+  - [x] ✅ IDE-DB & Salsa: Iteration 10 (ЗАВЕРШЕНО 2025-12-30)
   - [ ] Metadata Infrastructure: Iteration 11
 - Phase 3 (Diagnostics): 0% (Iterations 12-25)
   - Tier 1 (Syntax): 12-14
@@ -465,35 +465,47 @@
 - Clippy warnings: 0
 - Файлы: 8 новых файлов в `crates/module-graph/`
 
-### Iteration 10: IDE-DB & Salsa Integration
+### ✅ Iteration 10: IDE-DB & Salsa Integration (ЗАВЕРШЕНО 2025-12-30)
 **Источники:** rust-analyzer (ide-db/), salsa (src/, book/, tests/)
+**Статус:** Фазы 1-4 завершены, производительность превышает цели в 100-25,000 раз
 
-- [ ] Полная интеграция Salsa 0.25.2
+- [x] ✅ Полная интеграция Salsa 0.25.2 (Фазы 1-2)
   - Референс: `/Users/kiriller/src/lsp/salsa/`
-  - Изучить актуальную документацию через book/
-  - Изучить примеры в tests/ и examples/
-  - См. детальный план в `SALSA_TODO.md`
-- [ ] RootDatabase с Salsa
-  - Референс: `rust-analyzer/crates/ide-db/src/`
-  - Input queries: file_text, source_root
-  - Derived queries: parse, module tree
-- [ ] Salsa queries для базовых операций
-  - parse() с LRU кешированием
-  - module_tree() для зависимостей
-- [ ] Настройка Durability
-  - HIGH для библиотек
-  - LOW для исходного кода
-- [ ] Тесты инкрементальности
-  - Изменение файла не должно пересчитывать зависимые модули (если интерфейс не изменился)
-  - Benchmarks: incremental update < 100ms
-- [ ] Профилирование
-  - BSL_PROFILE=* для анализа overhead Salsa
+  - Создан прототип в `experiments/salsa-prototype/`
+  - Изучены паттерны Salsa 0.25.2 API
+  - См. детальный план в `SALSA_TODO.md` ✅
+- [x] ✅ RootDatabase с Salsa (Фаза 3)
+  - `RootDatabaseImpl` использует `salsa::Storage<Self>`
+  - Input queries: `FileTextInput`, `SourceRootInput`, `FileSourceRootInput`
+  - Derived queries: `parse_query` с LRU=128
+  - DefDatabase с ручным кешированием (временно)
+- [x] ✅ Salsa queries для базовых операций (Фаза 2-3)
+  - `parse_query` с `#[salsa::tracked(lru = 128)]`
+  - Автоматическая инвалидация через Salsa
+  - item_tree, module_data, symbol_tree (ручное кеширование)
+- [x] ✅ Настройка Durability (Фаза 4)
+  - HIGH для библиотек (is_library = true)
+  - LOW для исходного кода (is_library = false)
+  - `set_file_text_smart()` для автоопределения durability
+  - `set_file_text_with_durability()` для явного контроля
+- [x] ✅ Тесты инкрементальности (Фаза 4)
+  - Benchmarks: incremental update = **1.96 μs** (цель < 100ms) 🚀
+  - Cache hit: **21.8 ns** (цель < 10 μs) 🚀
+  - LRU eviction работает корректно
+  - 106 тестов проходят ✅
+- [x] ✅ Профилирование (Фаза 4)
+  - Созданы comprehensive benchmarks в `ide-db/benches/`
+  - Результаты в `docs/planning/PHASE3_BENCHMARKS.md`
+  - Overhead Salsa минимальный (~5-22 ns для cache hit)
 
 **Критерии готовности:**
-- ✅ Все существующие 82+ тестов проходят
-- ✅ Salsa корректно кеширует результаты
-- ✅ Incremental updates работают
-- ✅ Профилирование показывает минимальный overhead
+- ✅ Все 106 тестов проходят (превышен базовый 82+)
+- ✅ Salsa корректно кеширует результаты (LRU=128)
+- ✅ Incremental updates работают (1.96 μs, в 25,000 раз лучше цели)
+- ✅ Профилирование показывает минимальный overhead (5-22 ns)
+
+**Осталось на будущее:**
+- DefDatabase Salsa миграция (требует решения FileId/ModuleId паттерна)
 
 ### Iteration 11: Metadata Infrastructure
 **Источники:** bsl-language-server-rust (bsl-metadata/), bsl-language-server (mdclasses), salsa

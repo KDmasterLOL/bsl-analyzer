@@ -42,17 +42,21 @@ pub struct SymbolInfo {
 /// providing full HIR functionality with caching.
 pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase {}
 
-/// Default implementation of RootDatabase with caching.
+/// Default implementation of RootDatabase with Salsa integration.
 ///
-/// Uses DashMap for thread-safe caching of all queries.
-#[derive(Debug, Clone)]
+/// Uses Salsa for base queries and manual caching for HIR queries.
+/// TODO: Migrate HIR queries to Salsa tracked functions in future iteration.
+#[salsa::db]
+#[derive(Clone)]
 pub struct RootDatabaseImpl {
+    /// Salsa storage for incremental computation
+    storage: salsa::Storage<Self>,
+
     /// Base file storage
     files: Files,
 
-    /// HIR caches
-    #[doc(hidden)]
-    pub item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
+    /// HIR caches (TODO: Replace with Salsa tracked queries)
+    item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
     module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
     symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
 }
@@ -67,6 +71,7 @@ impl RootDatabaseImpl {
     /// Create a new empty database.
     pub fn new() -> Self {
         Self {
+            storage: salsa::Storage::default(),
             files: Files::new(),
             item_tree_cache: Arc::new(DashMap::default()),
             module_data_cache: Arc::new(DashMap::default()),
@@ -77,6 +82,7 @@ impl RootDatabaseImpl {
     /// Invalidate HIR caches for a file.
     ///
     /// Called when file content changes.
+    /// Note: This is temporary. Will be automatic when we migrate to Salsa tracked queries.
     fn invalidate_file(&self, file_id: FileId) {
         self.item_tree_cache.remove(&file_id);
         self.module_data_cache.remove(&ModuleId::new(file_id));
@@ -84,40 +90,53 @@ impl RootDatabaseImpl {
     }
 }
 
+// ========== Salsa Database ==========
+
+#[salsa::db]
+impl salsa::Database for RootDatabaseImpl {}
+
 // ========== SourceDatabase ==========
 
+#[salsa::db]
 impl SourceDatabase for RootDatabaseImpl {
-    fn file_text(&self, file_id: FileId) -> Arc<str> {
+    fn file_text_input(&self, file_id: FileId) -> base_db::FileTextInput {
         self.files.file_text(file_id)
     }
 
-    fn file_source_root(&self, file_id: FileId) -> SourceRootId {
+    fn source_root_input(&self, source_root_id: SourceRootId) -> base_db::SourceRootInput {
+        self.files.source_root(source_root_id)
+    }
+
+    fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
         self.files.file_source_root(file_id)
     }
 
-    fn source_root(&self, id: SourceRootId) -> Arc<SourceRoot> {
-        self.files.source_root(id)
-    }
-
     fn set_file_text(&mut self, file_id: FileId, text: &str) {
-        self.files.set_file_text(file_id, text);
+        let files = self.files.clone();
+        files.set_file_text(self, file_id, text);
+        // Salsa automatically invalidates parse query
+        // But we need to manually invalidate HIR caches for now
         self.invalidate_file(file_id);
     }
 
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
-        self.files.set_file_source_root(file_id, source_root_id);
+        let files = self.files.clone();
+        files.set_file_source_root(self, file_id, source_root_id);
     }
 
-    fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: Arc<SourceRoot>) {
-        self.files.set_source_root(source_root_id, source_root);
+    fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot) {
+        let files = self.files.clone();
+        files.set_source_root(self, source_root_id, source_root);
     }
 }
 
 // ========== RootQueryDb ==========
 
+#[salsa::db]
 impl RootQueryDb for RootDatabaseImpl {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
-        self.files.parse(self, file_id)
+        let input = self.file_text_input(file_id);
+        base_db::parse_query(self, input)
     }
 }
 
@@ -193,7 +212,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Set file text
@@ -224,7 +243,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Initial content
@@ -253,7 +272,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Set file text
@@ -288,7 +307,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Set initial content
@@ -315,7 +334,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Initial content
@@ -350,7 +369,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         db.set_file_text(file_id, "Процедура МояПроцедура() КонецПроцедуры");
@@ -376,7 +395,7 @@ mod tests {
         file_set.insert(file1, VfsPath::new("/module1.bsl"));
         file_set.insert(file2, VfsPath::new("/module2.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file1, SourceRootId(0));
         db.set_file_source_root(file2, SourceRootId(0));
 
@@ -414,7 +433,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Use actual BSL code instead of manually constructing ItemTree
@@ -460,7 +479,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         db.set_file_text(file_id, "Процедура МояПроцедура() КонецПроцедуры");
@@ -486,7 +505,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         db.set_file_text(file_id, "Перем МодульнаяПеременная Экспорт;");
@@ -517,7 +536,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Create module with method and variable
@@ -570,7 +589,7 @@ mod tests {
         let mut file_set = FileSet::new();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), Arc::new(source_root));
+        db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
 
         // Create module variable with name "Значение"
