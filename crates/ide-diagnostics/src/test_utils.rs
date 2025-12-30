@@ -1,0 +1,131 @@
+//! Common test utilities for diagnostic tests.
+//!
+//! This module provides helper functions for testing diagnostics,
+//! including position calculation and assertion helpers.
+
+use crate::Diagnostic;
+use ide_db::TextRange;
+
+/// Convert TextRange (byte offsets) to (line, column) positions.
+///
+/// Handles UTF-8 properly by converting byte positions to character positions.
+/// Lines and columns are 0-indexed.
+///
+/// # Arguments
+/// * `text` - The source text
+/// * `range` - The byte range to convert
+///
+/// # Returns
+/// Tuple of (start_line, start_col, end_line, end_col)
+pub fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
+    let start_offset: usize = range.start().into();
+    let end_offset: usize = range.end().into();
+
+    let mut line = 0u32;
+    let mut col = 0u32; // Character position in current line
+    let mut byte_pos = 0usize; // Byte position in text
+    let mut start_line = 0u32;
+    let mut start_col = 0u32;
+    let mut end_line = 0u32;
+    let mut end_col = 0u32;
+
+    for ch in text.chars() {
+        if byte_pos == start_offset {
+            start_line = line;
+            start_col = col;
+        }
+        if byte_pos == end_offset {
+            end_line = line;
+            end_col = col;
+            break;
+        }
+
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+            byte_pos += 1; // newline is 1 byte
+        } else {
+            col += 1; // Increment character position
+            byte_pos += ch.len_utf8(); // Increment byte position by character's UTF-8 length
+        }
+    }
+
+    // Handle case where end_offset is at the very end
+    if byte_pos == end_offset || end_offset >= text.len() {
+        end_line = line;
+        end_col = col;
+    }
+
+    (start_line, start_col, end_line, end_col)
+}
+
+/// Assert that a diagnostic has the expected line and column range.
+///
+/// # Arguments
+/// * `text` - The source text
+/// * `diagnostic` - The diagnostic to check
+/// * `expected_line` - Expected line number (0-indexed)
+/// * `expected_start_col` - Expected start column (0-indexed, character position)
+/// * `expected_end_col` - Expected end column (0-indexed, character position)
+///
+/// # Panics
+/// Panics if the diagnostic range doesn't match expectations.
+pub fn assert_diagnostic_range(
+    text: &str,
+    diagnostic: &Diagnostic,
+    expected_line: u32,
+    expected_start_col: u32,
+    expected_end_col: u32,
+) {
+    let (start_line, start_col, end_line, end_col) = range_to_line_col(text, diagnostic.range);
+    assert_eq!(
+        start_line, expected_line,
+        "Diagnostic start line mismatch: expected {}, got {}",
+        expected_line, start_line
+    );
+    assert_eq!(
+        end_line, expected_line,
+        "Diagnostic end line mismatch: expected {}, got {}",
+        expected_line, end_line
+    );
+    assert_eq!(
+        start_col, expected_start_col,
+        "Diagnostic start column mismatch: expected {}, got {}",
+        expected_start_col, start_col
+    );
+    assert_eq!(
+        end_col, expected_end_col,
+        "Diagnostic end column mismatch: expected {}, got {}",
+        expected_end_col, end_col
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_range_to_line_col_ascii() {
+        let text = "Hello\nWorld\n";
+        // "World" is on line 1, columns 0-5
+        let range = TextRange::new(6.into(), 11.into());
+        let (start_line, start_col, end_line, end_col) = range_to_line_col(text, range);
+        assert_eq!(start_line, 1);
+        assert_eq!(start_col, 0);
+        assert_eq!(end_line, 1);
+        assert_eq!(end_col, 5);
+    }
+
+    #[test]
+    fn test_range_to_line_col_utf8() {
+        // Russian text: "Привет" = 12 bytes, 6 characters
+        let text = "// Привет\n";
+        // "Привет" starts at byte 3, character 3
+        let range = TextRange::new(3.into(), 15.into());
+        let (start_line, start_col, end_line, end_col) = range_to_line_col(text, range);
+        assert_eq!(start_line, 0);
+        assert_eq!(start_col, 3); // Character position
+        assert_eq!(end_line, 0);
+        assert_eq!(end_col, 9); // Character position (3 + 6)
+    }
+}

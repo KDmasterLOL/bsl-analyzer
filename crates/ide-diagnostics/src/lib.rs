@@ -6,6 +6,9 @@ pub mod handlers;
 pub mod metadata_diagnostic;
 pub mod rules;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use ide_db::{RootDatabase, TextRange};
 use vfs::FileId;
 

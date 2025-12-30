@@ -113,7 +113,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
+    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig};
     use ide_db::{base_db::SourceDatabase, RootDatabase, RootDatabaseImpl};
     use std::sync::Arc;
     use test_fixture::Fixture;
@@ -138,78 +138,6 @@ mod tests {
 
         let diagnostics = check(&ctx);
         (diagnostics, file_content)
-    }
-
-    fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
-        let start_offset: usize = range.start().into();
-        let end_offset: usize = range.end().into();
-
-        let mut line = 0u32;
-        let mut col = 0u32; // Character position in current line
-        let mut byte_pos = 0usize; // Byte position in text
-        let mut start_line = 0u32;
-        let mut start_col = 0u32;
-        let mut end_line = 0u32;
-        let mut end_col = 0u32;
-
-        for ch in text.chars() {
-            if byte_pos == start_offset {
-                start_line = line;
-                start_col = col;
-            }
-            if byte_pos == end_offset {
-                end_line = line;
-                end_col = col;
-                break;
-            }
-
-            if ch == '\n' {
-                line += 1;
-                col = 0;
-                byte_pos += 1; // newline is 1 byte
-            } else {
-                col += 1; // Increment character position
-                byte_pos += ch.len_utf8(); // Increment byte position by character's UTF-8 length
-            }
-        }
-
-        // Handle case where end_offset is at the very end
-        if byte_pos == end_offset || end_offset >= text.len() {
-            end_line = line;
-            end_col = col;
-        }
-
-        (start_line, start_col, end_line, end_col)
-    }
-
-    fn assert_diagnostic_range(
-        text: &str,
-        diagnostic: &Diagnostic,
-        expected_line: u32,
-        expected_start_col: u32,
-        expected_end_col: u32,
-    ) {
-        let (start_line, start_col, end_line, end_col) = range_to_line_col(text, diagnostic.range);
-        assert_eq!(
-            start_line, expected_line,
-            "Diagnostic start line mismatch: expected {}, got {}",
-            expected_line, start_line
-        );
-        assert_eq!(
-            end_line, expected_line,
-            "Diagnostic end line mismatch: expected {}, got {}",
-            expected_line, end_line
-        );
-        assert_eq!(
-            start_col, expected_start_col,
-            "Diagnostic start column mismatch: expected {}, got {}",
-            expected_start_col, start_col
-        );
-        assert_eq!(
-            end_col, expected_end_col,
-            "Diagnostic end column mismatch: expected {}, got {}",
-            expected_end_col, end_col
-        );
     }
 
     #[test]
