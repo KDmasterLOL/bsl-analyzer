@@ -19,16 +19,16 @@ struct Cli {
 enum Commands {
     /// Run static analysis on a project
     Analyze {
-        /// Path to the project root
-        #[arg(short, long)]
+        /// Path to the project root (Java-compatible alias: --src)
+        #[arg(short, long, alias = "src")]
         project: std::path::PathBuf,
 
         /// Output file for results
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
 
-        /// Output format (json, sarif, generic)
-        #[arg(short, long, default_value = "json")]
+        /// Output format: json, sonarqube, sarif, generic (Java-compatible alias: --reporter)
+        #[arg(short, long, alias = "reporter", default_value = "json")]
         format: String,
 
         /// Enable incremental analysis (only analyze affected modules)
@@ -39,7 +39,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',', requires = "incremental")]
         changed_files: Option<Vec<PathBuf>>,
 
-        /// Git ref to compare against (e.g., HEAD~1, main) for incremental mode
+        /// Git ref to compare against (e.g., HEAD~1, origin/main) for incremental mode
         #[arg(long, requires = "incremental", conflicts_with = "changed_files")]
         git_diff: Option<String>,
     },

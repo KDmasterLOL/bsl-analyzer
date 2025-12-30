@@ -937,6 +937,8 @@ name = "module-graph"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "bsl-metadata",
+ "ide-db",
  "la-arena",
  "parser",
  "rustc-hash 2.1.1",
