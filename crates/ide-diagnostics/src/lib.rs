@@ -50,6 +50,7 @@ pub enum DiagnosticCode {
     TernaryOperatorUsage,
     UnaryPlusInConcatenation,
     UselessTernaryOperator,
+    BadWords,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -121,6 +122,7 @@ impl DiagnosticCode {
             Self::TernaryOperatorUsage => "TernaryOperatorUsage",
             Self::UnaryPlusInConcatenation => "UnaryPlusInConcatenation",
             Self::UselessTernaryOperator => "UselessTernaryOperator",
+            Self::BadWords => "BadWords",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             _ => "Unknown",
@@ -202,6 +204,9 @@ pub struct DiagnosticsContext<'a> {
 /// Runs all diagnostics on a file.
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
+
+    // Tier 1: Syntax diagnostics
+    result.extend(handlers::bad_words::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));

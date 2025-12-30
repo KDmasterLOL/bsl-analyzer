@@ -700,6 +700,7 @@ dependencies = [
  "ide-db",
  "itertools 0.12.1",
  "parser",
+ "regex",
  "serde_json",
  "stdx",
  "syntax",
