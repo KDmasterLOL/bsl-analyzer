@@ -41,6 +41,7 @@ impl Fixture {
         let mut current_path: Option<String> = None;
         let mut current_content = String::new();
 
+        let mut first_line_for_file = false;
         for line in input.lines() {
             if let Some(path) = line.strip_prefix("//- ") {
                 // Save previous file if any
@@ -49,10 +50,13 @@ impl Fixture {
                     current_content.clear();
                 }
                 current_path = Some(path.to_string());
+                first_line_for_file = true;
             } else if current_path.is_some() {
-                if !current_content.is_empty() {
+                // Add newline before each line except the very first line of the file
+                if !first_line_for_file {
                     current_content.push('\n');
                 }
+                first_line_for_file = false;
                 current_content.push_str(line);
             }
         }

@@ -221,6 +221,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Tier 1: Syntax diagnostics
     result.extend(handlers::bad_words::check(ctx));
+    result.extend(handlers::canonical_spelling_keywords::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
