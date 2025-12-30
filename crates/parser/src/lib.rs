@@ -11,6 +11,7 @@
 mod event;
 pub mod grammar;
 mod parser;
+mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
 
@@ -48,31 +49,37 @@ pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
 ///
 /// # Implementation Status
 ///
-/// **Current:** Basic lexer support with 150+ SDBL tokens (keywords, functions, metadata types)
-/// **Future:** Full SDBL grammar parsing (SELECT, FROM, WHERE, JOIN, GROUP BY, ORDER BY, etc.)
+/// **Phase 1 (MVP):** Basic SELECT parsing for AssignAliasFieldsInQuery diagnostic
+/// - SELECT fields with aliases (AS keyword tracking)
+/// - FROM clause with table references and subqueries
+/// - WHERE clause with logical expressions
+/// - UNION queries
 ///
-/// This function provides the entry point for SDBL parsing. Full grammar implementation
-/// will be completed in future iterations when SDBL diagnostics are implemented.
+/// **Phase 2-4:** Complete SDBL grammar (JOINs, GROUP BY, ORDER BY, etc.)
 ///
 /// # Example
 ///
 /// ```ignore
-/// let parse = parser::parse_sdbl("SELECT Name FROM Catalog.Products");
-/// // Full parsing not yet implemented - returns stub tree
+/// let parse = parser::parse_sdbl("SELECT Name AS ProductName FROM Catalog.Products");
+/// assert!(!parse.has_errors());
 /// ```
 pub fn parse_sdbl(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     use lexer::sdbl::tokenize_sdbl;
 
-    let _tokens = tokenize_sdbl(input);
+    // Tokenize SDBL query
+    let sdbl_tokens = tokenize_sdbl(input);
 
-    // TODO: Implement full SDBL grammar parsing
-    // For now, return a minimal empty parse tree to indicate SDBL infrastructure is in place
-    // We use the same pattern as the main parse() function
+    // Convert SDBL tokens to parser-compatible format
+    let tokens = sdbl_token_converter::convert_sdbl_tokens(&sdbl_tokens);
 
-    // Build empty syntax tree (just a root node for now)
-    let mut builder = syntax::SyntaxTreeBuilder::new();
-    builder.start_node(syntax::SyntaxKind::SDBL_QUERY);
-    builder.finish_node();
+    // Create parser and parse using SDBL grammar
+    let mut p = parser::Parser::new(&tokens);
+    grammar::sdbl::query_package(&mut p);
+    let events = p.finish();
+
+    // Build syntax tree from events
+    let sink = sink::Sink::new(&tokens);
+    let builder = sink.finish(events);
     builder.finish()
 }
 
@@ -126,10 +133,18 @@ mod tests {
 
     #[test]
     fn test_parse_sdbl_entry_point() {
-        // Test that SDBL parser entry point exists and can be called
+        // Test that SDBL parser works with basic SELECT query
         let parse = parse_sdbl("SELECT Name FROM Catalog.Products");
-        // Should not panic - validates that infrastructure is in place
-        // Full parsing functionality will be implemented in future iterations
-        assert!(!parse.has_errors()); // No errors since we're not parsing yet
+
+        // Should parse without errors
+        if parse.has_errors() {
+            for error in parse.errors() {
+                eprintln!("Parse error: {:?}", error);
+            }
+        }
+
+        let root = parse.syntax_node();
+        // Root should be SDBL_QUERY_PACKAGE (not SDBL_QUERY)
+        assert_eq!(root.kind(), syntax::SyntaxKind::SDBL_QUERY_PACKAGE);
     }
 }

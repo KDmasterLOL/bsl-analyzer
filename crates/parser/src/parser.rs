@@ -51,6 +51,17 @@ impl<'a> Parser<'a> {
         self.current() == Some(kind)
     }
 
+    /// Checks if the current token matches the given kind and text (case-insensitive).
+    ///
+    /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
+    pub fn at_keyword(&self, text: &str) -> bool {
+        if let Some(token) = self.tokens.get(self.pos) {
+            token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case(text)
+        } else {
+            false
+        }
+    }
+
     /// Checks if at the end of input.
     pub fn at_end(&self) -> bool {
         self.pos >= self.tokens.len()
@@ -77,6 +88,29 @@ impl<'a> Parser<'a> {
     /// Expects the current token to be of the given kind.
     pub fn expect(&mut self, kind: TokenKind) -> bool {
         if self.eat(kind) {
+            true
+        } else {
+            self.error();
+            false
+        }
+    }
+
+    /// Consumes the current token if it matches the keyword text (case-insensitive).
+    ///
+    /// This is useful for SDBL keywords that are mapped to TokenKind::Ident.
+    pub fn eat_keyword(&mut self, text: &str) -> bool {
+        if self.at_keyword(text) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consumes the current token and expects it to match the keyword text.
+    /// Returns true if successful, false if not (and adds an error).
+    pub fn expect_keyword(&mut self, text: &str) -> bool {
+        if self.eat_keyword(text) {
             true
         } else {
             self.error();

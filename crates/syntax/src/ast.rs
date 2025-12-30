@@ -792,3 +792,486 @@ impl StmtList {
         self.0.children().filter_map(VarDef::cast)
     }
 }
+
+// ==================== SDBL (Query Language) ====================
+
+/// SDBL query package (root node).
+///
+/// Contains one or more queries separated by semicolons.
+#[derive(Debug, Clone)]
+pub struct SdblQueryPackage(SyntaxNode);
+
+impl AstNode for SdblQueryPackage {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_QUERY_PACKAGE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblQueryPackage {
+    /// Get all SELECT queries in this package.
+    pub fn queries(&self) -> impl Iterator<Item = SdblSelectQuery> + '_ {
+        self.0.children().filter_map(SdblSelectQuery::cast)
+    }
+}
+
+/// SDBL SELECT query statement.
+#[derive(Debug, Clone)]
+pub struct SdblSelectQuery(SyntaxNode);
+
+impl AstNode for SdblSelectQuery {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_SELECT_QUERY
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblSelectQuery {
+    /// Get the subquery (includes main query and UNIONs).
+    pub fn subquery(&self) -> Option<SdblSubquery> {
+        self.0.children().find_map(SdblSubquery::cast)
+    }
+}
+
+/// SDBL subquery (main query + optional UNIONs).
+#[derive(Debug, Clone)]
+pub struct SdblSubquery(SyntaxNode);
+
+impl AstNode for SdblSubquery {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_SUBQUERY
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblSubquery {
+    /// Get the main query (first direct SdblQuery child, not UNION queries).
+    ///
+    /// CRITICAL for AssignAliasFieldsInQuery: Only main query is checked, not UNIONs.
+    pub fn main_query(&self) -> Option<SdblQuery> {
+        self.0.children().find_map(SdblQuery::cast)
+    }
+
+    /// Get UNION clauses.
+    pub fn union_clauses(&self) -> impl Iterator<Item = SdblUnionClause> + '_ {
+        self.0.children().filter_map(SdblUnionClause::cast)
+    }
+
+    /// Get all queries (main query + queries from UNION clauses).
+    pub fn queries(&self) -> impl Iterator<Item = SdblQuery> + '_ {
+        // First the main query
+        let main = self.main_query().into_iter();
+        // Then queries from UNION clauses
+        let unions = self.union_clauses().filter_map(|union_clause| union_clause.query());
+        main.chain(unions)
+    }
+
+    /// Get UNION queries (queries from UNION clauses, excluding main query).
+    pub fn union_queries(&self) -> impl Iterator<Item = SdblQuery> + '_ {
+        self.union_clauses().filter_map(|union_clause| union_clause.query())
+    }
+}
+
+/// SDBL UNION clause.
+#[derive(Debug, Clone)]
+pub struct SdblUnionClause(SyntaxNode);
+
+impl AstNode for SdblUnionClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_UNION_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblUnionClause {
+    /// Get the query inside this UNION clause.
+    pub fn query(&self) -> Option<SdblQuery> {
+        self.0.children().find_map(SdblQuery::cast)
+    }
+
+    /// Check if this UNION has ALL keyword.
+    pub fn has_all(&self) -> bool {
+        self.0.children_with_tokens().filter_map(|it| it.into_token()).any(|t| {
+            if t.kind() == SyntaxKind::IDENT {
+                let text = t.text();
+                text.eq_ignore_ascii_case("ALL") || text.eq_ignore_ascii_case("ВСЕ")
+            } else {
+                false
+            }
+        })
+    }
+}
+
+/// Individual SDBL SELECT query.
+#[derive(Debug, Clone)]
+pub struct SdblQuery(SyntaxNode);
+
+impl AstNode for SdblQuery {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_QUERY
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblQuery {
+    /// Get the field list.
+    pub fn field_list(&self) -> Option<SdblFieldList> {
+        self.0.children().find_map(SdblFieldList::cast)
+    }
+
+    /// Get the FROM clause.
+    pub fn from_clause(&self) -> Option<SdblFromClause> {
+        self.0.children().find_map(SdblFromClause::cast)
+    }
+
+    /// Get the WHERE clause.
+    pub fn where_clause(&self) -> Option<SdblWhereClause> {
+        self.0.children().find_map(SdblWhereClause::cast)
+    }
+}
+
+/// SDBL field list.
+#[derive(Debug, Clone)]
+pub struct SdblFieldList(SyntaxNode);
+
+impl AstNode for SdblFieldList {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_FIELD_LIST
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblFieldList {
+    /// Get all selected fields.
+    pub fn fields(&self) -> impl Iterator<Item = SdblSelectedField> + '_ {
+        self.0.children().filter_map(SdblSelectedField::cast)
+    }
+}
+
+/// SDBL selected field (expression + optional alias).
+///
+/// **CRITICAL FOR AssignAliasFieldsInQuery DIAGNOSTIC**
+#[derive(Debug, Clone)]
+pub struct SdblSelectedField(SyntaxNode);
+
+impl AstNode for SdblSelectedField {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_SELECTED_FIELD
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblSelectedField {
+    /// Check if this is an asterisk field (* or Table.*).
+    ///
+    /// Asterisk fields don't need aliases according to diagnostic rules.
+    pub fn is_asterisk(&self) -> bool {
+        self.0.children().any(|n| n.kind() == SyntaxKind::SDBL_ASTERISK_FIELD)
+    }
+
+    /// Get the alias (if present).
+    pub fn alias(&self) -> Option<SdblAlias> {
+        self.0.children().find_map(SdblAlias::cast)
+    }
+
+    /// Get the expression (column reference, function call, etc.).
+    pub fn expression(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::SDBL_COLUMN_REF
+                    | SyntaxKind::SDBL_FUNCTION_CALL
+                    | SyntaxKind::SDBL_LITERAL
+                    | SyntaxKind::SDBL_PAREN_EXPR
+                    | SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                    | SyntaxKind::SDBL_NOT_EXPR
+                    | SyntaxKind::SDBL_COMPARISON_EXPR
+                    | SyntaxKind::SDBL_ADDITIVE_EXPR
+                    | SyntaxKind::SDBL_MULTIPLICATIVE_EXPR
+                    | SyntaxKind::SDBL_UNARY_EXPR
+            )
+        })
+    }
+}
+
+/// SDBL alias ([AS] identifier).
+///
+/// **CRITICAL FOR AssignAliasFieldsInQuery DIAGNOSTIC**
+#[derive(Debug, Clone)]
+pub struct SdblAlias(SyntaxNode);
+
+impl AstNode for SdblAlias {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_ALIAS
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblAlias {
+    /// Check if alias has AS/КАК keyword.
+    ///
+    /// **CRITICAL for AssignAliasFieldsInQuery diagnostic:**
+    /// Returns true if AS/КАК keyword is present (explicit alias).
+    /// Returns false for implicit aliases (just identifier without AS).
+    ///
+    /// # Example
+    /// ```sdbl
+    /// Name AS ProductName  // has_as_keyword() = true
+    /// Name ProductName     // has_as_keyword() = false (implicit alias - error!)
+    /// ```
+    pub fn has_as_keyword(&self) -> bool {
+        self.0.children_with_tokens().filter_map(|it| it.into_token()).any(|t| {
+            // Check if token is IDENT with text "AS" or "КАК" (case-insensitive)
+            // This is needed because SDBL keywords are mapped to Ident in token converter
+            if t.kind() == SyntaxKind::IDENT {
+                let text = t.text();
+                text.eq_ignore_ascii_case("AS") || text.eq_ignore_ascii_case("КАК")
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Get the identifier token (alias name).
+    pub fn identifier(&self) -> Option<SyntaxToken> {
+        // Get the last IDENT token (after AS keyword if present)
+        self.0
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|t| t.kind() == SyntaxKind::IDENT)
+            .filter(|t| {
+                // Filter out AS/КАК keywords
+                let text = t.text();
+                !text.eq_ignore_ascii_case("AS") && !text.eq_ignore_ascii_case("КАК")
+            })
+            .last()
+    }
+
+    /// Get the alias name.
+    pub fn name(&self) -> Option<String> {
+        self.identifier().map(|tok| tok.text().to_string())
+    }
+}
+
+/// SDBL asterisk field (* or Table.*).
+#[derive(Debug, Clone)]
+pub struct SdblAsteriskField(SyntaxNode);
+
+impl AstNode for SdblAsteriskField {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_ASTERISK_FIELD
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// SDBL FROM clause.
+#[derive(Debug, Clone)]
+pub struct SdblFromClause(SyntaxNode);
+
+impl AstNode for SdblFromClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_FROM_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblFromClause {
+    /// Get all data sources.
+    pub fn data_sources(&self) -> impl Iterator<Item = SdblDataSource> + '_ {
+        self.0.children().filter_map(SdblDataSource::cast)
+    }
+}
+
+/// SDBL data source (table or subquery in FROM clause).
+#[derive(Debug, Clone)]
+pub struct SdblDataSource(SyntaxNode);
+
+impl AstNode for SdblDataSource {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_DATA_SOURCE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblDataSource {
+    /// Get the table reference (if this is a table, not a subquery).
+    pub fn table_ref(&self) -> Option<SdblTableRef> {
+        self.0.children().find_map(SdblTableRef::cast)
+    }
+
+    /// Get the subquery (if this is a subquery, not a table).
+    pub fn subquery(&self) -> Option<SdblSubquery> {
+        self.0.children().find_map(SdblSubquery::cast)
+    }
+
+    /// Get the alias (for table or subquery).
+    pub fn alias(&self) -> Option<SdblAlias> {
+        self.0.children().find_map(SdblAlias::cast)
+    }
+}
+
+/// SDBL table reference.
+#[derive(Debug, Clone)]
+pub struct SdblTableRef(SyntaxNode);
+
+impl AstNode for SdblTableRef {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_TABLE_REF
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// SDBL WHERE clause.
+#[derive(Debug, Clone)]
+pub struct SdblWhereClause(SyntaxNode);
+
+impl AstNode for SdblWhereClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_WHERE_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}

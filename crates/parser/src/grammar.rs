@@ -2,6 +2,7 @@
 
 pub mod expressions;
 pub mod items;
+pub mod sdbl;
 pub mod statements;
 
 use lexer::TokenKind;

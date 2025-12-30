@@ -219,21 +219,54 @@ pub enum SyntaxKind {
     PRE_BOOL_OP,
 
     // ========= SDBL (Query Language) =========
-    // Basic nodes for SDBL query parsing
-    // Full grammar will be expanded in future iterations
-    SDBL_QUERY,         // Root node for an SDBL query
+    // Phase 1 (MVP): Basic SELECT parsing for AssignAliasFieldsInQuery diagnostic
+    // Phase 2-4: Complete SDBL grammar (JOINs, GROUP BY, ORDER BY, etc.)
+
+    // Query Structure
+    SDBL_QUERY_PACKAGE, // Root: queries separated by semicolons
     SDBL_SELECT_QUERY,  // SELECT query statement
-    SDBL_SELECT_CLAUSE, // SELECT clause with fields
-    SDBL_FROM_CLAUSE,   // FROM clause with data sources
-    SDBL_WHERE_CLAUSE,  // WHERE clause with conditions
-    SDBL_JOIN_CLAUSE,   // JOIN clause
-    SDBL_GROUP_CLAUSE,  // GROUP BY clause
-    SDBL_ORDER_CLAUSE,  // ORDER BY clause
-    SDBL_TABLE_REF,     // Table reference (e.g., Catalog.Products)
+    SDBL_SUBQUERY,      // Main query + UNIONs
+    SDBL_UNION_CLAUSE,  // UNION [ALL] query
+    SDBL_QUERY,         // Individual SELECT query
+
+    // SELECT Components
+    SDBL_SELECT_CLAUSE,  // SELECT clause with fields
+    SDBL_FIELD_LIST,     // List of fields in SELECT
+    SDBL_SELECTED_FIELD, // Single field (expression + optional alias)
+    SDBL_ALIAS,          // [AS] identifier (CRITICAL for diagnostic)
+    SDBL_ASTERISK_FIELD, // * or Table.*
+
+    // FROM/WHERE Components
+    SDBL_FROM_CLAUSE,  // FROM clause with data sources
+    SDBL_DATA_SOURCE,  // Table or subquery in FROM
+    SDBL_TABLE_REF,    // Table reference (e.g., Catalog.Products)
+    SDBL_WHERE_CLAUSE, // WHERE clause with conditions
+
+    // Expressions
+    SDBL_EXPR,                // SDBL expression (general)
+    SDBL_LOGICAL_OR_EXPR,     // OR expression
+    SDBL_LOGICAL_AND_EXPR,    // AND expression
+    SDBL_NOT_EXPR,            // NOT expression
+    SDBL_COMPARISON_EXPR,     // Comparison operators (=, <>, <, >, etc.)
+    SDBL_ADDITIVE_EXPR,       // Additive operators (+, -)
+    SDBL_MULTIPLICATIVE_EXPR, // Multiplicative operators (*, /, MOD)
+    SDBL_UNARY_EXPR,          // Unary operators (+, -, NOT)
+    SDBL_PAREN_EXPR,          // Parenthesized expression
+    SDBL_SUBQUERY_EXPR,       // Subquery in expression context
+
+    // Primary Expressions
     SDBL_COLUMN_REF,    // Column reference
-    SDBL_FIELD_LIST,    // List of fields in SELECT
-    SDBL_EXPR,          // SDBL expression
-    SDBL_LITERAL,       // SDBL literal value
+    SDBL_FUNCTION_CALL, // Function call
+    SDBL_LITERAL,       // Literal value (number, string, boolean, null)
+    SDBL_PARAMETER,     // Parameter reference (&Parameter)
+
+    // Future (Phase 2+)
+    SDBL_JOIN_CLAUSE,  // JOIN clause
+    SDBL_GROUP_CLAUSE, // GROUP BY clause
+    SDBL_ORDER_CLAUSE, // ORDER BY clause
+
+    // Error recovery
+    SDBL_ERROR, // Error node for SDBL
 
     // Error recovery
     ERROR,
