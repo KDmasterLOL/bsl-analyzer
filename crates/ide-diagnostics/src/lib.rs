@@ -3,6 +3,8 @@
 //! This crate implements all 181 diagnostics from bsl-language-server.
 
 pub mod handlers;
+pub mod metadata_diagnostic;
+pub mod rules;
 
 use ide_db::{RootDatabase, TextRange};
 use vfs::FileId;

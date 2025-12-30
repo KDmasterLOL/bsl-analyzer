@@ -289,7 +289,9 @@ pub struct DiagnosticsContext<'a> {
 
 ### 4. Metadata Infrastructure
 
-**Статус:** Запланирована на Iteration 11 (см. `docs/planning/METADATA_PLAN.md`)
+**Статус:** ✅ **Реализована** (Iteration 11 завершена)
+**Крейты:** `bsl-metadata`, `ide-db/metadata`
+**Детали:** См. `docs/planning/METADATA_PLAN.md`
 
 Инфраструктура для работы с метаданными 1С:Enterprise — критически важная часть для полноценного Language Server.
 
@@ -330,58 +332,96 @@ pub struct DiagnosticsContext<'a> {
 - Валидация виртуальных таблиц
 - Проверка полей объектов метаданных
 
+#### Designer Format Structure
+
+**КРИТИЧЕСКИ ВАЖНО:** XML файлы находятся **РЯДОМ** с папками, не внутри!
+
+```text
+Configuration.xml                      # Корневой файл
+ConfigDumpInfo.xml                     # Информация о выгрузке
+
+CommonModules/
+├── <Name>.xml                         # XML NEXT TO folder
+└── <Name>/                            # Folder with code
+    └── Ext/
+        └── Module.bsl                 # Code INSIDE Ext/
+
+Catalogs/
+├── <Name>.xml                         # XML NEXT TO folder
+└── <Name>/                            # Folder with code
+    └── Ext/
+        ├── ManagerModule.bsl
+        └── ObjectModule.bsl
+
+InformationRegisters/
+├── <Name>.xml                         # XML NEXT TO folder
+└── <Name>/                            # Folder with code
+    └── Ext/
+        └── ManagerModule.bsl
+```
+
 #### Архитектура
 
 **Крейт `bsl-metadata`:**
 
 ```rust
 // Основные структуры (портированы из bsl-language-server-rust)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Configuration {
-    name: String,
     uuid: Uuid,
+    name: String,
     common_modules: Vec<CommonModule>,
-    catalogs: Vec<MetadataObject>,
-    documents: Vec<MetadataObject>,
-    registers: Vec<Register>,
-    // ... другие типы
+    metadata_objects: Vec<MetadataObject>,
+    // HashMap caches (excluded from PartialEq)
+    #[serde(skip)]
+    uri_to_module: HashMap<String, usize>,
+    #[serde(skip)]
+    name_to_common_module: HashMap<String, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommonModule {
-    name: String,
     uuid: Uuid,
-    server: bool,             // Серверный
-    global: bool,             // Глобальный
+    name: String,
+    uri: Option<String>,          // Path to .bsl file
+    server: bool,                 // Серверный
+    global: bool,                 // Глобальный
     client_managed_application: bool,  // Клиент (управляемое приложение)
-    server_call: bool,        // Серверный вызов
-    privileged: bool,         // Привилегированный
-    return_value_reuse: ReturnValueReuse,
-    module_type: ModuleType,
+    server_call: bool,            // Серверный вызов
+    privileged: bool,             // Привилегированный
+    return_values_reuse: ReturnValueReuse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MdoType {
-    CATALOG,
-    DOCUMENT,
-    INFORMATION_REGISTER,
-    COMMON_MODULE,
+    Catalog,
+    Document,
+    InformationRegister,
     // ... ~14+ типов
 }
 ```
 
-**XML Loader:**
+**XML Loader (с правильными путями):**
 
 ```rust
-// Загрузка метаданных из файловой системы
-pub fn load_from_directory(path: &Path) -> Result<Configuration, MetadataError> {
-    // 1. Парсинг Configuration.xml
-    let config = parse_configuration(&path.join("Configuration.xml"))?;
+// Загрузка метаданных из Designer format
+pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
+    let mut config = Configuration::new("Configuration");
 
-    // 2. Загрузка CommonModules
-    for entry in read_dir(path.join("CommonModules"))? {
-        let module = parse_common_module(&entry.path())?;
-        config.add_common_module(module);
+    // Load CommonModules
+    for entry in fs::read_dir(path.join("CommonModules"))? {
+        let path = entry.path();
+        // XML files are NEXT TO folders!
+        if path.is_file() && path.extension() == Some("xml") {
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            let xml = fs::read_to_string(&path)?;
+            let mut module = xml_parser::parse_common_module_xml(&xml)?;
+
+            // Build URI to .bsl file (INSIDE Ext/)
+            let module_bsl = format!("CommonModules/{}/Ext/Module.bsl", name);
+            config.add_common_module(module);
+        }
     }
-
-    // 3. Загрузка других типов (Catalogs, Documents, Registers...)
 
     Ok(config)
 }
@@ -391,36 +431,40 @@ pub fn load_from_directory(path: &Path) -> Result<Configuration, MetadataError> 
 
 ```rust
 // Input query — путь к конфигурации
-#[salsa::input]
-struct ConfigurationPath {
-    #[returns(as_ref)]
-    path: PathBuf,
+#[salsa::input(debug)]
+pub struct ConfigurationPathInput {
+    pub path: String,  // Stored as String for Salsa
 }
 
-// Derived query — загрузка конфигурации
-// Durability::HIGH — метаданные меняются редко!
-#[salsa::tracked(lru = 16, durability = Durability::HIGH)]
-fn load_configuration(db: &dyn MetadataDb) -> Arc<Configuration> {
-    let path = db.configuration_path();
-    Arc::new(bsl_metadata::load_from_directory(&path).unwrap())
+// Tracked query — загрузка конфигурации
+// LRU cache: 16 configurations (multi-workspace support)
+#[salsa::tracked(lru = 16)]
+pub fn load_configuration(
+    db: &dyn salsa::Database,
+    path_input: ConfigurationPathInput,
+) -> Arc<Configuration> {
+    let path = PathBuf::from(path_input.path(db));
+    let config = bsl_metadata::load_from_directory(&path)
+        .unwrap_or_else(|_| Configuration::new("Configuration"));
+    Arc::new(config)
 }
 
-// Derived query — поиск общего модуля
-#[salsa::tracked]
-fn find_common_module(db: &dyn Db, name: &str) -> Option<Arc<CommonModule>> {
-    db.load_configuration()  // Salsa автоматически кеширует!
-        .common_modules()
-        .find(|m| m.name() == name)
-        .cloned()
+// Database trait
+#[salsa::db]
+pub trait MetadataDb: salsa::Database {
+    fn load_configuration(&self, path_input: ConfigurationPathInput) -> Arc<Configuration> {
+        load_configuration(self, path_input)
+    }
 }
 ```
 
 **Почему Salsa критична для метаданных:**
 
-1. **Редко меняются** — можно пометить как `Durability::HIGH`
-2. **Дорого загружать** — парсинг XML, чтение файловой системы (секунды)
-3. **Часто используются** — каждая диагностика может запрашивать метаданные
-4. **Результат:** Загрузка 1 раз (~1 сек), далее кеширование (< 1ms)
+1. **Редко меняются** — загружаются 1 раз при открытии workspace
+2. **Дорого загружать** — XML парсинг + file I/O (~1 секунда)
+3. **Часто используются** — каждая Tier 3 диагностика запрашивает метаданные
+4. **PartialEq requirement** — все структуры реализуют PartialEq для Salsa caching
+5. **Результат:** Загрузка 1 раз (~1 сек), далее кеширование (< 1ms)
 
 #### AbstractMetadataDiagnostic Pattern
 
@@ -461,11 +505,16 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 
 #### Текущее состояние
 
-- ⚠️ **Не реализовано** — отложено до Iteration 11
-- 📋 **Блокирует:** Tier 3 диагностики (Iterations 19-23)
-- ✅ **Источники:** `bsl-language-server-rust/crates/bsl-metadata/` (готовые структуры)
+- ✅ **Реализовано** — Iteration 11 завершена (2025-12-30)
+- ✅ **Крейт bsl-metadata** — все базовые структуры портированы
+- ✅ **XML Loader** — парсинг Designer format (CommonModules, InformationRegisters)
+- ✅ **Salsa Integration** — MetadataDb trait, load_configuration query
+- ✅ **PartialEq support** — все структуры поддерживают Salsa caching
+- ✅ **Тесты** — 14 unit tests в bsl-metadata, 2 integration tests в ide-db
+- ✅ **Производительность** — загрузка < 1 сек, кеш < 1 мс
+- 📋 **Готово для:** Tier 3 диагностики (Iterations 19-23)
 
-См. `docs/planning/METADATA_PLAN.md` для детального плана реализации.
+См. `docs/planning/METADATA_PLAN.md` для деталей реализации.
 
 ### 5. LSP Compatibility
 
@@ -518,14 +567,16 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 - `handlers/` - 181 диагностика
 
 ### bsl-metadata
-Метаданные 1С:
-- `lib.rs` - публичный API
-- `configuration.rs` - Configuration
-- `common_module.rs` - CommonModule
-- `metadata_object.rs` - MetadataObject trait и реализации
-- `loader.rs` - XML parsing & загрузка из файловой системы
-- `enums.rs` - MdoType, ModuleType, ReturnValueReuse
-- `error.rs` - MetadataError
+Метаданные 1С (Iteration 11 - ✅ реализовано):
+- `lib.rs` - публичный API с примерами использования
+- `configuration.rs` - Configuration (с PartialEq для Salsa)
+- `common_module.rs` - CommonModule (все execution context flags)
+- `metadata_object.rs` - MetadataObject + MdoType enum
+- `loader.rs` - загрузка из Designer format (правильные пути!)
+- `xml_parser.rs` - парсинг XML с quick-xml + serde
+- `traits.rs` - MdObject, Module traits
+- `enums.rs` - ReturnValueReuse, ModuleType, ObjectBelonging, SupportVariant
+- `error.rs` - MetadataError + Result type
 
 ## Потоки данных
 

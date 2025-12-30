@@ -17,6 +17,10 @@ pub use hir_def;
 pub use syntax::TextRange;
 pub use vfs;
 
+// ========== Metadata Module ==========
+
+pub mod metadata;
+
 // ========== Symbol types (TODO: full implementation in later iterations) ==========
 
 /// Symbol kind (procedure, function, variable, etc).
@@ -38,9 +42,9 @@ pub struct SymbolInfo {
 
 /// The root database for IDE operations.
 ///
-/// This database extends SourceDatabase and RootQueryDb with DefDatabase,
-/// providing full HIR functionality with caching.
-pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase {}
+/// This database extends SourceDatabase, RootQueryDb, DefDatabase, and MetadataDb,
+/// providing full HIR functionality and metadata support with caching.
+pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::MetadataDb {}
 
 /// Default implementation of RootDatabase with Salsa integration.
 ///
@@ -193,6 +197,11 @@ impl DefDatabase for RootDatabaseImpl {
         tree
     }
 }
+
+// ========== MetadataDb ==========
+
+#[salsa::db]
+impl metadata::MetadataDb for RootDatabaseImpl {}
 
 // ========== RootDatabase ==========
 
