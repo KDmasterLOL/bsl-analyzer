@@ -559,80 +559,113 @@ mod tests {
     #[test]
     fn test_select_statement() {
         let tokens = tokenize_sdbl("SELECT Name FROM Catalog.Products");
+        // SELECT(0) WS(1) Name(2) WS(3) FROM(4) WS(5) Catalog(6) .(7) Products(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
-        assert_eq!(tokens[1].kind, SdblTokenKind::Ident);
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwFrom);
-        assert_eq!(tokens[3].kind, SdblTokenKind::MdoCatalog);
-        assert_eq!(tokens[4].kind, SdblTokenKind::Dot);
-        assert_eq!(tokens[5].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwFrom);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::MdoCatalog);
+        assert_eq!(tokens[7].kind, SdblTokenKind::Dot);
+        assert_eq!(tokens[8].kind, SdblTokenKind::Ident);
     }
 
     #[test]
     fn test_russian_keywords() {
         let tokens = tokenize_sdbl("ВЫБРАТЬ Наименование ИЗ Справочник.Товары");
+        // ВЫБРАТЬ(0) WS(1) Наименование(2) WS(3) ИЗ(4) WS(5) Справочник(6) .(7) Товары(8)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
-        assert_eq!(tokens[1].kind, SdblTokenKind::Ident);
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwFrom);
-        assert_eq!(tokens[3].kind, SdblTokenKind::MdoCatalog);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwFrom);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::MdoCatalog);
+        assert_eq!(tokens[7].kind, SdblTokenKind::Dot);
+        assert_eq!(tokens[8].kind, SdblTokenKind::Ident);
     }
 
     #[test]
     fn test_where_clause() {
         let tokens = tokenize_sdbl("WHERE Price > 100");
+        // WHERE(0) WS(1) Price(2) WS(3) >(4) WS(5) 100(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
-        assert_eq!(tokens[1].kind, SdblTokenKind::Ident);
-        assert_eq!(tokens[2].kind, SdblTokenKind::Gt);
-        assert_eq!(tokens[3].kind, SdblTokenKind::Decimal);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Gt);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::Decimal);
     }
 
     #[test]
     fn test_join() {
         let tokens =
             tokenize_sdbl("LEFT JOIN Catalog.Categories ON Products.Category = Categories.Ref");
+        // LEFT(0) WS(1) JOIN(2) WS(3) Catalog(4) .(5) Categories(6) ...
         assert_eq!(tokens[0].kind, SdblTokenKind::KwLeft);
-        assert_eq!(tokens[1].kind, SdblTokenKind::KwJoin);
-        assert_eq!(tokens[2].kind, SdblTokenKind::MdoCatalog);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::KwJoin);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::MdoCatalog);
     }
 
     #[test]
     fn test_aggregate_functions() {
         let tokens = tokenize_sdbl("SUM(Amount) AS Total");
+        // SUM(0) ((1) Amount(2) )(3) WS(4) AS(5) WS(6) Total(7)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnSum);
         assert_eq!(tokens[1].kind, SdblTokenKind::LParen);
-        assert_eq!(tokens[4].kind, SdblTokenKind::KwAs);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::RParen);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[5].kind, SdblTokenKind::KwAs);
+        assert_eq!(tokens[6].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[7].kind, SdblTokenKind::Ident);
     }
 
     #[test]
     fn test_parameters() {
         let tokens = tokenize_sdbl("WHERE Date > &StartDate");
-        assert_eq!(tokens[3].kind, SdblTokenKind::Parameter);
-        assert_eq!(tokens[3].text.as_str(), "&StartDate");
+        // WHERE(0) WS(1) Date(2) WS(3) >(4) WS(5) &StartDate(6)
+        assert_eq!(tokens[6].kind, SdblTokenKind::Parameter);
+        assert_eq!(tokens[6].text.as_str(), "&StartDate");
     }
 
     #[test]
     fn test_temporary_table() {
         let tokens = tokenize_sdbl("INTO #TempTable");
+        // INTO(0) WS(1) #(2) TempTable(3)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwInto);
-        assert_eq!(tokens[1].kind, SdblTokenKind::Hash);
-        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Hash);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Ident);
     }
 
     #[test]
     fn test_virtual_table() {
         let tokens = tokenize_sdbl("FROM AccumulationRegister.Stock.Balance");
+        // FROM(0) WS(1) AccumulationRegister(2) .(3) Stock(4) .(5) Balance(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwFrom);
-        assert_eq!(tokens[1].kind, SdblTokenKind::MdoAccumulationRegister);
-        assert_eq!(tokens[5].kind, SdblTokenKind::VtBalance);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::MdoAccumulationRegister);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Dot);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Dot);
+        assert_eq!(tokens[6].kind, SdblTokenKind::VtBalance);
     }
 
     #[test]
     fn test_case_expression() {
         let tokens = tokenize_sdbl("CASE WHEN Amount > 0 THEN 1 ELSE 0 END");
+        // CASE(0) WS(1) WHEN(2) WS(3) Amount(4) WS(5) >(6) WS(7) 0(8) WS(9) THEN(10) WS(11) 1(12) WS(13) ELSE(14) WS(15) 0(16) WS(17) END(18)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwCase);
-        assert_eq!(tokens[1].kind, SdblTokenKind::KwWhen);
-        assert_eq!(tokens[5].kind, SdblTokenKind::KwThen);
-        assert_eq!(tokens[7].kind, SdblTokenKind::KwElse);
-        assert_eq!(tokens[9].kind, SdblTokenKind::KwEnd);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::KwWhen);
+        assert_eq!(tokens[10].kind, SdblTokenKind::KwThen);
+        assert_eq!(tokens[14].kind, SdblTokenKind::KwElse);
+        assert_eq!(tokens[18].kind, SdblTokenKind::KwEnd);
     }
 
     #[test]
@@ -650,92 +683,148 @@ mod tests {
     #[test]
     fn test_boolean_literals() {
         let tokens = tokenize_sdbl("TRUE FALSE Истина Ложь");
+        // TRUE(0) WS(1) FALSE(2) WS(3) Истина(4) WS(5) Ложь(6)
         assert_eq!(tokens[0].kind, SdblTokenKind::LitTrue);
-        assert_eq!(tokens[1].kind, SdblTokenKind::LitFalse);
-        assert_eq!(tokens[2].kind, SdblTokenKind::LitTrue);
-        assert_eq!(tokens[3].kind, SdblTokenKind::LitFalse);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::LitFalse);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::LitTrue);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::LitFalse);
     }
 
     #[test]
     fn test_date_functions() {
         let tokens = tokenize_sdbl("YEAR(Date) MONTH(Date) DAY(Date)");
+        // YEAR(0) ((1) Date(2) )(3) WS(4) MONTH(5) ((6) Date(7) )(8) WS(9) DAY(10) ((11) Date(12) )(13)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnYear);
-        assert_eq!(tokens[4].kind, SdblTokenKind::FnMonth);
-        assert_eq!(tokens[8].kind, SdblTokenKind::FnDay);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[5].kind, SdblTokenKind::FnMonth);
+        assert_eq!(tokens[9].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[10].kind, SdblTokenKind::FnDay);
     }
 
     #[test]
     fn test_string_functions() {
         let tokens = tokenize_sdbl("SUBSTRING(Name, 1, 10) UPPER(Name)");
-        // SUBSTRING(0) ((1) Name(2) ,(3) 1(4) ,(5) 10(6) )(7) UPPER(8) ((9) Name(10) )(11)
+        // SUBSTRING(0) ((1) Name(2) ,(3) WS(4) 1(5) ,(6) WS(7) 10(8) )(9) WS(10) UPPER(11) ((12) Name(13) )(14)
         assert_eq!(tokens[0].kind, SdblTokenKind::FnSubstring);
-        assert_eq!(tokens[8].kind, SdblTokenKind::FnUpper);
+        assert_eq!(tokens[10].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[11].kind, SdblTokenKind::FnUpper);
     }
 
     #[test]
     fn test_group_by() {
         let tokens = tokenize_sdbl("GROUP BY Category HAVING COUNT(*) > 5");
+        // GROUP(0) WS(1) BY(2) WS(3) Category(4) WS(5) HAVING(6) WS(7) COUNT(8) ...
         assert_eq!(tokens[0].kind, SdblTokenKind::KwGroup);
-        assert_eq!(tokens[1].kind, SdblTokenKind::KwOnOrBy);
-        assert_eq!(tokens[3].kind, SdblTokenKind::KwHaving);
-        assert_eq!(tokens[4].kind, SdblTokenKind::FnCount);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::KwOnOrBy);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::KwHaving);
+        assert_eq!(tokens[7].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[8].kind, SdblTokenKind::FnCount);
     }
 
     #[test]
     fn test_order_by() {
         let tokens = tokenize_sdbl("ORDER BY Name ASC, Price DESC");
+        // ORDER(0) WS(1) BY(2) WS(3) Name(4) WS(5) ASC(6) ,(7) WS(8) Price(9) WS(10) DESC(11)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwOrder);
-        assert_eq!(tokens[1].kind, SdblTokenKind::KwOnOrBy);
-        assert_eq!(tokens[3].kind, SdblTokenKind::KwAsc);
-        assert_eq!(tokens[6].kind, SdblTokenKind::KwDesc);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::KwOnOrBy);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::KwAsc);
+        assert_eq!(tokens[9].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[10].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[11].kind, SdblTokenKind::KwDesc);
     }
 
     #[test]
     fn test_union() {
         let tokens = tokenize_sdbl("SELECT * FROM Table1 UNION ALL SELECT * FROM Table2");
-        // SELECT(0) *(1) FROM(2) Table1(3) UNION(4) ALL(5) SELECT(6) *(7) FROM(8) Table2(9)
-        assert_eq!(tokens[4].kind, SdblTokenKind::KwUnion);
-        assert_eq!(tokens[5].kind, SdblTokenKind::KwAll);
+        // SELECT(0) WS(1) *(2) WS(3) FROM(4) WS(5) Table1(6) WS(7) UNION(8) WS(9) ALL(10) WS(11) SELECT(12) ...
+        assert_eq!(tokens[8].kind, SdblTokenKind::KwUnion);
+        assert_eq!(tokens[9].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[10].kind, SdblTokenKind::KwAll);
     }
 
     #[test]
     fn test_distinct_top() {
         let tokens = tokenize_sdbl("SELECT DISTINCT TOP 100 Name");
-        assert_eq!(tokens[1].kind, SdblTokenKind::KwDistinct);
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwTop);
+        // SELECT(0) WS(1) DISTINCT(2) WS(3) TOP(4) WS(5) 100(6) WS(7) Name(8)
+        assert_eq!(tokens[0].kind, SdblTokenKind::KwSelect);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::KwDistinct);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwTop);
     }
 
     #[test]
     fn test_in_predicate() {
         let tokens = tokenize_sdbl("WHERE Category IN (&CategoryList)");
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwIn);
+        // WHERE(0) WS(1) Category(2) WS(3) IN(4) WS(5) ((6) &CategoryList(7) )(8)
+        assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwIn);
     }
 
     #[test]
     fn test_between_predicate() {
         let tokens = tokenize_sdbl("WHERE Price BETWEEN 100 AND 500");
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwBetween);
-        assert_eq!(tokens[4].kind, SdblTokenKind::OpAnd);
+        // WHERE(0) WS(1) Price(2) WS(3) BETWEEN(4) WS(5) 100(6) WS(7) AND(8) WS(9) 500(10)
+        assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwBetween);
+        assert_eq!(tokens[6].kind, SdblTokenKind::Decimal);
+        assert_eq!(tokens[7].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[8].kind, SdblTokenKind::OpAnd);
     }
 
     #[test]
     fn test_like_predicate() {
         let tokens = tokenize_sdbl("WHERE Name LIKE \"%Products%\"");
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwLike);
+        // WHERE(0) WS(1) Name(2) WS(3) LIKE(4) WS(5) "%Products%"(6)
+        assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwLike);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::String);
     }
 
     #[test]
     fn test_is_null() {
         let tokens = tokenize_sdbl("WHERE Description IS NULL");
-        assert_eq!(tokens[2].kind, SdblTokenKind::KwIs);
-        assert_eq!(tokens[3].kind, SdblTokenKind::LitNull);
+        // WHERE(0) WS(1) Description(2) WS(3) IS(4) WS(5) NULL(6)
+        assert_eq!(tokens[0].kind, SdblTokenKind::KwWhere);
+        assert_eq!(tokens[1].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwIs);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::LitNull);
     }
 
     #[test]
     fn test_cast() {
         let tokens = tokenize_sdbl("CAST(Price AS NUMBER(15, 2))");
+        // CAST(0) ((1) Price(2) WS(3) AS(4) WS(5) NUMBER(6) ((7) 15(8) ,(9) WS(10) 2(11) )(12) )(13)
         assert_eq!(tokens[0].kind, SdblTokenKind::KwCast);
-        assert_eq!(tokens[3].kind, SdblTokenKind::KwAs);
-        assert_eq!(tokens[4].kind, SdblTokenKind::TypeNumber);
+        assert_eq!(tokens[1].kind, SdblTokenKind::LParen);
+        assert_eq!(tokens[2].kind, SdblTokenKind::Ident);
+        assert_eq!(tokens[3].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[4].kind, SdblTokenKind::KwAs);
+        assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
+        assert_eq!(tokens[6].kind, SdblTokenKind::TypeNumber);
     }
 }
