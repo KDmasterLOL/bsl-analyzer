@@ -33,4 +33,5 @@ pub mod cyclomatic_complexity;
 pub mod data_exchange_loading;
 #[cfg(test)]
 mod debug_test;
+pub mod deleting_collection_item;
 // TODO: Add all 181 handlers

@@ -91,6 +91,7 @@ pub enum DiagnosticCode {
     CompilationDirectiveLost,
     CreateQueryInCycle,
     DataExchangeLoading,
+    DeletingCollectionItem,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -154,6 +155,7 @@ impl DiagnosticCode {
             Self::CompilationDirectiveLost => "CompilationDirectiveLost",
             Self::CreateQueryInCycle => "CreateQueryInCycle",
             Self::DataExchangeLoading => "DataExchangeLoading",
+            Self::DeletingCollectionItem => "DeletingCollectionItem",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -269,6 +271,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::compilation_directive_lost::check(ctx));
     result.extend(handlers::create_query_in_cycle::check(ctx));
     result.extend(handlers::data_exchange_loading::check(ctx));
+    result.extend(handlers::deleting_collection_item::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));
