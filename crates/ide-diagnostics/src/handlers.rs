@@ -11,6 +11,7 @@ pub mod canonical_spelling_keywords;
 pub mod code_after_async_call;
 pub mod code_block_before_sub;
 pub mod code_out_of_region;
+pub mod cognitive_complexity;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;

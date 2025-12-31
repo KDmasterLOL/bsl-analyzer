@@ -135,6 +135,7 @@ impl DiagnosticCode {
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
+            Self::CognitiveComplexity => "CognitiveComplexity",
             _ => "Unknown",
         }
     }
@@ -229,6 +230,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
     result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
+    result.extend(handlers::code_block_before_sub::check(ctx));
+    result.extend(handlers::code_out_of_region::check(ctx));
+    result.extend(handlers::cognitive_complexity::check(ctx));
 
     // Tier 3: Metadata diagnostics
     result.extend(handlers::cached_public::check(ctx));
