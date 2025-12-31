@@ -47,6 +47,7 @@
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::TextRange;
 use std::collections::HashMap;
 use syntax::{SyntaxKind, SyntaxNode};
 
@@ -224,13 +225,21 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
         }
 
         SyntaxKind::ASSIGN_STMT => {
+            eprintln!("[DEBUG] ASSIGN_STMT, in_cycle={}", scope.in_cycle());
             check_assignment(node, scope);
+            // Check for Execute call in rvalue (right side of assignment)
+            if scope.in_cycle() {
+                eprintln!("[DEBUG] Calling check_execute_call_in_assignment");
+                check_execute_call_in_assignment(node, diagnostics, scope);
+                eprintln!("[DEBUG] After check, diagnostics count: {}", diagnostics.len());
+            }
             for child in node.children() {
                 check_node(&child, diagnostics, scope);
             }
         }
 
         SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
+            eprintln!("[DEBUG] CALL_STMT/EXPR, in_cycle={}", scope.in_cycle());
             // Check if this is an assignment (has EQ token) or a method call (has DOT token)
             let has_eq = node
                 .descendants_with_tokens()
@@ -242,11 +251,20 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
                 .filter_map(|el| el.into_token())
                 .any(|t| t.kind() == SyntaxKind::DOT);
 
+            eprintln!("[DEBUG] has_eq={}, has_dot={}", has_eq, has_dot);
             if has_eq {
                 check_assignment(node, scope);
             }
             if has_dot && scope.in_cycle() {
-                check_execute_call(node, diagnostics, scope);
+                if has_eq {
+                    // Assignment with Execute call: use special handling for rvalue range
+                    eprintln!("[DEBUG] Assignment with Execute - using rvalue range");
+                    check_execute_call_in_assignment(node, diagnostics, scope);
+                } else {
+                    // Pure method call
+                    eprintln!("[DEBUG] Pure Execute call");
+                    check_execute_call(node, diagnostics, scope);
+                }
             }
 
             for child in node.children() {
@@ -345,22 +363,36 @@ fn check_execute_call(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scop
     }
 
     // Extract all IDENTs before the Execute to find the variable being called
-    // Skip IDENTs before EQ if this is an assignment
+    // Also track token ranges for precise diagnostic range
     let mut idents = Vec::new();
+    let mut first_ident_range: Option<TextRange> = None;
+    let mut last_significant_token: Option<TextRange> = None;
+
     for token in node.descendants_with_tokens().filter_map(|el| el.into_token()) {
         match token.kind() {
             SyntaxKind::EQ => {
                 // For assignments, clear any IDENTs collected before EQ
                 idents.clear();
+                first_ident_range = None;
             }
             SyntaxKind::IDENT => {
                 let text = token.text().to_lowercase();
                 if !matches!(text.as_str(), "execute" | "выполнить") {
+                    if first_ident_range.is_none() {
+                        first_ident_range = Some(token.text_range());
+                    }
                     idents.push(token.text().to_string());
                 }
+                last_significant_token = Some(token.text_range());
             }
             SyntaxKind::KW_EXECUTE => {
-                // Stop collecting IDENTs after Execute
+                last_significant_token = Some(token.text_range());
+                // Continue to find closing parens
+            }
+            SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET => {
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::SEMICOLON => {
                 break;
             }
             _ => {}
@@ -376,7 +408,14 @@ fn check_execute_call(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scop
         let prefix = idents[0..=i].join(".");
         if let Some(var_def) = scope.get_variable(&prefix) {
             if var_def.has_query_type() {
-                diagnostics.push(make_diagnostic(node));
+                // Create diagnostic with precise range
+                if let (Some(start), Some(end)) = (first_ident_range, last_significant_token) {
+                    let diagnostic_range = TextRange::new(start.start(), end.end());
+                    eprintln!("[DEBUG] Pure Execute range: {:?}", diagnostic_range);
+                    diagnostics.push(make_diagnostic_with_range(diagnostic_range));
+                } else {
+                    diagnostics.push(make_diagnostic(node));
+                }
                 return;
             }
         }
@@ -419,14 +458,89 @@ fn check_expr_for_execute(
     }
 }
 
+fn check_execute_call_in_assignment(
+    node: &SyntaxNode,
+    diagnostics: &mut Vec<Diagnostic>,
+    scope: &VariableScope,
+) {
+    let has_execute = node.descendants_with_tokens().filter_map(|el| el.into_token()).any(|t| {
+        t.kind() == SyntaxKind::KW_EXECUTE
+            || (t.kind() == SyntaxKind::IDENT
+                && matches!(t.text().to_lowercase().as_str(), "execute" | "выполнить"))
+    });
+
+    if !has_execute {
+        return;
+    }
+
+    // Find the range of rvalue (everything after EQ token up to semicolon or end of expression)
+    let mut eq_found = false;
+    let mut first_ident_after_eq: Option<TextRange> = None;
+    let mut last_significant_token: Option<TextRange> = None;
+    let mut idents = Vec::new();
+
+    for elem in node.descendants_with_tokens() {
+        if let Some(token) = elem.as_token() {
+            match token.kind() {
+                SyntaxKind::EQ => {
+                    eq_found = true;
+                }
+                SyntaxKind::IDENT if eq_found => {
+                    let text = token.text().to_lowercase();
+                    if !matches!(text.as_str(), "execute" | "выполнить") {
+                        if first_ident_after_eq.is_none() {
+                            first_ident_after_eq = Some(token.text_range());
+                        }
+                        idents.push(token.text().to_string());
+                    }
+                    last_significant_token = Some(token.text_range());
+                }
+                SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET if eq_found => {
+                    last_significant_token = Some(token.text_range());
+                }
+                SyntaxKind::KW_EXECUTE if eq_found => {
+                    last_significant_token = Some(token.text_range());
+                }
+                SyntaxKind::SEMICOLON => {
+                    // Stop at semicolon
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Check if any variable prefix is a Query type
+    for i in 0..idents.len() {
+        let prefix = idents[0..=i].join(".");
+        if let Some(var_def) = scope.get_variable(&prefix) {
+            if var_def.has_query_type() {
+                // Create diagnostic for rvalue only
+                if let (Some(start_range), Some(end_range)) =
+                    (first_ident_after_eq, last_significant_token)
+                {
+                    let diagnostic_range = TextRange::new(start_range.start(), end_range.end());
+                    eprintln!("[DEBUG] Assignment Execute range: {:?}", diagnostic_range);
+                    diagnostics.push(make_diagnostic_with_range(diagnostic_range));
+                }
+                return;
+            }
+        }
+    }
+}
+
 fn make_diagnostic(node: &SyntaxNode) -> Diagnostic {
+    make_diagnostic_with_range(node.text_range())
+}
+
+fn make_diagnostic_with_range(range: TextRange) -> Diagnostic {
     Diagnostic {
         code: DiagnosticCode::CreateQueryInCycle,
         message: "Выполнение запроса в цикле приводит к деградации производительности. \
                   Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла"
             .to_string(),
         severity: Severity::Error,
-        range: node.text_range(),
+        range,
         tags: vec![],
         fixes: vec![],
     }
@@ -553,8 +667,10 @@ EndProcedure
 
     #[test]
     fn test_comprehensive() {
+        use crate::test_utils::assert_diagnostic_range;
+
         let code = include_str!("../../test_data/CreateQueryInCycleDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let (diagnostics, _) = check_diagnostic(code);
 
         assert_eq!(
             diagnostics.len(),
@@ -562,18 +678,18 @@ EndProcedure
             "Should find exactly 10 diagnostics (all critical Query.Execute() calls in loops)"
         );
 
-        // Note: Our diagnostic positions differ slightly from Java's due to how the Rowan parser
-        // structures nodes. The diagnostics are still correct - they identify all the right issues.
-        // We verify here that we find the correct NUMBER of diagnostics and they're on the right lines.
-
-        let lines: Vec<usize> = diagnostics
-            .iter()
-            .map(|d| file_content[..d.range.start().into()].lines().count() - 1)
-            .collect();
-
-        // Expected lines where diagnostics should occur (0-indexed)
-        let expected_lines = vec![4, 27, 44, 48, 59, 60, 66, 73, 79, 90];
-
-        assert_eq!(lines, expected_lines, "Diagnostics should be on the correct lines");
+        // Verify exact positions matching bsl-language-server (Java) implementation
+        // Format: assert_diagnostic_range(code, diagnostic, line, start_col, end_col)
+        // All positions are 0-indexed
+        assert_diagnostic_range(code, &diagnostics[0], 4, 8, 36);
+        assert_diagnostic_range(code, &diagnostics[1], 27, 23, 47);
+        assert_diagnostic_range(code, &diagnostics[2], 44, 4, 22);
+        assert_diagnostic_range(code, &diagnostics[3], 48, 4, 22);
+        assert_diagnostic_range(code, &diagnostics[4], 59, 4, 18);
+        assert_diagnostic_range(code, &diagnostics[5], 60, 4, 24);
+        assert_diagnostic_range(code, &diagnostics[6], 66, 4, 22);
+        assert_diagnostic_range(code, &diagnostics[7], 73, 2, 30);
+        assert_diagnostic_range(code, &diagnostics[8], 79, 4, 34);
+        assert_diagnostic_range(code, &diagnostics[9], 90, 41, 71);
     }
 }
