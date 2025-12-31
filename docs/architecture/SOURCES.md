@@ -146,7 +146,31 @@ crates/
 
 ---
 
-### 6. salsa
+### 6. bsl-language-server-rust
+
+**Путь:** `/Users/kiriller/src/lsp/bsl-language-server-rust/`
+**Роль:** Rust реализации диагностик для справки
+
+Rust прототип LSP сервера на базе tree-sitter. Содержит 183 реализованные диагностики.
+
+**Что брать:**
+- Rust реализации диагностик (адаптировать под Rowan AST)
+- Паттерны работы с AST traversal
+- Алгоритмы вычисления метрик (cyclomatic complexity, cognitive complexity)
+
+**Ключевые файлы:**
+- `crates/bsl-diagnostics/src/rules/cyclomatic_complexity.rs` - CyclomaticComplexity
+- `crates/bsl-diagnostics/src/rules/cognitive_complexity.rs` - CognitiveComplexity
+- `crates/bsl-parser/` - tree-sitter парсер (для сравнения)
+
+**Примечание:** tree-sitter → Rowan adaptation required:
+- tree-sitter: cursor-based traversal → Rowan: `node.descendants()` / `node.children()`
+- tree-sitter: string node kinds → Rowan: `SyntaxKind` enums
+- tree-sitter: field names → Rowan: iterate tokens with `children_with_tokens()`
+
+---
+
+### 7. salsa
 **Путь:** `/Users/kiriller/src/lsp/salsa/`
 **Роль:** Фреймворк инкрементальных вычислений
 
@@ -279,5 +303,5 @@ fn find_common_module(db: &dyn Db, name: &str) -> Option<Arc<CommonModule>> {
 | bsl-language-server | Java | 181 | 50K+ | Целевая совместимость |
 | bsl-parser | Java/ANTLR | - | 15K+ | Полная грамматика BSL+SDBL |
 | tree-sitter-bsl | JS/C | - | 2K+ | Грамматика BSL (без SDBL) |
-| bsl-language-server-rust | Rust | 183 | 77K | Готовые компоненты |
+| bsl-language-server-rust | Rust | 183 | 77K | Rust реализации (tree-sitter) |
 | salsa | Rust | - | 50K+ | Инкрементальные вычисления (v0.25.2) |

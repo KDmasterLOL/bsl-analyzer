@@ -254,6 +254,7 @@ fn await_expr(p: &mut Parser) {
 }
 
 fn new_expr(p: &mut Parser) {
+    let m = p.start();
     p.bump(); // Новый
     p.skip_trivia();
 
@@ -266,9 +267,11 @@ fn new_expr(p: &mut Parser) {
     if p.at(TokenKind::LParen) {
         arg_list(p);
     }
+    m.complete(p, NodeKind::NewExpr);
 }
 
 fn ternary_expr(p: &mut Parser) {
+    let m = p.start();
     p.bump(); // ?
     p.skip_trivia();
     p.expect(TokenKind::LParen);
@@ -284,6 +287,7 @@ fn ternary_expr(p: &mut Parser) {
     expression(p); // else
     p.skip_trivia();
     p.expect(TokenKind::RParen);
+    m.complete(p, NodeKind::TernaryExpr);
 }
 
 fn arg_list(p: &mut Parser) {

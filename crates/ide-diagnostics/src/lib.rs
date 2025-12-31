@@ -154,6 +154,7 @@ impl DiagnosticCode {
             Self::CreateQueryInCycle => "CreateQueryInCycle",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
+            Self::CyclomaticComplexity => "CyclomaticComplexity",
             Self::CommandModuleExportMethods => "CommandModuleExportMethods",
             Self::CommonModuleAssign => "CommonModuleAssign",
             Self::CommonModuleInvalidType => "CommonModuleInvalidType",
@@ -175,6 +176,7 @@ impl DiagnosticCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
+    Critical,
     Warning,
     Information,
     Hint,
@@ -268,6 +270,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));
     result.extend(handlers::cognitive_complexity::check(ctx));
+    result.extend(handlers::cyclomatic_complexity::check(ctx));
 
     // Tier 3: Metadata diagnostics
     result.extend(handlers::cached_public::check(ctx));
