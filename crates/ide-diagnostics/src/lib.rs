@@ -88,6 +88,7 @@ pub enum DiagnosticCode {
     BeginTransactionBeforeTryCatch,
     CodeAfterAsyncCall,
     CommitTransactionOutsideTryCatch,
+    CompilationDirectiveLost,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -148,6 +149,7 @@ impl DiagnosticCode {
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
+            Self::CompilationDirectiveLost => "CompilationDirectiveLost",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CommandModuleExportMethods => "CommandModuleExportMethods",
@@ -258,6 +260,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
     result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
     result.extend(handlers::commit_transaction_outside_try_catch::check(ctx));
+    result.extend(handlers::compilation_directive_lost::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));

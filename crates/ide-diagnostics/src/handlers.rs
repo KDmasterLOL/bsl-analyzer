@@ -26,6 +26,7 @@ pub mod common_module_name_global;
 pub mod common_module_name_global_client;
 pub mod common_module_name_server_call;
 pub mod common_module_name_words;
+pub mod compilation_directive_lost;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;
