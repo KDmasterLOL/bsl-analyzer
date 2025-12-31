@@ -41,4 +41,5 @@ pub mod deprecated_message;
 pub mod deprecated_methods_8310;
 pub mod deprecated_methods_8317;
 pub mod disable_safe_mode;
+pub mod double_negatives;
 // TODO: Add all 181 handlers

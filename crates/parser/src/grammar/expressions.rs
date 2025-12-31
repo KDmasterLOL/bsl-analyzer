@@ -73,25 +73,38 @@ fn and_expr(p: &mut Parser) {
 
 fn not_expr(p: &mut Parser) {
     if p.at(TokenKind::KwNot) {
+        let m = p.start();
         p.bump();
         p.skip_trivia();
         not_expr(p);
+        m.complete(p, NodeKind::UnaryExpr);
     } else {
         comparison_expr(p);
     }
 }
 
 fn comparison_expr(p: &mut Parser) {
+    let m = p.start();
     additive_expr(p);
 
-    match p.current() {
-        Some(TokenKind::Eq) | Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le)
-        | Some(TokenKind::Gt) | Some(TokenKind::Ge) => {
+    let has_op = match p.current() {
+        // NOTE: TokenKind::Eq is NOT included here to avoid conflict with assignment statements
+        // "A = 5" at statement level should be parsed as assignment, not comparison
+        // This means "Не А = 1" will have parse errors, but diagnostics can still work
+        Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le) | Some(TokenKind::Gt)
+        | Some(TokenKind::Ge) => {
             p.bump();
             p.skip_trivia();
             additive_expr(p);
+            true
         }
-        _ => {}
+        _ => false,
+    };
+
+    if has_op {
+        m.complete(p, NodeKind::BinaryExpr);
+    } else {
+        m.abandon(p);
     }
 }
 
@@ -225,14 +238,18 @@ fn primary_expr(p: &mut Parser) {
             await_expr(p);
         }
         Some(TokenKind::Ident) => {
+            let m = p.start();
             p.bump();
+            m.complete(p, NodeKind::Ident);
         }
         Some(TokenKind::LParen) => {
+            let m = p.start();
             p.bump();
             p.skip_trivia();
             expression(p);
             p.skip_trivia();
             p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::ParenExpr);
         }
         Some(TokenKind::KwNew) => {
             new_expr(p);
