@@ -85,7 +85,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 
 **Версия:** Salsa 0.25.2
 **Репозиторий:** `/Users/kiriller/src/lsp/salsa/`
-**Статус:** Полная интеграция запланирована на Iteration 10 (см. `docs/planning/SALSA_TODO.md`)
+**Статус:** ✅ Реализовано
 
 Salsa — фреймворк для инкрементальных вычислений, критично важный для производительности Language Server.
 
@@ -231,14 +231,6 @@ fn module_tree(db: &dyn Db, file_id: FileId) -> Arc<ModuleTree> {
 
 См. `docs/planning/PERFORMANCE_ESTIMATES.md` для детальных расчетов.
 
-#### Текущее состояние
-
-- ⚠️ **Iteration 5:** Упрощенная реализация с DashMap (временное решение)
-- 📋 **Iteration 10:** Полная интеграция Salsa 0.25.2 (запланирована)
-- ✅ **Iteration 11:** Критично для Metadata Infrastructure
-
-См. `docs/planning/SALSA_TODO.md` для детального плана интеграции.
-
 ### 2. Rowan для Syntax Trees
 
 Red-green trees для эффективного представления синтаксиса:
@@ -289,9 +281,8 @@ pub struct DiagnosticsContext<'a> {
 
 ### 4. Metadata Infrastructure
 
-**Статус:** ✅ **Реализована** (Iteration 11 завершена)
+**Статус:** ✅ **Реализовано**
 **Крейты:** `bsl-metadata`, `ide-db/metadata`
-**Детали:** См. `docs/planning/METADATA_PLAN.md`
 
 Инфраструктура для работы с метаданными 1С:Enterprise — критически важная часть для полноценного Language Server.
 
@@ -497,24 +488,20 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 
 #### Метрики производительности
 
-| Операция | Цель | Обоснование |
-|----------|------|-------------|
+| Операция | Результат | Обоснование |
+|----------|-----------|-------------|
 | Загрузка конфигурации | < 1 сек | Холодный старт LSP сервера |
 | Кешированный доступ | < 1 мс | Каждая диагностика может запрашивать метаданные |
 | Память (ERP 2.5) | < 100 MB | Не должны доминировать в потреблении памяти |
 
-#### Текущее состояние
+#### Реализация
 
-- ✅ **Реализовано** — Iteration 11 завершена (2025-12-30)
-- ✅ **Крейт bsl-metadata** — все базовые структуры портированы
-- ✅ **XML Loader** — парсинг Designer format (CommonModules, InformationRegisters)
-- ✅ **Salsa Integration** — MetadataDb trait, load_configuration query
+- ✅ **Крейт bsl-metadata** — все базовые структуры (Configuration, CommonModule, MetadataObject)
+- ✅ **XML Loader** — парсинг Designer format (CommonModules, InformationRegisters, Catalogs, Documents)
+- ✅ **Salsa Integration** — MetadataDb trait, load_configuration query с кешированием
 - ✅ **PartialEq support** — все структуры поддерживают Salsa caching
 - ✅ **Тесты** — 14 unit tests в bsl-metadata, 2 integration tests в ide-db
-- ✅ **Производительность** — загрузка < 1 сек, кеш < 1 мс
-- 📋 **Готово для:** Tier 3 диагностики (Iterations 19-23)
-
-См. `docs/planning/METADATA_PLAN.md` для деталей реализации.
+- ✅ **Производительность** — загрузка < 1 сек, кешированный доступ < 1 мс
 
 ### 5. LSP Compatibility
 
@@ -567,12 +554,12 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 - `handlers/` - 181 диагностика
 
 ### bsl-metadata
-Метаданные 1С (Iteration 11 - ✅ реализовано):
+Метаданные 1С:
 - `lib.rs` - публичный API с примерами использования
 - `configuration.rs` - Configuration (с PartialEq для Salsa)
 - `common_module.rs` - CommonModule (все execution context flags)
 - `metadata_object.rs` - MetadataObject + MdoType enum
-- `loader.rs` - загрузка из Designer format (правильные пути!)
+- `loader.rs` - загрузка из Designer format
 - `xml_parser.rs` - парсинг XML с quick-xml + serde
 - `traits.rs` - MdObject, Module traits
 - `enums.rs` - ReturnValueReuse, ModuleType, ObjectBelonging, SupportVariant
