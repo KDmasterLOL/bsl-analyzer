@@ -135,6 +135,7 @@ impl DiagnosticCode {
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
+            Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CommandModuleExportMethods => "CommandModuleExportMethods",
@@ -232,6 +233,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
     result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
+    result.extend(handlers::commit_transaction_outside_try_catch::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));

@@ -14,6 +14,7 @@ pub mod code_out_of_region;
 pub mod cognitive_complexity;
 pub mod command_module_export_methods;
 pub mod commented_code;
+pub mod commit_transaction_outside_try_catch;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;
