@@ -2,6 +2,7 @@
 //!
 //! This crate implements all 181 diagnostics from bsl-language-server.
 
+pub mod common_module_helpers;
 pub mod handlers;
 pub mod metadata_diagnostic;
 pub mod rules;
@@ -93,6 +94,17 @@ pub enum DiagnosticCode {
     // Tier 3: Metadata (requires 1C configuration metadata)
     CachedPublic,
     CommandModuleExportMethods,
+    CommonModuleAssign,
+    CommonModuleInvalidType,
+    CommonModuleMissingAPI,
+    CommonModuleNameCached,
+    CommonModuleNameClient,
+    CommonModuleNameClientServer,
+    CommonModuleNameFullAccess,
+    CommonModuleNameGlobal,
+    CommonModuleNameGlobalClient,
+    CommonModuleNameServerCall,
+    CommonModuleNameWords,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -139,6 +151,17 @@ impl DiagnosticCode {
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CommandModuleExportMethods => "CommandModuleExportMethods",
+            Self::CommonModuleAssign => "CommonModuleAssign",
+            Self::CommonModuleInvalidType => "CommonModuleInvalidType",
+            Self::CommonModuleMissingAPI => "CommonModuleMissingAPI",
+            Self::CommonModuleNameCached => "CommonModuleNameCached",
+            Self::CommonModuleNameClient => "CommonModuleNameClient",
+            Self::CommonModuleNameClientServer => "CommonModuleNameClientServer",
+            Self::CommonModuleNameFullAccess => "CommonModuleNameFullAccess",
+            Self::CommonModuleNameGlobal => "CommonModuleNameGlobal",
+            Self::CommonModuleNameGlobalClient => "CommonModuleNameGlobalClient",
+            Self::CommonModuleNameServerCall => "CommonModuleNameServerCall",
+            Self::CommonModuleNameWords => "CommonModuleNameWords",
             _ => "Unknown",
         }
     }
@@ -179,6 +202,7 @@ pub struct TextEdit {
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
     pub parameters: std::collections::HashMap<DiagnosticCode, serde_json::Value>,
+    pub ordinary_app_support: bool,
 }
 
 impl DiagnosticsConfig {
@@ -242,6 +266,17 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Tier 3: Metadata diagnostics
     result.extend(handlers::cached_public::check(ctx));
     result.extend(handlers::command_module_export_methods::check(ctx));
+    result.extend(handlers::common_module_assign::check(ctx));
+    result.extend(handlers::common_module_invalid_type::check(ctx));
+    result.extend(handlers::common_module_missing_api::check(ctx));
+    result.extend(handlers::common_module_name_cached::check(ctx));
+    result.extend(handlers::common_module_name_client::check(ctx));
+    result.extend(handlers::common_module_name_client_server::check(ctx));
+    result.extend(handlers::common_module_name_full_access::check(ctx));
+    result.extend(handlers::common_module_name_global::check(ctx));
+    result.extend(handlers::common_module_name_global_client::check(ctx));
+    result.extend(handlers::common_module_name_server_call::check(ctx));
+    result.extend(handlers::common_module_name_words::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));

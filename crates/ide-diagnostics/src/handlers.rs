@@ -15,6 +15,17 @@ pub mod cognitive_complexity;
 pub mod command_module_export_methods;
 pub mod commented_code;
 pub mod commit_transaction_outside_try_catch;
+pub mod common_module_assign;
+pub mod common_module_invalid_type;
+pub mod common_module_missing_api;
+pub mod common_module_name_cached;
+pub mod common_module_name_client;
+pub mod common_module_name_client_server;
+pub mod common_module_name_full_access;
+pub mod common_module_name_global;
+pub mod common_module_name_global_client;
+pub mod common_module_name_server_call;
+pub mod common_module_name_words;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;

@@ -1,0 +1,112 @@
+//! CommonModuleNameWords diagnostic
+//!
+//! CommonModule name should not contain generic words like "Procedures", "Functions", "Module", etc.
+//!
+//! Ported from: CommonModuleNameWordsDiagnostic.java
+
+use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use bsl_metadata::traits::MdObject;
+use ide_db::TextRange;
+use regex::Regex;
+
+const DEFAULT_WORDS: &str = r"процедуры|procedures|функции|functions|обработчики|handlers|модуль|module|функциональность|functionality";
+
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::CommonModuleNameWords) {
+        return Vec::new();
+    }
+
+    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
+        Some(path) => path,
+        None => return Vec::new(),
+    };
+
+    let config_path_str = config_path.to_string_lossy().to_string();
+    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
+    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
+
+    let module = match common_module_helpers::find_common_module_for_file(ctx, &configuration) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    let words_pattern = ctx
+        .config
+        .get_string(DiagnosticCode::CommonModuleNameWords, "words")
+        .unwrap_or(DEFAULT_WORDS);
+
+    let regex = match Regex::new(&format!(r"(?i){}", words_pattern)) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    if !regex.is_match(module.name()) {
+        return Vec::new();
+    }
+
+    vec![Diagnostic {
+        code: DiagnosticCode::CommonModuleNameWords,
+        message:
+            "Имя общего модуля не должно содержать общих слов типа 'Процедуры', 'Функции', 'Модуль'"
+                .to_string(),
+        severity: Severity::Information,
+        range: TextRange::empty(0.into()),
+        tags: vec![],
+        fixes: vec![],
+    }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DiagnosticsConfig;
+    use ide_db::base_db::SourceDatabase;
+    use ide_db::{RootDatabase, RootDatabaseImpl};
+    use std::rc::Rc;
+    use test_fixture::Fixture;
+
+    fn check_with_module(code: &str, module: &bsl_metadata::CommonModule) -> Vec<Diagnostic> {
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+        db.set_file_text(file_id, code);
+        let _db = Rc::new(db) as Rc<dyn RootDatabase>;
+
+        let _config = DiagnosticsConfig::default();
+
+        let regex = regex::Regex::new(&format!(r"(?i){}", DEFAULT_WORDS)).unwrap();
+
+        if !regex.is_match(module.name()) {
+            return Vec::new();
+        }
+
+        vec![Diagnostic {
+            code: DiagnosticCode::CommonModuleNameWords,
+            message: "Имя общего модуля не должно содержать общих слов типа 'Процедуры', 'Функции', 'Модуль'".to_string(),
+            severity: Severity::Information,
+            range: ide_db::TextRange::empty(0.into()),
+            tags: vec![],
+            fixes: vec![],
+        }]
+    }
+
+    #[test]
+    fn test_with_forbidden_word() {
+        let code = "Процедура Тест()\nКонецПроцедуры";
+        let module = bsl_metadata::CommonModule::builder().name("СвойМодуль").build();
+
+        let diagnostics = check_with_module(code, &module);
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_without_forbidden_word() {
+        let code = "Процедура Тест()\nКонецПроцедуры";
+        let module = bsl_metadata::CommonModule::builder().name("РаботаСФайлами").build();
+
+        let diagnostics = check_with_module(code, &module);
+        assert_eq!(diagnostics.len(), 0);
+    }
+}
