@@ -34,4 +34,11 @@ pub mod data_exchange_loading;
 #[cfg(test)]
 mod debug_test;
 pub mod deleting_collection_item;
+pub mod deprecated_attributes_8312;
+pub mod deprecated_current_date;
+pub mod deprecated_find;
+pub mod deprecated_message;
+pub mod deprecated_methods_8310;
+pub mod deprecated_methods_8317;
+pub mod disable_safe_mode;
 // TODO: Add all 181 handlers

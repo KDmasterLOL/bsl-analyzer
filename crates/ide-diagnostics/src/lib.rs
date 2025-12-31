@@ -92,6 +92,13 @@ pub enum DiagnosticCode {
     CreateQueryInCycle,
     DataExchangeLoading,
     DeletingCollectionItem,
+    DeprecatedCurrentDate,
+    DeprecatedFind,
+    DeprecatedMessage,
+    DeprecatedMethods8310,
+    DeprecatedMethods8317,
+    DeprecatedAttributes8312,
+    DisableSafeMode,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -156,6 +163,13 @@ impl DiagnosticCode {
             Self::CreateQueryInCycle => "CreateQueryInCycle",
             Self::DataExchangeLoading => "DataExchangeLoading",
             Self::DeletingCollectionItem => "DeletingCollectionItem",
+            Self::DeprecatedCurrentDate => "DeprecatedCurrentDate",
+            Self::DeprecatedFind => "DeprecatedFind",
+            Self::DeprecatedMessage => "DeprecatedMessage",
+            Self::DeprecatedMethods8310 => "DeprecatedMethods8310",
+            Self::DeprecatedMethods8317 => "DeprecatedMethods8317",
+            Self::DeprecatedAttributes8312 => "DeprecatedAttributes8312",
+            Self::DisableSafeMode => "DisableSafeMode",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -272,6 +286,13 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::create_query_in_cycle::check(ctx));
     result.extend(handlers::data_exchange_loading::check(ctx));
     result.extend(handlers::deleting_collection_item::check(ctx));
+    result.extend(handlers::deprecated_current_date::check(ctx));
+    result.extend(handlers::deprecated_find::check(ctx));
+    result.extend(handlers::deprecated_message::check(ctx));
+    result.extend(handlers::deprecated_methods_8310::check(ctx));
+    result.extend(handlers::deprecated_methods_8317::check(ctx));
+    result.extend(handlers::deprecated_attributes_8312::check(ctx));
+    result.extend(handlers::disable_safe_mode::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));
