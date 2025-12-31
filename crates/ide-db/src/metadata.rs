@@ -122,6 +122,53 @@ pub trait MetadataDb: salsa::Database {
 
 // ========== Helper Functions ==========
 
+/// Определяет тип модуля по URI файла.
+///
+/// Парсит путь к файлу для определения типа модуля по структуре:
+/// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
+/// - `Catalogs/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl` → CommandModule
+/// - `Catalogs/<Name>/Forms/<Form>/Ext/Form/Module.bsl` → FormModule
+/// - `Catalogs/<Name>/Ext/ObjectModule.bsl` → ObjectModule
+///
+/// # Returns
+///
+/// Тип модуля если распознан, `None` в противном случае.
+pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleType> {
+    let parts: Vec<&str> = file_uri.split('/').collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    // CommonModules/<Name>/Ext/Module.bsl
+    if parts.len() >= 4 && parts[0] == "CommonModules" {
+        return Some(bsl_metadata::ModuleType::CommonModule);
+    }
+
+    // <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl
+    if parts.len() >= 6 && parts[2] == "Commands" && parts[5].ends_with("CommandModule.bsl") {
+        return Some(bsl_metadata::ModuleType::CommandModule);
+    }
+
+    // <TypePlural>/<Name>/Forms/<Form>/Ext/Form/Module.bsl
+    if parts.len() >= 7 && parts[2] == "Forms" && parts[6].ends_with("Module.bsl") {
+        return Some(bsl_metadata::ModuleType::FormModule);
+    }
+
+    // Простые модули
+    if parts.len() >= 4 {
+        let module_file = parts[parts.len() - 1];
+        return match module_file {
+            "ObjectModule.bsl" => Some(bsl_metadata::ModuleType::ObjectModule),
+            "ManagerModule.bsl" => Some(bsl_metadata::ModuleType::ManagerModule),
+            "RecordSetModule.bsl" => Some(bsl_metadata::ModuleType::RecordSetModule),
+            _ => None,
+        };
+    }
+
+    None
+}
+
 /// Find a metadata object by type and name.
 ///
 /// This is a convenience function for looking up metadata objects.
@@ -525,5 +572,35 @@ mod tests {
 
         // Test PartialEq
         assert_eq!(owner1, owner2, "Same module owner should be equal");
+    }
+
+    #[test]
+    fn test_get_module_type_command_module() {
+        let uri = "Catalogs/Справочник1/Commands/Команда1/Ext/CommandModule.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommandModule));
+    }
+
+    #[test]
+    fn test_get_module_type_common_module() {
+        let uri = "CommonModules/ГлобальныйМодуль/Ext/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommonModule));
+    }
+
+    #[test]
+    fn test_get_module_type_form_module() {
+        let uri = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+    }
+
+    #[test]
+    fn test_get_module_type_object_module() {
+        let uri = "Catalogs/Номенклатура/Ext/ObjectModule.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::ObjectModule));
+    }
+
+    #[test]
+    fn test_get_module_type_unknown() {
+        let uri = "SomeRandomPath/File.bsl";
+        assert_eq!(get_module_type_from_uri(uri), None);
     }
 }

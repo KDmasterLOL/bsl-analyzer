@@ -92,6 +92,7 @@ pub enum DiagnosticCode {
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     CachedPublic,
+    CommandModuleExportMethods,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -136,6 +137,7 @@ impl DiagnosticCode {
             Self::CachedPublic => "CachedPublic",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
+            Self::CommandModuleExportMethods => "CommandModuleExportMethods",
             _ => "Unknown",
         }
     }
@@ -225,6 +227,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Tier 1: Syntax diagnostics
     result.extend(handlers::bad_words::check(ctx));
     result.extend(handlers::canonical_spelling_keywords::check(ctx));
+    result.extend(handlers::commented_code::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
@@ -236,6 +239,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Tier 3: Metadata diagnostics
     result.extend(handlers::cached_public::check(ctx));
+    result.extend(handlers::command_module_export_methods::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));

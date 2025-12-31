@@ -12,6 +12,8 @@ pub mod code_after_async_call;
 pub mod code_block_before_sub;
 pub mod code_out_of_region;
 pub mod cognitive_complexity;
+pub mod command_module_export_methods;
+pub mod commented_code;
 pub mod consecutive_empty_lines;
 #[cfg(test)]
 mod debug_test;
