@@ -50,6 +50,42 @@
 - Snapshot-тесты для парсера и AST (expect-test)
 - Адаптировать тесты из bsl-language-server где возможно
 
+**Тестирование диагностик на BSL файлах:**
+
+При тестировании диагностик **ОБЯЗАТЕЛЬНО** использовать вспомогательные методы для проверки позиций:
+
+```rust
+use crate::test_utils::assert_diagnostic_range_multiline;
+
+#[test]
+fn test_my_diagnostic() {
+    let code = include_str!("../../test_data/MyDiagnostic.bsl");
+    let diagnostics = check_diagnostic(code);
+
+    // ✅ ПРАВИЛЬНО: используем assert_diagnostic_range_multiline
+    assert_eq!(diagnostics.len(), 1);
+    assert_diagnostic_range_multiline(&code, &diagnostics[0], 3, 0, 5, 13);
+    // Проверяет что диагностика на строке 3, колонка 0 до строки 5, колонка 13
+}
+```
+
+**Запрещено:**
+```rust
+// ❌ НЕПРАВИЛЬНО: ручная проверка TextRange
+assert_eq!(diagnostics[0].range, TextRange::new(42.into(), 156.into()));
+// Магические числа, сложно понять где именно ошибка в BSL файле
+```
+
+**Обоснование:**
+- `assert_diagnostic_range_multiline` показывает читаемые номера строк/колонок
+- При падении теста сразу понятно где проблема в BSL файле
+- Легко сверить с Java тестами (которые тоже используют line/column)
+- Избегаем магических чисел для byte offsets
+
+**Доступные helper методы** (см. `crates/ide-diagnostics/src/test_utils.rs`):
+- `assert_diagnostic_range_multiline(code, diag, start_line, start_col, end_line, end_col)`
+- `assert_diagnostic_range(code, diag, line, start_col, end_col)` — для однострочных
+
 **Если сломались существующие тесты:**
 
 1. **Понять причину** — не игнорировать, не удалять тест
@@ -72,6 +108,7 @@ UPDATE_EXPECT=1 cargo test
 - Удалять тесты без обоснования
 - Коммитить с падающими тестами
 - Использовать `#[ignore]` без TODO с планом исправления
+- Использовать магические числа для TextRange в тестах диагностик
 
 ---
 
