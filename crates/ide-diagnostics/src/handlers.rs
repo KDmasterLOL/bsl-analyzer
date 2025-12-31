@@ -30,6 +30,7 @@ pub mod compilation_directive_lost;
 pub mod consecutive_empty_lines;
 pub mod create_query_in_cycle;
 pub mod cyclomatic_complexity;
+pub mod data_exchange_loading;
 #[cfg(test)]
 mod debug_test;
 // TODO: Add all 181 handlers
