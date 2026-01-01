@@ -48,4 +48,5 @@ pub mod duplicate_region;
 pub mod duplicate_string_literal;
 pub mod duplicated_insertion_into_collection;
 pub mod empty_code_block;
+pub mod empty_region;
 // TODO: Add all 181 handlers
