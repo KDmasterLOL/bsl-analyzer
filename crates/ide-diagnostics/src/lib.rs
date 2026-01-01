@@ -55,6 +55,7 @@ pub enum DiagnosticCode {
     UnaryPlusInConcatenation,
     UselessTernaryOperator,
     BadWords,
+    DuplicateStringLiteral,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -154,6 +155,7 @@ impl DiagnosticCode {
             Self::UnaryPlusInConcatenation => "UnaryPlusInConcatenation",
             Self::UselessTernaryOperator => "UselessTernaryOperator",
             Self::BadWords => "BadWords",
+            Self::DuplicateStringLiteral => "DuplicateStringLiteral",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
@@ -278,6 +280,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::canonical_spelling_keywords::check(ctx));
     result.extend(handlers::commented_code::check(ctx));
     result.extend(handlers::double_negatives::check(ctx));
+    result.extend(handlers::duplicate_string_literal::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
