@@ -69,10 +69,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 fn check_code_block(block: &SyntaxNode, allow_add: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut tracker = InsertionTracker::new();
-
-    // Process all nodes - single tracker for entire function to track generations properly
     check_scope(block, allow_add, &mut tracker, diagnostics, 0);
-
     tracker.report_duplicates(diagnostics, 0);
 }
 
@@ -92,7 +89,6 @@ fn check_scope(
                     tracing::trace!(lvalue = %lvalue, "assignment found");
                     tracker.record_assignment(lvalue);
                 }
-                // Still need to check descendants for nested structures
                 check_descendants_non_recursive(
                     &node,
                     allow_add,
@@ -102,10 +98,8 @@ fn check_scope(
                 );
             }
             SyntaxKind::CALL_STMT => {
-                // Try to extract method call info (for insertion methods)
                 if let Some((collection, method, args)) = extract_method_call_info(&node) {
                     if is_insertion_method(&method, allow_add) && !args.is_empty() {
-                        // Only check first argument for special literals (key for Insert/Вставить)
                         if is_special_literal(&args[0]) {
                             tracing::trace!(
                                 collection = %collection,
@@ -121,41 +115,41 @@ fn check_scope(
                             args = ?args,
                             "insertion found"
                         );
-                        tracker.record_insertion(collection, args, node.text_range(), scope_depth);
-                        continue; // Don't treat as a regular call
+                        if let Some(range) = extract_insertion_range(&node) {
+                            tracker.record_insertion(collection, args, range, scope_depth);
+                        }
+                        continue;
                     }
                 }
 
-                // For all non-insertion calls (methods or global functions),
-                // increment generation for any variables used as arguments
                 for identifier in extract_identifiers_from_call(&node) {
                     tracing::trace!(identifier = %identifier, "variable used in call");
                     tracker.record_assignment(identifier);
                 }
             }
-            // Breakers: return always affects all, break/continue only if local
             SyntaxKind::RETURN_STMT => {
                 tracing::trace!(scope_depth = scope_depth, "return found");
                 tracker.record_breaker(node.text_range().start().into(), scope_depth);
             }
             SyntaxKind::BREAK_STMT | SyntaxKind::CONTINUE_STMT => {
-                // Check if this is a LOCAL break (parent loop inside current function)
                 if is_local_breaker(&node, scope) {
                     tracing::trace!(scope_depth = scope_depth, "local break/continue found");
-                    tracker.record_local_breaker(node.text_range().start().into());
+                    tracker.record_local_breaker(node.text_range().start().into(), scope_depth);
                 }
             }
-            // Nested control flow blocks: increment scope depth and continue with SAME tracker
-            SyntaxKind::IF_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::TRY_STMT => {
+            SyntaxKind::IF_STMT | SyntaxKind::TRY_STMT => {
                 check_scope(&node, allow_add, tracker, diagnostics, scope_depth + 1);
-                // Report duplicates for this nested scope
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
             }
+            SyntaxKind::FOR_STMT | SyntaxKind::FOR_EACH_STMT | SyntaxKind::WHILE_STMT => {
+                let saved_local_breaker = tracker.last_local_breaker;
+                check_scope(&node, allow_add, tracker, diagnostics, scope_depth + 1);
+                tracker.report_duplicates(diagnostics, scope_depth + 1);
+                // Restore local_breaker after exiting loop
+                // (break inside loop doesn't affect code after loop)
+                tracker.last_local_breaker = saved_local_breaker;
+            }
             _ => {
-                // For other nodes, continue checking descendants
                 check_descendants_non_recursive(
                     &node,
                     allow_add,
@@ -168,7 +162,6 @@ fn check_scope(
     }
 }
 
-/// Check descendants but don't recurse into nested control flow blocks
 fn check_descendants_non_recursive(
     node: &SyntaxNode,
     allow_add: bool,
@@ -178,13 +171,15 @@ fn check_descendants_non_recursive(
 ) {
     for child in node.children() {
         match child.kind() {
-            // Stop at nested control flow blocks
-            SyntaxKind::IF_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::TRY_STMT => {
+            SyntaxKind::IF_STMT | SyntaxKind::TRY_STMT => {
                 check_scope(&child, allow_add, tracker, diagnostics, scope_depth + 1);
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
+            }
+            SyntaxKind::FOR_STMT | SyntaxKind::FOR_EACH_STMT | SyntaxKind::WHILE_STMT => {
+                let saved_local_breaker = tracker.last_local_breaker;
+                check_scope(&child, allow_add, tracker, diagnostics, scope_depth + 1);
+                tracker.report_duplicates(diagnostics, scope_depth + 1);
+                tracker.last_local_breaker = saved_local_breaker;
             }
             SyntaxKind::ASSIGN_STMT => {
                 if let Some(lvalue) = extract_lvalue(&child) {
@@ -200,34 +195,31 @@ fn check_descendants_non_recursive(
                 );
             }
             SyntaxKind::BREAK_STMT | SyntaxKind::CONTINUE_STMT => {
-                // Check if this is a LOCAL break (parent loop inside current function)
-                // Note: we pass the ROOT of the function, not current node
                 let function_root = find_function_root(&child);
                 if let Some(func_root) = function_root {
                     if is_local_breaker(&child, &func_root) {
-                        tracker.record_local_breaker(child.text_range().start().into());
+                        tracker
+                            .record_local_breaker(child.text_range().start().into(), scope_depth);
                     }
                 }
             }
             SyntaxKind::CALL_STMT => {
-                // Try to extract method call info (for insertion methods)
                 if let Some((collection, method, args)) = extract_method_call_info(&child) {
                     if is_insertion_method(&method, allow_add) && !args.is_empty() {
-                        // Only check first argument for special literals (key for Insert/Вставить)
                         if is_special_literal(&args[0]) {
                             continue;
                         }
-                        tracker.record_insertion(collection, args, child.text_range(), scope_depth);
-                        continue; // Don't treat as a regular call
+                        if let Some(range) = extract_insertion_range(&child) {
+                            tracker.record_insertion(collection, args, range, scope_depth);
+                        }
+                        continue;
                     }
                 }
 
-                // For all non-insertion calls, increment generation for variables used as arguments
                 for identifier in extract_identifiers_from_call(&child) {
                     tracker.record_assignment(identifier);
                 }
             }
-            // Breakers: only return statements
             SyntaxKind::RETURN_STMT => {
                 tracker.record_breaker(child.text_range().start().into(), scope_depth);
             }
@@ -266,7 +258,6 @@ fn is_insertion_method(method: &str, allow_add: bool) -> bool {
     }
 }
 
-/// Find the root function/procedure node containing this node
 fn find_function_root(node: &SyntaxNode) -> Option<SyntaxNode> {
     let mut current = Some(node.clone());
     while let Some(n) = current {
@@ -278,18 +269,14 @@ fn find_function_root(node: &SyntaxNode) -> Option<SyntaxNode> {
     None
 }
 
-/// Check if break/continue is LOCAL (parent loop inside current function)
 /// Per Java logic: local break doesn't affect outer code flow
 fn is_local_breaker(breaker_node: &SyntaxNode, function_scope: &SyntaxNode) -> bool {
-    // Find parent FOR/WHILE/TRY loop
     let mut current = breaker_node.parent();
     while let Some(node) = current {
-        // Stop if we reached function boundary
         if node == *function_scope {
-            return false; // No parent loop found inside function
+            return false;
         }
 
-        // Check if this is a loop/try
         if matches!(
             node.kind(),
             SyntaxKind::FOR_STMT
@@ -297,21 +284,18 @@ fn is_local_breaker(breaker_node: &SyntaxNode, function_scope: &SyntaxNode) -> b
                 | SyntaxKind::WHILE_STMT
                 | SyntaxKind::TRY_STMT
         ) {
-            // Found parent loop - check if it's inside function_scope
-            // If we haven't exited function_scope yet, it must be inside
-            return true; // Local break (loop is inside function)
+            return true;
         }
 
         current = node.parent();
     }
 
-    false // No parent loop found
+    false
 }
 
 fn is_special_literal(arg: &str) -> bool {
     let trimmed = arg.trim();
 
-    // Empty or whitespace-only strings
     if trimmed == "\"\""
         || (trimmed.starts_with('"')
             && trimmed.ends_with('"')
@@ -320,7 +304,6 @@ fn is_special_literal(arg: &str) -> bool {
         return true;
     }
 
-    // Undefined/Null
     let lower = trimmed.to_lowercase();
     if matches!(lower.as_str(), "неопределено" | "undefined" | "null") {
         return true;
@@ -342,19 +325,14 @@ fn is_special_literal(arg: &str) -> bool {
 fn is_likely_variable(arg: &str) -> bool {
     let trimmed = arg.trim();
 
-    // Not a variable if it's a literal
     if trimmed.starts_with('"') || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return false;
     }
 
-    // Not a variable if it contains operators or function calls
-    // Function calls, arithmetic, etc. can produce different values
     if trimmed.contains(&['+', '-', '*', '/', '(', ')', ','][..]) {
         return false;
     }
 
-    // Simple identifier or property access (Var or Obj.Prop or Obj.Prop.SubProp)
-    // These are safe to track with generations
     true
 }
 
@@ -368,7 +346,6 @@ impl VariableGenerations {
     }
 
     fn get(&self, var: &str) -> usize {
-        // Get generation for this exact variable
         let mut max_gen = self.map.get(&UniCase::new(var.to_string())).copied().unwrap_or(0);
 
         // Also check all prefixes (for partial reassignment detection)
@@ -422,8 +399,8 @@ struct InsertionTracker {
     insertions: HashMap<InsertionKey, Vec<Insertion>>,
     /// Last return statement: (offset, scope_depth)
     last_breaker: Option<(u32, usize)>,
-    /// Last local break/continue statement offset
-    last_local_breaker: Option<u32>,
+    /// Last local break/continue statement: (offset, scope_depth)
+    last_local_breaker: Option<(u32, usize)>,
 }
 
 impl InsertionTracker {
@@ -440,24 +417,20 @@ impl InsertionTracker {
         self.last_breaker = Some((offset, scope_depth));
     }
 
-    fn record_local_breaker(&mut self, offset: u32) {
-        self.last_local_breaker = Some(offset);
+    fn record_local_breaker(&mut self, offset: u32, scope_depth: usize) {
+        self.last_local_breaker = Some((offset, scope_depth));
     }
 
     fn record_assignment(&mut self, lvalue: String) {
         self.variable_gens.increment(lvalue);
     }
 
-    /// Normalize complex argument by extracting identifiers and adding generations
     fn normalize_complex_arg(&self, arg: &str) -> String {
-        // Extract all identifiers with their positions
         let re = regex::Regex::new(r"\b[А-Яа-яA-Za-z_][А-Яа-яA-Za-z0-9_]*\b").unwrap();
 
-        // Collect replacements: (start, end, replacement_text)
         let mut replacements = Vec::new();
         for cap in re.find_iter(arg) {
             let identifier = cap.as_str();
-            // Skip BSL keywords and literals
             if is_bsl_keyword_or_literal(identifier) {
                 continue;
             }
@@ -488,24 +461,19 @@ impl InsertionTracker {
         // Per Java implementation: only firstParam is used for duplicate detection
         let first_arg = &args[0];
         let normalized_first_arg = if is_likely_variable(first_arg) {
-            // Simple identifier - just add generation
             format!("{}@gen{}", first_arg, self.variable_gens.get(first_arg))
         } else {
-            // Complex expression - extract all identifiers and add their generations
             self.normalize_complex_arg(first_arg)
         };
 
         let key = InsertionKey {
             collection: UniCase::new(collection.clone()),
             generation: coll_gen,
-            first_arg: normalized_first_arg,
+            first_arg: normalized_first_arg.clone(),
         };
 
-        // Return statement always affects all subsequent insertions in the function
         let breaker_context = self.last_breaker.map(|(offset, _scope)| offset);
-
-        // Local break/continue may prevent execution of subsequent insertions
-        let local_breaker_context = self.last_local_breaker;
+        let local_breaker_context = self.last_local_breaker.map(|(offset, _depth)| offset);
 
         self.insertions.entry(key).or_default().push(Insertion {
             range,
@@ -519,7 +487,6 @@ impl InsertionTracker {
 
     fn report_duplicates(&mut self, diagnostics: &mut Vec<Diagnostic>, scope_depth: usize) {
         for insertions in self.insertions.values() {
-            // Filter insertions to only those at the current scope depth
             let scope_insertions: Vec<_> =
                 insertions.iter().filter(|ins| ins.scope_depth == scope_depth).collect();
 
@@ -535,15 +502,18 @@ impl InsertionTracker {
 
                 for group in grouped.values() {
                     if group.len() > 1 {
-                        for ins in group.iter().skip(1) {
+                        // Report only SECOND insertion (Java compatibility)
+                        // When Diagnostic supports related_information, include all insertions there
+                        if let Some(second_insertion) = group.get(1) {
                             diagnostics.push(Diagnostic {
                                 code: DiagnosticCode::DuplicatedInsertionIntoCollection,
                                 message: format!(
                                     "Проверьте повторную вставку {} в коллекцию {}",
-                                    ins.args_display, ins.collection_display
+                                    second_insertion.args_display,
+                                    second_insertion.collection_display
                                 ),
                                 severity: Severity::Warning,
-                                range: ins.range,
+                                range: second_insertion.range,
                                 tags: vec![],
                                 fixes: vec![],
                             });
@@ -553,7 +523,6 @@ impl InsertionTracker {
             }
         }
 
-        // Clear reported insertions at this scope to avoid re-reporting
         for insertions in self.insertions.values_mut() {
             insertions.retain(|ins| ins.scope_depth != scope_depth);
         }
@@ -565,6 +534,38 @@ fn extract_lvalue(assign_stmt: &SyntaxNode) -> Option<String> {
         .children()
         .find(|n| n.kind() == SyntaxKind::EXPR)
         .map(|expr| expr.text().to_string().trim().to_string())
+}
+
+fn extract_insertion_range(call_stmt: &SyntaxNode) -> Option<TextRange> {
+    // Find the ARG_LIST to get the end position (closing paren)
+    // Java compatibility: range should be from start to end of ARG_LIST, not including semicolon
+    let arg_lists: Vec<_> =
+        call_stmt.descendants().filter(|n| n.kind() == SyntaxKind::ARG_LIST).collect();
+
+    if arg_lists.is_empty() {
+        return None;
+    }
+
+    let arg_list = arg_lists
+        .iter()
+        .rev()
+        .find(|&list| {
+            let mut parent = list.parent();
+            while let Some(p) = parent {
+                if p == *call_stmt {
+                    break;
+                }
+                if p.kind() == SyntaxKind::ARG_LIST {
+                    return false;
+                }
+                parent = p.parent();
+            }
+            true
+        })
+        .or_else(|| arg_lists.last())?;
+
+    // Range from start of CALL_STMT to end of ARG_LIST (excluding semicolon)
+    Some(TextRange::new(call_stmt.text_range().start(), arg_list.text_range().end()))
 }
 
 fn extract_method_call_info(call_stmt: &SyntaxNode) -> Option<(String, String, Vec<String>)> {
@@ -580,24 +581,22 @@ fn extract_method_call_info(call_stmt: &SyntaxNode) -> Option<(String, String, V
         return None;
     }
 
-    // Find ARG_LIST that is NOT inside another ARG_LIST
     // For multiple non-nested ARG_LIST (e.g., "Коллекция().Добавить(X)"), take the LAST one
     let arg_list = arg_lists
         .iter()
         .rev()
         .find(|&list| {
-            // Check if any ancestor (before call_stmt) is an ARG_LIST
             let mut parent = list.parent();
             while let Some(p) = parent {
                 if p == *call_stmt {
                     break;
                 }
                 if p.kind() == SyntaxKind::ARG_LIST {
-                    return false; // This ARG_LIST is nested inside another
+                    return false;
                 }
                 parent = p.parent();
             }
-            true // This ARG_LIST is not nested
+            true
         })
         .or_else(|| arg_lists.last())?;
 
@@ -644,7 +643,6 @@ fn extract_args(arg_list: &SyntaxNode) -> Vec<String> {
                 has_content = true;
             }
             syntax::NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => {
-                // Comma found - push current arg (empty if no content)
                 args.push(if has_content { current_arg.clone() } else { String::new() });
                 current_arg.clear();
                 has_content = false;
@@ -653,7 +651,6 @@ fn extract_args(arg_list: &SyntaxNode) -> Vec<String> {
         }
     }
 
-    // Push last arg (if any content OR if we had commas)
     if has_content || !args.is_empty() {
         args.push(if has_content { current_arg } else { String::new() });
     }
@@ -661,11 +658,9 @@ fn extract_args(arg_list: &SyntaxNode) -> Vec<String> {
     args
 }
 
-/// Extract all identifiers used in a CALL_STMT (for tracking function parameter usage)
 fn extract_identifiers_from_call(call_stmt: &SyntaxNode) -> Vec<String> {
     let mut identifiers = Vec::new();
 
-    // Find all ARG_LIST nodes and extract their arguments
     for node in call_stmt.descendants() {
         if node.kind() == SyntaxKind::ARG_LIST {
             for arg in extract_args(&node) {
@@ -720,6 +715,9 @@ mod tests {
         "#;
         let diagnostics = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "Should detect one duplicate");
+
+        use crate::test_utils::assert_diagnostic_range;
+        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 29);
     }
 
     #[test]
@@ -762,11 +760,10 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_diagnostic(code);
-        eprintln!("Global function test: found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            eprintln!("  {}", diag.message);
-        }
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with global function");
+
+        use crate::test_utils::assert_diagnostic_range;
+        assert_diagnostic_range(code, &diagnostics[0], 3, 4, 34);
     }
 
     #[test]
@@ -781,15 +778,14 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_diagnostic(code);
-        eprintln!("Preprocessor test: found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            eprintln!("  {}", diag.message);
-        }
         assert_eq!(
             diagnostics.len(),
             1,
             "Should detect duplicate across preprocessor branches (same key)"
         );
+
+        use crate::test_utils::assert_diagnostic_range;
+        assert_diagnostic_range(code, &diagnostics[0], 5, 8, 72);
     }
 
     #[test]
@@ -806,11 +802,6 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_diagnostic(code);
-        eprintln!("Break test: found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            let start_line = code[..diag.range.start().into()].lines().count();
-            eprintln!("  Line {}: {}", start_line, diag.message);
-        }
         assert_eq!(
             diagnostics.len(),
             0,
@@ -828,11 +819,10 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_diagnostic(code);
-        eprintln!("Method in path test: found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            eprintln!("  {}", diag.message);
-        }
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with method in collection path");
+
+        use crate::test_utils::assert_diagnostic_range;
+        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 49);
     }
 
     #[test]
@@ -844,11 +834,10 @@ mod tests {
 КонецПроцедуры
         "#;
         let diagnostics = check_diagnostic(code);
-        eprintln!("Complex argument test: found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            eprintln!("  {}", diag.message);
-        }
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with complex argument");
+
+        use crate::test_utils::assert_diagnostic_range;
+        assert_diagnostic_range(code, &diagnostics[0], 3, 4, 77);
     }
 
     #[test]
@@ -856,30 +845,19 @@ mod tests {
         let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
         let diagnostics = check_diagnostic(code);
 
-        eprintln!("\n===== Found {} diagnostics =====", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let start_line = code[..diag.range.start().into()].lines().count();
-            eprintln!("{}: Line {} - {}", i + 1, start_line, diag.message);
-        }
-
-        // Expected: 18 diagnostics from Java
-        // Status: Line 260 FIXED! ✅ (local breaker tracking)
-        // Remaining limitation:
-        // - Line 59 instead of 58 (preprocessor #Иначе vs actual insertion line)
-        //   This is actually MORE accurate (report insertion, not directive)
-        assert_eq!(
-            diagnostics.len(),
-            18,
-            "Expected 18 diagnostics (matching Java after Line 260 fix)"
-        );
+        // Expected: 18 diagnostics from Java (exact match!)
+        assert_eq!(diagnostics.len(), 18, "Expected 18 diagnostics (full Java compatibility)");
 
         // Verify we have all expected lines
         let found_lines: Vec<_> =
             diagnostics.iter().map(|d| code[..d.range.start().into()].lines().count()).collect();
 
-        // Java expectations (with Line 59 instead of 58)
+        // Java expectations (18 diagnostics):
+        // Lines 4,8,12,22,27,58,99,102,119,133,136,147,151,157,161,171,265,268 (0-indexed)
+        // = 5,9,13,23,28,59,100,103,120,134,137,148,152,158,162,172,266,269 (1-indexed)
+        // Note: Line 163 is part of triple duplicate with 160,162,163 but not separate diagnostic
         let expected_java =
-            vec![5, 9, 13, 28, 59, 100, 103, 134, 137, 148, 152, 158, 162, 163, 172, 266, 269];
+            vec![5, 9, 13, 23, 28, 59, 100, 103, 120, 134, 137, 148, 152, 158, 162, 172, 266, 269];
         for expected_line in expected_java {
             assert!(
                 found_lines.contains(&expected_line),
@@ -888,16 +866,10 @@ mod tests {
             );
         }
 
-        // Line 59 instead of 58 (preprocessor #Иначе - actually more accurate!)
-        assert!(found_lines.contains(&59), "Line 59 should be detected (preprocessor duplicate)");
-
-        // Line 163 is correctly detected (third duplicate in sequence)
-        assert!(found_lines.contains(&163), "Line 163 should be detected");
-
-        // Line 260 should NOT be detected (break in nested if - correctly handled by local breaker tracking)
+        // Line 260 should NOT be detected (break in nested if correctly prevents duplicate)
         assert!(
             !found_lines.contains(&260),
-            "Line 260 should NOT be detected (break prevents execution)"
+            "Line 260 should NOT be detected (break may prevent execution)"
         );
     }
 }
