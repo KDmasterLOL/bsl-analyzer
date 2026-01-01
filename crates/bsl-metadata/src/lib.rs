@@ -94,17 +94,21 @@
 
 pub mod common_module;
 pub mod configuration;
+pub mod dimension;
 pub mod enums;
 pub mod error;
 pub mod loader;
 pub mod metadata_object;
+pub mod register;
 pub mod traits;
 pub mod xml_parser;
 
 pub use common_module::{CommonModule, CommonModuleBuilder};
 pub use configuration::Configuration;
+pub use dimension::{Dimension, DimensionBuilder};
 pub use enums::{ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant};
 pub use error::{MetadataError, Result};
 pub use loader::load_from_directory;
 pub use metadata_object::{MdoType, MetadataObject};
+pub use register::{Register, RegisterBuilder};
 pub use traits::{MdObject, Module};

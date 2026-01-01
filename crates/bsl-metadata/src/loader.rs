@@ -4,30 +4,30 @@
 //!
 //! ## Designer Format Structure
 //!
-//! **CRITICAL:** XML files are INSIDE object folders, code files are inside Ext/ subdirectories:
+//! **CRITICAL:** XML files are NEXT TO object folders, code files are inside Ext/ subdirectories:
 //!
 //! ```text
 //! Configuration.xml                      # Root configuration
 //! ConfigDumpInfo.xml                     # Dump information
 //!
 //! CommonModules/
-//! ├── <Name>/                            # Object folder
-//! │   ├── <Name>.xml                     # XML INSIDE folder!
-//! │   └── Ext/
-//! │       └── Module.bsl                 # Code inside Ext/!
+//! ├── <Name>.xml                         # XML NEXT TO folder!
+//! └── <Name>/                            # Object folder
+//!     └── Ext/
+//!         └── Module.bsl                 # Code inside Ext/
 //!
 //! Catalogs/
-//! ├── <Name>/                            # Object folder
-//! │   ├── <Name>.xml                     # XML INSIDE folder!
-//! │   └── Ext/
-//! │       ├── ManagerModule.bsl          # Code inside Ext/!
-//! │       └── ObjectModule.bsl
+//! ├── <Name>.xml                         # XML NEXT TO folder!
+//! └── <Name>/                            # Object folder
+//!     └── Ext/
+//!         ├── ManagerModule.bsl          # Code inside Ext/
+//!         └── ObjectModule.bsl
 //!
 //! InformationRegisters/
-//! ├── <Name>/                            # Object folder
-//! │   ├── <Name>.xml                     # XML INSIDE folder!
-//! │   └── Ext/
-//! │       └── ManagerModule.bsl          # Code inside Ext/!
+//! ├── <Name>.xml                         # XML NEXT TO folder!
+//! └── <Name>/                            # Object folder
+//!     └── Ext/
+//!         └── ManagerModule.bsl          # Code inside Ext/
 //! ```
 
 use crate::configuration::Configuration;
@@ -71,12 +71,16 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load Documents
     load_documents(&path.join("Documents"), &mut config)?;
 
-    // Load InformationRegisters
+    // Load all 4 register types
     load_information_registers(&path.join("InformationRegisters"), &mut config)?;
+    load_accumulation_registers(&path.join("AccumulationRegisters"), &mut config)?;
+    load_accounting_registers(&path.join("AccountingRegisters"), &mut config)?;
+    load_calculation_registers(&path.join("CalculationRegisters"), &mut config)?;
 
     tracing::info!(
         common_modules = config.common_modules().len(),
         metadata_objects = config.metadata_objects().len(),
+        registers = config.registers().len(),
         "configuration loaded"
     );
 
@@ -86,7 +90,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
 /// Load CommonModules from directory
 ///
 /// Designer format structure:
-/// - XML: `CommonModules/<Name>/<Name>.xml` (ВНУТРИ папки!)
+/// - XML: `CommonModules/<Name>.xml` (рядом с папкой!)
 /// - Code: `CommonModules/<Name>/Ext/Module.bsl` (внутри Ext/)
 fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
     let _span = tracing::debug_span!("load_common_modules", ?dir).entered();
@@ -103,11 +107,11 @@ fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
         // Look for directories
         if module_dir.is_dir() {
             if let Some(name) = module_dir.file_name().and_then(|n| n.to_str()) {
-                // ПРАВИЛЬНАЯ СТРУКТУРА:
-                // - XML: CommonModules/<Name>/<Name>.xml (внутри папки!)
-                // - Код: CommonModules/<Name>/Ext/Module.bsl (внутри Ext/)
+                // Designer format structure:
+                // - XML: CommonModules/<Name>.xml (NEXT TO folder)
+                // - Code: CommonModules/<Name>/Ext/Module.bsl (inside Ext/)
 
-                let xml_path = module_dir.join(format!("{}.xml", name));
+                let xml_path = dir.join(format!("{}.xml", name));
                 let module_bsl_path = module_dir.join("Ext/Module.bsl");
 
                 if xml_path.exists() {
@@ -157,7 +161,7 @@ fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
 /// Load Catalogs from directory
 ///
 /// Designer format structure:
-/// - XML: `Catalogs/<Name>/<Name>.xml` (ВНУТРИ папки!)
+/// - XML: `Catalogs/<Name>.xml` (рядом с папкой!)
 /// - Code: `Catalogs/<Name>/Ext/ManagerModule.bsl` and `ObjectModule.bsl` (внутри Ext/)
 fn load_catalogs(dir: &Path, config: &mut Configuration) -> Result<()> {
     let _span = tracing::debug_span!("load_catalogs", ?dir).entered();
@@ -174,7 +178,7 @@ fn load_catalogs(dir: &Path, config: &mut Configuration) -> Result<()> {
         // Look for directories
         if catalog_dir.is_dir() {
             if let Some(name) = catalog_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = catalog_dir.join(format!("{}.xml", name));
+                let xml_path = dir.join(format!("{}.xml", name));
 
                 if xml_path.exists() {
                     let obj = MetadataObject::new(MdoType::Catalog, name);
@@ -192,7 +196,7 @@ fn load_catalogs(dir: &Path, config: &mut Configuration) -> Result<()> {
 /// Load Documents from directory
 ///
 /// Designer format structure:
-/// - XML: `Documents/<Name>/<Name>.xml` (ВНУТРИ папки!)
+/// - XML: `Documents/<Name>.xml` (рядом с папкой!)
 /// - Code: `Documents/<Name>/Ext/ManagerModule.bsl` and `ObjectModule.bsl` (внутри Ext/)
 fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
     let _span = tracing::debug_span!("load_documents", ?dir).entered();
@@ -209,7 +213,7 @@ fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
         // Look for directories
         if document_dir.is_dir() {
             if let Some(name) = document_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = document_dir.join(format!("{}.xml", name));
+                let xml_path = dir.join(format!("{}.xml", name));
 
                 if xml_path.exists() {
                     let obj = MetadataObject::new(MdoType::Document, name);
@@ -225,12 +229,35 @@ fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
 }
 
 /// Load InformationRegisters from directory
+fn load_information_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
+    load_registers(dir, config, xml_parser::parse_information_register_xml)
+}
+
+/// Load AccumulationRegisters from directory
+fn load_accumulation_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
+    load_registers(dir, config, xml_parser::parse_accumulation_register_xml)
+}
+
+/// Load AccountingRegisters from directory
+fn load_accounting_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
+    load_registers(dir, config, xml_parser::parse_accounting_register_xml)
+}
+
+/// Load CalculationRegisters from directory
+fn load_calculation_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
+    load_registers(dir, config, xml_parser::parse_calculation_register_xml)
+}
+
+/// Generic register loader for all 4 register types
 ///
 /// Designer format structure:
-/// - XML: `InformationRegisters/<Name>/<Name>.xml` (ВНУТРИ папки!)
-/// - Code: `InformationRegisters/<Name>/Ext/ManagerModule.bsl` (внутри Ext/)
-fn load_information_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_information_registers", ?dir).entered();
+/// - XML: `<RegisterType>/<Name>.xml` (NEXT TO folder)
+/// - Code: `<RegisterType>/<Name>/Ext/ManagerModule.bsl` (inside Ext/)
+fn load_registers<F>(dir: &Path, config: &mut Configuration, parser: F) -> Result<()>
+where
+    F: Fn(&str) -> Result<crate::register::Register>,
+{
+    let _span = tracing::debug_span!("load_registers", ?dir).entered();
 
     if !dir.exists() {
         tracing::debug!("directory does not exist, skipping");
@@ -244,13 +271,18 @@ fn load_information_registers(dir: &Path, config: &mut Configuration) -> Result<
         // Look for directories
         if register_dir.is_dir() {
             if let Some(name) = register_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = register_dir.join(format!("{}.xml", name));
+                // XML is NEXT TO folder: <RegisterType>/<Name>.xml
+                let xml_path = dir.join(format!("{}.xml", name));
 
                 if xml_path.exists() {
-                    let obj = MetadataObject::new(MdoType::InformationRegister, name);
-                    config.add_metadata_object(obj);
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let register = parser(&xml)?;
+                    config.add_register(register);
 
-                    tracing::debug!(register = %name, "loaded information register");
+                    tracing::debug!(
+                        register = %name,
+                        "loaded register"
+                    );
                 }
             }
         }
@@ -286,7 +318,22 @@ mod tests {
         assert!(module.uri().is_some(), "Should have URI");
         assert_eq!(module.uri().unwrap(), "CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl");
 
-        // Check InformationRegisters loaded
+        // Check registers loaded
+        assert!(!config.registers().is_empty(), "No registers loaded");
+
+        // Check InformationRegisters loaded as full Register objects
+        let register = config.find_register("РегистрСведений1");
+        if let Some(reg) = register {
+            assert!(reg.is_information_register(), "Should be InformationRegister");
+            assert_eq!(reg.dimensions().len(), 1, "Should have 1 dimension");
+            assert_eq!(reg.dimensions()[0].name(), "Справочник1", "Dimension name should match");
+            assert!(
+                !reg.dimensions()[0].is_deny_incomplete_values(),
+                "DenyIncompleteValues should be false"
+            );
+        }
+
+        // Check Catalogs and Documents loaded as metadata objects
         assert!(!config.metadata_objects().is_empty(), "No metadata objects loaded");
     }
 }

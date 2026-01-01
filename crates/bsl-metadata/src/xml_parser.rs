@@ -3,8 +3,11 @@
 //! Parses 1C:Enterprise metadata files in Designer format using quick-xml + serde.
 
 use crate::common_module::CommonModule;
+use crate::dimension::Dimension;
 use crate::enums::ReturnValueReuse;
 use crate::error::Result;
+use crate::metadata_object::MdoType;
+use crate::register::Register;
 use crate::traits::MdObject;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -158,6 +161,155 @@ pub fn parse_common_module_xml(xml: &str) -> Result<CommonModule> {
     Ok(module)
 }
 
+/// Root XML structure for Register (all 4 types)
+///
+/// Designer format structure:
+/// ```xml
+/// <MetaDataObject xmlns="...">
+///   <InformationRegister uuid="...">  <!-- or AccumulationRegister, AccountingRegister, CalculationRegister -->
+///     <Properties>
+///       <Name>...</Name>
+///     </Properties>
+///     <ChildObjects>
+///       <Dimension uuid="...">
+///         <Properties>...</Properties>
+///       </Dimension>
+///     </ChildObjects>
+///   </InformationRegister>
+/// </MetaDataObject>
+/// ```
+#[derive(Debug, Deserialize)]
+struct RegisterRoot {
+    #[serde(
+        alias = "InformationRegister",
+        alias = "AccumulationRegister",
+        alias = "AccountingRegister",
+        alias = "CalculationRegister"
+    )]
+    register: RegisterXml,
+}
+
+/// Register XML structure (generic for all 4 types)
+#[derive(Debug, Deserialize)]
+struct RegisterXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: RegisterProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    child_objects: Option<ChildObjects>,
+}
+
+/// Register Properties
+#[derive(Debug, Deserialize)]
+struct RegisterProperties {
+    #[serde(rename = "Name")]
+    name: String,
+}
+
+/// ChildObjects container for dimensions
+#[derive(Debug, Deserialize)]
+struct ChildObjects {
+    #[serde(rename = "Dimension", default)]
+    dimensions: Vec<DimensionXml>,
+}
+
+/// Dimension XML structure
+#[derive(Debug, Deserialize)]
+struct DimensionXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: DimensionProperties,
+}
+
+/// Dimension Properties
+#[derive(Debug, Deserialize)]
+struct DimensionProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "DenyIncompleteValues", default)]
+    deny_incomplete_values: BoolValue,
+
+    #[serde(rename = "Master", default)]
+    master: BoolValue,
+
+    #[serde(rename = "Indexing", default)]
+    indexing: String,
+}
+
+/// Parse InformationRegister XML from Designer format
+pub fn parse_information_register_xml(xml: &str) -> Result<Register> {
+    parse_register_xml(xml, MdoType::InformationRegister)
+}
+
+/// Parse AccumulationRegister XML from Designer format
+pub fn parse_accumulation_register_xml(xml: &str) -> Result<Register> {
+    parse_register_xml(xml, MdoType::AccumulationRegister)
+}
+
+/// Parse AccountingRegister XML from Designer format
+pub fn parse_accounting_register_xml(xml: &str) -> Result<Register> {
+    parse_register_xml(xml, MdoType::AccountingRegister)
+}
+
+/// Parse CalculationRegister XML from Designer format
+pub fn parse_calculation_register_xml(xml: &str) -> Result<Register> {
+    parse_register_xml(xml, MdoType::CalculationRegister)
+}
+
+/// Internal helper to parse register XML with specific type
+fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
+    let _span = tracing::debug_span!("parse_register_xml", ?mdo_type).entered();
+
+    let root: RegisterRoot = quick_xml::de::from_str(xml)?;
+
+    let uuid =
+        root.register.uuid.parse::<Uuid>().map_err(|e| {
+            crate::error::MetadataError::InvalidFormat(format!("Invalid UUID: {}", e))
+        })?;
+
+    let mut dimensions = Vec::new();
+    if let Some(child_objects) = root.register.child_objects {
+        for dim_xml in child_objects.dimensions {
+            let dim_uuid = dim_xml.uuid.parse::<Uuid>().map_err(|e| {
+                crate::error::MetadataError::InvalidFormat(format!("Invalid dimension UUID: {}", e))
+            })?;
+
+            let dimension = Dimension::builder()
+                .uuid(dim_uuid)
+                .name(dim_xml.properties.name)
+                .deny_incomplete_values(dim_xml.properties.deny_incomplete_values.into())
+                .master(dim_xml.properties.master.into())
+                .indexing(dim_xml.properties.indexing)
+                .build();
+
+            dimensions.push(dimension);
+        }
+    }
+
+    let register = Register::builder()
+        .uuid(uuid)
+        .name(root.register.properties.name)
+        .mdo_type(mdo_type)
+        .dimensions(dimensions)
+        .build();
+
+    tracing::debug!(
+        register_name = %register.name(),
+        uuid = %register.uuid(),
+        mdo_type = ?register.mdo_type(),
+        dimensions = register.dimensions().len(),
+        "parsed register"
+    );
+
+    Ok(register)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +373,190 @@ mod tests {
         assert!(!module.is_global());
         assert!(module.is_client_managed_application());
         assert!(module.is_client_ordinary_application());
+    }
+
+    #[test]
+    fn test_parse_information_register_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <InformationRegister uuid="59f8d329-f39c-4999-b470-ae9fc74511ac">
+        <Properties>
+            <Name>РегистрСведений1</Name>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="532f2a7f-4c1e-4a49-8281-3c21232da2d7">
+                <Properties>
+                    <Name>Справочник1</Name>
+                    <Master>false</Master>
+                    <DenyIncompleteValues>false</DenyIncompleteValues>
+                    <Indexing>DontIndex</Indexing>
+                </Properties>
+            </Dimension>
+        </ChildObjects>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "РегистрСведений1");
+        assert_eq!(register.uuid().to_string(), "59f8d329-f39c-4999-b470-ae9fc74511ac");
+        assert!(register.is_information_register());
+        assert_eq!(register.dimensions().len(), 1);
+
+        let dimension = &register.dimensions()[0];
+        assert_eq!(dimension.name(), "Справочник1");
+        assert_eq!(dimension.uuid().to_string(), "532f2a7f-4c1e-4a49-8281-3c21232da2d7");
+        assert!(!dimension.is_deny_incomplete_values());
+        assert!(!dimension.is_master());
+        assert_eq!(dimension.indexing(), "DontIndex");
+    }
+
+    #[test]
+    fn test_parse_accumulation_register_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <AccumulationRegister uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>РегистрНакопления1</Name>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="22222222-2222-2222-2222-222222222222">
+                <Properties>
+                    <Name>Измерение1</Name>
+                    <Master>true</Master>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+        </ChildObjects>
+    </AccumulationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_accumulation_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "РегистрНакопления1");
+        assert!(register.is_accumulation_register());
+        assert_eq!(register.dimensions().len(), 1);
+
+        let dimension = &register.dimensions()[0];
+        assert_eq!(dimension.name(), "Измерение1");
+        assert!(dimension.is_deny_incomplete_values());
+        assert!(dimension.is_master());
+        assert_eq!(dimension.indexing(), "Index");
+    }
+
+    #[test]
+    fn test_parse_register_with_multiple_dimensions() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <InformationRegister uuid="33333333-3333-3333-3333-333333333333">
+        <Properties>
+            <Name>МногоИзмерений</Name>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="44444444-4444-4444-4444-444444444444">
+                <Properties>
+                    <Name>Измерение1</Name>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Master>false</Master>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+            <Dimension uuid="55555555-5555-5555-5555-555555555555">
+                <Properties>
+                    <Name>Измерение2</Name>
+                    <DenyIncompleteValues>false</DenyIncompleteValues>
+                    <Master>true</Master>
+                    <Indexing>DontIndex</Indexing>
+                </Properties>
+            </Dimension>
+        </ChildObjects>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "МногоИзмерений");
+        assert_eq!(register.dimensions().len(), 2);
+
+        assert_eq!(register.dimensions()[0].name(), "Измерение1");
+        assert!(register.dimensions()[0].is_deny_incomplete_values());
+        assert!(!register.dimensions()[0].is_master());
+
+        assert_eq!(register.dimensions()[1].name(), "Измерение2");
+        assert!(!register.dimensions()[1].is_deny_incomplete_values());
+        assert!(register.dimensions()[1].is_master());
+    }
+
+    #[test]
+    fn test_parse_register_without_dimensions() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <InformationRegister uuid="66666666-6666-6666-6666-666666666666">
+        <Properties>
+            <Name>БезИзмерений</Name>
+        </Properties>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "БезИзмерений");
+        assert_eq!(register.dimensions().len(), 0);
+    }
+
+    #[test]
+    fn test_parse_all_register_types() {
+        // Test InformationRegister
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <InformationRegister uuid="77777777-7777-7777-7777-777777777777">
+        <Properties>
+            <Name>ТестРегистр</Name>
+        </Properties>
+    </InformationRegister>
+</MetaDataObject>"#;
+        let register = parse_information_register_xml(xml).unwrap();
+        assert_eq!(register.name(), "ТестРегистр");
+        assert_eq!(register.mdo_type(), MdoType::InformationRegister);
+
+        // Test AccumulationRegister
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <AccumulationRegister uuid="77777777-7777-7777-7777-777777777777">
+        <Properties>
+            <Name>ТестРегистр</Name>
+        </Properties>
+    </AccumulationRegister>
+</MetaDataObject>"#;
+        let register = parse_accumulation_register_xml(xml).unwrap();
+        assert_eq!(register.name(), "ТестРегистр");
+        assert_eq!(register.mdo_type(), MdoType::AccumulationRegister);
+
+        // Test AccountingRegister
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <AccountingRegister uuid="77777777-7777-7777-7777-777777777777">
+        <Properties>
+            <Name>ТестРегистр</Name>
+        </Properties>
+    </AccountingRegister>
+</MetaDataObject>"#;
+        let register = parse_accounting_register_xml(xml).unwrap();
+        assert_eq!(register.name(), "ТестРегистр");
+        assert_eq!(register.mdo_type(), MdoType::AccountingRegister);
+
+        // Test CalculationRegister
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CalculationRegister uuid="77777777-7777-7777-7777-777777777777">
+        <Properties>
+            <Name>ТестРегистр</Name>
+        </Properties>
+    </CalculationRegister>
+</MetaDataObject>"#;
+        let register = parse_calculation_register_xml(xml).unwrap();
+        assert_eq!(register.name(), "ТестРегистр");
+        assert_eq!(register.mdo_type(), MdoType::CalculationRegister);
     }
 }

@@ -5,6 +5,7 @@
 use crate::common_module::CommonModule;
 use crate::error::Result;
 use crate::metadata_object::{MdoType, MetadataObject};
+use crate::register::Register;
 use crate::traits::{MdObject, Module};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,9 +29,13 @@ pub struct Configuration {
     #[serde(rename = "commonModules", default)]
     common_modules: Vec<CommonModule>,
 
-    /// Metadata objects (Catalogs, Documents, Registers, etc.)
+    /// Metadata objects (Catalogs, Documents, etc.)
     #[serde(rename = "metadataObjects", default)]
     metadata_objects: Vec<MetadataObject>,
+
+    /// Registers (Information, Accumulation, Accounting, Calculation)
+    #[serde(rename = "registers", default)]
+    registers: Vec<Register>,
 
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
@@ -39,6 +44,10 @@ pub struct Configuration {
     /// Cache: Name -> Common Module index mapping (not serialized)
     #[serde(skip)]
     name_to_common_module: HashMap<String, usize>,
+
+    /// Cache: Name -> Register index mapping (not serialized)
+    #[serde(skip)]
+    name_to_register: HashMap<String, usize>,
 
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
@@ -56,6 +65,7 @@ impl PartialEq for Configuration {
             && self.name == other.name
             && self.common_modules == other.common_modules
             && self.metadata_objects == other.metadata_objects
+            && self.registers == other.registers
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -71,8 +81,10 @@ impl Configuration {
             name: name.into(),
             common_modules: Vec::new(),
             metadata_objects: Vec::new(),
+            registers: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
+            name_to_register: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
         }
@@ -98,12 +110,17 @@ impl Configuration {
         // Build URI -> Module mapping
         self.uri_to_module.clear();
         self.name_to_common_module.clear();
+        self.name_to_register.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
                 self.uri_to_module.insert(uri.to_string(), idx);
             }
             self.name_to_common_module.insert(module.name().to_lowercase(), idx);
+        }
+
+        for (idx, register) in self.registers.iter().enumerate() {
+            self.name_to_register.insert(register.name().to_lowercase(), idx);
         }
     }
 
@@ -219,6 +236,36 @@ impl Configuration {
             .iter()
             .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
     }
+
+    /// Get all registers
+    pub fn registers(&self) -> &[Register] {
+        &self.registers
+    }
+
+    /// Find register by name (case-insensitive)
+    pub fn find_register(&self, name: &str) -> Option<&Register> {
+        let name_lower = name.to_lowercase();
+        self.name_to_register.get(&name_lower).and_then(|&idx| self.registers.get(idx))
+    }
+
+    /// Find register by type and name (case-insensitive)
+    pub fn find_register_by_type_and_name(
+        &self,
+        mdo_type: MdoType,
+        name: &str,
+    ) -> Option<&Register> {
+        let name_lower = name.to_lowercase();
+        self.name_to_register
+            .get(&name_lower)
+            .and_then(|&idx| self.registers.get(idx).filter(|r| r.mdo_type() == mdo_type))
+    }
+
+    /// Add register
+    pub fn add_register(&mut self, register: Register) {
+        let idx = self.registers.len();
+        self.name_to_register.insert(register.name().to_lowercase(), idx);
+        self.registers.push(register);
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +339,70 @@ mod tests {
         let found = config.find_metadata_object(MdoType::Catalog, "номенклатура");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "Номенклатура");
+    }
+
+    #[test]
+    fn test_add_and_find_register() {
+        use crate::register::Register;
+
+        let mut config = Configuration::new("Test");
+
+        let register = Register::builder()
+            .name("РегистрСведений1")
+            .mdo_type(MdoType::InformationRegister)
+            .build();
+
+        config.add_register(register);
+
+        assert_eq!(config.registers().len(), 1);
+
+        // Find by name
+        let found = config.find_register("РегистрСведений1");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name(), "РегистрСведений1");
+
+        // Find by name case-insensitive
+        let found_ci = config.find_register("регистрсведений1");
+        assert!(found_ci.is_some());
+
+        // Find by type and name
+        let found_typed =
+            config.find_register_by_type_and_name(MdoType::InformationRegister, "РегистрСведений1");
+        assert!(found_typed.is_some());
+
+        // Wrong type
+        let not_found = config
+            .find_register_by_type_and_name(MdoType::AccumulationRegister, "РегистрСведений1");
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_multiple_register_types() {
+        use crate::register::Register;
+
+        let mut config = Configuration::new("Test");
+
+        let info_reg = Register::builder()
+            .name("РегистрСведений1")
+            .mdo_type(MdoType::InformationRegister)
+            .build();
+
+        let accum_reg = Register::builder()
+            .name("РегистрНакопления1")
+            .mdo_type(MdoType::AccumulationRegister)
+            .build();
+
+        config.add_register(info_reg);
+        config.add_register(accum_reg);
+
+        assert_eq!(config.registers().len(), 2);
+
+        let info_found = config.find_register("РегистрСведений1");
+        assert!(info_found.is_some());
+        assert!(info_found.unwrap().is_information_register());
+
+        let accum_found = config.find_register("РегистрНакопления1");
+        assert!(accum_found.is_some());
+        assert!(accum_found.unwrap().is_accumulation_register());
     }
 }

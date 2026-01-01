@@ -117,6 +117,7 @@ pub enum DiagnosticCode {
     CommonModuleNameGlobalClient,
     CommonModuleNameServerCall,
     CommonModuleNameWords,
+    DenyIncompleteValues,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -165,6 +166,7 @@ impl DiagnosticCode {
             Self::CreateQueryInCycle => "CreateQueryInCycle",
             Self::DataExchangeLoading => "DataExchangeLoading",
             Self::DeletingCollectionItem => "DeletingCollectionItem",
+            Self::DenyIncompleteValues => "DenyIncompleteValues",
             Self::DeprecatedCurrentDate => "DeprecatedCurrentDate",
             Self::DeprecatedFind => "DeprecatedFind",
             Self::DeprecatedMessage => "DeprecatedMessage",
@@ -318,6 +320,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::common_module_name_global_client::check(ctx));
     result.extend(handlers::common_module_name_server_call::check(ctx));
     result.extend(handlers::common_module_name_words::check(ctx));
+    result.extend(handlers::deny_incomplete_values::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));

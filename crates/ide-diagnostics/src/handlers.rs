@@ -34,6 +34,7 @@ pub mod data_exchange_loading;
 #[cfg(test)]
 mod debug_test;
 pub mod deleting_collection_item;
+pub mod deny_incomplete_values;
 pub mod deprecated_attributes_8312;
 pub mod deprecated_current_date;
 pub mod deprecated_find;
