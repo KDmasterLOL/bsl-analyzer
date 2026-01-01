@@ -281,6 +281,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::commented_code::check(ctx));
     result.extend(handlers::double_negatives::check(ctx));
     result.extend(handlers::duplicate_string_literal::check(ctx));
+    result.extend(handlers::empty_code_block::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
