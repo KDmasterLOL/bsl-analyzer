@@ -56,6 +56,7 @@ pub enum DiagnosticCode {
     UselessTernaryOperator,
     BadWords,
     DuplicateStringLiteral,
+    DuplicateRegion,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -158,6 +159,7 @@ impl DiagnosticCode {
             Self::UselessTernaryOperator => "UselessTernaryOperator",
             Self::BadWords => "BadWords",
             Self::DuplicateStringLiteral => "DuplicateStringLiteral",
+            Self::DuplicateRegion => "DuplicateRegion",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
@@ -285,6 +287,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::commented_code::check(ctx));
     result.extend(handlers::double_negatives::check(ctx));
     result.extend(handlers::duplicate_string_literal::check(ctx));
+    result.extend(handlers::duplicate_region::check(ctx));
     result.extend(handlers::empty_code_block::check(ctx));
 
     // Tier 2: Semantic diagnostics

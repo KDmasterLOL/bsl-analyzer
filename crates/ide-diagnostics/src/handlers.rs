@@ -44,6 +44,7 @@ pub mod deprecated_methods_8317;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;
+pub mod duplicate_region;
 pub mod duplicate_string_literal;
 pub mod empty_code_block;
 // TODO: Add all 181 handlers
