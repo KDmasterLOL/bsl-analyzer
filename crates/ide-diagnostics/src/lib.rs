@@ -57,6 +57,7 @@ pub enum DiagnosticCode {
     BadWords,
     DuplicateStringLiteral,
     DuplicateRegion,
+    DuplicatedInsertionIntoCollection,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -288,6 +289,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::double_negatives::check(ctx));
     result.extend(handlers::duplicate_string_literal::check(ctx));
     result.extend(handlers::duplicate_region::check(ctx));
+    result.extend(handlers::duplicated_insertion_into_collection::check(ctx));
     result.extend(handlers::empty_code_block::check(ctx));
 
     // Tier 2: Semantic diagnostics

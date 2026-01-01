@@ -46,5 +46,6 @@ pub mod disable_safe_mode;
 pub mod double_negatives;
 pub mod duplicate_region;
 pub mod duplicate_string_literal;
+pub mod duplicated_insertion_into_collection;
 pub mod empty_code_block;
 // TODO: Add all 181 handlers

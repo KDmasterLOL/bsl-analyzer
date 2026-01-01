@@ -86,6 +86,7 @@ triomphe = { version = "0.1.14", default-features = false, features = ["std"] }
 rustc-hash = "2.0"
 crossbeam-channel = "0.5"
 regex = "1.10"
+unicase = "2.7"
 
 # Testing
 expect-test = "1.4"
