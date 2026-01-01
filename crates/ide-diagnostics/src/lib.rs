@@ -58,6 +58,7 @@ pub enum DiagnosticCode {
     DuplicateStringLiteral,
     DuplicateRegion,
     DuplicatedInsertionIntoCollection,
+    ExcessiveAutoTestCheck,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -103,6 +104,7 @@ pub enum DiagnosticCode {
     DeprecatedMethods8317,
     DeprecatedAttributes8312,
     DisableSafeMode,
+    ExecuteExternalCode,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -121,6 +123,7 @@ pub enum DiagnosticCode {
     CommonModuleNameServerCall,
     CommonModuleNameWords,
     DenyIncompleteValues,
+    ExecuteExternalCodeInCommonModule,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -161,6 +164,8 @@ impl DiagnosticCode {
             Self::BadWords => "BadWords",
             Self::DuplicateStringLiteral => "DuplicateStringLiteral",
             Self::DuplicateRegion => "DuplicateRegion",
+            Self::DuplicatedInsertionIntoCollection => "DuplicatedInsertionIntoCollection",
+            Self::ExcessiveAutoTestCheck => "ExcessiveAutoTestCheck",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
@@ -179,6 +184,7 @@ impl DiagnosticCode {
             Self::DeprecatedMethods8317 => "DeprecatedMethods8317",
             Self::DeprecatedAttributes8312 => "DeprecatedAttributes8312",
             Self::DisableSafeMode => "DisableSafeMode",
+            Self::ExecuteExternalCode => "ExecuteExternalCode",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -194,6 +200,7 @@ impl DiagnosticCode {
             Self::CommonModuleNameGlobalClient => "CommonModuleNameGlobalClient",
             Self::CommonModuleNameServerCall => "CommonModuleNameServerCall",
             Self::CommonModuleNameWords => "CommonModuleNameWords",
+            Self::ExecuteExternalCodeInCommonModule => "ExecuteExternalCodeInCommonModule",
             _ => "Unknown",
         }
     }
@@ -293,6 +300,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::empty_code_block::check(ctx));
     result.extend(handlers::empty_region::check(ctx));
     result.extend(handlers::empty_statement::check(ctx));
+    result.extend(handlers::excessive_auto_test_check::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
@@ -310,6 +318,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::deprecated_methods_8317::check(ctx));
     result.extend(handlers::deprecated_attributes_8312::check(ctx));
     result.extend(handlers::disable_safe_mode::check(ctx));
+    result.extend(handlers::execute_external_code::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));
@@ -331,6 +340,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::common_module_name_server_call::check(ctx));
     result.extend(handlers::common_module_name_words::check(ctx));
     result.extend(handlers::deny_incomplete_values::check(ctx));
+    result.extend(handlers::execute_external_code_in_common_module::check(ctx));
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));

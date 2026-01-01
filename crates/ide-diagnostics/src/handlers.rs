@@ -50,4 +50,7 @@ pub mod duplicated_insertion_into_collection;
 pub mod empty_code_block;
 pub mod empty_region;
 pub mod empty_statement;
+pub mod excessive_auto_test_check;
+pub mod execute_external_code;
+pub mod execute_external_code_in_common_module;
 // TODO: Add all 181 handlers
