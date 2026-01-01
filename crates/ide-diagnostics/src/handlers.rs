@@ -41,6 +41,7 @@ pub mod deprecated_find;
 pub mod deprecated_message;
 pub mod deprecated_methods_8310;
 pub mod deprecated_methods_8317;
+pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;
 pub mod duplicate_string_literal;

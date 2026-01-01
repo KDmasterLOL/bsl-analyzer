@@ -96,6 +96,7 @@ pub enum DiagnosticCode {
     DeprecatedCurrentDate,
     DeprecatedFind,
     DeprecatedMessage,
+    DeprecatedTypeManagedForm,
     DeprecatedMethods8310,
     DeprecatedMethods8317,
     DeprecatedAttributes8312,
@@ -170,6 +171,7 @@ impl DiagnosticCode {
             Self::DeprecatedCurrentDate => "DeprecatedCurrentDate",
             Self::DeprecatedFind => "DeprecatedFind",
             Self::DeprecatedMessage => "DeprecatedMessage",
+            Self::DeprecatedTypeManagedForm => "DeprecatedTypeManagedForm",
             Self::DeprecatedMethods8310 => "DeprecatedMethods8310",
             Self::DeprecatedMethods8317 => "DeprecatedMethods8317",
             Self::DeprecatedAttributes8312 => "DeprecatedAttributes8312",
@@ -296,6 +298,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::deprecated_current_date::check(ctx));
     result.extend(handlers::deprecated_find::check(ctx));
     result.extend(handlers::deprecated_message::check(ctx));
+    result.extend(handlers::deprecated_type_managed_form::check(ctx));
     result.extend(handlers::deprecated_methods_8310::check(ctx));
     result.extend(handlers::deprecated_methods_8317::check(ctx));
     result.extend(handlers::deprecated_attributes_8312::check(ctx));
