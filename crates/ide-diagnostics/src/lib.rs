@@ -292,6 +292,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::duplicated_insertion_into_collection::check(ctx));
     result.extend(handlers::empty_code_block::check(ctx));
     result.extend(handlers::empty_region::check(ctx));
+    result.extend(handlers::empty_statement::check(ctx));
 
     // Tier 2: Semantic diagnostics
     result.extend(handlers::all_function_path_must_have_return::check(ctx));
