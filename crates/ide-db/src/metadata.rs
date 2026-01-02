@@ -207,11 +207,33 @@ pub fn find_metadata_object<DB: MetadataDb>(
 ) -> Option<bsl_metadata::MetadataObject> {
     let config = db.load_configuration(path_input);
 
-    config
-        .metadata_objects()
-        .iter()
-        .find(|mdo| mdo.mdo_type == mdo_type && mdo.name == name)
-        .cloned()
+    // First try to find in metadata_objects
+    if let Some(mdo) =
+        config.metadata_objects().iter().find(|mdo| mdo.mdo_type == mdo_type && mdo.name == name)
+    {
+        return Some(mdo.clone());
+    }
+
+    // For register types, also search in registers collection
+    use bsl_metadata::MdoType;
+    if matches!(
+        mdo_type,
+        MdoType::InformationRegister
+            | MdoType::AccumulationRegister
+            | MdoType::AccountingRegister
+            | MdoType::CalculationRegister
+    ) {
+        // Find in registers and convert to MetadataObject
+        #[allow(unused_imports)]
+        use bsl_metadata::traits::MdObject;
+        config
+            .registers()
+            .iter()
+            .find(|reg| reg.mdo_type() == mdo_type && reg.name() == name)
+            .map(|reg| bsl_metadata::MetadataObject::new(mdo_type, reg.name()))
+    } else {
+        None
+    }
 }
 
 /// Find a common module by name.
