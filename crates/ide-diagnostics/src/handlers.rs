@@ -58,4 +58,5 @@ pub mod external_app_starting;
 pub mod extra_commas;
 pub mod fields_from_joins_without_is_null;
 pub mod file_system_access;
+pub mod form_data_to_value;
 // TODO: Add all 181 handlers
