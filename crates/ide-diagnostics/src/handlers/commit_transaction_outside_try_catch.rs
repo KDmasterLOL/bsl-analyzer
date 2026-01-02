@@ -317,6 +317,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         check(&ctx)

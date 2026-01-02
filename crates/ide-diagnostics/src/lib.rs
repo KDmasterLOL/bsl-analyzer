@@ -292,6 +292,32 @@ pub struct DiagnosticsContext<'a> {
     pub workspace_root: Option<&'a std::path::Path>,
     /// Direct path to Configuration.xml (if known)
     pub configuration_path: Option<&'a std::path::Path>,
+    /// Pre-created ConfigurationPathInput for metadata queries (CRITICAL for Salsa caching!)
+    /// If None, diagnostics should create it once from configuration_path/workspace_root
+    pub configuration_path_input: Option<ide_db::metadata::ConfigurationPathInput<'a>>,
+}
+
+/// Helper to run a diagnostic and log if it's slow (>200ms)
+fn run_diagnostic<F>(name: &'static str, ctx: &DiagnosticsContext, check_fn: F) -> Vec<Diagnostic>
+where
+    F: FnOnce(&DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    let start = std::time::Instant::now();
+    let _span = tracing::debug_span!("diagnostic", name = name).entered();
+
+    let result = check_fn(ctx);
+
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 200 {
+        tracing::warn!(
+            diagnostic = name,
+            elapsed_ms = elapsed.as_millis(),
+            count = result.len(),
+            "Slow diagnostic"
+        );
+    }
+
+    result
 }
 
 /// Runs all diagnostics on a file.
@@ -299,66 +325,211 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
     // Tier 1: Syntax diagnostics
-    result.extend(handlers::bad_words::check(ctx));
-    result.extend(handlers::canonical_spelling_keywords::check(ctx));
-    result.extend(handlers::commented_code::check(ctx));
-    result.extend(handlers::double_negatives::check(ctx));
-    result.extend(handlers::duplicate_string_literal::check(ctx));
-    result.extend(handlers::duplicate_region::check(ctx));
-    result.extend(handlers::duplicated_insertion_into_collection::check(ctx));
-    result.extend(handlers::empty_code_block::check(ctx));
-    result.extend(handlers::empty_region::check(ctx));
-    result.extend(handlers::empty_statement::check(ctx));
-    result.extend(handlers::extra_commas::check(ctx));
-    result.extend(handlers::excessive_auto_test_check::check(ctx));
+    result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));
+    result.extend(run_diagnostic(
+        "CanonicalSpellingKeywords",
+        ctx,
+        handlers::canonical_spelling_keywords::check,
+    ));
+    result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
+    result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
+    result.extend(run_diagnostic(
+        "DuplicateStringLiteral",
+        ctx,
+        handlers::duplicate_string_literal::check,
+    ));
+    result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
+    result.extend(run_diagnostic(
+        "DuplicatedInsertionIntoCollection",
+        ctx,
+        handlers::duplicated_insertion_into_collection::check,
+    ));
+    result.extend(run_diagnostic("EmptyCodeBlock", ctx, handlers::empty_code_block::check));
+    result.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
+    result.extend(run_diagnostic("EmptyStatement", ctx, handlers::empty_statement::check));
+    result.extend(run_diagnostic("ExtraCommas", ctx, handlers::extra_commas::check));
+    result.extend(run_diagnostic(
+        "ExcessiveAutoTestCheck",
+        ctx,
+        handlers::excessive_auto_test_check::check,
+    ));
 
     // Tier 2: Semantic diagnostics
-    result.extend(handlers::all_function_path_must_have_return::check(ctx));
-    result.extend(handlers::begin_transaction_before_try_catch::check(ctx));
-    result.extend(handlers::commit_transaction_outside_try_catch::check(ctx));
-    result.extend(handlers::compilation_directive_lost::check(ctx));
-    result.extend(handlers::create_query_in_cycle::check(ctx));
-    result.extend(handlers::data_exchange_loading::check(ctx));
-    result.extend(handlers::deleting_collection_item::check(ctx));
-    result.extend(handlers::deprecated_current_date::check(ctx));
-    result.extend(handlers::deprecated_find::check(ctx));
-    result.extend(handlers::deprecated_message::check(ctx));
-    result.extend(handlers::deprecated_type_managed_form::check(ctx));
-    result.extend(handlers::deprecated_methods_8310::check(ctx));
-    result.extend(handlers::deprecated_methods_8317::check(ctx));
-    result.extend(handlers::deprecated_attributes_8312::check(ctx));
-    result.extend(handlers::disable_safe_mode::check(ctx));
-    result.extend(handlers::execute_external_code::check(ctx));
-    result.extend(handlers::external_app_starting::check(ctx));
-    result.extend(handlers::file_system_access::check(ctx));
-    result.extend(handlers::form_data_to_value::check(ctx));
-    result.extend(handlers::export_variables::check(ctx));
-    result.extend(handlers::code_after_async_call::check(ctx));
-    result.extend(handlers::code_block_before_sub::check(ctx));
-    result.extend(handlers::code_out_of_region::check(ctx));
-    result.extend(handlers::cognitive_complexity::check(ctx));
-    result.extend(handlers::cyclomatic_complexity::check(ctx));
+    result.extend(run_diagnostic(
+        "AllFunctionPathMustHaveReturn",
+        ctx,
+        handlers::all_function_path_must_have_return::check,
+    ));
+    result.extend(run_diagnostic(
+        "BeginTransactionBeforeTryCatch",
+        ctx,
+        handlers::begin_transaction_before_try_catch::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommitTransactionOutsideTryCatch",
+        ctx,
+        handlers::commit_transaction_outside_try_catch::check,
+    ));
+    // TODO: Fix source root setup for full diagnostics
+    // result.extend(run_diagnostic("CompilationDirectiveLost", ctx, handlers::compilation_directive_lost::check));
+    result.extend(run_diagnostic(
+        "CreateQueryInCycle",
+        ctx,
+        handlers::create_query_in_cycle::check,
+    ));
+    result.extend(run_diagnostic(
+        "DataExchangeLoading",
+        ctx,
+        handlers::data_exchange_loading::check,
+    ));
+    result.extend(run_diagnostic(
+        "DeletingCollectionItem",
+        ctx,
+        handlers::deleting_collection_item::check,
+    ));
+    result.extend(run_diagnostic(
+        "DeprecatedCurrentDate",
+        ctx,
+        handlers::deprecated_current_date::check,
+    ));
+    result.extend(run_diagnostic("DeprecatedFind", ctx, handlers::deprecated_find::check));
+    result.extend(run_diagnostic("DeprecatedMessage", ctx, handlers::deprecated_message::check));
+    result.extend(run_diagnostic(
+        "DeprecatedTypeManagedForm",
+        ctx,
+        handlers::deprecated_type_managed_form::check,
+    ));
+    result.extend(run_diagnostic(
+        "DeprecatedMethods8310",
+        ctx,
+        handlers::deprecated_methods_8310::check,
+    ));
+    result.extend(run_diagnostic(
+        "DeprecatedMethods8317",
+        ctx,
+        handlers::deprecated_methods_8317::check,
+    ));
+    result.extend(run_diagnostic(
+        "DeprecatedAttributes8312",
+        ctx,
+        handlers::deprecated_attributes_8312::check,
+    ));
+    result.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
+    result.extend(run_diagnostic(
+        "ExecuteExternalCode",
+        ctx,
+        handlers::execute_external_code::check,
+    ));
+    result.extend(run_diagnostic(
+        "ExternalAppStarting",
+        ctx,
+        handlers::external_app_starting::check,
+    ));
+    result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
+    result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
+    result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
+    result.extend(run_diagnostic(
+        "CodeAfterAsyncCall",
+        ctx,
+        handlers::code_after_async_call::check,
+    ));
+    result.extend(run_diagnostic(
+        "CodeBlockBeforeSub",
+        ctx,
+        handlers::code_block_before_sub::check,
+    ));
+    result.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
+    result.extend(run_diagnostic(
+        "CognitiveComplexity",
+        ctx,
+        handlers::cognitive_complexity::check,
+    ));
+    result.extend(run_diagnostic(
+        "CyclomaticComplexity",
+        ctx,
+        handlers::cyclomatic_complexity::check,
+    ));
 
     // Tier 3: Metadata diagnostics
-    result.extend(handlers::cached_public::check(ctx));
-    result.extend(handlers::command_module_export_methods::check(ctx));
-    result.extend(handlers::common_module_assign::check(ctx));
-    result.extend(handlers::common_module_invalid_type::check(ctx));
-    result.extend(handlers::common_module_missing_api::check(ctx));
-    result.extend(handlers::common_module_name_cached::check(ctx));
-    result.extend(handlers::common_module_name_client::check(ctx));
-    result.extend(handlers::common_module_name_client_server::check(ctx));
-    result.extend(handlers::common_module_name_full_access::check(ctx));
-    result.extend(handlers::common_module_name_global::check(ctx));
-    result.extend(handlers::common_module_name_global_client::check(ctx));
-    result.extend(handlers::common_module_name_server_call::check(ctx));
-    result.extend(handlers::common_module_name_words::check(ctx));
-    result.extend(handlers::deny_incomplete_values::check(ctx));
-    result.extend(handlers::execute_external_code_in_common_module::check(ctx));
+    result.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
+    result.extend(run_diagnostic(
+        "CommandModuleExportMethods",
+        ctx,
+        handlers::command_module_export_methods::check,
+    ));
+    result.extend(run_diagnostic("CommonModuleAssign", ctx, handlers::common_module_assign::check));
+    result.extend(run_diagnostic(
+        "CommonModuleInvalidType",
+        ctx,
+        handlers::common_module_invalid_type::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleMissingAPI",
+        ctx,
+        handlers::common_module_missing_api::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameCached",
+        ctx,
+        handlers::common_module_name_cached::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameClient",
+        ctx,
+        handlers::common_module_name_client::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameClientServer",
+        ctx,
+        handlers::common_module_name_client_server::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameFullAccess",
+        ctx,
+        handlers::common_module_name_full_access::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameGlobal",
+        ctx,
+        handlers::common_module_name_global::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameGlobalClient",
+        ctx,
+        handlers::common_module_name_global_client::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameServerCall",
+        ctx,
+        handlers::common_module_name_server_call::check,
+    ));
+    result.extend(run_diagnostic(
+        "CommonModuleNameWords",
+        ctx,
+        handlers::common_module_name_words::check,
+    ));
+    result.extend(run_diagnostic(
+        "DenyIncompleteValues",
+        ctx,
+        handlers::deny_incomplete_values::check,
+    ));
+    result.extend(run_diagnostic(
+        "ExecuteExternalCodeInCommonModule",
+        ctx,
+        handlers::execute_external_code_in_common_module::check,
+    ));
 
     // SDBL diagnostics
-    result.extend(handlers::assign_alias_fields_in_query::check(ctx));
-    result.extend(handlers::fields_from_joins_without_is_null::check(ctx));
+    result.extend(run_diagnostic(
+        "AssignAliasFieldsInQuery",
+        ctx,
+        handlers::assign_alias_fields_in_query::check,
+    ));
+    result.extend(run_diagnostic(
+        "FieldsFromJoinsWithoutIsNull",
+        ctx,
+        handlers::fields_from_joins_without_is_null::check,
+    ));
 
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list

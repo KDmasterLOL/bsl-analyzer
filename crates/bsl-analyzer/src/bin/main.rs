@@ -5,6 +5,7 @@
 use std::{env, error::Error, fs, io, path::PathBuf, process::Command, sync::Arc};
 
 use clap::{Parser, Subcommand};
+use ide_db::metadata;
 
 #[derive(Parser)]
 #[command(name = "bsl-analyzer")]
@@ -19,17 +20,41 @@ struct Cli {
 enum Commands {
     /// Run static analysis on a project
     Analyze {
-        /// Path to the project root (Java-compatible alias: --src)
-        #[arg(short, long, alias = "src")]
-        project: std::path::PathBuf,
+        /// Source directory containing BSL files (default: current directory)
+        /// Java-compatible aliases: --srcDir, --src, --project
+        #[arg(
+            short = 's',
+            long = "source-dir",
+            alias = "srcDir",
+            alias = "src",
+            alias = "project",
+            default_value = "."
+        )]
+        source_dir: PathBuf,
 
-        /// Output file for results
-        #[arg(short, long)]
-        output: Option<std::path::PathBuf>,
+        /// Workspace directory for relative paths in reports (default: source directory)
+        /// Java-compatible alias: --workspaceDir
+        #[arg(short = 'w', long = "workspace-dir", alias = "workspaceDir")]
+        workspace_dir: Option<PathBuf>,
 
-        /// Output format: json, sonarqube, sarif, generic (Java-compatible alias: --reporter)
-        #[arg(short, long, alias = "reporter", default_value = "json")]
-        format: String,
+        /// Output directory for analysis reports (default: current directory)
+        /// Java-compatible alias: --outputDir
+        #[arg(short = 'o', long = "output-dir", alias = "outputDir")]
+        output_dir: Option<PathBuf>,
+
+        /// Configuration file path (Java-compatible alias: --configuration)
+        #[arg(short = 'c', long = "config", alias = "configuration")]
+        config: Option<PathBuf>,
+
+        /// Reporters to use (can be specified multiple times or comma-separated)
+        /// Valid values: console, json, sarif, tslint, junit, generic, code-quality
+        /// (Java-compatible alias: --reporter)
+        #[arg(short = 'r', long = "reporters", alias = "reporter", value_delimiter = ',')]
+        reporters: Vec<String>,
+
+        /// Silent mode - disable progress bar (Java-compatible alias: --silent)
+        #[arg(short = 'q', long = "quiet", alias = "silent")]
+        quiet: bool,
 
         /// Enable incremental analysis (only analyze affected modules)
         #[arg(long)]
@@ -63,13 +88,26 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match cli.command {
         Some(Commands::Analyze {
-            project,
-            output,
-            format,
+            source_dir,
+            workspace_dir,
+            output_dir,
+            config,
+            reporters,
+            quiet,
             incremental,
             changed_files,
             git_diff,
-        }) => analyze(project, output, format, incremental, changed_files, git_diff),
+        }) => analyze(
+            source_dir,
+            workspace_dir,
+            output_dir,
+            config,
+            reporters,
+            quiet,
+            incremental,
+            changed_files,
+            git_diff,
+        ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -84,60 +122,295 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // CLI compatibility with Java bsl-language-server
 fn analyze(
-    project: PathBuf,
-    output: Option<PathBuf>,
-    format: String,
-    incremental: bool,
-    changed_files: Option<Vec<PathBuf>>,
-    git_diff: Option<String>,
+    source_dir: PathBuf,
+    workspace_dir: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    reporters: Vec<String>,
+    quiet: bool,
+    _incremental: bool,
+    _changed_files: Option<Vec<PathBuf>>,
+    _git_diff: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!("Analyzing project: {:?}", project);
-    tracing::info!("Output format: {}", format);
-    tracing::info!("Incremental mode: {}", incremental);
+    use base_db::SourceDatabase;
+    use ide::{DiagnosticsConfig, RootDatabaseImpl};
+    use ide_diagnostics::DiagnosticsContext;
+    use indicatif::{ProgressBar, ProgressStyle};
+    use rayon::prelude::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+    use vfs::FileId;
+    use walkdir::WalkDir;
 
-    // TODO: Full analysis implementation will be in later iterations
-    // For now, we demonstrate the incremental workflow
+    use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
 
-    if incremental {
-        tracing::info!("Running incremental analysis");
+    let _span = tracing::info_span!("cli_analyze").entered();
 
-        // Resolve changed files
-        let changed_paths = if let Some(files) = changed_files {
-            tracing::info!("Using explicitly provided changed files: {} files", files.len());
-            files
-        } else if let Some(git_ref) = git_diff {
-            tracing::info!("Getting changed files from git diff {}", git_ref);
-            get_changed_files_from_git(&project, &git_ref)?
-        } else {
-            return Err("Incremental mode requires either --changed-files or --git-diff".into());
-        };
+    tracing::info!("Analyzing project: {:?}", source_dir);
+    tracing::info!("Reporters: {:?}", reporters);
+    tracing::info!("Quiet mode: {}", quiet);
 
-        tracing::info!("Changed files: {} files", changed_paths.len());
-        for path in &changed_paths {
-            tracing::debug!("  - {:?}", path);
-        }
+    let start = Instant::now();
 
-        // TODO: Build module graph, compute affected modules, run analysis
-        // This will be implemented when we integrate with ide-diagnostics
-        println!(
-            "Incremental analysis would process {} changed files + affected modules",
-            changed_paths.len()
-        );
+    // Determine workspace and output directories
+    // workspace_dir defaults to source_dir (Java behavior)
+    let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
+    // output_dir defaults to current directory "." (Java behavior)
+    let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+
+    // Load project configuration
+    tracing::info!("Loading project configuration");
+    let proj_config = if let Some(ref cfg) = config_path {
+        project_model::ProjectConfig::load(cfg).unwrap_or_default()
     } else {
-        tracing::info!("Running full analysis");
-        println!("Full analysis mode");
+        project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
+    };
+
+    // Load metadata if available
+    let configuration_path = proj_config.configuration_path(&source_dir);
+    if let Some(ref cfg_path) = configuration_path {
+        tracing::info!("Configuration root: {:?}", cfg_path);
+
+        if cfg_path.exists() {
+            tracing::info!("Loading metadata from {:?}", cfg_path);
+            let metadata_start = Instant::now();
+            match bsl_metadata::load_from_directory(cfg_path) {
+                Ok(config) => {
+                    let metadata_elapsed = metadata_start.elapsed();
+                    tracing::info!(
+                        "Metadata loaded in {:.2?} ({} common modules)",
+                        metadata_elapsed,
+                        config.common_modules().len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load metadata: {}", e);
+                }
+            }
+        } else {
+            tracing::warn!("Configuration root not found: {:?}", cfg_path);
+        }
+    } else {
+        tracing::info!("No configuration root specified");
     }
 
-    if let Some(output) = output {
-        tracing::info!("Results would be written to: {:?}", output);
-        println!("Output: {:?} (format: {})", output, format);
+    // Create database
+    tracing::info!("Creating database");
+    let mut db = RootDatabaseImpl::default();
+
+    // Setup source root
+    let source_root_id = base_db::SourceRootId(0);
+    let source_root = base_db::SourceRoot::new_local(vfs::FileSet::new());
+    db.set_source_root(source_root_id, source_root);
+
+    // Find all BSL files
+    tracing::info!("Finding BSL files in {:?}", source_dir);
+    let mut bsl_files = Vec::new();
+    for entry in WalkDir::new(&source_dir).follow_links(true) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "bsl" {
+                    bsl_files.push(entry.path().to_path_buf());
+                }
+            }
+        }
     }
+
+    tracing::info!("Found {} BSL files", bsl_files.len());
+
+    // Load files into database
+    tracing::info!("Loading files into database");
+    let mut file_ids = Vec::new();
+
+    for (idx, path) in bsl_files.iter().enumerate() {
+        let file_id = FileId(idx as u32);
+        let content = fs::read_to_string(path)?;
+
+        db.set_file_source_root(file_id, source_root_id);
+        db.set_file_text(file_id, &content);
+
+        file_ids.push((file_id, path.clone()));
+    }
+
+    tracing::info!(
+        "Files loaded, starting parallel diagnostics (threads: {})",
+        rayon::current_num_threads()
+    );
+
+    // Setup progress bar
+    let progress = if !quiet {
+        let pb = ProgressBar::new(file_ids.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    // CRITICAL: Create ConfigurationPathInput ONCE for Salsa caching!
+    // If we create a new input for each diagnostic, Salsa won't cache the metadata load
+    let config_path_input = configuration_path.as_ref().map(|path| {
+        let path_str = path.to_string_lossy().to_string();
+        metadata::ConfigurationPathInput::new(&db, path_str)
+    });
+
+    // Parallel diagnostics execution WITHOUT Mutex!
+    // Use map_with to clone database for each thread worker
+    // map_with calls db.clone() once per thread (not per file!)
+    // Salsa's clone creates snapshot with new ZalsaLocal (per-thread state)
+    let config = Arc::new(DiagnosticsConfig::default());
+    let processed = Arc::new(AtomicUsize::new(0));
+    let progress_arc = Arc::new(progress);
+    let workspace_dir_arc = Arc::new(workspace_dir.clone());
+    let source_dir_arc = Arc::new(source_dir.clone());
+    let configuration_path_arc = Arc::new(configuration_path);
+    let clones_count = Arc::new(AtomicUsize::new(0));
+
+    let all_diagnostics: Vec<FileAnalysis> = file_ids
+        .par_iter()
+        .map_with((db.clone(), clones_count.clone()), |(db_snapshot, clones), (file_id, path)| {
+            // Log database cloning - this should happen once per thread!
+            let clone_num = clones.fetch_add(1, Ordering::Relaxed);
+            if clone_num < 20 {
+                // Log first 20 clones to see the pattern
+                tracing::debug!(
+                    clone_num = clone_num,
+                    thread = ?std::thread::current().id(),
+                    "Database cloned for thread worker"
+                );
+            }
+
+            let ctx = DiagnosticsContext {
+                db: db_snapshot,
+                config: &config,
+                file_id: *file_id,
+                workspace_root: Some(&source_dir_arc),
+                configuration_path: configuration_path_arc.as_deref(),
+                configuration_path_input: config_path_input,
+            };
+
+            // Catch panics to continue analyzing other files if one fails
+            let file_start = std::time::Instant::now();
+            let diagnostics =
+                match catch_unwind(AssertUnwindSafe(|| ide_diagnostics::diagnostics(&ctx))) {
+                    Ok(diags) => {
+                        let elapsed = file_start.elapsed();
+                        if elapsed.as_millis() > 100 {
+                            // Log slow files
+                            tracing::warn!(
+                                file = ?path,
+                                elapsed_ms = elapsed.as_millis(),
+                                "Slow file analysis"
+                            );
+                        }
+                        diags
+                    }
+                    Err(e) => {
+                        tracing::error!("Panic analyzing {:?}: {:?}", path, e);
+                        return None;
+                    }
+                };
+
+            // Update progress (lock-free atomic counter)
+            let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(ref pb) = &*progress_arc {
+                pb.set_position(count as u64);
+                pb.set_message(format!(
+                    "{:.0} files/sec",
+                    count as f64 / start.elapsed().as_secs_f64()
+                ));
+            }
+
+            // Return only if diagnostics found
+            if !diagnostics.is_empty() {
+                Some(FileAnalysis {
+                    path: path.clone(),
+                    relative_path: path
+                        .strip_prefix(&*workspace_dir_arc)
+                        .unwrap_or(path)
+                        .to_path_buf(),
+                    diagnostics,
+                })
+            } else {
+                None
+            }
+        })
+        .flatten() // flatten Option<FileAnalysis> from map_with
+        .collect();
+
+    // Finish progress bar
+    if let Some(ref pb) = &*progress_arc {
+        pb.finish_with_message("Analysis complete");
+    }
+
+    let elapsed = start.elapsed();
+    let total_clones = clones_count.load(Ordering::Relaxed);
+    tracing::info!(
+        total_clones = total_clones,
+        expected_clones = rayon::current_num_threads(),
+        "Database cloning statistics"
+    );
+
+    if total_clones > rayon::current_num_threads() * 2 {
+        tracing::warn!(
+            "Database cloned {} times (expected ~{}). This may indicate excessive cloning!",
+            total_clones,
+            rayon::current_num_threads()
+        );
+    }
+
+    // Create analysis results
+    let total_diagnostics: usize = all_diagnostics.iter().map(|f| f.diagnostics.len()).sum();
+
+    let results = AnalysisResults {
+        files_analyzed: bsl_files.len(),
+        files_with_issues: all_diagnostics.len(),
+        total_diagnostics,
+        elapsed_secs: elapsed.as_secs_f64(),
+        diagnostics: all_diagnostics,
+        source_dir: source_dir.clone(),
+        workspace_dir: workspace_dir.clone(),
+    };
+
+    // Create output directory if needed
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Run reporters
+    let registry = ReporterRegistry::new();
+    let reporter_keys = if reporters.is_empty() { vec!["console".to_string()] } else { reporters };
+
+    for key in &reporter_keys {
+        match registry.get(key) {
+            Some(reporter) => {
+                if let Err(e) = reporter.report(&results, &output_dir) {
+                    tracing::error!("Reporter '{}' failed: {}", key, e);
+                    eprintln!("Error: Reporter '{}' failed: {}", key, e);
+                }
+            }
+            None => {
+                eprintln!("Error: Unknown reporter '{}'", key);
+                eprintln!("Valid reporters: {}", registry.keys().join(", "));
+                return Err(format!("Unknown reporter: {}", key).into());
+            }
+        }
+    }
+
+    tracing::info!("Analysis complete");
 
     Ok(())
 }
 
 /// Retrieves changed files from git diff.
+#[allow(dead_code)] // Will be used in incremental mode implementation
 fn get_changed_files_from_git(
     project_root: &PathBuf,
     git_ref: &str,

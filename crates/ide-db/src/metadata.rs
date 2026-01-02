@@ -32,11 +32,13 @@ use std::sync::Arc;
 
 // ========== Salsa Inputs ==========
 
-/// Input: path to configuration root directory.
+/// Interned: path to configuration root directory.
 ///
-/// This is a Salsa input that represents the path to a 1C configuration.
+/// This is a Salsa interned value that represents the path to a 1C configuration.
+/// Using `interned` instead of `input` ensures that multiple calls with the same path
+/// return the same ID, enabling proper Salsa caching.
 /// When the path changes, all dependent queries are invalidated.
-#[salsa::input(debug)]
+#[salsa::interned(debug)]
 pub struct ConfigurationPathInput {
     /// Path to configuration root directory (stored as String for Salsa)
     pub path: String,
@@ -64,26 +66,26 @@ pub struct ConfigurationPathInput {
 ///
 /// Loaded configuration wrapped in Arc for efficient cloning
 #[salsa::tracked(lru = 16)]
-pub fn load_configuration(
-    db: &dyn salsa::Database,
-    path_input: ConfigurationPathInput,
+pub fn load_configuration<'db>(
+    db: &'db dyn salsa::Database,
+    path_input: ConfigurationPathInput<'db>,
 ) -> Arc<Configuration> {
     let _span = tracing::info_span!("load_configuration").entered();
 
     let path_str = path_input.path(db);
     let path = PathBuf::from(path_str);
 
-    tracing::debug!(?path, "loading configuration from directory");
+    tracing::warn!(?path, "METADATA LOAD: loading configuration from directory");
 
     let config = bsl_metadata::load_from_directory(&path).unwrap_or_else(|e| {
         tracing::error!(error = %e, ?path, "failed to load configuration");
         Configuration::new("Configuration")
     });
 
-    tracing::info!(
+    tracing::warn!(
         common_modules = config.common_modules().len(),
         metadata_objects = config.metadata_objects().len(),
-        "configuration loaded successfully"
+        "METADATA LOAD: configuration loaded successfully"
     );
 
     Arc::new(config)
@@ -112,7 +114,10 @@ pub trait MetadataDb: salsa::Database {
     ///
     /// This method is cached by Salsa. The same path will return the same Arc,
     /// avoiding redundant file I/O and parsing.
-    fn load_configuration(&self, path_input: ConfigurationPathInput) -> Arc<Configuration>
+    fn load_configuration<'db>(
+        &'db self,
+        path_input: ConfigurationPathInput<'db>,
+    ) -> Arc<Configuration>
     where
         Self: Sized,
     {

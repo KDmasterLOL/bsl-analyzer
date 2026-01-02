@@ -225,13 +225,10 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
         }
 
         SyntaxKind::ASSIGN_STMT => {
-            eprintln!("[DEBUG] ASSIGN_STMT, in_cycle={}", scope.in_cycle());
             check_assignment(node, scope);
             // Check for Execute call in rvalue (right side of assignment)
             if scope.in_cycle() {
-                eprintln!("[DEBUG] Calling check_execute_call_in_assignment");
                 check_execute_call_in_assignment(node, diagnostics, scope);
-                eprintln!("[DEBUG] After check, diagnostics count: {}", diagnostics.len());
             }
             for child in node.children() {
                 check_node(&child, diagnostics, scope);
@@ -239,7 +236,6 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
         }
 
         SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
-            eprintln!("[DEBUG] CALL_STMT/EXPR, in_cycle={}", scope.in_cycle());
             // Check if this is an assignment (has EQ token) or a method call (has DOT token)
             let has_eq = node
                 .descendants_with_tokens()
@@ -251,18 +247,15 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
                 .filter_map(|el| el.into_token())
                 .any(|t| t.kind() == SyntaxKind::DOT);
 
-            eprintln!("[DEBUG] has_eq={}, has_dot={}", has_eq, has_dot);
             if has_eq {
                 check_assignment(node, scope);
             }
             if has_dot && scope.in_cycle() {
                 if has_eq {
                     // Assignment with Execute call: use special handling for rvalue range
-                    eprintln!("[DEBUG] Assignment with Execute - using rvalue range");
                     check_execute_call_in_assignment(node, diagnostics, scope);
                 } else {
                     // Pure method call
-                    eprintln!("[DEBUG] Pure Execute call");
                     check_execute_call(node, diagnostics, scope);
                 }
             }
@@ -411,7 +404,6 @@ fn check_execute_call(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scop
                 // Create diagnostic with precise range
                 if let (Some(start), Some(end)) = (first_ident_range, last_significant_token) {
                     let diagnostic_range = TextRange::new(start.start(), end.end());
-                    eprintln!("[DEBUG] Pure Execute range: {:?}", diagnostic_range);
                     diagnostics.push(make_diagnostic_with_range(diagnostic_range));
                 } else {
                     diagnostics.push(make_diagnostic(node));
@@ -520,7 +512,6 @@ fn check_execute_call_in_assignment(
                     (first_ident_after_eq, last_significant_token)
                 {
                     let diagnostic_range = TextRange::new(start_range.start(), end_range.end());
-                    eprintln!("[DEBUG] Assignment Execute range: {:?}", diagnostic_range);
                     diagnostics.push(make_diagnostic_with_range(diagnostic_range));
                 }
                 return;
@@ -577,6 +568,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         let diagnostics = check(&ctx);

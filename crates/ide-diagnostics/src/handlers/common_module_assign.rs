@@ -14,14 +14,25 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
-        None => return Vec::new(),
+    // Use pre-created ConfigurationPathInput for Salsa caching
+    let path_input = match ctx.configuration_path_input {
+        Some(input) => input,
+        None => {
+            // Fallback: create input if not provided (for tests)
+            let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
+                Some(path) => path,
+                None => return Vec::new(),
+            };
+            let config_path_str = config_path.to_string_lossy().to_string();
+            ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str)
+        }
     };
-
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
     let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
+
+    // Build HashSet of common module names (lowercase) for O(1) lookup
+    // This avoids O(N) iteration for each assignment statement
+    let common_module_names: std::collections::HashSet<String> =
+        configuration.common_modules().iter().map(|m| m.name().to_lowercase()).collect();
 
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
@@ -31,12 +42,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for node in root.descendants() {
         if let Some(assign_stmt) = AssignStmt::cast(node) {
             if let Some(identifier) = extract_simple_identifier(&assign_stmt) {
-                let module_exists = configuration
-                    .common_modules()
-                    .iter()
-                    .any(|m| m.name().to_lowercase() == identifier.to_lowercase());
-
-                if module_exists {
+                // O(1) lookup instead of O(N) iteration
+                if common_module_names.contains(&identifier.to_lowercase()) {
                     let lvalue_node = assign_stmt
                         .syntax()
                         .children()
@@ -107,6 +114,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         check(&ctx)

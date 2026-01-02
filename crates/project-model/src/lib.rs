@@ -21,8 +21,9 @@ impl Project {
     }
 }
 
-/// Project configuration (from .bslls.json).
+/// Project configuration (from .bslls.json or .bsl-language-server.json).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
@@ -32,18 +33,33 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub formatting: FormattingConfig,
+
+    #[serde(default)]
+    pub configuration_root: Option<String>,
+
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl ProjectConfig {
-    /// Loads configuration from .bslls.json in the project root.
+    /// Loads configuration from .bslls.json or .bsl-language-server.json in the project root.
     pub fn load(root: &Path) -> Option<Self> {
-        let config_path = root.join(".bslls.json");
+        Self::try_load(root, ".bsl-language-server.json")
+            .or_else(|| Self::try_load(root, ".bslls.json"))
+    }
+
+    fn try_load(root: &Path, filename: &str) -> Option<Self> {
+        let config_path = root.join(filename);
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path).ok()?;
             serde_json::from_str(&content).ok()
         } else {
             None
         }
+    }
+
+    pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
+        self.configuration_root.as_ref().map(|root| project_root.join(root))
     }
 }
 

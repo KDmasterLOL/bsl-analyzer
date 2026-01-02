@@ -285,6 +285,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         let diagnostics = check(&ctx);
@@ -394,6 +395,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         let diagnostics = check(&ctx);

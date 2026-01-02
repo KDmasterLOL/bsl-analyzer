@@ -14,6 +14,10 @@ path = "src/bin/main.rs"
 
 [dependencies]
 ide.workspace = true
+ide-diagnostics.workspace = true
+ide-db.workspace = true
+base-db.workspace = true
+bsl-metadata.workspace = true
 project-model.workspace = true
 vfs.workspace = true
 stdx.workspace = true
@@ -30,6 +34,11 @@ clap.workspace = true
 tokio.workspace = true
 crossbeam-channel.workspace = true
 
+# Parallelism
+rayon.workspace = true
+indicatif.workspace = true
+parking_lot.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +51,9 @@ rustc-hash.workspace = true
 
 # Error handling
 anyhow.workspace = true
+
+# Utilities
+walkdir.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

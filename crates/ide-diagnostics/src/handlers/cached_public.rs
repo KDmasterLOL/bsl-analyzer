@@ -288,6 +288,7 @@ mod tests {
             file_id,
             workspace_root: None, // No workspace in unit tests
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         let diagnostics = check(&ctx);
@@ -371,6 +372,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         // Create mock module with DuringRequest (mimics Java's spy)
@@ -410,6 +412,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         // Create mock module with DuringSession
@@ -439,6 +442,7 @@ mod tests {
             file_id,
             workspace_root: None,
             configuration_path: None,
+            configuration_path_input: None,
         };
 
         // Create mock module with DontUse (not cached)
