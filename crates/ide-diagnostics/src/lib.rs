@@ -128,6 +128,7 @@ pub enum DiagnosticCode {
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
+    FieldsFromJoinsWithoutIsNull,
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }
@@ -169,6 +170,7 @@ impl DiagnosticCode {
             Self::ExcessiveAutoTestCheck => "ExcessiveAutoTestCheck",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
+            Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
@@ -350,6 +352,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // SDBL diagnostics
     result.extend(handlers::assign_alias_fields_in_query::check(ctx));
+    result.extend(handlers::fields_from_joins_without_is_null::check(ctx));
 
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list

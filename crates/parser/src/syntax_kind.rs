@@ -89,6 +89,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblFromClause => SK::SDBL_FROM_CLAUSE,
         NodeKind::SdblDataSource => SK::SDBL_DATA_SOURCE,
         NodeKind::SdblTableRef => SK::SDBL_TABLE_REF,
+        NodeKind::SdblJoinClause => SK::SDBL_JOIN_CLAUSE,
         NodeKind::SdblWhereClause => SK::SDBL_WHERE_CLAUSE,
         NodeKind::SdblExpr => SK::SDBL_EXPR,
         NodeKind::SdblLogicalOrExpr => SK::SDBL_LOGICAL_OR_EXPR,

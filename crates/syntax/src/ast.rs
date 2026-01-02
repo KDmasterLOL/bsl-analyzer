@@ -1304,6 +1304,11 @@ impl SdblDataSource {
     pub fn alias(&self) -> Option<SdblAlias> {
         self.0.children().find_map(SdblAlias::cast)
     }
+
+    /// Get all JOIN clauses attached to this data source.
+    pub fn join_clauses(&self) -> impl Iterator<Item = SdblJoinClause> + '_ {
+        self.0.children().filter_map(SdblJoinClause::cast)
+    }
 }
 
 /// SDBL table reference.
@@ -1326,6 +1331,59 @@ impl AstNode for SdblTableRef {
     fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
+}
+
+/// SDBL JOIN clause.
+#[derive(Debug, Clone)]
+pub struct SdblJoinClause(SyntaxNode);
+
+impl AstNode for SdblJoinClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_JOIN_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl SdblJoinClause {
+    /// Get the joined data source.
+    pub fn data_source(&self) -> Option<SdblDataSource> {
+        self.0.children().find_map(SdblDataSource::cast)
+    }
+
+    /// Determine the JOIN type from keywords in the clause.
+    pub fn join_type(&self) -> JoinType {
+        let text = self.0.text().to_string().to_uppercase();
+
+        if text.contains("LEFT") || text.contains("ЛЕВОЕ") {
+            JoinType::Left
+        } else if text.contains("RIGHT") || text.contains("ПРАВОЕ") {
+            JoinType::Right
+        } else if text.contains("FULL") || text.contains("ПОЛНОЕ") {
+            JoinType::Full
+        } else {
+            JoinType::Inner
+        }
+    }
+}
+
+/// JOIN type enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Left,
+    Right,
+    Full,
+    Inner,
 }
 
 /// SDBL WHERE clause.

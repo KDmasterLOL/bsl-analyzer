@@ -56,4 +56,5 @@ pub mod execute_external_code_in_common_module;
 pub mod export_variables;
 pub mod external_app_starting;
 pub mod extra_commas;
+pub mod fields_from_joins_without_is_null;
 // TODO: Add all 181 handlers

@@ -97,6 +97,7 @@ pub enum NodeKind {
     SdblFromClause,
     SdblDataSource,
     SdblTableRef,
+    SdblJoinClause,
     SdblWhereClause,
     SdblExpr,
     SdblLogicalOrExpr,

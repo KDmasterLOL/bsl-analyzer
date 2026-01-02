@@ -275,9 +275,7 @@ fn alias(p: &mut Parser) {
 /// Parse FROM clause
 ///
 /// Grammar: `FROM dataSources`
-///
-/// Phase 1: Basic table references and subqueries
-/// Phase 2: Add JOINs, virtual tables, external data sources
+/// where `dataSources: tables+=dataSource (COMMA tables+=dataSource)*`
 fn from_clause(p: &mut Parser) {
     let m = p.start();
 
@@ -297,14 +295,14 @@ fn from_clause(p: &mut Parser) {
 
 /// Parse a data source (table, subquery, or parameter)
 ///
-/// Grammar (simplified for Phase 1):
+/// Grammar:
 /// ```
 /// dataSource:
 ///     (LPAREN dataSource RPAREN)
-///   | ((table | subquery) alias?)
+///   | ((table | subquery) alias? joins+=joinPart*)
 /// ```
 ///
-/// Phase 2: Add JOINs, virtual tables
+/// Each data source can have zero or more JOINs attached to it.
 fn data_source(p: &mut Parser) {
     let m = p.start();
 
@@ -335,8 +333,12 @@ fn data_source(p: &mut Parser) {
         }
     }
 
-    // Phase 2: Parse JOIN clauses
-    // while is_join_keyword(p) { join_part(p); }
+    // Parse JOIN clauses (zero or more)
+    p.skip_trivia();
+    while is_join_keyword(p) {
+        join_clause(p);
+        p.skip_trivia();
+    }
 
     m.complete(p, NodeKind::SdblDataSource);
 }
@@ -409,4 +411,78 @@ fn is_clause_keyword(p: &Parser) -> bool {
         || p.at_keyword("ORDER")
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || p.at_keyword("INTO")
+}
+
+/// Check if current position starts a JOIN clause
+///
+/// Looks for: LEFT/RIGHT/FULL/INNER/OUTER/JOIN keywords
+fn is_join_keyword(p: &Parser) -> bool {
+    p.at_keyword("LEFT")
+        || p.at_keyword("ЛЕВОЕ")
+        || p.at_keyword("RIGHT")
+        || p.at_keyword("ПРАВОЕ")
+        || p.at_keyword("FULL")
+        || p.at_keyword("ПОЛНОЕ")
+        || p.at_keyword("INNER")
+        || p.at_keyword("ВНУТРЕННЕЕ")
+        || p.at_keyword("JOIN")
+        || p.at_keyword("СОЕДИНЕНИЕ")
+}
+
+/// Parse a JOIN clause
+///
+/// Grammar:
+/// ```
+/// joinPart:
+///     (LEFT | RIGHT | FULL | INNER)? OUTER? JOIN
+///     source=dataSource (ON | ПО) condition=logicalExpression
+/// ```
+fn join_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // Parse join type (LEFT, RIGHT, FULL, INNER)
+    // Note: In ANTLR grammar, JOIN alone defaults to INNER JOIN
+    let has_join_type = p.at_keyword("LEFT")
+        || p.at_keyword("ЛЕВОЕ")
+        || p.at_keyword("RIGHT")
+        || p.at_keyword("ПРАВОЕ")
+        || p.at_keyword("FULL")
+        || p.at_keyword("ПОЛНОЕ")
+        || p.at_keyword("INNER")
+        || p.at_keyword("ВНУТРЕННЕЕ");
+
+    if has_join_type {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    // Optional OUTER keyword (for LEFT OUTER JOIN, RIGHT OUTER JOIN, FULL OUTER JOIN)
+    if p.at_keyword("OUTER") || p.at_keyword("ВНЕШНЕЕ") {
+        p.bump();
+        p.skip_trivia();
+    }
+
+    // JOIN/СОЕДИНЕНИЕ keyword (mandatory)
+    if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
+        p.error(); // Expected JOIN keyword
+        m.complete(p, NodeKind::SdblJoinClause);
+        return;
+    }
+    p.bump(); // Consume JOIN
+    p.skip_trivia();
+
+    // Parse joined data source (table or subquery with alias)
+    data_source(p);
+    p.skip_trivia();
+
+    // ON/ПО keyword (mandatory)
+    if !eat_sdbl_keyword(p, "ON", "ПО") {
+        p.error(); // Expected ON/ПО
+    }
+    p.skip_trivia();
+
+    // Parse join condition (logical expression)
+    expressions::logical_expression(p);
+
+    m.complete(p, NodeKind::SdblJoinClause);
 }
