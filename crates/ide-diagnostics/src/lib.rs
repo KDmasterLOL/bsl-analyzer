@@ -105,6 +105,7 @@ pub enum DiagnosticCode {
     DeprecatedAttributes8312,
     DisableSafeMode,
     ExecuteExternalCode,
+    ExternalAppStarting,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -185,6 +186,7 @@ impl DiagnosticCode {
             Self::DeprecatedAttributes8312 => "DeprecatedAttributes8312",
             Self::DisableSafeMode => "DisableSafeMode",
             Self::ExecuteExternalCode => "ExecuteExternalCode",
+            Self::ExternalAppStarting => "ExternalAppStarting",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -320,6 +322,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::deprecated_attributes_8312::check(ctx));
     result.extend(handlers::disable_safe_mode::check(ctx));
     result.extend(handlers::execute_external_code::check(ctx));
+    result.extend(handlers::external_app_starting::check(ctx));
     result.extend(handlers::export_variables::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
