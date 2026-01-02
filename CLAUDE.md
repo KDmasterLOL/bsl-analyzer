@@ -8,19 +8,20 @@ BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) writt
 
 **Target:** Drop-in replacement for bsl-language-server with SonarQube integration.
 
-**Performance (Real Data + Extrapolation):**
+**Performance (Real Data):**
 
-**✅ Real project pt_erp (121 MB, 111K files):**
-- SonarQube scan: **10-15 seconds** (vs 1 hour in Java) — **240x-360x faster**
-- LSP cold start: **3-5 seconds** (vs 45-100 seconds) — **10x-30x faster**
-- LSP incremental: **< 50 ms** (vs 500-5000 ms) — **10x-100x faster**
-- Memory: **~500 MB** (vs 2-4 GB) — **4x-8x less**
+**✅ Real project doc3 (121 MB, 6,540 BSL files):**
+- **Full analysis**: **11.1 seconds** (vs 61.1 seconds in Java) — **5.5x faster**
+- **CPU efficiency**: 59.9s user time (vs 358.3s) — **6.0x less CPU**
+- **I/O efficiency**: 2.9s system time (vs 29.1s) — **10.1x less I/O**
+- **Throughput**: 590 files/sec (vs 107 files/sec) — **5.5x higher**
+- **Memory**: **~500 MB** (vs 2-4 GB) — **4-8x less**
 
-**Extrapolation for 4GB project:**
-- SonarQube scan: **6-10 minutes** (vs 33 hours in Java) — **200x-330x faster**
-- Memory: **~4-5 GB** (vs 99 GB) — **20x less**
+**Extrapolation for 4GB project (~33x larger):**
+- **Full analysis**: **~6 minutes** (vs ~33 minutes in Java) — **5-6x faster**
+- **Memory**: **~4-5 GB** (vs 8-16 GB) — **2-4x less**
 
-See `docs/planning/PERFORMANCE_REAL_DATA.md` for detailed analysis based on real measurements.
+See `docs/planning/PERFORMANCE_REAL_DATA.md` for detailed benchmark data and methodology.
 
 ## Common Commands
 
