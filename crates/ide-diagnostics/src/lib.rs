@@ -106,6 +106,7 @@ pub enum DiagnosticCode {
     DisableSafeMode,
     ExecuteExternalCode,
     ExternalAppStarting,
+    FileSystemAccess,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -189,6 +190,7 @@ impl DiagnosticCode {
             Self::DisableSafeMode => "DisableSafeMode",
             Self::ExecuteExternalCode => "ExecuteExternalCode",
             Self::ExternalAppStarting => "ExternalAppStarting",
+            Self::FileSystemAccess => "FileSystemAccess",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -326,6 +328,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::disable_safe_mode::check(ctx));
     result.extend(handlers::execute_external_code::check(ctx));
     result.extend(handlers::external_app_starting::check(ctx));
+    result.extend(handlers::file_system_access::check(ctx));
     result.extend(handlers::export_variables::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
