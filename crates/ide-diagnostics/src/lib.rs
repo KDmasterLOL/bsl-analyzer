@@ -452,6 +452,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::cyclomatic_complexity::check,
     ));
+    result.extend(run_diagnostic(
+        "FunctionNameStartsWithGet",
+        ctx,
+        handlers::function_name_starts_with_get::check,
+    ));
 
     // Tier 3: Metadata diagnostics
     result.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
