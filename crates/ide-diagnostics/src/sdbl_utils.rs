@@ -21,30 +21,52 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 /// - Column mapping:
 ///   - First line: `bsl_col = bsl_literal_col + sdbl_col + 1` (+1 for opening quote)
 ///   - Multiline: `bsl_col = sdbl_col` (already aligned after `|` removal)
+///
+/// ## Performance
+///
+/// Uses `&str` instead of `String` to avoid copying the entire BSL source for each query.
+/// This is critical for files with many SDBL queries (e.g., 100+ queries).
+///
+/// Caches BSL literal starting position to avoid recalculating for each diagnostic.
 #[derive(Debug, Clone)]
-pub struct SdblPositionMapper {
+pub struct SdblPositionMapper<'a> {
     /// Position of the string literal (LITERAL node) in BSL source
+    /// Kept for debugging/inspection purposes
+    #[allow(dead_code)]
     bsl_literal_range: TextRange,
 
     /// Original BSL file content (for line/column calculations)
-    bsl_source: String,
+    /// OPTIMIZATION: Reference instead of owned String to avoid massive allocations
+    bsl_source: &'a str,
+
+    /// Cached BSL literal starting position (line, column)
+    /// OPTIMIZATION: Computed once, reused for all diagnostics in this query
+    bsl_literal_line: u32,
+    bsl_literal_col: u32,
 }
 
-impl SdblPositionMapper {
+impl<'a> SdblPositionMapper<'a> {
     /// Create a new position mapper from a LITERAL node.
-    pub fn new(bsl_literal_node: &SyntaxNode, bsl_source: &str) -> Self {
-        Self {
-            bsl_literal_range: bsl_literal_node.text_range(),
-            bsl_source: bsl_source.to_string(),
-        }
+    pub fn new(bsl_literal_node: &SyntaxNode, bsl_source: &'a str) -> Self {
+        let bsl_literal_range = bsl_literal_node.text_range();
+        let (bsl_literal_line, bsl_literal_col) =
+            byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
+
+        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col }
     }
 
     /// Create a new position mapper from a cached TextRange.
     ///
     /// This is used when working with cached SDBL queries where we already
     /// have the literal range but not the original SyntaxNode.
-    pub fn new_from_range(bsl_literal_range: TextRange, bsl_source: &str) -> Self {
-        Self { bsl_literal_range, bsl_source: bsl_source.to_string() }
+    ///
+    /// OPTIMIZATION: Uses `&str` reference instead of copying the entire source.
+    /// OPTIMIZATION: Caches literal position to avoid recalculating for each diagnostic.
+    pub fn new_from_range(bsl_literal_range: TextRange, bsl_source: &'a str) -> Self {
+        let (bsl_literal_line, bsl_literal_col) =
+            byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
+
+        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col }
     }
 
     /// Map SDBL TextRange to BSL TextRange.
@@ -58,9 +80,9 @@ impl SdblPositionMapper {
         let (sdbl_end_line, sdbl_end_col) =
             byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.end()));
 
-        // 2. Get BSL literal starting position
-        let (bsl_literal_line, bsl_literal_col) =
-            byte_offset_to_line_col(&self.bsl_source, u32::from(self.bsl_literal_range.start()));
+        // 2. Use cached BSL literal starting position (computed in constructor)
+        let bsl_literal_line = self.bsl_literal_line;
+        let bsl_literal_col = self.bsl_literal_col;
 
         // 3. Map SDBL → BSL accounting for removed | prefix
         let bsl_start_line = bsl_literal_line + sdbl_start_line;
@@ -103,8 +125,8 @@ impl SdblPositionMapper {
 
         // 4. Convert back to TextRange (byte offsets in BSL)
         let bsl_start_offset =
-            line_col_to_byte_offset(&self.bsl_source, bsl_start_line, bsl_start_col);
-        let bsl_end_offset = line_col_to_byte_offset(&self.bsl_source, bsl_end_line, bsl_end_col);
+            line_col_to_byte_offset(self.bsl_source, bsl_start_line, bsl_start_col);
+        let bsl_end_offset = line_col_to_byte_offset(self.bsl_source, bsl_end_line, bsl_end_col);
 
         TextRange::new(bsl_start_offset.into(), bsl_end_offset.into())
     }

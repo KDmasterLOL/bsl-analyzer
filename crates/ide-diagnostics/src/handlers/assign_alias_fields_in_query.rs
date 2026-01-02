@@ -61,16 +61,21 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // ✅ NEW: Get cached SDBL queries (no tree walking!)
+    let cache_start = Instant::now();
     let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
+    let cache_ms = cache_start.elapsed().as_micros();
 
     // Get BSL source text for position mapping
+    let source_start = Instant::now();
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
+    let source_ms = source_start.elapsed().as_micros();
 
     let mut diagnostics = Vec::new();
 
     // Time measurements
-    let mut time_analyzing_ast_ms = 0u128;
+    let mut time_mapper_creation_us = 0u128;
+    let mut time_analyzing_ast_us = 0u128;
     let mut queries_analyzed = 0;
 
     // Process each cached SDBL query
@@ -87,44 +92,45 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         tracing::debug!(query_len = query_info.query_text.len(), "Analyzing SDBL query from cache");
 
         // Create position mapper (uses cached bsl_literal_range)
+        let mapper_start = Instant::now();
         let mapper = SdblPositionMapper::new_from_range(query_info.bsl_literal_range, &bsl_source);
+        time_mapper_creation_us += mapper_start.elapsed().as_micros();
 
         // Check SDBL query AST (already parsed!)
         let analyze_start = Instant::now();
-        check_sdbl_query_cached(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
-        time_analyzing_ast_ms += analyze_start.elapsed().as_millis();
+        check_sdbl_query_optimized(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
+        time_analyzing_ast_us += analyze_start.elapsed().as_micros();
         queries_analyzed += 1;
     }
 
     let total_elapsed = start.elapsed().as_millis();
 
-    tracing::info!(
+    tracing::warn!(
         total_ms = total_elapsed,
-        analyzing_ast_ms = time_analyzing_ast_ms,
+        cache_fetch_us = cache_ms,
+        source_fetch_us = source_ms,
+        mapper_creation_us = time_mapper_creation_us,
+        analyzing_ast_us = time_analyzing_ast_us,
         queries_from_cache = sdbl_queries.len(),
         queries_analyzed,
         diagnostics_found = diagnostics.len(),
-        "AssignAliasFieldsInQuery completed (using SDBL cache)"
+        "[PROFILE] AssignAliasFieldsInQuery"
     );
 
     diagnostics
 }
 
-/// Check a single SDBL query for fields without AS keyword (using cached parse).
+/// Check a single SDBL query for fields without AS keyword (optimized).
 ///
-/// This version uses a pre-parsed SDBL query to avoid re-parsing identical queries.
-fn check_sdbl_query_cached(
+/// OPTIMIZATION: Uses cached query_text directly instead of root.text().to_string()
+/// This eliminates string allocation for each query.
+fn check_sdbl_query_optimized(
     parse: &Parse<SyntaxNode>,
-    _query_text: &str,
+    query_text: &str,
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let root = parse.syntax_node();
-
-    // CRITICAL: The SDBL parser strips whitespace from the parse tree!
-    // TextRange values from the parser are relative to the STRIPPED text, not the original query_text.
-    // We MUST use the stripped text for position calculations.
-    let sdbl_stripped_text = root.text().to_string();
 
     // Get query package
     let Some(package) = SdblQueryPackage::cast(root) else {
@@ -132,8 +138,58 @@ fn check_sdbl_query_cached(
     };
 
     // Check each SELECT query
+    // OPTIMIZATION: Use query_text from cache instead of root.text().to_string()
+    for select_query in package.queries() {
+        check_select_query_with_mapper(&select_query, query_text, mapper, diagnostics);
+    }
+}
+
+/// Check a single SDBL query for fields without AS keyword (using cached parse).
+///
+/// This version uses a pre-parsed SDBL query to avoid re-parsing identical queries.
+#[allow(dead_code)]
+fn check_sdbl_query_cached(
+    parse: &Parse<SyntaxNode>,
+    _query_text: &str,
+    mapper: &SdblPositionMapper,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    use std::time::Instant;
+
+    let root = parse.syntax_node();
+
+    // CRITICAL: The SDBL parser strips whitespace from the parse tree!
+    // TextRange values from the parser are relative to the STRIPPED text, not the original query_text.
+    // We MUST use the stripped text for position calculations.
+    let strip_start = Instant::now();
+    let sdbl_stripped_text = root.text().to_string();
+    let strip_us = strip_start.elapsed().as_micros();
+
+    // Get query package
+    let cast_start = Instant::now();
+    let Some(package) = SdblQueryPackage::cast(root) else {
+        return;
+    };
+    let cast_us = cast_start.elapsed().as_micros();
+
+    // Check each SELECT query
+    let check_start = Instant::now();
+    let mut query_count = 0;
     for select_query in package.queries() {
         check_select_query_with_mapper(&select_query, &sdbl_stripped_text, mapper, diagnostics);
+        query_count += 1;
+    }
+    let check_us = check_start.elapsed().as_micros();
+
+    if strip_us > 1000 || check_us > 10000 {
+        tracing::debug!(
+            strip_us,
+            cast_us,
+            check_us,
+            query_count,
+            text_len = sdbl_stripped_text.len(),
+            "[PROFILE] check_sdbl_query_cached"
+        );
     }
 }
 
@@ -195,14 +251,19 @@ fn check_from_clause_for_subqueries_with_mapper(
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    use std::time::Instant;
     use syntax::ast::{AstNode, SdblSubquery};
     use syntax::SyntaxKind;
 
     // Walk descendants looking for SDBL_SUBQUERY nodes
     // These are subqueries in FROM clause like: FROM (SELECT ... ) AS Sub
+    let desc_start = Instant::now();
+    let mut subquery_count = 0;
+
     for node in from_clause.syntax().descendants() {
         if node.kind() == SyntaxKind::SDBL_SUBQUERY {
             if let Some(subquery) = SdblSubquery::cast(node) {
+                subquery_count += 1;
                 // Check the main query in this subquery (parent is subquery ✓)
                 if let Some(main_query) = subquery.main_query() {
                     check_query_fields_and_subqueries_with_mapper(
@@ -214,6 +275,11 @@ fn check_from_clause_for_subqueries_with_mapper(
                 }
             }
         }
+    }
+
+    let desc_us = desc_start.elapsed().as_micros();
+    if desc_us > 5000 {
+        tracing::debug!(desc_us, subquery_count, "[PROFILE] check_from_clause descendants()");
     }
 }
 
