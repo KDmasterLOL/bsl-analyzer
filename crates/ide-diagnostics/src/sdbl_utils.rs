@@ -43,6 +43,11 @@ pub struct SdblPositionMapper<'a> {
     /// OPTIMIZATION: Computed once, reused for all diagnostics in this query
     bsl_literal_line: u32,
     bsl_literal_col: u32,
+
+    /// Line start positions (byte offsets) for O(1) line lookup
+    /// OPTIMIZATION: Build once, use for all map_range() calls
+    /// line_starts[i] = byte offset where line i starts
+    line_starts: Vec<usize>,
 }
 
 impl<'a> SdblPositionMapper<'a> {
@@ -52,7 +57,10 @@ impl<'a> SdblPositionMapper<'a> {
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
 
-        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col }
+        // Build line index for O(1) line lookups
+        let line_starts = build_line_index(bsl_source);
+
+        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
     }
 
     /// Create a new position mapper from a cached TextRange.
@@ -62,11 +70,15 @@ impl<'a> SdblPositionMapper<'a> {
     ///
     /// OPTIMIZATION: Uses `&str` reference instead of copying the entire source.
     /// OPTIMIZATION: Caches literal position to avoid recalculating for each diagnostic.
+    /// OPTIMIZATION: Builds line index once for O(1) line lookup.
     pub fn new_from_range(bsl_literal_range: TextRange, bsl_source: &'a str) -> Self {
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
 
-        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col }
+        // Build line index for O(1) line lookups
+        let line_starts = build_line_index(bsl_source);
+
+        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
     }
 
     /// Map SDBL TextRange to BSL TextRange.
@@ -91,7 +103,9 @@ impl<'a> SdblPositionMapper<'a> {
             bsl_literal_col + sdbl_start_col + 1 // +1 for opening quote
         } else {
             // Multiline: find where | is in BSL line
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_start_line as usize).unwrap_or("");
+            // OPTIMIZATION: Use line index for O(1) line lookup instead of lines().nth() O(n)
+            let bsl_line_text =
+                get_line_text(self.bsl_source, &self.line_starts, bsl_start_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
                 // Count whitespace after | that was kept in SDBL
                 let after_pipe = &bsl_line_text[pipe_pos + 1..];
@@ -111,7 +125,9 @@ impl<'a> SdblPositionMapper<'a> {
         let bsl_end_col = if sdbl_end_line == 0 {
             bsl_literal_col + sdbl_end_col + 1
         } else {
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_end_line as usize).unwrap_or("");
+            // OPTIMIZATION: Use line index for O(1) line lookup instead of lines().nth() O(n)
+            let bsl_line_text =
+                get_line_text(self.bsl_source, &self.line_starts, bsl_end_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
                 let after_pipe = &bsl_line_text[pipe_pos + 1..];
                 let whitespace_count =
@@ -124,9 +140,19 @@ impl<'a> SdblPositionMapper<'a> {
         };
 
         // 4. Convert back to TextRange (byte offsets in BSL)
-        let bsl_start_offset =
-            line_col_to_byte_offset(self.bsl_source, bsl_start_line, bsl_start_col);
-        let bsl_end_offset = line_col_to_byte_offset(self.bsl_source, bsl_end_line, bsl_end_col);
+        // OPTIMIZATION: Use line index for O(col) conversion instead of O(total_text)
+        let bsl_start_offset = line_col_to_byte_offset_fast(
+            self.bsl_source,
+            &self.line_starts,
+            bsl_start_line,
+            bsl_start_col,
+        );
+        let bsl_end_offset = line_col_to_byte_offset_fast(
+            self.bsl_source,
+            &self.line_starts,
+            bsl_end_line,
+            bsl_end_col,
+        );
 
         TextRange::new(bsl_start_offset.into(), bsl_end_offset.into())
     }
@@ -175,6 +201,79 @@ pub fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) ->
 
     // If we reach here, we're at EOF - return length
     text.len() as u32
+}
+
+/// Build line index for O(1) line lookup.
+///
+/// Returns a Vec where line_starts[i] = byte offset where line i starts.
+/// Line 0 starts at offset 0, line 1 starts after the first \n, etc.
+fn build_line_index(text: &str) -> Vec<usize> {
+    let mut line_starts = vec![0]; // Line 0 starts at 0
+
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            // Next line starts after this \n
+            line_starts.push(idx + 1);
+        }
+    }
+
+    line_starts
+}
+
+/// Get text of a specific line using line index (O(1) instead of O(n)).
+///
+/// Returns the text of the line without the trailing newline.
+fn get_line_text<'a>(text: &'a str, line_starts: &[usize], line: usize) -> &'a str {
+    if line >= line_starts.len() {
+        return "";
+    }
+
+    let start = line_starts[line];
+    let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+
+    // Remove trailing \n if present
+    let line_text = &text[start..end];
+    line_text.strip_suffix('\n').unwrap_or(line_text)
+}
+
+/// Convert (line, column) to byte offset using line index.
+///
+/// This is faster than line_col_to_byte_offset() because it uses
+/// the pre-built line index to skip directly to the target line (O(1)),
+/// then only iterates through characters on that line (O(col)).
+///
+/// Overall: O(col) instead of O(total_text)
+fn line_col_to_byte_offset_fast(
+    text: &str,
+    line_starts: &[usize],
+    target_line: u32,
+    target_col: u32,
+) -> u32 {
+    let line = target_line as usize;
+    if line >= line_starts.len() {
+        return line_starts.last().copied().unwrap_or(0) as u32;
+    }
+
+    let line_start = line_starts[line];
+
+    // Handle column 0
+    if target_col == 0 {
+        return line_start as u32;
+    }
+
+    // Find byte offset by iterating through characters on this line only
+    // (not through the entire file!)
+    let next_line_start = line_starts.get(line + 1).copied().unwrap_or(text.len());
+    let line_text = &text[line_start..next_line_start];
+
+    for (char_count, (byte_idx, _ch)) in line_text.char_indices().enumerate() {
+        if char_count as u32 == target_col {
+            return (line_start + byte_idx) as u32;
+        }
+    }
+
+    // If we reach here, column is past end of line
+    next_line_start as u32
 }
 
 /// Check if a LITERAL node is part of string concatenation.

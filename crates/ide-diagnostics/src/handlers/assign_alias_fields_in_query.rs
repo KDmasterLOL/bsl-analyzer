@@ -200,13 +200,25 @@ fn check_select_query_with_mapper(
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    use std::time::Instant;
+
     let Some(subquery) = select_query.subquery() else {
         return;
     };
 
     // Check main query fields (parent is subquery ✓)
+    let check_start = Instant::now();
+    let diag_count_before = diagnostics.len();
+
     if let Some(main_query) = subquery.main_query() {
         check_query_fields_and_subqueries_with_mapper(&main_query, query_text, mapper, diagnostics);
+    }
+
+    let check_us = check_start.elapsed().as_micros();
+    let diag_count = diagnostics.len() - diag_count_before;
+
+    if check_us > 10000 {
+        tracing::debug!(check_us, diag_count, "[PROFILE] check_select_query_with_mapper (>10ms)");
     }
 
     // Note: UNION queries are NOT checked (parent is union node, not subquery)
@@ -219,12 +231,22 @@ fn check_query_fields_and_subqueries_with_mapper(
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    use std::time::Instant;
+
     // Check fields in this query
+    let fields_start = Instant::now();
     check_query_fields_with_mapper(query, query_text, mapper, diagnostics);
+    let fields_us = fields_start.elapsed().as_micros();
 
     // Recursively check subqueries in FROM clause
+    let from_start = Instant::now();
     if let Some(from_clause) = query.from_clause() {
         check_from_clause_for_subqueries_with_mapper(&from_clause, query_text, mapper, diagnostics);
+    }
+    let from_us = from_start.elapsed().as_micros();
+
+    if fields_us > 5000 || from_us > 5000 {
+        tracing::debug!(fields_us, from_us, "[PROFILE] check_query_fields_and_subqueries");
     }
 }
 
@@ -318,10 +340,13 @@ fn add_diagnostic_for_alias_with_mapper(
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    use std::time::Instant;
+
     let alias_name = alias.name().unwrap_or_else(|| "<unknown>".to_string());
 
     // Use the whole field's range (expression + alias)
     // Get first token from expression and last token from alias
+    let token_start = Instant::now();
     let sdbl_range = match (field.expression(), alias.identifier()) {
         (Some(expr), Some(alias_ident)) => {
             // Get first non-whitespace token from expression
@@ -343,7 +368,15 @@ fn add_diagnostic_for_alias_with_mapper(
         }
         _ => field.syntax().text_range(),
     };
+    let token_us = token_start.elapsed().as_micros();
+
+    let map_start = Instant::now();
     let bsl_range = mapper.map_range(sdbl_range, query_text);
+    let map_us = map_start.elapsed().as_micros();
+
+    if token_us > 100 || map_us > 100 {
+        tracing::trace!(token_us, map_us, "[PROFILE] add_diagnostic_for_alias");
+    }
 
     diagnostics.push(Diagnostic {
         code: DiagnosticCode::AssignAliasFieldsInQuery,
@@ -365,7 +398,10 @@ fn add_diagnostic_for_field_with_mapper(
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    use std::time::Instant;
+
     // Get SDBL range - trim leading/trailing whitespace from expression
+    let token_start = Instant::now();
     let sdbl_range = if let Some(expr) = field.expression() {
         let full_range = expr.text_range();
 
@@ -409,7 +445,15 @@ fn add_diagnostic_for_field_with_mapper(
     } else {
         field.syntax().text_range()
     };
+    let token_us = token_start.elapsed().as_micros();
+
+    let map_start = Instant::now();
     let bsl_range = mapper.map_range(sdbl_range, query_text);
+    let map_us = map_start.elapsed().as_micros();
+
+    if token_us > 100 || map_us > 100 {
+        tracing::trace!(token_us, map_us, "[PROFILE] add_diagnostic_for_field");
+    }
 
     diagnostics.push(Diagnostic {
         code: DiagnosticCode::AssignAliasFieldsInQuery,
