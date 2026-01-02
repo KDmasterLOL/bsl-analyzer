@@ -42,7 +42,7 @@
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedTypeManagedForm) {
@@ -52,12 +52,45 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(diagnostic) = check_call(&node) {
-            if seen_ranges.insert(diagnostic.range) {
-                diagnostics.push(diagnostic);
+    // Optimized: single traversal O(n) instead of O(n³)
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
+            continue;
+        }
+
+        // Check if this is "Тип" or "Type" method call
+        let method_name = token.text().to_string();
+        if !is_type_method(&method_name) {
+            continue;
+        }
+
+        // Check pattern: IDENT ( but not .IDENT(
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        let prev_is_dot = i
+            .checked_sub(1)
+            .and_then(|idx| tokens.get(idx))
+            .map(|t| t.kind() == SyntaxKind::DOT)
+            .unwrap_or(false);
+
+        if prev_is_dot {
+            continue;
+        }
+
+        // Look for first STRING token in next ~20 tokens (within argument list)
+        if let Some((string_token, arg_value)) =
+            find_string_argument(&tokens[i..i.saturating_add(20).min(tokens.len())])
+        {
+            if is_deprecated_managed_form(&arg_value) {
+                diagnostics.push(create_diagnostic(&string_token, &arg_value));
             }
         }
     }
@@ -65,84 +98,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_call(node: &SyntaxNode) -> Option<Diagnostic> {
-    let (_method_name_token, method_name) = extract_method_name(node)?;
-
-    if !is_type_method(&method_name) {
-        return None;
-    }
-
-    let (string_token, arg_value) = extract_first_string_argument(node)?;
-
-    if !is_deprecated_managed_form(&arg_value) {
-        return None;
-    }
-
-    Some(create_diagnostic(&string_token, &arg_value))
-}
-
-fn extract_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut method_name_token: Option<SyntaxToken> = None;
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    method_name_token = Some(token.clone());
-                    break;
-                }
+/// Find first STRING token in token slice and extract its content
+fn find_string_argument(tokens: &[SyntaxToken]) -> Option<(SyntaxToken, String)> {
+    for token in tokens {
+        if token.kind() == SyntaxKind::STRING {
+            let text = token.text();
+            if text.len() < 2 {
+                continue;
             }
+            // Remove quotes
+            let inner = &text[1..text.len() - 1];
+            // Unescape double quotes
+            let content = inner.replace("\"\"", "\"");
+            return Some((token.clone(), content));
         }
     }
-
-    method_name_token.map(|t| {
-        let text = t.text().to_string();
-        (t, text)
-    })
+    None
 }
 
 fn is_type_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "тип" || lower == "type"
-}
-
-fn extract_first_string_argument(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    let arg_list = node.descendants().find(|n| n.kind() == SyntaxKind::ARG_LIST)?;
-
-    let literal = arg_list.descendants().find(|n| n.kind() == SyntaxKind::LITERAL)?;
-
-    let string_token = literal
-        .children_with_tokens()
-        .filter_map(|elem| elem.into_token())
-        .find(|t| t.kind() == SyntaxKind::STRING)?;
-
-    let text = string_token.text();
-    if text.len() < 2 {
-        return None;
-    }
-
-    let inner = &text[1..text.len() - 1];
-
-    let content = inner.replace("\"\"", "\"");
-
-    Some((string_token, content))
 }
 
 fn is_deprecated_managed_form(value: &str) -> bool {

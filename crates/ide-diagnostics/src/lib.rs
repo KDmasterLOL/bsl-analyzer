@@ -298,7 +298,7 @@ pub struct DiagnosticsContext<'a> {
     pub configuration_path_input: Option<ide_db::metadata::ConfigurationPathInput<'a>>,
 }
 
-/// Helper to run a diagnostic and log if it's slow (>200ms)
+/// Helper to run a diagnostic and log if it's slow (>100ms)
 fn run_diagnostic<F>(name: &'static str, ctx: &DiagnosticsContext, check_fn: F) -> Vec<Diagnostic>
 where
     F: FnOnce(&DiagnosticsContext) -> Vec<Diagnostic>,
@@ -309,7 +309,7 @@ where
     let result = check_fn(ctx);
 
     let elapsed = start.elapsed();
-    if elapsed.as_millis() > 200 {
+    if elapsed.as_millis() > 100 {
         tracing::warn!(
             diagnostic = name,
             elapsed_ms = elapsed.as_millis(),

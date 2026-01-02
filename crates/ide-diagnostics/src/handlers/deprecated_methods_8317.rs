@@ -47,7 +47,7 @@
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedMethods8317) {
@@ -57,58 +57,41 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(diagnostic) = check_call(&node) {
-            if seen_ranges.insert(diagnostic.range) {
-                diagnostics.push(diagnostic);
-            }
+    // Optimized: single traversal O(n) instead of O(n²)
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
+            continue;
+        }
+
+        // Check pattern: IDENT ( but not .IDENT(
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        let prev_is_dot = i
+            .checked_sub(1)
+            .and_then(|idx| tokens.get(idx))
+            .map(|t| t.kind() == SyntaxKind::DOT)
+            .unwrap_or(false);
+
+        if prev_is_dot {
+            continue;
+        }
+
+        // Found global method call - check if deprecated
+        let method_name = token.text().to_string();
+        if is_deprecated_method(&method_name) {
+            diagnostics.push(create_diagnostic(token, &method_name));
         }
     }
 
     diagnostics
-}
-
-fn check_call(node: &SyntaxNode) -> Option<Diagnostic> {
-    let (method_name_token, method_name) = extract_method_name(node)?;
-
-    if !is_deprecated_method(&method_name) {
-        return None;
-    }
-
-    Some(create_diagnostic(&method_name_token, &method_name))
-}
-
-fn extract_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut method_name_token: Option<SyntaxToken> = None;
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    method_name_token = Some(token.clone());
-                    break;
-                }
-            }
-        }
-    }
-
-    method_name_token.map(|t| {
-        let text = t.text().to_string();
-        (t, text)
-    })
 }
 
 fn is_deprecated_method(name: &str) -> bool {
