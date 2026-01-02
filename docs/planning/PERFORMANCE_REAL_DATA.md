@@ -18,11 +18,12 @@ bsl-language-server analyze -c=.bsl-language-server.json -o=./.build -r=json -s=
 ```
 
 **Results:**
-- **Wall time**: 1:01.14 (61.14 seconds)
-- **User time**: 358.31s (total CPU time across all cores)
-- **System time**: 29.09s
-- **CPU usage**: 633% (~6.33 cores)
-- **Files/second**: ~107 files/sec
+- **Wall time**: 58.87 seconds
+- **User time**: 337.13s (total CPU time across all cores)
+- **System time**: 28.79s
+- **CPU usage**: 622% (~6.22 cores)
+- **Files/second**: ~111 files/sec
+- **Peak memory**: 3,822 MB (~3.73 GB)
 
 ### Rust bsl-analyzer (optimized)
 
@@ -31,23 +32,22 @@ bsl-analyzer analyze -s=./src/cf/
 ```
 
 **Results:**
-- **Wall time**: 11.083 seconds
-- **User time**: 59.86s (total CPU time across all cores)
-- **System time**: 2.89s
-- **CPU usage**: 566% (~5.66 cores)
-- **Files/second**: ~590 files/sec
+- **Wall time**: 11.17 seconds
+- **User time**: 59.32s (total CPU time across all cores)
+- **System time**: 2.80s
+- **CPU usage**: ~556% (~5.56 cores)
+- **Files/second**: ~585 files/sec
+- **Peak memory**: 1,426 MB (~1.39 GB)
 
 ### Performance Comparison
 
 | Metric | Java | Rust | Improvement |
 |--------|------|------|-------------|
-| **Wall time** | 61.14s | 11.08s | **5.52x faster** |
-| **User time** | 358.31s | 59.86s | **5.99x less CPU** |
-| **System time** | 29.09s | 2.89s | **10.07x less I/O** |
-| **Files/sec** | 107 | 590 | **5.51x throughput** |
-| **Memory** | ~2-4 GB* | ~500 MB* | **4-8x less** |
-
-\* Memory estimates based on typical usage patterns
+| **Wall time** | 58.87s | 11.17s | **5.27x faster** ⚡ |
+| **User time** | 337.13s | 59.32s | **5.68x less CPU** 🚀 |
+| **System time** | 28.79s | 2.80s | **10.28x less I/O** 💾 |
+| **Files/sec** | 111 | 585 | **5.27x throughput** 📈 |
+| **Peak memory** | 3,822 MB | 1,426 MB | **2.68x less** 💪 |
 
 ### Key Optimizations
 
@@ -75,14 +75,15 @@ Recent optimizations that contributed to these results:
 Based on doc3 results (121 MB, 6,540 files):
 
 **4 GB project** (~33x larger):
-- **Java**: ~33 minutes (61s × 33 ≈ 2,017s)
-- **Rust**: ~6 minutes (11s × 33 ≈ 363s)
-- **Improvement**: Still **5-6x faster**
+- **Java**: ~32 minutes (59s × 33 ≈ 1,947s), **~123 GB memory**
+- **Rust**: ~6 minutes (11s × 33 ≈ 369s), **~46 GB memory**
+- **Improvement**: Still **5-6x faster**, **2.7x less memory**
 
-**Note**: These are conservative estimates. Actual performance may be better due to:
+**Note**: These are conservative linear estimates. Actual performance may be better due to:
 - Better cache hit rates on larger projects
 - More efficient parallelization
 - Salsa incremental computation benefits
+- Sub-linear memory growth (shared data structures)
 
 ### Notes
 

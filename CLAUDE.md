@@ -11,15 +11,15 @@ BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) writt
 **Performance (Real Data):**
 
 **✅ Real project doc3 (121 MB, 6,540 BSL files):**
-- **Full analysis**: **11.1 seconds** (vs 61.1 seconds in Java) — **5.5x faster**
-- **CPU efficiency**: 59.9s user time (vs 358.3s) — **6.0x less CPU**
-- **I/O efficiency**: 2.9s system time (vs 29.1s) — **10.1x less I/O**
-- **Throughput**: 590 files/sec (vs 107 files/sec) — **5.5x higher**
-- **Memory**: **~500 MB** (vs 2-4 GB) — **4-8x less**
+- **Full analysis**: **11.2 seconds** (vs 58.9 seconds in Java) — **5.3x faster** ⚡
+- **CPU efficiency**: 59.3s user time (vs 337.1s) — **5.7x less CPU** 🚀
+- **I/O efficiency**: 2.8s system time (vs 28.8s) — **10.3x less I/O** 💾
+- **Throughput**: 585 files/sec (vs 111 files/sec) — **5.3x higher** 📈
+- **Peak memory**: **1,426 MB** (vs 3,822 MB) — **2.7x less** 💪
 
 **Extrapolation for 4GB project (~33x larger):**
-- **Full analysis**: **~6 minutes** (vs ~33 minutes in Java) — **5-6x faster**
-- **Memory**: **~4-5 GB** (vs 8-16 GB) — **2-4x less**
+- **Full analysis**: **~6 minutes** (vs ~32 minutes in Java) — **5-6x faster**
+- **Peak memory**: **~46 GB** (vs ~123 GB) — **2.7x less**
 
 See `docs/planning/PERFORMANCE_REAL_DATA.md` for detailed benchmark data and methodology.
 
