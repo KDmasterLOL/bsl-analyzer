@@ -54,128 +54,17 @@
 //!
 //! Source: `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/FieldsFromJoinsWithoutIsNullDiagnostic.bsl`
 
+use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use parser::parse_sdbl;
 use syntax::{
     ast::{AstNode, JoinType, SdblQuery, SdblQueryPackage, SdblSelectQuery},
     SyntaxKind, SyntaxNode, TextRange,
 };
 use tracing::{debug, trace};
 
-/// Maps SDBL positions back to BSL source positions.
-///
-/// Handles multiline strings with `|` prefixes. When SDBL is extracted from BSL strings,
-/// the `|` prefixes and quotes are removed, so diagnostic positions in SDBL don't correspond
-/// to the original BSL source positions. This mapper tracks the BSL literal position and
-/// converts SDBL TextRange to BSL TextRange.
-#[derive(Debug, Clone)]
-struct SdblPositionMapper {
-    /// Position of the string literal (LITERAL node) in BSL source
-    bsl_literal_range: TextRange,
-
-    /// Original BSL file content (for line/column calculations)
-    bsl_source: String,
-}
-
-impl SdblPositionMapper {
-    fn new(bsl_literal_node: &SyntaxNode, bsl_source: &str) -> Self {
-        Self {
-            bsl_literal_range: bsl_literal_node.text_range(),
-            bsl_source: bsl_source.to_string(),
-        }
-    }
-
-    /// Map SDBL TextRange to BSL TextRange.
-    fn map_range(&self, sdbl_range: TextRange, sdbl_text: &str) -> TextRange {
-        let (sdbl_start_line, sdbl_start_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.start()));
-        let (sdbl_end_line, sdbl_end_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.end()));
-
-        let (bsl_literal_line, bsl_literal_col) =
-            byte_offset_to_line_col(&self.bsl_source, u32::from(self.bsl_literal_range.start()));
-
-        let bsl_start_line = bsl_literal_line + sdbl_start_line;
-        let bsl_start_col = if sdbl_start_line == 0 {
-            bsl_literal_col + sdbl_start_col + 1 // +1 for opening quote
-        } else {
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_start_line as usize).unwrap_or("");
-            if let Some(pipe_pos) = bsl_line_text.find('|') {
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                content_start_col + sdbl_start_col - (whitespace_count as u32)
-            } else {
-                sdbl_start_col
-            }
-        };
-
-        let bsl_end_line = bsl_literal_line + sdbl_end_line;
-        let bsl_end_col = if sdbl_end_line == 0 {
-            bsl_literal_col + sdbl_end_col + 1
-        } else {
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_end_line as usize).unwrap_or("");
-            if let Some(pipe_pos) = bsl_line_text.find('|') {
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                content_start_col + sdbl_end_col - (whitespace_count as u32)
-            } else {
-                sdbl_end_col
-            }
-        };
-
-        let bsl_start_offset =
-            line_col_to_byte_offset(&self.bsl_source, bsl_start_line, bsl_start_col);
-        let bsl_end_offset = line_col_to_byte_offset(&self.bsl_source, bsl_end_line, bsl_end_col);
-
-        TextRange::new(bsl_start_offset.into(), bsl_end_offset.into())
-    }
-}
-
-/// Convert byte offset to (line, column) position - 0-indexed.
-fn byte_offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (idx, ch) in text.char_indices() {
-        if idx as u32 >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-
-    (line, col)
-}
-
-/// Convert (line, column) position to byte offset - 0-indexed.
-fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) -> u32 {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (idx, ch) in text.char_indices() {
-        if line == target_line && col == target_col {
-            return idx as u32;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-
-    text.len() as u32
-}
-
 /// Runs the FieldsFromJoinsWithoutIsNull diagnostic.
+///
+/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("fields_from_joins_without_is_null").entered();
 
@@ -183,126 +72,49 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
+    // ✅ NEW: Get cached SDBL queries (no tree walking!)
+    let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
 
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
     let mut diagnostics = Vec::new();
-    debug!("Starting FieldsFromJoinsWithoutIsNull check");
+    debug!(queries_from_cache = sdbl_queries.len(), "Starting FieldsFromJoinsWithoutIsNull check");
 
-    // Walk the tree looking for string literals that might contain SDBL
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::LITERAL {
-            if has_string_concatenation(&node) {
-                continue;
-            }
-
-            if let Some(query_text) = extract_string_content(&node) {
-                let uppercase = query_text.to_uppercase();
-                if uppercase.contains("SELECT") || uppercase.contains("ВЫБРАТЬ") {
-                    trace!("Found SDBL query: {} chars", query_text.len());
-                    let mapper = SdblPositionMapper::new(&node, &bsl_source);
-                    check_sdbl_query_with_mapper(&query_text, &mapper, &mut diagnostics);
-                }
-            }
+    // Process each cached SDBL query
+    for query_info in sdbl_queries.iter() {
+        // Skip if not valid SDBL
+        if !query_info.is_valid() {
+            continue;
         }
+
+        let Some(ref query_ast) = query_info.query_ast else {
+            continue;
+        };
+
+        trace!("Analyzing SDBL query from cache: {} chars", query_info.query_text.len());
+
+        // Create position mapper (uses cached bsl_literal_range)
+        let mapper = SdblPositionMapper::new_from_range(query_info.bsl_literal_range, &bsl_source);
+
+        check_sdbl_query_with_mapper(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
     }
 
-    debug!(diagnostics_count = diagnostics.len(), "FieldsFromJoinsWithoutIsNull check completed");
+    debug!(
+        diagnostics_count = diagnostics.len(),
+        "FieldsFromJoinsWithoutIsNull check completed (using SDBL cache)"
+    );
     diagnostics
-}
-
-/// Check if a LITERAL node is part of string concatenation.
-fn has_string_concatenation(node: &SyntaxNode) -> bool {
-    if let Some(next) = node.next_sibling_or_token() {
-        if let Some(token) = next.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    if let Some(prev) = node.prev_sibling_or_token() {
-        if let Some(token) = prev.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Extract string content from a LITERAL node containing STRING tokens.
-fn extract_string_content(node: &SyntaxNode) -> Option<String> {
-    let mut result = String::new();
-    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
-
-    let first_token = tokens.next()?;
-
-    match first_token.kind() {
-        SyntaxKind::STRING => {
-            let text = first_token.text();
-            if text.len() < 2 {
-                return None;
-            }
-            let inner = &text[1..text.len() - 1];
-            result = inner.replace("\"\"", "\"");
-        }
-        SyntaxKind::STRING_START => {
-            let text = first_token.text();
-            if text.is_empty() {
-                return None;
-            }
-            result.push_str(&text[1..]);
-
-            for token in tokens {
-                match token.kind() {
-                    SyntaxKind::NEWLINE => {
-                        result.push('\n');
-                    }
-                    SyntaxKind::STRING_PART => {
-                        let text = token.text();
-                        if let Some(content) = text.strip_prefix('|') {
-                            result.push_str(content);
-                        }
-                    }
-                    SyntaxKind::STRING_TAIL => {
-                        let text = token.text();
-                        if let Some(content) = text.strip_prefix('|') {
-                            if let Some(content) = content.strip_suffix('"') {
-                                result.push_str(content);
-                            }
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            result = result.replace("\"\"", "\"");
-        }
-        _ => return None,
-    }
-
-    Some(result)
 }
 
 /// Check a single SDBL query for fields from JOINs without NULL protection.
 fn check_sdbl_query_with_mapper(
-    query_text: &str,
+    query_ast: &syntax::Parse<syntax::SyntaxNode>,
+    _query_text: &str,
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let parse = parse_sdbl(query_text);
-
-    if parse.has_errors() {
-        return;
-    }
-
-    let root = parse.syntax_node();
+    let root = query_ast.syntax_node();
     let sdbl_stripped_text = root.text().to_string();
 
     let Some(package) = SdblQueryPackage::cast(root) else {

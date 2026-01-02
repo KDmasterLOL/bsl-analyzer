@@ -39,157 +39,17 @@
 //!
 //! Adapted to use full SDBL parser with AST instead of token-based approach.
 
+use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use parser::parse_sdbl;
 use syntax::{
     ast::{AstNode, SdblAlias, SdblQuery, SdblQueryPackage, SdblSelectQuery, SdblSelectedField},
     Parse, SyntaxKind, SyntaxNode, TextRange,
 };
 
-/// Maps SDBL positions back to BSL source positions.
-///
-/// Handles multiline strings with `|` prefixes. When SDBL is extracted from BSL strings,
-/// the `|` prefixes and quotes are removed, so diagnostic positions in SDBL don't correspond
-/// to the original BSL source positions. This mapper tracks the BSL literal position and
-/// converts SDBL TextRange to BSL TextRange.
-///
-/// ## Algorithm
-///
-/// Based on reference implementation from bsl-language-server-rust:
-/// - Line mapping: `bsl_line = bsl_literal_line + sdbl_line`
-/// - Column mapping:
-///   - First line: `bsl_col = bsl_literal_col + sdbl_col + 1` (+1 for opening quote)
-///   - Multiline: `bsl_col = sdbl_col` (already aligned after `|` removal)
-#[derive(Debug, Clone)]
-struct SdblPositionMapper {
-    /// Position of the string literal (LITERAL node) in BSL source
-    bsl_literal_range: TextRange,
-
-    /// Original BSL file content (for line/column calculations)
-    bsl_source: String,
-}
-
-impl SdblPositionMapper {
-    fn new(bsl_literal_node: &SyntaxNode, bsl_source: &str) -> Self {
-        Self {
-            bsl_literal_range: bsl_literal_node.text_range(),
-            bsl_source: bsl_source.to_string(),
-        }
-    }
-
-    /// Map SDBL TextRange to BSL TextRange.
-    ///
-    /// Takes a range within the extracted SDBL text and returns the corresponding
-    /// range in the original BSL source file.
-    fn map_range(&self, sdbl_range: TextRange, sdbl_text: &str) -> TextRange {
-        // 1. Convert SDBL byte offsets to line:column
-        let (sdbl_start_line, sdbl_start_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.start()));
-        let (sdbl_end_line, sdbl_end_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.end()));
-
-        // 2. Get BSL literal starting position
-        let (bsl_literal_line, bsl_literal_col) =
-            byte_offset_to_line_col(&self.bsl_source, u32::from(self.bsl_literal_range.start()));
-
-        // 3. Map SDBL → BSL accounting for removed | prefix
-        let bsl_start_line = bsl_literal_line + sdbl_start_line;
-        let bsl_start_col = if sdbl_start_line == 0 {
-            // First line of SDBL (same line as opening quote in BSL)
-            bsl_literal_col + sdbl_start_col + 1 // +1 for opening quote
-        } else {
-            // Multiline: find where | is in BSL line
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_start_line as usize).unwrap_or("");
-            if let Some(pipe_pos) = bsl_line_text.find('|') {
-                // Count whitespace after | that was kept in SDBL
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                // content_start_col points to first non-whitespace in BSL
-                // sdbl_start_col includes leading whitespace, so we need to subtract it
-                content_start_col + sdbl_start_col - (whitespace_count as u32)
-            } else {
-                sdbl_start_col // Fallback if no | found
-            }
-        };
-
-        // Same mapping for end position
-        let bsl_end_line = bsl_literal_line + sdbl_end_line;
-        let bsl_end_col = if sdbl_end_line == 0 {
-            bsl_literal_col + sdbl_end_col + 1
-        } else {
-            let bsl_line_text = self.bsl_source.lines().nth(bsl_end_line as usize).unwrap_or("");
-            if let Some(pipe_pos) = bsl_line_text.find('|') {
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                content_start_col + sdbl_end_col - (whitespace_count as u32)
-            } else {
-                sdbl_end_col
-            }
-        };
-
-        // 4. Convert back to TextRange (byte offsets in BSL)
-        let bsl_start_offset =
-            line_col_to_byte_offset(&self.bsl_source, bsl_start_line, bsl_start_col);
-        let bsl_end_offset = line_col_to_byte_offset(&self.bsl_source, bsl_end_line, bsl_end_col);
-
-        TextRange::new(bsl_start_offset.into(), bsl_end_offset.into())
-    }
-}
-
-/// Convert byte offset to (line, column) position - 0-indexed.
-///
-/// Iterates through the text counting newlines and character positions.
-fn byte_offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (idx, ch) in text.char_indices() {
-        if idx as u32 >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-
-    (line, col)
-}
-
-/// Convert (line, column) position to byte offset - 0-indexed.
-///
-/// Iterates through the text to find the byte offset at the given line and column.
-fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) -> u32 {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (idx, ch) in text.char_indices() {
-        if line == target_line && col == target_col {
-            return idx as u32;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-
-    // If we reach here, we're at EOF - return length
-    text.len() as u32
-}
-
 /// Runs the AssignAliasFieldsInQuery diagnostic.
 ///
-/// Walks the BSL AST to find string literals containing SDBL queries,
-/// extracts the SDBL, parses it, and checks for fields without AS keyword.
-/// Uses position mapping to report diagnostics at correct BSL source positions.
+/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
+/// Checks for fields without AS keyword and reports diagnostics at correct BSL positions.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
 
@@ -200,8 +60,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
+    // ✅ NEW: Get cached SDBL queries (no tree walking!)
+    let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
 
     // Get BSL source text for position mapping
     let input = ctx.db.file_text_input(ctx.file_id);
@@ -210,198 +70,44 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Time measurements
-    let mut time_extracting_strings_ms = 0u128;
-    let mut time_parsing_sdbl_ms = 0u128;
     let mut time_analyzing_ast_ms = 0u128;
-
-    // Counters for profiling
-    let mut strings_checked = 0;
-    let mut strings_extracted = 0;
-    let mut queries_parsed = 0;
     let mut queries_analyzed = 0;
 
-    // Walk the tree looking for string literals that might contain SDBL
-    let find_start = Instant::now();
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::LITERAL {
-            strings_checked += 1;
-
-            // Skip if this string literal is part of string concatenation
-            // (indicated by "+" or PLUS token after the string)
-            if has_string_concatenation(&node) {
-                continue;
-            }
-
-            // Try to extract string content
-            let extract_start = Instant::now();
-            let query_text = match extract_string_content(&node) {
-                Some(text) => {
-                    strings_extracted += 1;
-                    text
-                }
-                None => continue,
-            };
-            time_extracting_strings_ms += extract_start.elapsed().as_millis();
-
-            // Skip obviously non-SDBL strings early
-            // Minimum viable SDBL query: "SELECT * FROM Table" (~20 chars)
-            if query_text.len() < 15 {
-                continue;
-            }
-
-            // Only check if it looks like SDBL (contains SELECT/ВЫБРАТЬ keyword)
-            let uppercase = query_text.to_uppercase();
-            if !uppercase.contains("SELECT") && !uppercase.contains("ВЫБРАТЬ") {
-                continue;
-            }
-
-            // Parse SDBL
-            let parse_start = Instant::now();
-            let parse = parse_sdbl(&query_text);
-            let parse_elapsed = parse_start.elapsed().as_millis();
-            time_parsing_sdbl_ms += parse_elapsed;
-            queries_parsed += 1;
-
-            // Skip if not valid SDBL
-            if parse.has_errors() {
-                continue;
-            }
-
-            tracing::debug!(
-                parse_time_ms = parse_elapsed,
-                query_len = query_text.len(),
-                "Parsed SDBL query"
-            );
-
-            // Create position mapper for this string literal
-            let mapper = SdblPositionMapper::new(&node, &bsl_source);
-
-            // Check SDBL query with position mapping
-            let analyze_start = Instant::now();
-            check_sdbl_query_cached(&parse, &query_text, &mapper, &mut diagnostics);
-            time_analyzing_ast_ms += analyze_start.elapsed().as_millis();
-            queries_analyzed += 1;
+    // Process each cached SDBL query
+    for query_info in sdbl_queries.iter() {
+        // Skip if not valid SDBL
+        if !query_info.is_valid() {
+            continue;
         }
+
+        let Some(ref query_ast) = query_info.query_ast else {
+            continue;
+        };
+
+        tracing::debug!(query_len = query_info.query_text.len(), "Analyzing SDBL query from cache");
+
+        // Create position mapper (uses cached bsl_literal_range)
+        let mapper = SdblPositionMapper::new_from_range(query_info.bsl_literal_range, &bsl_source);
+
+        // Check SDBL query AST (already parsed!)
+        let analyze_start = Instant::now();
+        check_sdbl_query_cached(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
+        time_analyzing_ast_ms += analyze_start.elapsed().as_millis();
+        queries_analyzed += 1;
     }
-    let time_finding_strings_ms = find_start.elapsed().as_millis();
 
     let total_elapsed = start.elapsed().as_millis();
 
     tracing::info!(
         total_ms = total_elapsed,
-        finding_strings_ms = time_finding_strings_ms,
-        extracting_strings_ms = time_extracting_strings_ms,
-        parsing_sdbl_ms = time_parsing_sdbl_ms,
         analyzing_ast_ms = time_analyzing_ast_ms,
-        strings_checked,
-        strings_extracted,
-        queries_parsed,
+        queries_from_cache = sdbl_queries.len(),
         queries_analyzed,
         diagnostics_found = diagnostics.len(),
-        avg_parse_ms =
-            if queries_parsed > 0 { time_parsing_sdbl_ms / queries_parsed as u128 } else { 0 },
-        "AssignAliasFieldsInQuery completed"
+        "AssignAliasFieldsInQuery completed (using SDBL cache)"
     );
 
     diagnostics
-}
-
-/// Check if a LITERAL node is part of string concatenation.
-///
-/// Detects patterns like: "text" + variable or "text" + "more text"
-/// These are skipped because extraction would be incomplete.
-fn has_string_concatenation(node: &SyntaxNode) -> bool {
-    // Check if there's a PLUS token after this literal
-    if let Some(next) = node.next_sibling_or_token() {
-        if let Some(token) = next.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    // Check if there's a PLUS token before this literal
-    if let Some(prev) = node.prev_sibling_or_token() {
-        if let Some(token) = prev.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Extract string content from a LITERAL node containing STRING tokens.
-///
-/// Handles both simple strings and multiline strings:
-/// - Simple: "text" → one STRING token
-/// - Multiline: "line1\n|line2" → STRING_START + NEWLINE + STRING_PART + ... + STRING_TAIL
-fn extract_string_content(node: &SyntaxNode) -> Option<String> {
-    let mut result = String::new();
-    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
-
-    // Check first token to determine string type
-    let first_token = tokens.next()?;
-
-    match first_token.kind() {
-        SyntaxKind::STRING => {
-            // Simple string: "text"
-            let text = first_token.text();
-            if text.len() < 2 {
-                return None;
-            }
-            // Remove outer quotes
-            let inner = &text[1..text.len() - 1];
-            // Unescape quotes (BSL uses "" for escaped ")
-            result = inner.replace("\"\"", "\"");
-        }
-        SyntaxKind::STRING_START => {
-            // Multiline string: "line1\n|line2\n|line3"
-            // STRING_START contains: "line1
-            let text = first_token.text();
-            if text.is_empty() {
-                return None;
-            }
-            // Remove opening quote
-            result.push_str(&text[1..]);
-
-            // Process remaining tokens
-            for token in tokens {
-                match token.kind() {
-                    SyntaxKind::NEWLINE => {
-                        result.push('\n');
-                    }
-                    SyntaxKind::STRING_PART => {
-                        // STRING_PART contains: |line (with | prefix)
-                        let text = token.text();
-                        // Remove | prefix
-                        if let Some(content) = text.strip_prefix('|') {
-                            result.push_str(content);
-                        }
-                    }
-                    SyntaxKind::STRING_TAIL => {
-                        // STRING_TAIL contains: |line" (with | prefix and closing quote)
-                        let text = token.text();
-                        // Remove | prefix and closing quote
-                        if let Some(content) = text.strip_prefix('|') {
-                            if let Some(content) = content.strip_suffix('"') {
-                                result.push_str(content);
-                            }
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Unescape quotes
-            result = result.replace("\"\"", "\"");
-        }
-        _ => return None,
-    }
-
-    Some(result)
 }
 
 /// Check a single SDBL query for fields without AS keyword (using cached parse).
@@ -653,9 +359,11 @@ fn add_diagnostic_for_field_with_mapper(
 mod tests {
     use super::*;
     use crate::{
+        sdbl_utils::extract_string_content,
         test_utils::{assert_diagnostic_range, range_to_line_col},
         DiagnosticsConfig,
     };
+    use parser::parse_sdbl;
     use std::sync::Arc;
 
     /// Check a single SDBL query for fields without AS keyword (test version).

@@ -64,6 +64,221 @@ pub fn parse_query(
     parser::parse(&text)
 }
 
+/// Extract all SDBL queries from a BSL file.
+///
+/// This query walks the parsed BSL AST and identifies all string literals
+/// that look like SDBL queries (contain SELECT/ВЫБРАТЬ keywords), extracts
+/// their text, and eagerly parses them into SDBL AST.
+///
+/// # Performance
+/// - LRU cache: 256 files (SDBL analysis is moderately expensive)
+/// - Depends on: parse_query (automatic invalidation via Salsa)
+/// - Recomputed only when file content changes
+/// - Shared by ALL SDBL diagnostics (no redundant tree walking)
+///
+/// # Detection Strategy (per user request)
+/// 1. Find all LITERAL nodes in BSL tree
+/// 2. Extract string content (handle multiline with |)
+/// 3. Keyword filter: check for SELECT/ВЫБРАТЬ (case-insensitive)
+/// 4. Parse validation: try parse_sdbl(), keep only successful
+/// 5. Cache result with parsed AST
+#[salsa::tracked(lru = 256)]
+pub fn sdbl_queries_in_file(
+    db: &dyn salsa::Database,
+    input: FileTextInput,
+) -> Arc<Vec<syntax::SdblQueryInfo>> {
+    let _span = tracing::info_span!("sdbl_queries_in_file").entered();
+
+    // Parse BSL file (Salsa cached)
+    let parse = parse_query(db, input);
+    let root = parse.syntax_node();
+
+    // Extract SDBL queries with eager parsing
+    let queries = extract_and_parse_sdbl_queries(&root);
+
+    tracing::debug!(count = queries.len(), "Extracted and parsed SDBL queries");
+
+    Arc::new(queries)
+}
+
+/// Internal: Extract and parse SDBL queries from BSL AST.
+///
+/// Detection: keyword filter + parse validation (per user requirement).
+fn extract_and_parse_sdbl_queries(root: &syntax::SyntaxNode) -> Vec<syntax::SdblQueryInfo> {
+    use syntax::SyntaxKind;
+
+    let mut queries = Vec::new();
+
+    // Walk descendants looking for LITERAL nodes
+    for node in root.descendants() {
+        if node.kind() != SyntaxKind::LITERAL {
+            continue;
+        }
+
+        // Check if LITERAL contains STRING tokens
+        let has_string = node.children_with_tokens().any(|elem| {
+            elem.as_token()
+                .map(|t| {
+                    matches!(
+                        t.kind(),
+                        SyntaxKind::STRING
+                            | SyntaxKind::STRING_START
+                            | SyntaxKind::STRING_TAIL
+                            | SyntaxKind::STRING_PART
+                    )
+                })
+                .unwrap_or(false)
+        });
+
+        if !has_string {
+            continue;
+        }
+
+        // Skip string concatenation
+        if has_string_concatenation_internal(&node) {
+            continue;
+        }
+
+        // Extract string content (handles multiline with |)
+        let query_text = match extract_string_content_internal(&node) {
+            Some(text) => text,
+            None => continue,
+        };
+
+        // Minimum length filter: realistic SDBL queries are at least ~20 chars
+        // e.g., "SELECT 1 FROM Table" is 19 chars
+        if query_text.len() < 15 {
+            continue;
+        }
+
+        // Keyword filter: must contain SELECT or ВЫБРАТЬ (case-insensitive)
+        let uppercase = query_text.to_uppercase();
+        if !uppercase.contains("SELECT") && !uppercase.contains("ВЫБРАТЬ") {
+            continue;
+        }
+
+        // Parse validation: try to parse as SDBL
+        let query_ast = parser::parse_sdbl(&query_text);
+
+        // Check if parse produced a valid query package
+        // (parser is lenient for error recovery, so we check for package node)
+        if query_ast.has_errors() {
+            continue;
+        }
+
+        // Additional validation: check if it has a valid query structure
+        use syntax::ast::{AstNode, SdblQueryPackage};
+        let root_node = query_ast.syntax_node();
+        if SdblQueryPackage::cast(root_node.clone()).is_none() {
+            continue;
+        }
+
+        // Store with parsed AST (eager parsing per user requirement)
+        queries.push(syntax::SdblQueryInfo::new(node.text_range(), query_text, Some(query_ast)));
+    }
+
+    queries
+}
+
+/// Check if a LITERAL node is part of string concatenation.
+///
+/// Internal version for base-db (duplicates ide-diagnostics::sdbl_utils to keep crates decoupled).
+fn has_string_concatenation_internal(node: &syntax::SyntaxNode) -> bool {
+    use syntax::SyntaxKind;
+
+    // Check if there's a PLUS token after this literal
+    if let Some(next) = node.next_sibling_or_token() {
+        if let Some(token) = next.as_token() {
+            if token.kind() == SyntaxKind::PLUS {
+                return true;
+            }
+        }
+    }
+
+    // Check if there's a PLUS token before this literal
+    if let Some(prev) = node.prev_sibling_or_token() {
+        if let Some(token) = prev.as_token() {
+            if token.kind() == SyntaxKind::PLUS {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Extract string content from LITERAL node (internal version for base-db).
+///
+/// This is duplicated from ide-diagnostics::sdbl_utils to keep base-db independent.
+fn extract_string_content_internal(node: &syntax::SyntaxNode) -> Option<String> {
+    use syntax::SyntaxKind;
+
+    let mut result = String::new();
+    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
+
+    // Check first token to determine string type
+    let first_token = tokens.next()?;
+
+    match first_token.kind() {
+        SyntaxKind::STRING => {
+            // Simple string: "text"
+            let text = first_token.text();
+            if text.len() < 2 {
+                return None;
+            }
+            // Remove outer quotes
+            let inner = &text[1..text.len() - 1];
+            // Unescape quotes (BSL uses "" for escaped ")
+            result = inner.replace("\"\"", "\"");
+        }
+        SyntaxKind::STRING_START => {
+            // Multiline string: "line1\n|line2\n|line3"
+            // STRING_START contains: "line1
+            let text = first_token.text();
+            if text.is_empty() {
+                return None;
+            }
+            // Remove opening quote
+            result.push_str(&text[1..]);
+
+            // Process remaining tokens
+            for token in tokens {
+                match token.kind() {
+                    SyntaxKind::NEWLINE => {
+                        result.push('\n');
+                    }
+                    SyntaxKind::STRING_PART => {
+                        // STRING_PART contains: |line (with | prefix)
+                        let text = token.text();
+                        // Remove | prefix
+                        if let Some(content) = text.strip_prefix('|') {
+                            result.push_str(content);
+                        }
+                    }
+                    SyntaxKind::STRING_TAIL => {
+                        // STRING_TAIL contains: |line" (with | prefix and closing quote)
+                        let text = token.text();
+                        // Remove | prefix and closing quote
+                        if let Some(content) = text.strip_prefix('|') {
+                            if let Some(content) = content.strip_suffix('"') {
+                                result.push_str(content);
+                            }
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Unescape quotes
+            result = result.replace("\"\"", "\"");
+        }
+        _ => return None,
+    }
+
+    Some(result)
+}
+
 /// Higher-level database trait with derived queries.
 ///
 /// This trait extends SourceDatabase with parse queries.
@@ -75,6 +290,36 @@ pub trait RootQueryDb: SourceDatabase {
     /// This query is cached for incremental computation via Salsa.
     /// Implementations should call parse_query(self, file_text_input(file_id)).
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode>;
+
+    /// Extract all SDBL queries from a BSL file.
+    ///
+    /// Returns cached list of SDBL queries with parsed AST.
+    /// Used by SDBL diagnostics to avoid redundant tree walking and parsing.
+    ///
+    /// ## Performance Benefits
+    ///
+    /// - **Eliminates tree walking**: Diagnostics don't need `root.descendants()` anymore
+    /// - **Caches parsed SDBL AST**: SDBL queries are parsed once and reused
+    /// - **Shared across diagnostics**: Multiple SDBL diagnostics reuse the same cache
+    /// - **Auto-invalidation**: Salsa invalidates when file changes
+    ///
+    /// ## Usage in Diagnostics
+    ///
+    /// ```ignore
+    /// pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    ///     let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
+    ///
+    ///     for query_info in sdbl_queries.iter() {
+    ///         if query_info.is_valid() {
+    ///             // Use query_info.query_ast to analyze SDBL
+    ///             // Use query_info.bsl_literal_range for position mapping
+    ///         }
+    ///     }
+    ///
+    ///     // ...
+    /// }
+    /// ```
+    fn sdbl_queries(&self, file_id: FileId) -> Arc<Vec<syntax::SdblQueryInfo>>;
 }
 
 // ========== Files Helper ==========
@@ -289,6 +534,11 @@ mod tests {
             let input = self.file_text_input(file_id);
             parse_query(self, input)
         }
+
+        fn sdbl_queries(&self, file_id: FileId) -> Arc<Vec<syntax::SdblQueryInfo>> {
+            let input = self.file_text_input(file_id);
+            sdbl_queries_in_file(self, input)
+        }
     }
 
     #[test]
@@ -360,5 +610,165 @@ mod tests {
         // Should be able to parse now
         let result = db.parse(file_id);
         assert!(!result.has_errors());
+    }
+
+    #[test]
+    fn test_sdbl_queries_caching() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        // First call computes
+        let queries1 = db.sdbl_queries(file_id);
+        assert_eq!(queries1.len(), 1, "Should extract 1 SDBL query");
+        assert!(queries1[0].is_valid(), "SDBL should parse successfully");
+
+        // Second call should return same Arc (cache hit)
+        let queries2 = db.sdbl_queries(file_id);
+        assert!(Arc::ptr_eq(&queries1, &queries2), "Should cache SDBL queries");
+
+        // Change file
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос1 = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+    Запрос2 = "ВЫБРАТЬ Наименование ИЗ Справочник.Категории";
+КонецПроцедуры"#,
+        );
+
+        // Should recompute
+        let queries3 = db.sdbl_queries(file_id);
+        assert_eq!(queries3.len(), 2, "Should extract 2 SDBL queries");
+        assert!(!Arc::ptr_eq(&queries1, &queries3), "Should invalidate on file change");
+    }
+
+    #[test]
+    fn test_keyword_filter() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Strings without SELECT/ВЫБРАТЬ keywords should be skipped
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Строка = "Это просто строка без ключевых слов";
+    Запрос = "ВЫБРАТЬ * ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+        // Should only extract strings with SELECT/ВЫБРАТЬ
+        assert_eq!(queries.len(), 1, "Should filter by SELECT/ВЫБРАТЬ keyword");
+        assert!(queries[0].query_text.contains("ВЫБРАТЬ"));
+    }
+
+    #[test]
+    fn test_multiline_sdbl_query() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Multiline SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+        |  Ссылка,
+        |  Код
+        |ИЗ
+        |  Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+        assert_eq!(queries.len(), 1, "Should extract multiline SDBL query");
+        assert!(queries[0].is_valid());
+
+        // Check that extracted text has newlines and content preserved
+        assert!(queries[0].query_text.contains("Ссылка"));
+        assert!(queries[0].query_text.contains("Код"));
+        assert!(queries[0].query_text.contains("Справочник.Товары"));
+    }
+
+    #[test]
+    fn test_multiple_queries_extraction() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Multiple complete queries in one file
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос1 = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+    Запрос2 = "ВЫБРАТЬ Наименование ИЗ Справочник.Категории";
+    Запрос3 = "ВЫБРАТЬ * ИЗ Документ.Заказ";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+        // Should extract all 3 valid queries
+        assert_eq!(queries.len(), 3, "Should extract all valid SDBL queries");
+        assert!(queries.iter().any(|q| q.query_text.contains("Товары")));
+        assert!(queries.iter().any(|q| q.query_text.contains("Категории")));
+        assert!(queries.iter().any(|q| q.query_text.contains("Заказ")));
+    }
+
+    #[test]
+    fn test_short_strings_excluded() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Short strings with SELECT keyword should be filtered out by length check
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    КороткаяСтрока = "SELECT 1";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+        // "SELECT 1" is only 8 chars, should be filtered by minimum length (15)
+        assert_eq!(queries.len(), 0, "Should exclude short strings");
     }
 }

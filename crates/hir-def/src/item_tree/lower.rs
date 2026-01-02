@@ -255,6 +255,11 @@ mod tests {
             let input = self.file_text_input(file_id);
             base_db::parse_query(self, input)
         }
+
+        fn sdbl_queries(&self, file_id: FileId) -> std::sync::Arc<Vec<syntax::SdblQueryInfo>> {
+            let input = self.file_text_input(file_id);
+            base_db::sdbl_queries_in_file(self, input)
+        }
     }
 
     fn lower(input: &str) -> Arc<ItemTree> {

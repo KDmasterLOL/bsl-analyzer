@@ -6,6 +6,7 @@ pub mod common_module_helpers;
 pub mod handlers;
 pub mod metadata_diagnostic;
 pub mod rules;
+pub mod sdbl_utils;
 
 #[cfg(test)]
 pub mod test_utils;
