@@ -3,16 +3,23 @@
 //! Checks that metadata object names don't use reserved/forbidden names
 //! that match built-in 1C:Enterprise type names.
 //!
+//! This diagnostic checks both parent metadata objects AND their child elements
+//! (attributes, tabular sections) to ensure no reserved names are used.
+//!
 //! ## Examples
 //!
 //! **Bad (forbidden names):**
 //! - Catalog named "Catalog" or "Справочник"
+//!   - Diagnostic: `Запрещено использовать имя 'Справочник' для 'Справочник.Справочник'`
 //! - Document named "Document" or "Документ"
-//! - Register named "InformationRegister" or "РегистрСведений"
+//!   - Diagnostic: `Запрещено использовать имя 'Документ' для 'Документ.Документ'`
+//! - Catalog with attribute named "РегистрСведений"
+//!   - Diagnostic: `Запрещено использовать имя 'РегистрСведений' для 'Справочник.MyCatalog.Реквизит.РегистрСведений'`
 //!
 //! **Good:**
 //! - Catalog named "Products" or "Товары"
 //! - Document named "SalesOrder" or "ЗаказПокупателя"
+//! - Attributes named "ProductCode", "OrderDate", etc.
 //!
 //! ## Diagnostic Code
 //!
@@ -24,7 +31,10 @@
 //! ## References
 //!
 //! Ported from bsl-language-server:
-//! `ForbiddenMetadataNameDiagnostic.java`
+//! - Java: `ForbiddenMetadataNameDiagnostic.java`
+//! - Rust (tree-sitter): `bsl-language-server-rust/crates/bsl-diagnostics/src/rules/forbidden_metadata_name.rs`
+//!
+//! Note: Rust implementation has child checking as TODO. This implementation includes full child validation.
 
 use crate::metadata_diagnostic::{Diagnostic, DiagnosticSeverity, MetadataDiagnostic};
 use bsl_metadata::{MdoType, MetadataObject};
@@ -117,6 +127,64 @@ impl ForbiddenMetadataName {
         let name_lower = name.to_lowercase();
         FORBIDDEN_NAMES.iter().any(|forbidden| forbidden.to_lowercase() == name_lower)
     }
+
+    /// Build hierarchical path for metadata object.
+    ///
+    /// Format: `{MdoType}.{Name}` for parent, or `{ParentPath}.{ChildType}.{ChildName}` for children.
+    ///
+    /// Examples:
+    /// - Parent catalog: `Справочник.Справочник1`
+    /// - Child attribute: `Справочник.Справочник1.Реквизит.Name`
+    /// - Child tabular section: `Справочник.Справочник1.ТабличнаяЧасть.Name`
+    fn build_hierarchical_path(
+        mdo_type_name: &str,
+        object_name: &str,
+        parent_path: Option<&str>,
+    ) -> String {
+        if let Some(parent) = parent_path {
+            // Child element: include child type in path
+            // For now, we use generic "Реквизит" (Attribute) as Java determines this from metadata structure
+            format!("{}.Реквизит.{}", parent, object_name)
+        } else {
+            // Parent object
+            format!("{}.{}", mdo_type_name, object_name)
+        }
+    }
+
+    /// Check metadata object name recursively (including children).
+    ///
+    /// Returns diagnostics for the object and all its children with forbidden names.
+    fn check_name_recursive(
+        mdo: &MetadataObject,
+        parent_path: Option<&str>,
+        range: TextRange,
+    ) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+
+        // Build hierarchical path for this object
+        let mdo_type_name = mdo.mdo_type.russian_name();
+        let current_path = Self::build_hierarchical_path(mdo_type_name, &mdo.name, parent_path);
+
+        // Check current object's name
+        if Self::is_forbidden(&mdo.name) {
+            diagnostics.push(Diagnostic {
+                range,
+                message: format!(
+                    "Запрещено использовать имя '{}' для '{}'",
+                    mdo.name, current_path
+                ),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
+
+        // Recursively check all children
+        for child in &mdo.children {
+            let child_diagnostics = Self::check_name_recursive(child, Some(&current_path), range);
+            diagnostics.extend(child_diagnostics);
+        }
+
+        diagnostics
+    }
 }
 
 impl MetadataDiagnostic for ForbiddenMetadataName {
@@ -145,18 +213,8 @@ impl MetadataDiagnostic for ForbiddenMetadataName {
         mdo: &MetadataObject,
         range: TextRange,
     ) -> Vec<Diagnostic> {
-        if Self::is_forbidden(&mdo.name) {
-            vec![Diagnostic {
-                range,
-                message: format!(
-                    "Forbidden metadata object name: '{}'. This name conflicts with built-in 1C:Enterprise types.",
-                    mdo.name
-                ),
-                severity: DiagnosticSeverity::Error,
-            }]
-        } else {
-            Vec::new()
-        }
+        // Check metadata object and all its children recursively
+        Self::check_name_recursive(mdo, None, range)
     }
 }
 
@@ -200,8 +258,10 @@ mod tests {
 
         let results = diagnostic.check_metadata(&db, &mdo, range);
         assert_eq!(results.len(), 1);
-        assert!(results[0].message.contains("Forbidden metadata object name"));
-        assert!(results[0].message.contains("Catalog"));
+        assert_eq!(
+            results[0].message,
+            "Запрещено использовать имя 'Catalog' для 'Справочник.Catalog'"
+        );
         assert_eq!(results[0].severity, DiagnosticSeverity::Error);
     }
 
@@ -227,5 +287,101 @@ mod tests {
         assert!(types.contains(&MdoType::Catalog));
         assert!(types.contains(&MdoType::Document));
         assert!(types.contains(&MdoType::InformationRegister));
+    }
+
+    #[test]
+    fn test_check_metadata_with_forbidden_children() {
+        use ide_db::RootDatabaseImpl;
+
+        let db = RootDatabaseImpl::new();
+        let diagnostic = ForbiddenMetadataName;
+
+        // Create catalog with forbidden name and forbidden children
+        let mut mdo = MetadataObject::new(MdoType::Catalog, "Справочник");
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "РегистрСведений"));
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "Документ"));
+
+        let range = TextRange::empty(0.into());
+        let results = diagnostic.check_metadata(&db, &mdo, range);
+
+        // Should have 3 diagnostics: 1 parent + 2 children
+        assert_eq!(results.len(), 3);
+
+        // Check parent diagnostic
+        assert_eq!(
+            results[0].message,
+            "Запрещено использовать имя 'Справочник' для 'Справочник.Справочник'"
+        );
+
+        // Check first child diagnostic
+        assert_eq!(
+            results[1].message,
+            "Запрещено использовать имя 'РегистрСведений' для 'Справочник.Справочник.Реквизит.РегистрСведений'"
+        );
+
+        // Check second child diagnostic
+        assert_eq!(
+            results[2].message,
+            "Запрещено использовать имя 'Документ' для 'Справочник.Справочник.Реквизит.Документ'"
+        );
+    }
+
+    #[test]
+    fn test_check_metadata_with_allowed_children() {
+        use ide_db::RootDatabaseImpl;
+
+        let db = RootDatabaseImpl::new();
+        let diagnostic = ForbiddenMetadataName;
+
+        // Create catalog with allowed name and allowed children
+        let mut mdo = MetadataObject::new(MdoType::Catalog, "Products");
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "ProductCode"));
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "ProductName"));
+
+        let range = TextRange::empty(0.into());
+        let results = diagnostic.check_metadata(&db, &mdo, range);
+
+        // Should have no diagnostics
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_check_metadata_mixed_children() {
+        use ide_db::RootDatabaseImpl;
+
+        let db = RootDatabaseImpl::new();
+        let diagnostic = ForbiddenMetadataName;
+
+        // Create catalog with allowed parent but forbidden child
+        let mut mdo = MetadataObject::new(MdoType::Catalog, "Products");
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "РегистрСведений"));
+        mdo.add_child(MetadataObject::new(MdoType::Catalog, "ProductName"));
+
+        let range = TextRange::empty(0.into());
+        let results = diagnostic.check_metadata(&db, &mdo, range);
+
+        // Should have 1 diagnostic for forbidden child only
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].message,
+            "Запрещено использовать имя 'РегистрСведений' для 'Справочник.Products.Реквизит.РегистрСведений'"
+        );
+    }
+
+    #[test]
+    fn test_build_hierarchical_path() {
+        // Parent object
+        let path =
+            ForbiddenMetadataName::build_hierarchical_path("Справочник", "Справочник1", None);
+        assert_eq!(path, "Справочник.Справочник1");
+
+        // Child object
+        let parent_path = "Справочник.Справочник1";
+        let child_path = ForbiddenMetadataName::build_hierarchical_path(
+            "Справочник",
+            "РегистрСведений",
+            Some(parent_path),
+        );
+        assert_eq!(child_path, "Справочник.Справочник1.Реквизит.РегистрСведений");
     }
 }
