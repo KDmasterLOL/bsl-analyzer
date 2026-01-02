@@ -488,6 +488,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::function_returns_same_primitive::check,
     ));
+    result.extend(run_diagnostic(
+        "FunctionShouldHaveReturn",
+        ctx,
+        handlers::function_should_have_return::check,
+    ));
 
     // Tier 3: Metadata diagnostics
     result.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
