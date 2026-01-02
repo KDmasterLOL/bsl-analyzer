@@ -303,6 +303,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::empty_code_block::check(ctx));
     result.extend(handlers::empty_region::check(ctx));
     result.extend(handlers::empty_statement::check(ctx));
+    result.extend(handlers::extra_commas::check(ctx));
     result.extend(handlers::excessive_auto_test_check::check(ctx));
 
     // Tier 2: Semantic diagnostics

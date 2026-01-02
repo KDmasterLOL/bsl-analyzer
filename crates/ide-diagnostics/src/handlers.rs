@@ -55,4 +55,5 @@ pub mod execute_external_code;
 pub mod execute_external_code_in_common_module;
 pub mod export_variables;
 pub mod external_app_starting;
+pub mod extra_commas;
 // TODO: Add all 181 handlers
