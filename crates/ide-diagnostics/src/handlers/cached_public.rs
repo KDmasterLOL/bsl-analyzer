@@ -68,6 +68,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
+    // OPTIMIZATION 1: Check for public regions BEFORE loading metadata
+    // This is a fast O(n) scan that avoids expensive metadata loading if no public regions exist
+    let parse = ctx.db.parse(ctx.file_id);
+    let root = parse.syntax_node();
+
+    // Quick check: are there any public regions at all?
+    if !has_public_regions(&root) {
+        return Vec::new(); // Early exit - no public regions, no need to check metadata
+    }
+
     // Workspace integration required for metadata access
     let _config_path = match ctx.configuration_path.or(ctx.workspace_root) {
         Some(path) => path,
@@ -78,6 +88,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     };
 
+    // OPTIMIZATION 2: Only load metadata if there are public regions
     // Load configuration metadata
     // Workaround for trait object limitation: call Salsa query function directly
     // instead of using trait method (which requires Self: Sized)
@@ -101,10 +112,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Analyze source code for public regions
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let regions = find_public_regions(&root);
+    // OPTIMIZATION 3: Reuse already parsed tree (we already have 'root')
+    let regions = find_public_regions_optimized(&root);
 
     // Generate diagnostics for public regions with methods
     regions
@@ -136,10 +145,78 @@ fn is_public_region(region_name: &str) -> bool {
     name_lower == "public" || name_lower == "программныйинтерфейс"
 }
 
-/// Find all public regions with methods.
+/// Fast check if file has any public regions (before metadata loading).
 ///
-/// Optimized: Single traversal O(n) instead of O(n × regions).
-/// Collects both regions and methods in one pass, then matches them.
+/// Returns true if at least one PRE_REGION_DIR with public name is found.
+/// This is a quick O(n) scan to avoid expensive metadata loading.
+fn has_public_regions(root: &SyntaxNode) -> bool {
+    for node in root.descendants() {
+        if node.kind() == SyntaxKind::PRE_REGION_DIR {
+            if let Some(region_dir) = PreRegionDir::cast(node) {
+                if let Some(name) = region_dir.name() {
+                    if is_public_region(&name) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Find all public regions with methods (optimized version).
+///
+/// OPTIMIZATION: Sorts methods by position and uses early exit instead of checking all methods.
+/// For N regions and M methods: O(N + M log M + N×M) → O(N + M log M + N×k) where k << M
+fn find_public_regions_optimized(root: &SyntaxNode) -> Vec<RegionInfo> {
+    let mut public_regions: Vec<(String, TextRange)> = Vec::new();
+    let mut method_ranges: Vec<TextRange> = Vec::new();
+
+    // Single pass: collect public regions and method definitions
+    for node in root.descendants() {
+        match node.kind() {
+            SyntaxKind::PRE_REGION_DIR => {
+                if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
+                    if let Some(name) = region_dir.name() {
+                        if is_public_region(&name) {
+                            let range = region_dir.syntax().text_range();
+                            public_regions.push((name.to_string(), range));
+                        }
+                    }
+                }
+            }
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                method_ranges.push(node.text_range());
+            }
+            _ => {}
+        }
+    }
+
+    // OPTIMIZATION: Sort methods by start position for faster lookup
+    method_ranges.sort_by_key(|r| r.start());
+
+    // Match methods to regions with early exit
+    public_regions
+        .into_iter()
+        .map(|(name, range)| {
+            // Binary search to find first method that could be in this region
+            let start_idx = method_ranges
+                .binary_search_by_key(&range.start(), |r| r.start())
+                .unwrap_or_else(|idx| idx);
+
+            // Check only methods starting from start_idx until we exceed region end
+            let has_methods = method_ranges[start_idx..]
+                .iter()
+                .take_while(|method_range| method_range.start() < range.end())
+                .any(|method_range| range.contains_range(*method_range));
+
+            RegionInfo { name, range, has_methods }
+        })
+        .collect()
+}
+
+/// Find all public regions with methods (old version, kept for compatibility).
+#[allow(dead_code)]
 fn find_public_regions(root: &SyntaxNode) -> Vec<RegionInfo> {
     let mut public_regions: Vec<(String, TextRange)> = Vec::new();
     let mut method_ranges: Vec<TextRange> = Vec::new();
@@ -246,7 +323,7 @@ fn check_with_module(
     // Analyze source code for public regions
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
-    let regions = find_public_regions(&root);
+    let regions = find_public_regions_optimized(&root);
 
     // Generate diagnostics for public regions with methods
     regions
