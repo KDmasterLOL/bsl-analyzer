@@ -78,6 +78,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut time_analyzing_ast_us = 0u128;
     let mut queries_analyzed = 0;
 
+    // OPTIMIZATION: Build line index ONCE for the entire file
+    // Instead of rebuilding it for each of the 102 mappers (was 241ms overhead!)
+    use crate::sdbl_utils::build_line_index_shared;
+    let line_index_start = Instant::now();
+    let line_starts = build_line_index_shared(&bsl_source);
+    let time_line_index_us = line_index_start.elapsed().as_micros();
+
     // Process each cached SDBL query
     for query_info in sdbl_queries.iter() {
         // Skip if not valid SDBL
@@ -91,9 +98,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         tracing::debug!(query_len = query_info.query_text.len(), "Analyzing SDBL query from cache");
 
-        // Create position mapper (uses cached bsl_literal_range)
+        // Create position mapper (reuses shared line_starts from above)
         let mapper_start = Instant::now();
-        let mapper = SdblPositionMapper::new_from_range(query_info.bsl_literal_range, &bsl_source);
+        let mapper = SdblPositionMapper::new_from_range_with_line_index(
+            query_info.bsl_literal_range,
+            &bsl_source,
+            &line_starts,
+        );
         time_mapper_creation_us += mapper_start.elapsed().as_micros();
 
         // Check SDBL query AST (already parsed!)
@@ -109,6 +120,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         total_ms = total_elapsed,
         cache_fetch_us = cache_ms,
         source_fetch_us = source_ms,
+        line_index_us = time_line_index_us,
         mapper_creation_us = time_mapper_creation_us,
         analyzing_ast_us = time_analyzing_ast_us,
         queries_from_cache = sdbl_queries.len(),

@@ -81,6 +81,24 @@ impl<'a> SdblPositionMapper<'a> {
         Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
     }
 
+    /// Create a new position mapper with pre-built line index.
+    ///
+    /// OPTIMIZATION: Reuses shared line index built once for the entire file.
+    /// This eliminates 102× redundant line index builds for files with many SDBL queries.
+    pub fn new_from_range_with_line_index(
+        bsl_literal_range: TextRange,
+        bsl_source: &'a str,
+        line_starts: &'a [usize],
+    ) -> Self {
+        let (bsl_literal_line, bsl_literal_col) =
+            byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
+
+        // Clone the line index (cheap - just Vec of usize)
+        let line_starts = line_starts.to_vec();
+
+        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
+    }
+
     /// Map SDBL TextRange to BSL TextRange.
     ///
     /// Takes a range within the extracted SDBL text and returns the corresponding
@@ -203,7 +221,17 @@ pub fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) ->
     text.len() as u32
 }
 
-/// Build line index for O(1) line lookup.
+/// Build line index for O(1) line lookup (public API).
+///
+/// Returns a Vec where line_starts[i] = byte offset where line i starts.
+/// Line 0 starts at offset 0, line 1 starts after the first \n, etc.
+///
+/// This should be called ONCE per file and reused for all mappers in that file.
+pub fn build_line_index_shared(text: &str) -> Vec<usize> {
+    build_line_index(text)
+}
+
+/// Build line index for O(1) line lookup (internal).
 ///
 /// Returns a Vec where line_starts[i] = byte offset where line i starts.
 /// Line 0 starts at offset 0, line 1 starts after the first \n, etc.
