@@ -17,11 +17,7 @@ pub use hir_def;
 pub use syntax::TextRange;
 pub use vfs;
 
-// ========== Metadata Module ==========
-
 pub mod metadata;
-
-// ========== Symbol types (TODO: full implementation in later iterations) ==========
 
 /// Symbol kind (procedure, function, variable, etc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,12 +90,8 @@ impl RootDatabaseImpl {
     }
 }
 
-// ========== Salsa Database ==========
-
 #[salsa::db]
 impl salsa::Database for RootDatabaseImpl {}
-
-// ========== SourceDatabase ==========
 
 #[salsa::db]
 impl SourceDatabase for RootDatabaseImpl {
@@ -134,8 +126,6 @@ impl SourceDatabase for RootDatabaseImpl {
     }
 }
 
-// ========== RootQueryDb ==========
-
 #[salsa::db]
 impl RootQueryDb for RootDatabaseImpl {
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode> {
@@ -148,8 +138,6 @@ impl RootQueryDb for RootDatabaseImpl {
         base_db::sdbl_queries_in_file(self, input)
     }
 }
-
-// ========== DefDatabase ==========
 
 impl DefDatabase for RootDatabaseImpl {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
@@ -203,12 +191,8 @@ impl DefDatabase for RootDatabaseImpl {
     }
 }
 
-// ========== MetadataDb ==========
-
 #[salsa::db]
 impl metadata::MetadataDb for RootDatabaseImpl {}
-
-// ========== RootDatabase ==========
 
 impl RootDatabase for RootDatabaseImpl {}
 
@@ -431,8 +415,6 @@ mod tests {
         assert_eq!(tree2.methods().count(), 1);
         assert_eq!(tree2.exported_methods().count(), 1);
     }
-
-    // ========== Resolver integration tests ==========
 
     #[test]
     fn test_resolver_resolve_module_method() {

@@ -21,7 +21,6 @@ use smol_str::SmolStr;
 /// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SdblTokenKind {
-    // ========= DML Keywords (bilingual) =========
     #[regex(r"(?i)выбрать|(?i)select")]
     KwSelect,
 
@@ -37,7 +36,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)уничтожить|(?i)drop")]
     KwDrop,
 
-    // ========= Join Keywords =========
     #[regex(r"(?i)соединение|(?i)join")]
     KwJoin,
 
@@ -61,7 +59,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)по|(?i)on|(?i)by")]
     KwOnOrBy,
 
-    // ========= Grouping & Ordering =========
     #[regex(r"(?i)сгруппировать|(?i)group")]
     KwGroup,
 
@@ -86,7 +83,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)иерархия|(?i)hierarchy")]
     KwHierarchy,
 
-    // ========= Modifiers =========
     #[regex(r"(?i)различные|(?i)distinct")]
     KwDistinct,
 
@@ -120,7 +116,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)периоды|(?i)periods")]
     KwPeriods,
 
-    // ========= Predicates =========
     #[regex(r"(?i)в|(?i)in")]
     KwIn,
 
@@ -139,7 +134,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)ссылка|(?i)refs")]
     KwRefs,
 
-    // ========= Case Expression =========
     #[regex(r"(?i)выбор|(?i)case")]
     KwCase,
 
@@ -155,7 +149,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)конец|(?i)end")]
     KwEnd,
 
-    // ========= Casting & Type =========
     #[regex(r"(?i)выразить|(?i)cast")]
     KwCast,
 
@@ -168,7 +161,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)значение|(?i)value")]
     KwValue,
 
-    // ========= Aggregate Functions =========
     #[regex(r"(?i)сумма|(?i)sum")]
     FnSum,
 
@@ -184,7 +176,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)количество|(?i)count")]
     FnCount,
 
-    // ========= Date/Time Functions =========
     // Note: These also double as period types in TOTALS BY ... PERIODS(...)
     // The parser will determine context. Functions have higher priority.
     #[regex(r"(?i)год|(?i)year", priority = 2)]
@@ -235,7 +226,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)дата|(?i)date", priority = 2)]
     FnDate,
 
-    // ========= String Functions =========
     #[regex(r"(?i)подстрока|(?i)substring")]
     FnSubstring,
 
@@ -260,7 +250,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)сокрп|(?i)trimr")]
     FnTrimR,
 
-    // ========= Math Functions =========
     #[regex(r"(?i)окр|(?i)round")]
     FnRound,
 
@@ -279,7 +268,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)sqrt")]
     FnSqrt,
 
-    // ========= Type Functions =========
     #[regex(r"(?i)типзначения|(?i)valuetype")]
     FnValueType,
 
@@ -292,7 +280,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)естьnull|(?i)isnull")]
     FnIsNull,
 
-    // ========= Special Functions =========
     #[regex(r"(?i)пустаятаблица|(?i)emptytable")]
     FnEmptyTable,
 
@@ -302,7 +289,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)уникальныйидентификатор|(?i)uuid")]
     FnUUID,
 
-    // ========= Metadata Object Types =========
     #[regex(r"(?i)справочник|(?i)catalog")]
     MdoCatalog,
 
@@ -348,7 +334,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)внешнийисточникданных|(?i)externaldatasource")]
     MdoExternalDataSource,
 
-    // ========= Virtual Table Suffixes (keywords for virtual table names) =========
     #[regex(r"(?i)срезпервых|(?i)slicefirst")]
     VtSliceFirst,
 
@@ -367,7 +352,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)оборотыдткт|(?i)drcrturnovers")]
     VtDrCrTurnovers,
 
-    // ========= Data Types =========
     #[regex(r"(?i)булево|(?i)boolean")]
     TypeBoolean,
 
@@ -380,7 +364,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)дата|(?i)date")]
     TypeDate,
 
-    // ========= Literals =========
     #[regex(r"(?i)истина|(?i)true")]
     LitTrue,
 
@@ -393,7 +376,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)неопределено|(?i)undefined")]
     LitUndefined,
 
-    // ========= Logical Operators =========
     #[regex(r"(?i)и|(?i)and")]
     OpAnd,
 
@@ -403,7 +385,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)не|(?i)not")]
     OpNot,
 
-    // ========= Period Types (for TOTALS BY ... PERIODS(...)) =========
     // Note: Most period types are the same as date functions above.
     // Only unique period types are listed here.
     #[regex(r"(?i)декада|(?i)tendays")]
@@ -412,7 +393,6 @@ pub enum SdblTokenKind {
     #[regex(r"(?i)полугодие|(?i)halfyear")]
     PeriodHalfYear,
 
-    // ========= Operators =========
     #[token("=")]
     Eq,
 
@@ -446,7 +426,6 @@ pub enum SdblTokenKind {
     #[token("%")]
     Percent,
 
-    // ========= Punctuation =========
     #[token("(")]
     LParen,
 
@@ -471,8 +450,6 @@ pub enum SdblTokenKind {
     #[token("|")]
     Bar, // For multiline query strings
 
-    // ========= Literals =========
-
     // Numbers: floats must come before integers
     #[regex(r"[0-9]+\.[0-9]+")]
     Float,
@@ -488,8 +465,6 @@ pub enum SdblTokenKind {
     #[regex(r"'[0-9]{8,14}'")]
     Date,
 
-    // ========= Identifiers =========
-
     // Identifier: Unicode letters, digits, underscore
     // Lower priority than keywords
     #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*", priority = 1)]
@@ -498,8 +473,6 @@ pub enum SdblTokenKind {
     // Parameter reference: &Name
     #[regex(r"&[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
     Parameter,
-
-    // ========= Comments and whitespace =========
 
     // Line comment: // ...
     #[regex(r"//[^\n]*")]

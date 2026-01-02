@@ -41,7 +41,6 @@ pub struct CommonModule {
     #[serde(rename = "protected", default)]
     protected: bool,
 
-    // === Execution context flags ===
     /// Server execution context
     #[serde(rename = "server", default)]
     server: bool,
@@ -80,8 +79,6 @@ impl CommonModule {
     pub fn builder() -> CommonModuleBuilder {
         CommonModuleBuilder::default()
     }
-
-    // === Getters (following Java naming conventions) ===
 
     /// Get return value reuse mode
     pub fn return_values_reuse(&self) -> ReturnValueReuse {

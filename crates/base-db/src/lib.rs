@@ -20,8 +20,6 @@ mod input;
 pub use change::FileChange;
 pub use input::{FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput};
 
-// ========== Database Traits ==========
-
 /// The main Salsa database trait for source file operations.
 ///
 /// This trait provides access to file contents and source root information.
@@ -321,8 +319,6 @@ pub trait RootQueryDb: SourceDatabase {
     /// ```
     fn sdbl_queries(&self, file_id: FileId) -> Arc<Vec<syntax::SdblQueryInfo>>;
 }
-
-// ========== Files Helper ==========
 
 /// Helper structure for managing file state with concurrent access.
 ///

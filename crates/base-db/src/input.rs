@@ -66,8 +66,6 @@ impl SourceRoot {
     }
 }
 
-// ========== Salsa Input Structs ==========
-
 /// Salsa input for file text content.
 ///
 /// This represents mutable base input that can be changed via setters.

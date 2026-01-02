@@ -215,43 +215,6 @@ fn find_public_regions_optimized(root: &SyntaxNode) -> Vec<RegionInfo> {
         .collect()
 }
 
-/// Find all public regions with methods (old version, kept for compatibility).
-#[allow(dead_code)]
-fn find_public_regions(root: &SyntaxNode) -> Vec<RegionInfo> {
-    let mut public_regions: Vec<(String, TextRange)> = Vec::new();
-    let mut method_ranges: Vec<TextRange> = Vec::new();
-
-    // Single pass: collect public regions and method definitions
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::PRE_REGION_DIR => {
-                if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
-                    if let Some(name) = region_dir.name() {
-                        if is_public_region(&name) {
-                            let range = region_dir.syntax().text_range();
-                            public_regions.push((name.to_string(), range));
-                        }
-                    }
-                }
-            }
-            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
-                method_ranges.push(node.text_range());
-            }
-            _ => {}
-        }
-    }
-
-    // Match methods to regions
-    public_regions
-        .into_iter()
-        .map(|(name, range)| {
-            let has_methods =
-                method_ranges.iter().any(|method_range| range.contains_range(*method_range));
-            RegionInfo { name, range, has_methods }
-        })
-        .collect()
-}
-
 /// Find CommonModule metadata for given file.
 ///
 /// Returns None if file is not a CommonModule or metadata not found.

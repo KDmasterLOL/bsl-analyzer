@@ -156,55 +156,6 @@ fn check_sdbl_query_optimized(
     }
 }
 
-/// Check a single SDBL query for fields without AS keyword (using cached parse).
-///
-/// This version uses a pre-parsed SDBL query to avoid re-parsing identical queries.
-#[allow(dead_code)]
-fn check_sdbl_query_cached(
-    parse: &Parse<SyntaxNode>,
-    _query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-
-    let root = parse.syntax_node();
-
-    // CRITICAL: The SDBL parser strips whitespace from the parse tree!
-    // TextRange values from the parser are relative to the STRIPPED text, not the original query_text.
-    // We MUST use the stripped text for position calculations.
-    let strip_start = Instant::now();
-    let sdbl_stripped_text = root.text().to_string();
-    let strip_us = strip_start.elapsed().as_micros();
-
-    // Get query package
-    let cast_start = Instant::now();
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-    let cast_us = cast_start.elapsed().as_micros();
-
-    // Check each SELECT query
-    let check_start = Instant::now();
-    let mut query_count = 0;
-    for select_query in package.queries() {
-        check_select_query_with_mapper(&select_query, &sdbl_stripped_text, mapper, diagnostics);
-        query_count += 1;
-    }
-    let check_us = check_start.elapsed().as_micros();
-
-    if strip_us > 1000 || check_us > 10000 {
-        tracing::debug!(
-            strip_us,
-            cast_us,
-            check_us,
-            query_count,
-            text_len = sdbl_stripped_text.len(),
-            "[PROFILE] check_sdbl_query_cached"
-        );
-    }
-}
-
 /// Check a SELECT query for fields without AS keyword (with position mapping).
 fn check_select_query_with_mapper(
     select_query: &SdblSelectQuery,

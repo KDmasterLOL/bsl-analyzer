@@ -526,8 +526,6 @@ mod tests {
         assert_eq!(module.variables().len(), 0);
     }
 
-    // ========== New Semantics API tests ==========
-
     #[test]
     fn test_resolve_method_call() {
         let source = r#"

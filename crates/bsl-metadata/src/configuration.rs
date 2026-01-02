@@ -124,8 +124,6 @@ impl Configuration {
         }
     }
 
-    // === Getters (following Java naming conventions) ===
-
     /// Get configuration name
     pub fn name(&self) -> &str {
         &self.name

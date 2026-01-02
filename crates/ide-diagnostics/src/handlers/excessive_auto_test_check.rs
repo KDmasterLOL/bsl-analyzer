@@ -112,59 +112,6 @@ fn check_if_statement_optimized(
     None
 }
 
-/// Check if if-statement should be flagged (old version, kept for compatibility).
-///
-/// Returns Some(TextRange) if the if-statement:
-/// 1. Condition matches AutoTest pattern
-/// 2. Body contains only a return statement
-#[allow(dead_code)]
-fn check_if_statement(if_node: &SyntaxNode) -> Option<TextRange> {
-    let pattern = autotest_pattern();
-
-    // When parser encounters `=` in if condition, it creates ERROR node.
-    // In this case, STMT_LIST might include wrong content.
-    // We need to find STMT_LIST that contains only RETURN_STMT by checking
-    // all STMT_LIST nodes in descendants.
-
-    // First, try to find STMT_LIST among direct children (normal case)
-    let stmt_list_candidate = if_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
-
-    // If no STMT_LIST found among children, or if it doesn't have only return,
-    // try to find RETURN_STMT in descendants (workaround for parser bug with `=`)
-    if stmt_list_candidate.is_none()
-        || !has_only_return_statement(stmt_list_candidate.as_ref().unwrap())
-    {
-        // Check if there's an ERROR node (indicates parser issue)
-        let has_error = if_node.children().any(|n| n.kind() == SyntaxKind::ERROR);
-
-        if has_error {
-            // Workaround: Look for RETURN_STMT directly in descendants
-            let return_stmts: Vec<_> =
-                if_node.descendants().filter(|n| n.kind() == SyntaxKind::RETURN_STMT).collect();
-
-            // Should have exactly one RETURN_STMT for this diagnostic
-            if return_stmts.len() != 1 {
-                return None;
-            }
-
-            // Check pattern in full if-statement text
-            let if_text = if_node.text().to_string();
-            if pattern.is_match(&if_text) {
-                return Some(if_node.text_range());
-            }
-        }
-        return None;
-    }
-
-    // Normal case: STMT_LIST found and has only return
-    let if_text = if_node.text().to_string();
-    if pattern.is_match(&if_text) {
-        return Some(if_node.text_range());
-    }
-
-    None
-}
-
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::ExcessiveAutoTestCheck) {
         return Vec::new();

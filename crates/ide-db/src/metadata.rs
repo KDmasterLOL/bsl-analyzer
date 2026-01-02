@@ -30,8 +30,6 @@ use bsl_metadata::Configuration;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-// ========== Salsa Inputs ==========
-
 /// Interned: path to configuration root directory.
 ///
 /// This is a Salsa interned value that represents the path to a 1C configuration.
@@ -43,8 +41,6 @@ pub struct ConfigurationPathInput {
     /// Path to configuration root directory (stored as String for Salsa)
     pub path: String,
 }
-
-// ========== Salsa Tracked Queries ==========
 
 /// Load configuration from directory.
 ///
@@ -91,8 +87,6 @@ pub fn load_configuration<'db>(
     Arc::new(config)
 }
 
-// ========== Database Trait ==========
-
 /// Metadata database trait.
 ///
 /// Provides access to 1C:Enterprise metadata with Salsa-based caching.
@@ -124,8 +118,6 @@ pub trait MetadataDb: salsa::Database {
         load_configuration(self, path_input)
     }
 }
-
-// ========== Helper Functions ==========
 
 /// Определяет тип модуля по URI файла.
 ///

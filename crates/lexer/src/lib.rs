@@ -36,7 +36,6 @@ use smol_str::SmolStr;
 /// Keywords support both Russian and English variants (case-insensitive).
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
-    // ========= Keywords (bilingual: Russian/English) =========
     // Note: Using regex with (?i) for case-insensitive matching of both ASCII and Cyrillic
 
     // Procedure/Function keywords
@@ -169,7 +168,6 @@ pub enum TokenKind {
     #[regex(r"(?i)null")]
     KwNull,
 
-    // ========= Preprocessor directives =========
     #[regex(r"#(?i)если|#(?i)if")]
     PreIf,
 
@@ -207,8 +205,6 @@ pub enum TokenKind {
     // are NOT separate tokens. They are recognized as Ident and checked by the parser
     // in preprocessor expression context. This prevents false matches like "НаКлиенте"
     // in "Процедура НаКлиенте()" being tokenized as PreAtClient instead of Ident.
-
-    // ========= Annotations (starting with &) =========
     #[regex(r"&(?i)наклиенте|&(?i)atclient")]
     AnnAtClient,
 
@@ -240,7 +236,6 @@ pub enum TokenKind {
     #[regex(r"&[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
     AnnCustom,
 
-    // ========= Operators =========
     #[token("=")]
     Eq,
 
@@ -274,7 +269,6 @@ pub enum TokenKind {
     #[token("%")]
     Percent,
 
-    // ========= Punctuation =========
     #[token("(")]
     LParen,
 
@@ -317,8 +311,6 @@ pub enum TokenKind {
     #[token("!")]
     Exclamation, // Used in preprocessor (e.g., #!)
 
-    // ========= Literals =========
-
     // Numbers: floats must come before integers to match correctly
     #[regex(r"[0-9]+\.[0-9]+")]
     Float,
@@ -348,15 +340,11 @@ pub enum TokenKind {
     #[regex(r"'[0-9]{8,14}'")]
     Date,
 
-    // ========= Identifiers =========
-
     // Identifier: Unicode letters, digits, underscore
     // Must start with letter or underscore
     // Lower priority than keywords to ensure keywords are matched first
     #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*", priority = 1)]
     Ident,
-
-    // ========= Comments and whitespace =========
 
     // Line comment: // ...
     #[regex(r"//[^\n]*")]

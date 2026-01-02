@@ -135,7 +135,6 @@ fn find_parent_call_stmt(node: &SyntaxNode) -> Option<SyntaxNode> {
 /// Matches (case-insensitive):
 /// - `ЗафиксироватьТранзакцию()`
 /// - `CommitTransaction()`
-#[allow(dead_code)]
 fn is_global_commit_transaction_call(stmt: &SyntaxNode) -> bool {
     if stmt.kind() != SyntaxKind::CALL_STMT {
         return false;

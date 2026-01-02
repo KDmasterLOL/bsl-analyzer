@@ -21,8 +21,6 @@ fn check_no_errors(input: &str) {
     assert!(!parse.has_errors(), "Expected no errors, but got: {:#?}", parse.errors());
 }
 
-// ==================== Basic SELECT Tests ====================
-
 #[test]
 fn test_select_asterisk() {
     check_no_errors("SELECT * FROM Table");
@@ -52,8 +50,6 @@ fn test_select_table_asterisk() {
 fn test_select_qualified_column() {
     check_no_errors("SELECT Products.Name FROM Products");
 }
-
-// ==================== Alias Tests (CRITICAL for Diagnostic) ====================
 
 #[test]
 fn test_alias_with_as_keyword() {
@@ -129,8 +125,6 @@ fn test_asterisk_no_alias() {
     check_no_errors("SELECT Products.* FROM Products");
 }
 
-// ==================== UNION Tests ====================
-
 #[test]
 fn test_union_simple() {
     check_no_errors("SELECT Name FROM Products UNION SELECT Name FROM Services");
@@ -151,8 +145,6 @@ fn test_union_with_aliases() {
     check_no_errors("SELECT Name AS N FROM Products UNION SELECT Title AS N FROM Services");
 }
 
-// ==================== Subquery Tests ====================
-
 #[test]
 fn test_subquery_in_from() {
     check_no_errors("SELECT * FROM (SELECT Name FROM Products) AS Sub");
@@ -172,8 +164,6 @@ fn test_subquery_with_where() {
 fn test_subquery_in_expression() {
     check_no_errors("SELECT Name FROM Products WHERE Code IN (SELECT Code FROM Active)");
 }
-
-// ==================== Expression Tests ====================
 
 #[test]
 fn test_arithmetic_expressions() {
@@ -203,8 +193,6 @@ fn test_function_calls() {
     check_no_errors("SELECT YEAR(Date) AS Year FROM Orders");
 }
 
-// ==================== MDO References ====================
-
 #[test]
 fn test_mdo_table_reference() {
     check_no_errors("SELECT Name FROM Catalog.Products");
@@ -215,8 +203,6 @@ fn test_mdo_table_reference() {
 fn test_mdo_qualified_column() {
     check_no_errors("SELECT Catalog.Products.Name FROM Catalog.Products");
 }
-
-// ==================== Literals ====================
 
 #[test]
 fn test_numeric_literals() {
@@ -240,8 +226,6 @@ fn test_null_literal() {
     check_no_errors("SELECT * FROM Products WHERE Description = NULL");
 }
 
-// ==================== Parameters ====================
-
 #[test]
 fn test_parameter() {
     check_no_errors("SELECT * FROM Products WHERE Code = &ProductCode");
@@ -251,8 +235,6 @@ fn test_parameter() {
 fn test_multiple_parameters() {
     check_no_errors("SELECT * FROM Products WHERE Code = &Code AND Active = &IsActive");
 }
-
-// ==================== Complex Queries ====================
 
 #[test]
 fn test_complex_query_with_all_features() {
@@ -270,8 +252,6 @@ fn test_complex_query_with_all_features() {
     );
 }
 
-// ==================== Multiple Queries ====================
-
 #[test]
 fn test_multiple_queries_with_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services");
@@ -281,8 +261,6 @@ fn test_multiple_queries_with_semicolon() {
 fn test_multiple_queries_trailing_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services;");
 }
-
-// ==================== Error Recovery Tests ====================
 
 // TODO Phase 2: Error recovery is not fully implemented yet.
 // These tests are commented out until error recovery is improved.
@@ -306,8 +284,6 @@ fn test_multiple_queries_trailing_semicolon() {
 //     let parse = parse_sdbl("SELECT * FROM (SELECT Name FROM Products");
 //     assert!(parse.has_errors());
 // }
-
-// ==================== AST Navigation Tests (for Diagnostic) ====================
 
 #[test]
 fn test_ast_alias_has_as_keyword() {

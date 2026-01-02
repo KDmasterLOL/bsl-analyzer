@@ -16,19 +16,16 @@ use std::fmt;
 // constant naming convention and are widely used in parser/lexer literature.
 #[allow(non_camel_case_types)]
 pub enum SyntaxKind {
-    // ========= Special markers =========
     /// Placeholder for deleted nodes (never appears in final tree)
     #[doc(hidden)]
     TOMBSTONE,
     /// End of file marker
     EOF,
 
-    // ========= Trivia (whitespace and comments) =========
     WHITESPACE,
     NEWLINE,
     COMMENT,
 
-    // ========= Keywords (bilingual: Russian/English) =========
     // Procedure/Function keywords
     KW_PROCEDURE,
     KW_END_PROCEDURE,
@@ -89,7 +86,6 @@ pub enum SyntaxKind {
     KW_UNDEFINED,
     KW_NULL,
 
-    // ========= Preprocessor directives =========
     PRE_IF,
     PRE_ELSIF,
     PRE_ELSE,
@@ -102,7 +98,6 @@ pub enum SyntaxKind {
     PRE_DELETE,
     PRE_END_DELETE,
 
-    // ========= Annotations (starting with &) =========
     ANN_AT_CLIENT,
     ANN_AT_SERVER,
     ANN_AT_SERVER_NO_CONTEXT,
@@ -114,7 +109,6 @@ pub enum SyntaxKind {
     ANN_CHANGE_AND_VALIDATE,
     ANN_CUSTOM,
 
-    // ========= Operators =========
     EQ,      // =
     NEQ,     // <>
     LE,      // <=
@@ -127,7 +121,6 @@ pub enum SyntaxKind {
     SLASH,   // /
     PERCENT, // %
 
-    // ========= Punctuation =========
     L_PAREN,     // (
     R_PAREN,     // )
     L_BRACKET,   // [
@@ -143,7 +136,6 @@ pub enum SyntaxKind {
     AMPERSAND,   // &
     EXCLAMATION, // !
 
-    // ========= Literals =========
     FLOAT,        // 123.45
     DECIMAL,      // 123
     STRING,       // "text"
@@ -152,10 +144,7 @@ pub enum SyntaxKind {
     STRING_PART,  // |...part... (multiline middle)
     DATE,         // '20240101' or '20240101120000'
 
-    // ========= Identifiers =========
     IDENT, // identifier
-
-    // ========= Composite nodes (from parser) =========
 
     // Root
     SOURCE_FILE,
@@ -220,7 +209,6 @@ pub enum SyntaxKind {
     PRE_SYMBOL,
     PRE_BOOL_OP,
 
-    // ========= SDBL (Query Language) =========
     // Phase 1 (MVP): Basic SELECT parsing for AssignAliasFieldsInQuery diagnostic
     // Phase 2-4: Complete SDBL grammar (JOINs, GROUP BY, ORDER BY, etc.)
 

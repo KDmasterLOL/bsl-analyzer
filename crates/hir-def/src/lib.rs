@@ -19,8 +19,6 @@ pub use name::Name;
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::Ty;
 
-// ========== Database Traits ==========
-
 /// Database trait for HIR queries.
 ///
 /// This trait extends base_db::RootQueryDb with queries for ItemTree and module-level data.
@@ -42,8 +40,6 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// Built from ItemTree and cached.
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
 }
-
-// ========== Module & Item Identifiers ==========
 
 /// Module identifier.
 ///
@@ -74,8 +70,6 @@ pub struct VariableId {
     /// Index in ItemTree.top_level_items()
     pub local_id: u32,
 }
-
-// ========== Data Structures ==========
 
 /// Data about a module (derived from ItemTree).
 #[derive(Debug, Clone, PartialEq, Eq)]

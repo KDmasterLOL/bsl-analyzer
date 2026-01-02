@@ -105,8 +105,6 @@ impl Default for ExprScopes {
     }
 }
 
-// ========== Scope Building from AST ==========
-
 impl ExprScopes {
     /// Build scopes for a procedure from its AST.
     pub fn from_procedure(proc: &ast::ProcedureDef) -> Self {

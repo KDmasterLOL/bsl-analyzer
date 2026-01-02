@@ -150,8 +150,6 @@ impl FunctionDef {
     }
 }
 
-// ==================== Variable declarations ====================
-
 /// Variable definition.
 #[derive(Debug, Clone)]
 pub struct VarDef(SyntaxNode);
@@ -271,8 +269,6 @@ impl Param {
         self.0.children().next().is_some()
     }
 }
-
-// ==================== Statements ====================
 
 /// Assignment statement.
 #[derive(Debug, Clone)]
@@ -516,8 +512,6 @@ impl AstNode for ContinueStmt {
     }
 }
 
-// ==================== Expressions ====================
-
 /// Binary expression.
 #[derive(Debug, Clone)]
 pub struct BinaryExpr(SyntaxNode);
@@ -716,8 +710,6 @@ impl AstNode for Literal {
     }
 }
 
-// ==================== Annotations ====================
-
 /// Annotation (compiler directive).
 #[derive(Debug, Clone)]
 pub struct Annotation(SyntaxNode);
@@ -758,8 +750,6 @@ impl Annotation {
         })
     }
 }
-
-// ==================== Preprocessor ====================
 
 /// Preprocessor region directive (#Область/#Region or #КонецОбласти/#EndRegion).
 ///
@@ -833,8 +823,6 @@ impl PreRegionDir {
     }
 }
 
-// ==================== Statements ====================
-
 /// Statement list (body of a procedure/function or block).
 #[derive(Debug, Clone)]
 pub struct StmtList(SyntaxNode);
@@ -866,8 +854,6 @@ impl StmtList {
         self.0.children().filter_map(VarDef::cast)
     }
 }
-
-// ==================== SDBL (Query Language) ====================
 
 /// SDBL query package (root node).
 ///
