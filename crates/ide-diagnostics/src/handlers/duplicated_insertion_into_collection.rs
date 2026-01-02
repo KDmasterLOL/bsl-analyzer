@@ -38,7 +38,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
 use std::collections::HashMap;
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::{SyntaxKind, SyntaxNode, TextSize};
 use unicase::UniCase;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -57,19 +57,50 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
+    // OPTIMIZATION: Pre-collect both ARG_LIST and function definitions in ONE pass
+    // Map: parent CALL_STMT/ASSIGN_STMT start position → Vec<ARG_LIST>
+    let mut arg_lists_by_parent: HashMap<TextSize, Vec<SyntaxNode>> = HashMap::new();
+    let mut functions = Vec::new();
+
     for node in root.descendants() {
-        if matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF) {
-            check_code_block(&node, allow_add, &mut diagnostics);
+        match node.kind() {
+            SyntaxKind::ARG_LIST => {
+                // Find parent CALL_STMT or ASSIGN_STMT
+                let mut current = node.parent();
+                while let Some(parent) = current {
+                    if matches!(parent.kind(), SyntaxKind::CALL_STMT | SyntaxKind::ASSIGN_STMT) {
+                        arg_lists_by_parent
+                            .entry(parent.text_range().start())
+                            .or_default()
+                            .push(node.clone());
+                        break;
+                    }
+                    current = parent.parent();
+                }
+            }
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                functions.push(node);
+            }
+            _ => {}
         }
+    }
+
+    for function in functions {
+        check_code_block(&function, allow_add, &mut diagnostics, &arg_lists_by_parent);
     }
 
     tracing::debug!(count = diagnostics.len(), "diagnostics found");
     diagnostics
 }
 
-fn check_code_block(block: &SyntaxNode, allow_add: bool, diagnostics: &mut Vec<Diagnostic>) {
+fn check_code_block(
+    block: &SyntaxNode,
+    allow_add: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
+) {
     let mut tracker = InsertionTracker::new();
-    check_scope(block, allow_add, &mut tracker, diagnostics, 0);
+    check_scope(block, allow_add, &mut tracker, diagnostics, 0, arg_lists_by_parent);
     tracker.report_duplicates(diagnostics, 0);
 }
 
@@ -81,6 +112,7 @@ fn check_scope(
     tracker: &mut InsertionTracker,
     diagnostics: &mut Vec<Diagnostic>,
     scope_depth: usize,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
 ) {
     for node in scope.children() {
         match node.kind() {
@@ -95,10 +127,13 @@ fn check_scope(
                     tracker,
                     diagnostics,
                     scope_depth,
+                    arg_lists_by_parent,
                 );
             }
             SyntaxKind::CALL_STMT => {
-                if let Some((collection, method, args)) = extract_method_call_info(&node) {
+                if let Some((collection, method, args)) =
+                    extract_method_call_info(&node, arg_lists_by_parent)
+                {
                     if is_insertion_method(&method, allow_add) && !args.is_empty() {
                         if is_special_literal(&args[0]) {
                             tracing::trace!(
@@ -115,14 +150,14 @@ fn check_scope(
                             args = ?args,
                             "insertion found"
                         );
-                        if let Some(range) = extract_insertion_range(&node) {
+                        if let Some(range) = extract_insertion_range(&node, arg_lists_by_parent) {
                             tracker.record_insertion(collection, args, range, scope_depth);
                         }
                         continue;
                     }
                 }
 
-                for identifier in extract_identifiers_from_call(&node) {
+                for identifier in extract_identifiers_from_call(&node, arg_lists_by_parent) {
                     tracing::trace!(identifier = %identifier, "variable used in call");
                     tracker.record_assignment(identifier);
                 }
@@ -138,12 +173,26 @@ fn check_scope(
                 }
             }
             SyntaxKind::IF_STMT | SyntaxKind::TRY_STMT => {
-                check_scope(&node, allow_add, tracker, diagnostics, scope_depth + 1);
+                check_scope(
+                    &node,
+                    allow_add,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    arg_lists_by_parent,
+                );
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
             }
             SyntaxKind::FOR_STMT | SyntaxKind::FOR_EACH_STMT | SyntaxKind::WHILE_STMT => {
                 let saved_local_breaker = tracker.last_local_breaker;
-                check_scope(&node, allow_add, tracker, diagnostics, scope_depth + 1);
+                check_scope(
+                    &node,
+                    allow_add,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    arg_lists_by_parent,
+                );
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
                 // Restore local_breaker after exiting loop
                 // (break inside loop doesn't affect code after loop)
@@ -156,6 +205,7 @@ fn check_scope(
                     tracker,
                     diagnostics,
                     scope_depth,
+                    arg_lists_by_parent,
                 );
             }
         }
@@ -168,16 +218,31 @@ fn check_descendants_non_recursive(
     tracker: &mut InsertionTracker,
     diagnostics: &mut Vec<Diagnostic>,
     scope_depth: usize,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
 ) {
     for child in node.children() {
         match child.kind() {
             SyntaxKind::IF_STMT | SyntaxKind::TRY_STMT => {
-                check_scope(&child, allow_add, tracker, diagnostics, scope_depth + 1);
+                check_scope(
+                    &child,
+                    allow_add,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    arg_lists_by_parent,
+                );
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
             }
             SyntaxKind::FOR_STMT | SyntaxKind::FOR_EACH_STMT | SyntaxKind::WHILE_STMT => {
                 let saved_local_breaker = tracker.last_local_breaker;
-                check_scope(&child, allow_add, tracker, diagnostics, scope_depth + 1);
+                check_scope(
+                    &child,
+                    allow_add,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    arg_lists_by_parent,
+                );
                 tracker.report_duplicates(diagnostics, scope_depth + 1);
                 tracker.last_local_breaker = saved_local_breaker;
             }
@@ -192,6 +257,7 @@ fn check_descendants_non_recursive(
                     tracker,
                     diagnostics,
                     scope_depth,
+                    arg_lists_by_parent,
                 );
             }
             SyntaxKind::BREAK_STMT | SyntaxKind::CONTINUE_STMT => {
@@ -204,19 +270,21 @@ fn check_descendants_non_recursive(
                 }
             }
             SyntaxKind::CALL_STMT => {
-                if let Some((collection, method, args)) = extract_method_call_info(&child) {
+                if let Some((collection, method, args)) =
+                    extract_method_call_info(&child, arg_lists_by_parent)
+                {
                     if is_insertion_method(&method, allow_add) && !args.is_empty() {
                         if is_special_literal(&args[0]) {
                             continue;
                         }
-                        if let Some(range) = extract_insertion_range(&child) {
+                        if let Some(range) = extract_insertion_range(&child, arg_lists_by_parent) {
                             tracker.record_insertion(collection, args, range, scope_depth);
                         }
                         continue;
                     }
                 }
 
-                for identifier in extract_identifiers_from_call(&child) {
+                for identifier in extract_identifiers_from_call(&child, arg_lists_by_parent) {
                     tracker.record_assignment(identifier);
                 }
             }
@@ -230,6 +298,7 @@ fn check_descendants_non_recursive(
                     tracker,
                     diagnostics,
                     scope_depth,
+                    arg_lists_by_parent,
                 );
             }
         }
@@ -536,11 +605,12 @@ fn extract_lvalue(assign_stmt: &SyntaxNode) -> Option<String> {
         .map(|expr| expr.text().to_string().trim().to_string())
 }
 
-fn extract_insertion_range(call_stmt: &SyntaxNode) -> Option<TextRange> {
-    // Find the ARG_LIST to get the end position (closing paren)
-    // Java compatibility: range should be from start to end of ARG_LIST, not including semicolon
-    let arg_lists: Vec<_> =
-        call_stmt.descendants().filter(|n| n.kind() == SyntaxKind::ARG_LIST).collect();
+fn extract_insertion_range(
+    call_stmt: &SyntaxNode,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
+) -> Option<TextRange> {
+    // OPTIMIZATION: Use pre-collected ARG_LIST nodes instead of descendants()
+    let arg_lists = arg_lists_by_parent.get(&call_stmt.text_range().start())?;
 
     if arg_lists.is_empty() {
         return None;
@@ -568,14 +638,12 @@ fn extract_insertion_range(call_stmt: &SyntaxNode) -> Option<TextRange> {
     Some(TextRange::new(call_stmt.text_range().start(), arg_list.text_range().end()))
 }
 
-fn extract_method_call_info(call_stmt: &SyntaxNode) -> Option<(String, String, Vec<String>)> {
-    // Find ARG_LIST that doesn't have another ARG_LIST as ancestor
-    // This handles both:
-    // - "Коллекция().Добавить(X)" - want Добавить's ARG_LIST (last)
-    // - "Вставить(X, Y.Метод())" - want Вставить's ARG_LIST (not Метод's nested one)
-
-    let arg_lists: Vec<_> =
-        call_stmt.descendants().filter(|n| n.kind() == SyntaxKind::ARG_LIST).collect();
+fn extract_method_call_info(
+    call_stmt: &SyntaxNode,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
+) -> Option<(String, String, Vec<String>)> {
+    // OPTIMIZATION: Use pre-collected ARG_LIST nodes instead of descendants()
+    let arg_lists = arg_lists_by_parent.get(&call_stmt.text_range().start())?;
 
     if arg_lists.is_empty() {
         return None;
@@ -658,12 +726,16 @@ fn extract_args(arg_list: &SyntaxNode) -> Vec<String> {
     args
 }
 
-fn extract_identifiers_from_call(call_stmt: &SyntaxNode) -> Vec<String> {
+fn extract_identifiers_from_call(
+    call_stmt: &SyntaxNode,
+    arg_lists_by_parent: &HashMap<TextSize, Vec<SyntaxNode>>,
+) -> Vec<String> {
     let mut identifiers = Vec::new();
 
-    for node in call_stmt.descendants() {
-        if node.kind() == SyntaxKind::ARG_LIST {
-            for arg in extract_args(&node) {
+    // OPTIMIZATION: Use pre-collected ARG_LIST nodes instead of descendants()
+    if let Some(arg_lists) = arg_lists_by_parent.get(&call_stmt.text_range().start()) {
+        for node in arg_lists {
+            for arg in extract_args(node) {
                 if is_likely_variable(&arg) {
                     identifiers.push(arg);
                 }
