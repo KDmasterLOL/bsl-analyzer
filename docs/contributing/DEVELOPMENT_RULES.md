@@ -77,7 +77,166 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ---
 
-### 5. Независимость от внешних проектов
+### 5. Оптимизация алгоритмов (избегать O(n²) и выше)
+
+**Цель проекта:** 5-6x быстрее Java версии на реальных проектах (100+ MB, 6K+ файлов).
+
+**Правило:** Все алгоритмы должны быть оптимальной сложности. Избегать вложенных циклов O(n²) или выше.
+
+#### Запрещенные паттерны
+
+```rust
+// ❌ ПЛОХО: O(n²) - вложенный descendants() в цикле
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let root = parse.syntax_node();
+    for node in root.descendants() {           // O(n)
+        node.descendants()...                  // O(n) × n = O(n²)
+    }
+}
+
+// ❌ ПЛОХО: O(n×m) - проверка всех элементов для каждого
+for region in &regions {                       // O(n)
+    for method in &methods {                   // O(m) × n = O(n×m)
+        if region.contains(method) { ... }
+    }
+}
+
+// ❌ ПЛОХО: Множественные обходы дерева
+let has_eq = node.descendants_with_tokens()    // O(n)
+    .any(|t| t.kind() == SyntaxKind::EQ);
+let has_dot = node.descendants_with_tokens()   // O(n) - второй обход!
+    .any(|t| t.kind() == SyntaxKind::DOT);
+```
+
+#### Правильные паттерны
+
+```rust
+// ✅ ХОРОШО: O(n) - один обход с токен-стримом
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let root = parse.syntax_node();
+
+    // Построить токен-лист один раз
+    let tokens: Vec<_> = root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .collect();  // O(n) однократно
+
+    // Обрабатывать с lookahead
+    for (i, token) in tokens.iter().enumerate() {
+        let next = tokens.get(i + 1);          // O(1)
+        // ... pattern matching
+    }
+}
+
+// ✅ ХОРОШО: O(n + m log m) - сортировка + бинарный поиск
+methods.sort_by_key(|r| r.start());            // O(m log m)
+for region in &regions {                       // O(n)
+    let start_idx = methods
+        .binary_search_by_key(&region.start(), |r| r.start())  // O(log m)
+        .unwrap_or_else(|idx| idx);
+
+    // Проверяем только релевантные методы
+    let has_methods = methods[start_idx..]
+        .iter()
+        .take_while(|m| m.start() < region.end())  // Early exit
+        .any(|m| region.contains(m));
+}
+
+// ✅ ХОРОШО: Один обход с множественными проверками
+let tokens: Vec<_> = node.descendants_with_tokens()
+    .filter_map(|el| el.into_token())
+    .collect();  // O(n) один раз
+
+let has_eq = tokens.iter().any(|t| t.kind() == SyntaxKind::EQ);    // O(n)
+let has_dot = tokens.iter().any(|t| t.kind() == SyntaxKind::DOT);  // O(n)
+// Итого: O(n), а не O(2n) с двумя обходами дерева
+```
+
+#### Стратегии оптимизации
+
+1. **Pre-collect данные** в один проход:
+   ```rust
+   // Собрать все узлы/токены один раз
+   let nodes: Vec<_> = root.descendants().filter(...).collect();
+   let tokens: Vec<_> = root.descendants_with_tokens()...collect();
+   ```
+
+2. **Кешировать вычисления**:
+   ```rust
+   // HashMap для O(1) lookup вместо O(n) поиска
+   let mut node_info = HashMap::new();
+   for node in &nodes {
+       let info = compute_info(&node);  // Один раз
+       node_info.insert(node.id(), info);
+   }
+   ```
+
+3. **Сортировка + бинарный поиск** вместо вложенных циклов:
+   ```rust
+   items.sort_by_key(|item| item.position());
+   let idx = items.binary_search_by_key(&target, |i| i.position());
+   ```
+
+4. **Early exit** при поиске:
+   ```rust
+   // Остановиться когда нашли или вышли за границы
+   .take_while(|item| item.start() < region.end())
+   ```
+
+5. **Проверять дешевые условия ПЕРЕД дорогими**:
+   ```rust
+   // ✅ Быстрая проверка синтаксиса → дорогая загрузка метаданных
+   if !has_public_regions(&root) {
+       return Vec::new();  // Early exit
+   }
+   let metadata = load_metadata(ctx);  // Только если нужно
+   ```
+
+#### Измерение производительности
+
+```bash
+# Включить логирование медленных диагностик (>100ms)
+BSL_LOG=warn cargo run
+
+# Проверить, что ваша диагностика не в списке медленных
+./target/release/bsl-analyzer analyze -s=/path/to/large/project
+```
+
+**Threshold:** Диагностика на файле > 100ms считается медленной и требует оптимизации.
+
+#### Реальные примеры (из истории проекта)
+
+**До оптимизации:**
+- `double_negatives`: O(n²) - 7 вызовов descendants()
+- `create_query_in_cycle`: O(n²) - 9 вызовов descendants()
+- `cached_public`: 300-316ms (загрузка метаданных перед синтаксической проверкой)
+
+**После оптимизации:**
+- Все < 100ms
+- doc3 (6.5K файлов): **11.2s → 10.0s** общее время
+
+**Commit examples:** `cfe8491`, `4e6793d`
+
+#### Исключения
+
+Допустимо O(n²) ТОЛЬКО если:
+1. n гарантированно мало (< 10 элементов) и это документировано
+2. Оптимизация усложнит код без реальной пользы (профилирование показало < 1ms)
+3. Есть комментарий с обоснованием и бенчмарком
+
+```rust
+// ✅ Допустимо: n < 5 (только аннотации метода)
+// Benchmark: < 0.1ms на типичных методах (1-3 аннотации)
+for ann in annotations {  // n = 1-3
+    for param in ann.params {  // m = 0-2
+        check_param(param);
+    }
+}
+```
+
+---
+
+### 6. Независимость от внешних проектов
 
 **Все тестовые файлы копируются в наш проект:**
 
@@ -98,7 +257,7 @@ crates/parser/tests/fixtures/  # BSL файлы с указанием источ
 
 ---
 
-### 6. Логирование: только tracing
+### 7. Логирование: только tracing
 
 **ВСЕГДА используйте:**
 ```rust
@@ -134,7 +293,7 @@ BSL_LOG_FILE=/tmp/bsl.log cargo run # Запись в файл
 
 ---
 
-### 7. Self-documenting code (минимум комментариев)
+### 8. Self-documenting code (минимум комментариев)
 
 **Философия:** Код должен объяснять себя сам. Комментарии — только для "почему", не "что".
 
@@ -185,7 +344,7 @@ pub fn parse(input: &str) -> Parse { ... }
 
 ---
 
-### 8. Исправление инфраструктуры вместо костылей
+### 9. Исправление инфраструктуры вместо костылей
 
 **Правило:** Всегда предпочитать фундаментальное исправление временному решению.
 
@@ -227,7 +386,7 @@ fn module_dependencies(db: &dyn Db, module: ModuleId) -> Vec<ModuleId> { ... }
 
 ---
 
-### 9. Инкрементальная разработка
+### 10. Инкрементальная разработка
 
 ```bash
 # После каждого изменения
@@ -272,4 +431,6 @@ cargo test --all
 # - Нет магических чисел в assert для TextRange
 # - Комментарии только для "почему", не "что"
 # - TODO с контекстом (автор, issue, срок)
+# - Нет O(n²) паттернов (вложенные descendants() и т.д.)
+# - Диагностики < 100ms на файл (проверить: BSL_LOG=warn cargo run)
 ```
