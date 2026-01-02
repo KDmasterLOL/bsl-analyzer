@@ -109,6 +109,7 @@ pub enum DiagnosticCode {
     ExternalAppStarting,
     FileSystemAccess,
     FormDataToValue,
+    GetFormMethod,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -196,6 +197,7 @@ impl DiagnosticCode {
             Self::ExternalAppStarting => "ExternalAppStarting",
             Self::FileSystemAccess => "FileSystemAccess",
             Self::FormDataToValue => "FormDataToValue",
+            Self::GetFormMethod => "GetFormMethod",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -456,6 +458,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
+    result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
     result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
     result.extend(run_diagnostic(
         "CodeAfterAsyncCall",

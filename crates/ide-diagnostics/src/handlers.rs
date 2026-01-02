@@ -64,4 +64,5 @@ pub mod function_name_starts_with_get;
 pub mod function_out_parameter;
 pub mod function_returns_same_primitive;
 pub mod function_should_have_return;
+pub mod get_form_method;
 // TODO: Add all 181 handlers
