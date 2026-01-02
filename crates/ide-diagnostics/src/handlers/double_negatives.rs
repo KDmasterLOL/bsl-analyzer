@@ -25,9 +25,30 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
+    // Optimized: Collect all nodes in one pass
+    let mut unary_exprs = Vec::new();
+    let mut binary_exprs = Vec::new();
+    let mut node_info = std::collections::HashMap::new();
+
     for node in root.descendants() {
-        // Pattern 1: Double NOT (Не (Не X))
-        if let Some(range) = check_double_not(&node) {
+        match node.kind() {
+            SyntaxKind::UNARY_EXPR => {
+                let has_not = has_not_token(&node);
+                node_info.insert(node.text_range().start(), (has_not, false));
+                unary_exprs.push(node);
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let has_neq = has_neq_token(&node);
+                node_info.insert(node.text_range().start(), (has_neq, false));
+                binary_exprs.push(node);
+            }
+            _ => {}
+        }
+    }
+
+    // Check Pattern 1: Double NOT
+    for node in &unary_exprs {
+        if let Some(range) = check_double_not_optimized(node, &unary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::DoubleNegatives,
                 message: "Using double negatives complicates understanding of code".to_string(),
@@ -37,9 +58,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 fixes: vec![],
             });
         }
+    }
 
-        // Pattern 2a: NOT wrapping NEQ (Не (X <> Y))
-        if let Some(range) = check_not_wrapping_neq(&node) {
+    // Check Pattern 2a: NOT wrapping NEQ
+    for node in &unary_exprs {
+        if let Some(range) = check_not_wrapping_neq_optimized(node, &binary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::DoubleNegatives,
                 message: "Using double negatives complicates understanding of code".to_string(),
@@ -49,9 +72,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 fixes: vec![],
             });
         }
+    }
 
-        // Pattern 2b: NOT on left operand of NEQ ((Не X) <> Y)
-        if let Some(range) = check_not_on_left_neq(&node) {
+    // Check Pattern 2b: NOT on left operand of NEQ
+    for node in &binary_exprs {
+        if let Some(range) = check_not_on_left_neq_optimized(node, &unary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::DoubleNegatives,
                 message: "Using double negatives complicates understanding of code".to_string(),
@@ -94,7 +119,129 @@ fn contains_logical_operators(node: &SyntaxNode) -> bool {
     false
 }
 
+/// Pattern 1: Detect Не (Не X) - double NOT (optimized)
+fn check_double_not_optimized(
+    node: &SyntaxNode,
+    unary_exprs: &[SyntaxNode],
+    node_info: &std::collections::HashMap<syntax::TextSize, (bool, bool)>,
+) -> Option<TextRange> {
+    // 1. Check if this node has NOT operator (pre-computed)
+    let (has_not, _) = node_info.get(&node.text_range().start())?;
+    if !has_not {
+        return None;
+    }
+
+    // 2. Check if any descendant unary_expr (from pre-collected list) has NOT
+    let node_range = node.text_range();
+    for descendant in unary_exprs {
+        // Skip self
+        if descendant.text_range() == node_range {
+            continue;
+        }
+
+        // Check if descendant is inside this node
+        if !node_range.contains_range(descendant.text_range()) {
+            continue;
+        }
+
+        // Check if descendant has NOT (pre-computed)
+        if let Some((desc_has_not, _)) = node_info.get(&descendant.text_range().start()) {
+            if *desc_has_not {
+                // 3. Filter: skip if logical operators inside
+                if contains_logical_operators(node) {
+                    return None;
+                }
+
+                // 4. Filter: skip if text ends with "=" (incomplete due to parse error)
+                let text = node.text().to_string();
+                if text.trim_end().ends_with('=') {
+                    return None;
+                }
+
+                // 5. Return entire outer UnaryExpr range
+                return Some(node_range);
+            }
+        }
+    }
+
+    None
+}
+
+/// Pattern 2a: Detect Не (X <> Y) - NOT wrapping NEQ (optimized)
+fn check_not_wrapping_neq_optimized(
+    node: &SyntaxNode,
+    binary_exprs: &[SyntaxNode],
+    node_info: &std::collections::HashMap<syntax::TextSize, (bool, bool)>,
+) -> Option<TextRange> {
+    // 1. Check if this node has NOT operator (pre-computed)
+    let (has_not, _) = node_info.get(&node.text_range().start())?;
+    if !has_not {
+        return None;
+    }
+
+    // 2. Check if any descendant binary_expr (from pre-collected list) has NEQ
+    let node_range = node.text_range();
+    for descendant in binary_exprs {
+        // Check if descendant is inside this node
+        if !node_range.contains_range(descendant.text_range()) {
+            continue;
+        }
+
+        // Check if descendant has NEQ (pre-computed)
+        if let Some((desc_has_neq, _)) = node_info.get(&descendant.text_range().start()) {
+            if *desc_has_neq {
+                // 3. Filter: skip if logical operators inside
+                if contains_logical_operators(node) {
+                    return None;
+                }
+
+                // 4. Return entire UnaryExpr range
+                return Some(node_range);
+            }
+        }
+    }
+
+    None
+}
+
+/// Pattern 2b: Detect (Не X) <> Y - NOT on left operand (optimized)
+fn check_not_on_left_neq_optimized(
+    node: &SyntaxNode,
+    _unary_exprs: &[SyntaxNode],
+    node_info: &std::collections::HashMap<syntax::TextSize, (bool, bool)>,
+) -> Option<TextRange> {
+    // 1. Check if this node has NEQ operator (pre-computed)
+    let (has_neq, _) = node_info.get(&node.text_range().start())?;
+    if !has_neq {
+        return None;
+    }
+
+    // 2. Check if left child is UnaryExpr with NOT operator
+    let node_range = node.text_range();
+    for child in node.children() {
+        if child.kind() != SyntaxKind::UNARY_EXPR {
+            continue;
+        }
+
+        // Check if child has NOT (pre-computed)
+        if let Some((child_has_not, _)) = node_info.get(&child.text_range().start()) {
+            if *child_has_not {
+                // 3. Filter: skip if logical operators inside
+                if contains_logical_operators(node) {
+                    return None;
+                }
+
+                // 4. Return entire BinaryExpr range
+                return Some(node_range);
+            }
+        }
+    }
+
+    None
+}
+
 /// Pattern 1: Detect Не (Не X) - double NOT
+#[allow(dead_code)]
 fn check_double_not(node: &SyntaxNode) -> Option<TextRange> {
     // 1. Check if node is UnaryExpr with NOT operator
     if node.kind() != SyntaxKind::UNARY_EXPR {
@@ -129,6 +276,7 @@ fn check_double_not(node: &SyntaxNode) -> Option<TextRange> {
 }
 
 /// Pattern 2a: Detect Не (X <> Y) - NOT wrapping NEQ
+#[allow(dead_code)]
 fn check_not_wrapping_neq(node: &SyntaxNode) -> Option<TextRange> {
     // 1. Check if node is UnaryExpr with NOT operator
     if node.kind() != SyntaxKind::UNARY_EXPR {
@@ -156,6 +304,7 @@ fn check_not_wrapping_neq(node: &SyntaxNode) -> Option<TextRange> {
 }
 
 /// Pattern 2b: Detect (Не X) <> Y - NOT on left operand
+#[allow(dead_code)]
 fn check_not_on_left_neq(node: &SyntaxNode) -> Option<TextRange> {
     // 1. Check if node is BinaryExpr with NEQ operator
     if node.kind() != SyntaxKind::BINARY_EXPR {

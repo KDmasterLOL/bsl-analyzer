@@ -57,11 +57,67 @@ fn has_only_return_statement(stmt_list: &SyntaxNode) -> bool {
     statements.len() == 1 && statements[0].kind() == SyntaxKind::RETURN_STMT
 }
 
-/// Check if if-statement should be flagged.
+/// Check if if-statement should be flagged (optimized version).
 ///
 /// Returns Some(TextRange) if the if-statement:
 /// 1. Condition matches AutoTest pattern
 /// 2. Body contains only a return statement
+fn check_if_statement_optimized(
+    if_node: &SyntaxNode,
+    return_stmts_by_parent: &std::collections::HashMap<syntax::TextSize, Vec<SyntaxNode>>,
+) -> Option<TextRange> {
+    let pattern = autotest_pattern();
+
+    // First, try to find STMT_LIST among direct children (normal case)
+    let stmt_list_candidate = if_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+
+    // If no STMT_LIST found among children, or if it doesn't have only return,
+    // try to find RETURN_STMT using pre-collected map (workaround for parser bug with `=`)
+    if stmt_list_candidate.is_none()
+        || !has_only_return_statement(stmt_list_candidate.as_ref().unwrap())
+    {
+        // Check if there's an ERROR node (indicates parser issue)
+        let has_error = if_node.children().any(|n| n.kind() == SyntaxKind::ERROR);
+
+        if has_error {
+            // Workaround: Count RETURN_STMT nodes that are descendants of this IF_STMT
+            // by checking if any pre-collected returns are within this if_node's range
+            let if_range = if_node.text_range();
+            let return_count = return_stmts_by_parent
+                .values()
+                .flatten()
+                .filter(|r| if_range.contains_range(r.text_range()))
+                .count();
+
+            // Should have exactly one RETURN_STMT for this diagnostic
+            if return_count != 1 {
+                return None;
+            }
+
+            // Check pattern in full if-statement text
+            let if_text = if_node.text().to_string();
+            if pattern.is_match(&if_text) {
+                return Some(if_node.text_range());
+            }
+        }
+        return None;
+    }
+
+    // Normal case: STMT_LIST found and has only return
+    let if_text = if_node.text().to_string();
+    if pattern.is_match(&if_text) {
+        return Some(if_node.text_range());
+    }
+
+    None
+}
+
+/// Check if if-statement should be flagged (old version, kept for compatibility).
+///
+/// Returns Some(TextRange) if the if-statement:
+/// 1. Condition matches AutoTest pattern
+/// 2. Body contains only a return statement
+#[allow(dead_code)]
 fn check_if_statement(if_node: &SyntaxNode) -> Option<TextRange> {
     let pattern = autotest_pattern();
 
@@ -118,19 +174,39 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    // Traverse all IF_STMT nodes
+    // Optimized: Collect IF_STMT nodes and RETURN_STMT nodes in one pass
+    let mut if_stmts = Vec::new();
+    let mut return_stmts_by_parent = std::collections::HashMap::new();
+
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::IF_STMT {
-            if let Some(range) = check_if_statement(&node) {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::ExcessiveAutoTestCheck,
-                    message: "Excessive check for deprecated 'АвтоТест' parameter".to_string(),
-                    severity: Severity::Information,
-                    range,
-                    tags: vec![],
-                    fixes: vec![],
-                });
+        match node.kind() {
+            SyntaxKind::IF_STMT => {
+                if_stmts.push(node);
             }
+            SyntaxKind::RETURN_STMT => {
+                // Track return statements for ERROR case workaround
+                if let Some(parent) = node.parent() {
+                    return_stmts_by_parent
+                        .entry(parent.text_range().start())
+                        .or_insert_with(Vec::new)
+                        .push(node);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Check each IF_STMT
+    for if_node in if_stmts {
+        if let Some(range) = check_if_statement_optimized(&if_node, &return_stmts_by_parent) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::ExcessiveAutoTestCheck,
+                message: "Excessive check for deprecated 'АвтоТест' parameter".to_string(),
+                severity: Severity::Information,
+                range,
+                tags: vec![],
+                fixes: vec![],
+            });
         }
     }
 

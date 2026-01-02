@@ -75,16 +75,57 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    for call_stmt in root.descendants().filter(|n| n.kind() == SyntaxKind::CALL_STMT) {
-        if is_global_commit_transaction_call(&call_stmt) && !is_properly_protected(&call_stmt) {
-            diagnostics.push(make_diagnostic(&call_stmt));
+    // Optimized: Build token stream once and find all commit calls
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
+            continue;
+        }
+
+        // Check if this is CommitTransaction/ЗафиксироватьТранзакцию
+        let name = token.text().to_lowercase();
+        if name != "зафиксироватьтранзакцию" && name != "committransaction" {
+            continue;
+        }
+
+        // Check pattern: IDENT ( but not .IDENT(
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        let prev_is_dot = i
+            .checked_sub(1)
+            .and_then(|idx| tokens.get(idx))
+            .map(|t| t.kind() == SyntaxKind::DOT)
+            .unwrap_or(false);
+
+        if prev_is_dot {
+            continue; // Skip qualified calls
+        }
+
+        // Found global CommitTransaction call - get parent CALL_STMT
+        if let Some(parent) = token.parent() {
+            if let Some(call_stmt) = find_parent_call_stmt(&parent) {
+                if !is_properly_protected(&call_stmt) {
+                    diagnostics.push(make_diagnostic(&call_stmt));
+                }
+            }
         }
     }
 
     diagnostics
 }
 
-/// Check if a statement is a global CommitTransaction/ЗафиксироватьТранзакцию call.
+/// Find parent CALL_STMT node.
+fn find_parent_call_stmt(node: &SyntaxNode) -> Option<SyntaxNode> {
+    node.ancestors().find(|n| n.kind() == SyntaxKind::CALL_STMT)
+}
+
+/// Check if a statement is a global CommitTransaction/ЗафиксироватьТранзакцию call (old version).
 ///
 /// Filters out:
 /// - Non-CALL_STMT nodes
@@ -94,6 +135,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Matches (case-insensitive):
 /// - `ЗафиксироватьТранзакцию()`
 /// - `CommitTransaction()`
+#[allow(dead_code)]
 fn is_global_commit_transaction_call(stmt: &SyntaxNode) -> bool {
     if stmt.kind() != SyntaxKind::CALL_STMT {
         return false;

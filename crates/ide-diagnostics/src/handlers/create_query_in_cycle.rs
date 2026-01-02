@@ -225,10 +225,14 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
         }
 
         SyntaxKind::ASSIGN_STMT => {
-            check_assignment(node, scope);
+            // Optimized: build token list once
+            let tokens: Vec<_> =
+                node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+            check_assignment_optimized(node, scope, &tokens);
             // Check for Execute call in rvalue (right side of assignment)
             if scope.in_cycle() {
-                check_execute_call_in_assignment(node, diagnostics, scope);
+                check_execute_call_in_assignment_optimized(node, diagnostics, scope, &tokens);
             }
             for child in node.children() {
                 check_node(&child, diagnostics, scope);
@@ -236,27 +240,23 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
         }
 
         SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
-            // Check if this is an assignment (has EQ token) or a method call (has DOT token)
-            let has_eq = node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SyntaxKind::EQ);
+            // Optimized: build token list once and check both has_eq and has_dot
+            let tokens: Vec<_> =
+                node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
 
-            let has_dot = node
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SyntaxKind::DOT);
+            let has_eq = tokens.iter().any(|t| t.kind() == SyntaxKind::EQ);
+            let has_dot = tokens.iter().any(|t| t.kind() == SyntaxKind::DOT);
 
             if has_eq {
-                check_assignment(node, scope);
+                check_assignment_optimized(node, scope, &tokens);
             }
             if has_dot && scope.in_cycle() {
                 if has_eq {
                     // Assignment with Execute call: use special handling for rvalue range
-                    check_execute_call_in_assignment(node, diagnostics, scope);
+                    check_execute_call_in_assignment_optimized(node, diagnostics, scope, &tokens);
                 } else {
                     // Pure method call
-                    check_execute_call(node, diagnostics, scope);
+                    check_execute_call_optimized(node, diagnostics, scope, &tokens);
                 }
             }
 
@@ -273,6 +273,80 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
     }
 }
 
+/// Optimized version that accepts pre-built token list
+fn check_assignment_optimized(
+    _node: &SyntaxNode,
+    scope: &mut VariableScope,
+    tokens: &[syntax::SyntaxToken],
+) {
+    let mut lvalue_idents: Vec<String> = Vec::new();
+    let mut found_eq = false;
+    let mut found_new = false;
+    let mut type_name: Option<String> = None;
+    let mut rvalue_ident: Option<String> = None;
+
+    // Parse tokens: collect all IDENTs before EQ to build lvalue path (e.g., "Запрос2.info")
+    for token in tokens {
+        match token.kind() {
+            SyntaxKind::IDENT => {
+                if !found_eq {
+                    // IDENT before EQ is part of lvalue
+                    lvalue_idents.push(token.text().to_string());
+                } else if found_new && type_name.is_none() {
+                    // IDENT after "Новый" is the type name
+                    type_name = Some(token.text().to_string());
+                } else if !found_new && rvalue_ident.is_none() {
+                    // IDENT after "=" (without "Новый") is variable assignment
+                    rvalue_ident = Some(token.text().to_string());
+                }
+            }
+            SyntaxKind::STRING => {
+                if found_eq && found_new && type_name.is_none() {
+                    // STRING after "Новый" is the type name: Новый("Запрос")
+                    let text = token.text();
+                    let trimmed = text.trim_matches('"').trim_matches('\'');
+                    type_name = Some(trimmed.to_string());
+                }
+            }
+            SyntaxKind::EQ => {
+                found_eq = true;
+            }
+            SyntaxKind::KW_NEW => {
+                found_new = true;
+            }
+            _ => {}
+        }
+    }
+
+    if lvalue_idents.is_empty() {
+        return;
+    }
+
+    // Build full lvalue path: "Запрос" or "Запрос2.info"
+    let var_name = lvalue_idents.join(".");
+
+    if found_new {
+        // Case: Запрос = Новый Запрос()
+        if let Some(type_name) = type_name {
+            let var_type = VarType::from_type_name(&type_name);
+            scope.add_variable(var_name, var_type);
+        } else {
+            scope.add_variable(var_name, VarType::Undefined);
+        }
+    } else if let Some(source_var) = rvalue_ident {
+        // Case: Запрос2 = Запрос
+        if let Some(source_type) = scope.get_variable(&source_var) {
+            scope.add_variable(var_name, source_type.var_type.clone());
+        } else {
+            scope.add_variable(var_name, VarType::Undefined);
+        }
+    } else {
+        // Other expression
+        scope.add_variable(var_name, VarType::Undefined);
+    }
+}
+
+#[allow(dead_code)]
 fn check_assignment(node: &SyntaxNode, scope: &mut VariableScope) {
     let mut lvalue_idents: Vec<String> = Vec::new();
     let mut found_eq = false;
@@ -343,6 +417,84 @@ fn check_assignment(node: &SyntaxNode, scope: &mut VariableScope) {
     }
 }
 
+/// Optimized version that accepts pre-built token list
+fn check_execute_call_optimized(
+    node: &SyntaxNode,
+    diagnostics: &mut Vec<Diagnostic>,
+    scope: &VariableScope,
+    tokens: &[syntax::SyntaxToken],
+) {
+    // Check if this node contains an Execute call (KW_EXECUTE or "Execute"/"Выполнить" IDENT)
+    let has_execute = tokens.iter().any(|t| {
+        t.kind() == SyntaxKind::KW_EXECUTE
+            || (t.kind() == SyntaxKind::IDENT
+                && matches!(t.text().to_lowercase().as_str(), "execute" | "выполнить"))
+    });
+
+    if !has_execute {
+        return;
+    }
+
+    // Extract all IDENTs before the Execute to find the variable being called
+    // Also track token ranges for precise diagnostic range
+    let mut idents = Vec::new();
+    let mut first_ident_range: Option<TextRange> = None;
+    let mut last_significant_token: Option<TextRange> = None;
+
+    for token in tokens {
+        match token.kind() {
+            SyntaxKind::EQ => {
+                // For assignments, clear any IDENTs collected before EQ
+                idents.clear();
+                first_ident_range = None;
+            }
+            SyntaxKind::IDENT => {
+                let text = token.text().to_lowercase();
+                if !matches!(text.as_str(), "execute" | "выполнить") {
+                    if first_ident_range.is_none() {
+                        first_ident_range = Some(token.text_range());
+                    }
+                    idents.push(token.text().to_string());
+                }
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::KW_EXECUTE => {
+                last_significant_token = Some(token.text_range());
+                // Continue to find closing parens
+            }
+            SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET => {
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::SEMICOLON => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if idents.is_empty() {
+        return;
+    }
+
+    // Check all possible variable paths (e.g., "Запрос", "Запрос2.info")
+    for i in 0..idents.len() {
+        let prefix = idents[0..=i].join(".");
+        if let Some(var_def) = scope.get_variable(&prefix) {
+            if var_def.has_query_type() {
+                // Create diagnostic with precise range
+                if let (Some(start), Some(end)) = (first_ident_range, last_significant_token) {
+                    let diagnostic_range = TextRange::new(start.start(), end.end());
+                    diagnostics.push(make_diagnostic_with_range(diagnostic_range));
+                } else {
+                    diagnostics.push(make_diagnostic(node));
+                }
+                return;
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn check_execute_call(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &VariableScope) {
     // Check if this node contains an Execute call (KW_EXECUTE or "Execute"/"Выполнить" IDENT)
     let has_execute = node.descendants_with_tokens().filter_map(|el| el.into_token()).any(|t| {
@@ -450,6 +602,81 @@ fn check_expr_for_execute(
     }
 }
 
+/// Optimized version that accepts pre-built token list
+fn check_execute_call_in_assignment_optimized(
+    node: &SyntaxNode,
+    diagnostics: &mut Vec<Diagnostic>,
+    scope: &VariableScope,
+    tokens: &[syntax::SyntaxToken],
+) {
+    let has_execute = tokens.iter().any(|t| {
+        t.kind() == SyntaxKind::KW_EXECUTE
+            || (t.kind() == SyntaxKind::IDENT
+                && matches!(t.text().to_lowercase().as_str(), "execute" | "выполнить"))
+    });
+
+    if !has_execute {
+        return;
+    }
+
+    // Find the range of rvalue (everything after EQ token up to semicolon or end of expression)
+    let mut eq_found = false;
+    let mut first_ident_after_eq: Option<TextRange> = None;
+    let mut last_significant_token: Option<TextRange> = None;
+    let mut idents = Vec::new();
+
+    for token in tokens {
+        match token.kind() {
+            SyntaxKind::EQ => {
+                eq_found = true;
+            }
+            SyntaxKind::IDENT if eq_found => {
+                let text = token.text().to_lowercase();
+                if !matches!(text.as_str(), "execute" | "выполнить") {
+                    if first_ident_after_eq.is_none() {
+                        first_ident_after_eq = Some(token.text_range());
+                    }
+                    idents.push(token.text().to_string());
+                }
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET if eq_found => {
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::KW_EXECUTE if eq_found => {
+                last_significant_token = Some(token.text_range());
+            }
+            SyntaxKind::SEMICOLON => {
+                // Stop at semicolon
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if idents.is_empty() {
+        return;
+    }
+
+    // Check all possible variable paths
+    for i in 0..idents.len() {
+        let prefix = idents[0..=i].join(".");
+        if let Some(var_def) = scope.get_variable(&prefix) {
+            if var_def.has_query_type() {
+                // Create diagnostic for the rvalue (after EQ)
+                if let (Some(start), Some(end)) = (first_ident_after_eq, last_significant_token) {
+                    let diagnostic_range = TextRange::new(start.start(), end.end());
+                    diagnostics.push(make_diagnostic_with_range(diagnostic_range));
+                } else {
+                    diagnostics.push(make_diagnostic(node));
+                }
+                return;
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn check_execute_call_in_assignment(
     node: &SyntaxNode,
     diagnostics: &mut Vec<Diagnostic>,
