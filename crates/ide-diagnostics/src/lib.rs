@@ -201,6 +201,7 @@ impl DiagnosticCode {
             Self::CommonModuleNameServerCall => "CommonModuleNameServerCall",
             Self::CommonModuleNameWords => "CommonModuleNameWords",
             Self::ExecuteExternalCodeInCommonModule => "ExecuteExternalCodeInCommonModule",
+            Self::ExportVariables => "ExportVariables",
             _ => "Unknown",
         }
     }
@@ -319,6 +320,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(handlers::deprecated_attributes_8312::check(ctx));
     result.extend(handlers::disable_safe_mode::check(ctx));
     result.extend(handlers::execute_external_code::check(ctx));
+    result.extend(handlers::export_variables::check(ctx));
     result.extend(handlers::code_after_async_call::check(ctx));
     result.extend(handlers::code_block_before_sub::check(ctx));
     result.extend(handlers::code_out_of_region::check(ctx));
