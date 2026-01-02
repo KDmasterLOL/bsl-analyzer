@@ -31,6 +31,7 @@ use syntax::{
 
 /// Main check function for FormDataToValue diagnostic.
 ///
+/// Optimized: Single traversal O(n) instead of O(n²).
 /// Detects calls to ДанныеФормыВЗначение() / FormDataToValue() in methods with context.
 /// Skips methods with @НаСервереБезКонтекста or @НаКлиентеНаСервереБезКонтекста annotations.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -43,27 +44,42 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen_ranges = HashSet::new();
 
-    for node in root.descendants() {
-        // Skip high-level container nodes - we only want to check actual call statements
-        if matches!(
-            node.kind(),
-            SyntaxKind::SOURCE_FILE | SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF
-        ) {
+    // Optimized: Build token stream once
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    // Search for FormDataToValue calls
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
             continue;
         }
 
-        if let Some(range) = extract_method_call_range(&node) {
-            // Check if in "БезКонтекста" method
-            if let Some(parent_method) = find_parent_method(&node) {
+        // Check if this is FormDataToValue method
+        if !is_form_data_to_value_method(token.text()) {
+            continue;
+        }
+
+        // Check pattern: IDENT (
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        let range = token.text_range();
+
+        // Check if in "БезКонтекста" method
+        if let Some(parent_node) = token.parent() {
+            if let Some(parent_method) = find_parent_method(&parent_node) {
                 if has_no_context_annotation(&parent_method) {
                     continue; // SKIP - method has no context
                 }
             }
-            // If no parent method OR parent has context → TRIGGER
+        }
+        // If no parent method OR parent has context → TRIGGER
 
-            if seen_ranges.insert(range) {
-                diagnostics.push(create_diagnostic(range));
-            }
+        if seen_ranges.insert(range) {
+            diagnostics.push(create_diagnostic(range));
         }
     }
 
@@ -76,40 +92,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn is_form_data_to_value_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "данныеформывзначение" | "formdatatovalue")
-}
-
-/// Extract method call range from node.
-///
-/// Returns the range of the method name token ONLY (not the full call expression).
-/// Handles both global calls and qualified calls.
-///
-/// Examples:
-/// - Global: `ДанныеФормыВЗначение(...)` → range of "ДанныеФормыВЗначение"
-/// - Qualified: `Форма.ДанныеФормыВЗначение(...)` → range of "ДанныеФормыВЗначение"
-fn extract_method_call_range(node: &SyntaxNode) -> Option<TextRange> {
-    // Check for ARG_LIST (confirms it's a call, not just reference)
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let method_name = token.text();
-                if is_form_data_to_value_method(method_name) {
-                    return Some(token.text_range());
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// Find parent method (PROCEDURE_DEF or FUNCTION_DEF) containing the given node.
