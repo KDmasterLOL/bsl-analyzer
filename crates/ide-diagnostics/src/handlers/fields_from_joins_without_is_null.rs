@@ -66,20 +66,36 @@ use tracing::{debug, trace};
 ///
 /// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("fields_from_joins_without_is_null").entered();
+    use std::time::Instant;
+
+    let start = Instant::now();
 
     if ctx.config.is_disabled(DiagnosticCode::FieldsFromJoinsWithoutIsNull) {
         return Vec::new();
     }
 
-    // ✅ NEW: Get cached SDBL queries (no tree walking!)
+    // ✅ Get cached SDBL queries (no tree walking!)
+    let cache_start = Instant::now();
     let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
+    let time_cache_fetch_us = cache_start.elapsed().as_micros();
 
+    // Get BSL source text for position mapping
+    let source_start = Instant::now();
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
+    let time_source_fetch_us = source_start.elapsed().as_micros();
+
+    // ✅ OPTIMIZATION: Build line index ONCE for the entire file
+    // Instead of rebuilding it for each mapper (was causing massive overhead!)
+    use crate::sdbl_utils::build_line_index_shared;
+    let line_index_start = Instant::now();
+    let line_starts = build_line_index_shared(&bsl_source);
+    let time_line_index_us = line_index_start.elapsed().as_micros();
 
     let mut diagnostics = Vec::new();
-    debug!(queries_from_cache = sdbl_queries.len(), "Starting FieldsFromJoinsWithoutIsNull check");
+    let mut time_mapper_creation_us = 0u128;
+    let mut time_analyzing_ast_us = 0u128;
+    let mut queries_analyzed = 0;
 
     // Process each cached SDBL query
     for query_info in sdbl_queries.iter() {
@@ -92,18 +108,37 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         };
 
-        trace!("Analyzing SDBL query from cache: {} chars", query_info.query_text.len());
+        // ✅ Create position mapper (reuses shared line_starts from above)
+        let mapper_start = Instant::now();
+        let mapper = SdblPositionMapper::new_from_range_with_line_index(
+            query_info.bsl_literal_range,
+            &bsl_source,
+            &line_starts,
+        );
+        time_mapper_creation_us += mapper_start.elapsed().as_micros();
 
-        // Create position mapper (uses cached bsl_literal_range)
-        let mapper = SdblPositionMapper::new_from_range(query_info.bsl_literal_range, &bsl_source);
-
+        // Check SDBL query AST
+        let analyze_start = Instant::now();
         check_sdbl_query_with_mapper(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
+        time_analyzing_ast_us += analyze_start.elapsed().as_micros();
+        queries_analyzed += 1;
     }
 
-    debug!(
-        diagnostics_count = diagnostics.len(),
-        "FieldsFromJoinsWithoutIsNull check completed (using SDBL cache)"
+    let total_elapsed = start.elapsed().as_millis();
+
+    tracing::info!(
+        total_ms = total_elapsed,
+        cache_fetch_us = time_cache_fetch_us,
+        source_fetch_us = time_source_fetch_us,
+        line_index_us = time_line_index_us,
+        mapper_creation_us = time_mapper_creation_us,
+        analyzing_ast_us = time_analyzing_ast_us,
+        queries_from_cache = sdbl_queries.len(),
+        queries_analyzed,
+        diagnostics_found = diagnostics.len(),
+        "FieldsFromJoinsWithoutIsNull completed (using SDBL cache + shared line index)"
     );
+
     diagnostics
 }
 
