@@ -63,7 +63,7 @@ fn test_alias_with_as_keyword() {
                   SDBL_QUERY@0..40
                     IDENT@0..6 "SELECT"
                     WHITESPACE@6..7 " "
-                    SDBL_FIELD_LIST@7..26
+                    SDBL_FIELD_LIST@7..27
                       SDBL_SELECTED_FIELD@7..26
                         SDBL_LOGICAL_OR_EXPR@7..12
                           SDBL_LOGICAL_AND_EXPR@7..12
@@ -76,7 +76,7 @@ fn test_alias_with_as_keyword() {
                           IDENT@12..14 "AS"
                           WHITESPACE@14..15 " "
                           IDENT@15..26 "ProductName"
-                    WHITESPACE@26..27 " "
+                      WHITESPACE@26..27 " "
                     SDBL_FROM_CLAUSE@27..40
                       IDENT@27..31 "FROM"
                       WHITESPACE@31..32 " "
@@ -391,50 +391,14 @@ fn test_debug_semicolon_tokens() {
 ИЗ
 	Справочник.Валюты КАК Валюты"#;
 
-    // Parse SDBL
-    use lexer::sdbl::tokenize_sdbl;
-    let sdbl_tokens = tokenize_sdbl(query);
-
-    eprintln!("\n=== SDBL Tokens ===");
-    for (i, token) in sdbl_tokens.iter().enumerate() {
-        let text = &token.text;
-        eprintln!(
-            "  [{}] {:?} = {:?}",
-            i,
-            token.kind,
-            text.replace('\n', "\\n").replace('\t', "\\t")
-        );
-
-        // Print tokens around semicolon
-        if text.contains(';') {
-            eprintln!("\n  ^^^ SEMICOLON FOUND AT TOKEN {} ^^^", i);
-            eprintln!("\n  Next 10 tokens:");
-            for j in 1..=10.min(sdbl_tokens.len() - i - 1) {
-                let tok = &sdbl_tokens[i + j];
-                eprintln!(
-                    "    [{}] {:?} = {:?}",
-                    i + j,
-                    tok.kind,
-                    tok.text.replace('\n', "\\n").replace('\t', "\\t")
-                );
-            }
-            break;
-        }
-    }
-
     let parse = parse_sdbl(query);
-    eprintln!("\n=== Parse Result ===");
-    eprintln!("Has errors: {}", parse.has_errors());
+    assert!(!parse.has_errors(), "Should parse queries separated by semicolon");
 
     use syntax::ast::{AstNode, SdblQueryPackage};
     let root = parse.syntax_node();
-    if let Some(package) = SdblQueryPackage::cast(root) {
-        let count = package.queries().count();
-        eprintln!("Number of queries in package: {}", count);
-        assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
-    } else {
-        panic!("Failed to cast to SdblQueryPackage");
-    }
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+    assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
 
 #[test]
@@ -467,18 +431,13 @@ fn test_union_with_semicolon_separator() {
 	Справочник.Валюты КАК Валюты"#;
 
     let parse = parse_sdbl(query);
-    eprintln!("\n=== Union+Semicolon Test ===");
-    eprintln!("Has errors: {}", parse.has_errors());
+    assert!(!parse.has_errors(), "Should parse UNION queries separated by semicolon");
 
     use syntax::ast::{AstNode, SdblQueryPackage};
     let root = parse.syntax_node();
-    if let Some(package) = SdblQueryPackage::cast(root) {
-        let count = package.queries().count();
-        eprintln!("Number of queries: {}", count);
-        assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
-    } else {
-        panic!("Failed to cast to SdblQueryPackage");
-    }
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+    assert_eq!(count, 2, "Expected 2 SELECT queries (each with UNION) separated by semicolon");
 }
 
 #[test]
@@ -518,42 +477,143 @@ fn test_exact_java_query_structure() {
 ИЗ
 	Справочник.Валюты КАК Валюты"#;
 
-    // Tokenize to see what's happening
-    use lexer::sdbl::tokenize_sdbl;
-    let tokens = tokenize_sdbl(query);
-
-    eprintln!("\n=== SDBL Tokens 20-40 (around first UNION) ===");
-    for (i, token) in tokens.iter().enumerate().skip(20).take(20) {
-        eprintln!(
-            "[{}] {:?} = {:?}",
-            i,
-            token.kind,
-            token.text.replace('\n', "\\n").replace('\t', "\\t")
-        );
-    }
-    eprintln!("\n=== SDBL Tokens 45-65 (around semicolon at 56) ===");
-    for (i, token) in tokens.iter().enumerate().skip(45).take(20) {
-        eprintln!(
-            "[{}] {:?} = {:?}",
-            i,
-            token.kind,
-            token.text.replace('\n', "\\n").replace('\t', "\\t")
-        );
-    }
-    eprintln!("\nTotal SDBL tokens: {}", tokens.len());
-
     let parse = parse_sdbl(query);
-    eprintln!("\n=== Exact Java Query Test ===");
-    eprintln!("Query length: {} chars", query.len());
-    eprintln!("Has errors: {}", parse.has_errors());
+    assert!(!parse.has_errors(), "Should parse exact Java query structure");
 
     use syntax::ast::{AstNode, SdblQueryPackage};
     let root = parse.syntax_node();
-    if let Some(package) = SdblQueryPackage::cast(root) {
-        let count = package.queries().count();
-        eprintln!("Number of queries: {}", count);
-        assert_eq!(count, 2, "Should find 2 SELECT queries separated by semicolon");
-    } else {
-        panic!("Failed to cast to SdblQueryPackage");
-    }
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+    assert_eq!(count, 2, "Should find 2 SELECT queries separated by semicolon");
+}
+
+// Tests for FULL OUTER JOIN parsing (fix for keyword consumption bug)
+
+#[test]
+fn test_full_outer_join_simple() {
+    let input = "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse without errors");
+}
+
+#[test]
+fn test_multiple_full_outer_joins() {
+    let input =
+        "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A FULL OUTER JOIN T3 ON T1.B = T3.B";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse multiple JOINs");
+}
+
+#[test]
+fn test_on_not_consumed_as_alias() {
+    let input = "SELECT * FROM T1 JOIN T2 ON T1.ID = T2.ID";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors());
+    let text = format!("{:#?}", parse.syntax_node());
+    assert!(text.contains("ON"), "ON keyword should be in AST, not consumed as alias");
+}
+
+#[test]
+fn test_nested_joins_multiline_russian() {
+    let input = "ВЫБРАТЬ Товары.Номенклатура
+ИЗ Товары КАК Товары
+    ЛЕВОЕ СОЕДИНЕНИЕ ПланПродаж КАК ПланПродаж
+        ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ ФактическиеПродажи КАК ФактическиеПродажи
+        ПО ПланПродаж.Номенклатура = ФактическиеПродажи.Номенклатура
+    ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
+
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse multiline nested JOINs");
+}
+
+// Tests for multi-argument function calls (bug fix)
+
+#[test]
+fn test_function_with_two_arguments() {
+    // Simplest case: two-argument function without alias
+    check_no_errors("SELECT ISNULL(A, 0) FROM T");
+}
+
+#[test]
+fn test_function_with_two_arguments_and_alias() {
+    // With alias
+    check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM Products");
+}
+
+#[test]
+fn test_russian_function_with_arguments() {
+    // Russian version
+    check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
+}
+
+#[test]
+fn test_multiple_fields_with_function_arguments() {
+    // Multiple fields, one with multi-arg function
+    check_no_errors("SELECT Name, ISNULL(Amount, 0) AS Total FROM Products");
+}
+
+#[test]
+fn test_multiple_multi_arg_functions() {
+    // Multiple multi-arg functions like the failing diagnostic test
+    let input = "ВЫБРАТЬ
+    Товары.Номенклатура КАК Номенклатура,
+    ЕСТЬNULL(ПланПродаж.Сумма, 0) КАК СуммаПлан,
+    ЕСТЬNULL(ФактическиеПродажи.Сумма, 0) КАК СуммаФакт
+ИЗ
+    Товары";
+    let parse = parse_sdbl(input);
+    assert!(!parse.has_errors(), "Should parse multiple multi-arg functions");
+
+    // Verify FROM clause exists in AST
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("Should have package");
+    let query = package.queries().next().expect("Should have query");
+    let subquery = query.subquery().expect("Should have subquery");
+    let main_query = subquery.main_query().expect("Should have main query");
+    let from_clause = main_query.from_clause().expect("Should have FROM clause");
+
+    // FROM clause should have data sources
+    let data_sources_count = from_clause.data_sources().count();
+    assert!(data_sources_count > 0, "FROM should have data sources");
+}
+
+// Comprehensive test coverage for multi-argument functions
+
+#[test]
+fn test_single_arg_function() {
+    check_no_errors("SELECT SUM(Amount) FROM T");
+    check_no_errors("SELECT YEAR(Date) FROM T");
+}
+
+#[test]
+fn test_two_arg_functions() {
+    check_no_errors("SELECT ISNULL(A, 0) FROM T");
+    check_no_errors("SELECT SUBSTRING(Name, 1, 10) FROM T");
+}
+
+#[test]
+fn test_three_arg_functions() {
+    check_no_errors("SELECT SUBSTRING(Text, 1, 5) FROM T");
+}
+
+#[test]
+fn test_multi_arg_with_alias() {
+    check_no_errors("SELECT ISNULL(Amount, 0) AS Total FROM T");
+}
+
+#[test]
+fn test_mixed_fields_and_functions() {
+    check_no_errors("SELECT Name, ISNULL(Amount, 0), Code FROM T");
+}
+
+#[test]
+fn test_nested_functions() {
+    check_no_errors("SELECT ISNULL(SUM(Amount), 0) FROM T");
+}
+
+#[test]
+fn test_russian_multi_arg_functions() {
+    check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
+    check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) КАК Итого ИЗ Товары");
 }

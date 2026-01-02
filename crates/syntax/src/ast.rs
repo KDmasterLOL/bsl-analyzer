@@ -1348,14 +1348,25 @@ impl SdblJoinClause {
     }
 
     /// Determine the JOIN type from keywords in the clause.
+    ///
+    /// The JOIN type keywords (LEFT, RIGHT, FULL, INNER) are part of the parent
+    /// data_source node, not the SdblJoinClause node itself. We need to check
+    /// the parent to find them.
     pub fn join_type(&self) -> JoinType {
+        // First check the join clause itself (in case parser includes keywords)
         let text = self.0.text().to_string().to_uppercase();
 
-        if text.contains("LEFT") || text.contains("ЛЕВОЕ") {
+        // Then check the parent data_source node where JOIN type keywords actually are
+        let parent_text =
+            self.0.parent().map(|p| p.text().to_string().to_uppercase()).unwrap_or_default();
+
+        let combined_text = format!("{} {}", parent_text, text);
+
+        if combined_text.contains("LEFT") || combined_text.contains("ЛЕВОЕ") {
             JoinType::Left
-        } else if text.contains("RIGHT") || text.contains("ПРАВОЕ") {
+        } else if combined_text.contains("RIGHT") || combined_text.contains("ПРАВОЕ") {
             JoinType::Right
-        } else if text.contains("FULL") || text.contains("ПОЛНОЕ") {
+        } else if combined_text.contains("FULL") || combined_text.contains("ПОЛНОЕ") {
             JoinType::Full
         } else {
             JoinType::Inner

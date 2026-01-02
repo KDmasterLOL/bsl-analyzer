@@ -164,7 +164,13 @@ fn selected_fields(p: &mut Parser) {
     selected_field(p);
 
     // Parse additional fields (COMMA field)*
-    while p.eat(TokenKind::Comma) {
+    loop {
+        p.skip_trivia(); // CRITICAL: Skip trivia before checking for comma
+
+        if !p.eat(TokenKind::Comma) {
+            break; // No more fields
+        }
+
         p.skip_trivia();
         selected_field(p);
     }
@@ -193,6 +199,7 @@ fn selected_field(p: &mut Parser) {
     // Optional alias
     // Parse alias if we see AS keyword OR an identifier
     // (identifier could be implicit alias or explicit with AS)
+    p.skip_trivia(); // CRITICAL: Skip trivia before checking for alias
     if at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p) {
         // Lookahead to avoid consuming keywords that start next clause
         if !is_clause_keyword(p) {
@@ -411,6 +418,8 @@ fn is_clause_keyword(p: &Parser) -> bool {
         || p.at_keyword("ORDER")
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || p.at_keyword("INTO")
+        || at_sdbl_keyword(p, "ON", "ПО")
+        || is_join_keyword(p)
 }
 
 /// Check if current position starts a JOIN clause

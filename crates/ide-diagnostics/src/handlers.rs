@@ -59,4 +59,5 @@ pub mod extra_commas;
 pub mod fields_from_joins_without_is_null;
 pub mod file_system_access;
 pub mod form_data_to_value;
+pub mod full_outer_join_query;
 // TODO: Add all 181 handlers
