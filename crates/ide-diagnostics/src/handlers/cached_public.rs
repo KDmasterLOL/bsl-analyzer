@@ -138,33 +138,41 @@ fn is_public_region(region_name: &str) -> bool {
 
 /// Find all public regions with methods.
 ///
-/// Note: Parser creates ONE PRE_REGION_DIR node per region (containing entire region from #Область to #КонецОбласти).
+/// Optimized: Single traversal O(n) instead of O(n × regions).
+/// Collects both regions and methods in one pass, then matches them.
 fn find_public_regions(root: &SyntaxNode) -> Vec<RegionInfo> {
-    let mut regions = Vec::new();
+    let mut public_regions: Vec<(String, TextRange)> = Vec::new();
+    let mut method_ranges: Vec<TextRange> = Vec::new();
 
+    // Single pass: collect public regions and method definitions
     for node in root.descendants() {
-        if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
-            // Extract region name from first line
-            if let Some(name) = region_dir.name() {
-                // Check if this is a public region
-                if is_public_region(&name) {
-                    let range = region_dir.syntax().text_range();
-                    let has_methods = contains_methods(root, range);
-                    regions.push(RegionInfo { name: name.to_string(), range, has_methods });
+        match node.kind() {
+            SyntaxKind::PRE_REGION_DIR => {
+                if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
+                    if let Some(name) = region_dir.name() {
+                        if is_public_region(&name) {
+                            let range = region_dir.syntax().text_range();
+                            public_regions.push((name.to_string(), range));
+                        }
+                    }
                 }
             }
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                method_ranges.push(node.text_range());
+            }
+            _ => {}
         }
     }
 
-    regions
-}
-
-/// Check if range contains PROCEDURE_DEF or FUNCTION_DEF.
-fn contains_methods(root: &SyntaxNode, range: TextRange) -> bool {
-    root.descendants().any(|n| {
-        range.contains_range(n.text_range())
-            && matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
-    })
+    // Match methods to regions
+    public_regions
+        .into_iter()
+        .map(|(name, range)| {
+            let has_methods =
+                method_ranges.iter().any(|method_range| range.contains_range(*method_range));
+            RegionInfo { name, range, has_methods }
+        })
+        .collect()
 }
 
 /// Find CommonModule metadata for given file.

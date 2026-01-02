@@ -44,7 +44,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::SyntaxKind;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::ExternalAppStarting) {
@@ -54,13 +54,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(range) = extract_external_app_call_range(&node) {
-            if seen_ranges.insert(range) {
-                diagnostics.push(create_diagnostic(range));
-            }
+    // Optimized: single traversal O(n) instead of O(n²)
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
+            continue;
+        }
+
+        // Check pattern: IDENT (
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        // Check if method name matches external app pattern
+        let method_name = token.text();
+        if is_external_app_method(method_name) {
+            diagnostics.push(create_diagnostic(token.text_range()));
         }
     }
 
@@ -100,40 +114,6 @@ fn is_external_app_method(name: &str) -> bool {
             | "открытьпроводник"
             | "открытьфайл"
     )
-}
-
-/// Extract range of external app call from node.
-///
-/// Returns the range of the method name token ONLY (not the full call expression).
-/// Handles both global calls and object method calls.
-///
-/// Examples:
-/// - Global: `КомандаСистемы(...)` → range of "КомандаСистемы"
-/// - Object: `ФайловаяСистемаКлиент.ЗапуститьПрограмму(...)` → range of "ЗапуститьПрограмму"
-fn extract_external_app_call_range(node: &SyntaxNode) -> Option<TextRange> {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let method_name = token.text();
-
-                if is_external_app_method(method_name) {
-                    return Some(token.text_range());
-                }
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

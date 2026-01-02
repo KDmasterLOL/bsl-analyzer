@@ -59,7 +59,7 @@
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DisableSafeMode) {
@@ -69,14 +69,52 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(diagnostic) = check_call(&node) {
-            if seen_ranges.insert(diagnostic.range) {
-                diagnostics.push(diagnostic);
-            }
+    // Optimized: single traversal O(n) instead of O(n²)
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() != SyntaxKind::IDENT {
+            continue;
         }
+
+        // Check if this is a safe mode method
+        let method_name = token.text();
+        let method_type = match is_safe_mode_method(method_name) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        // Check pattern: IDENT ( but not .IDENT(
+        let next_is_lparen =
+            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+        if !next_is_lparen {
+            continue;
+        }
+
+        let prev_is_dot = i
+            .checked_sub(1)
+            .and_then(|idx| tokens.get(idx))
+            .map(|t| t.kind() == SyntaxKind::DOT)
+            .unwrap_or(false);
+
+        if prev_is_dot {
+            continue;
+        }
+
+        // Extract first argument by looking forward in token stream (skip method name + lparen)
+        let arg = extract_first_argument_from_tokens(
+            &tokens[i.saturating_add(2)..i.saturating_add(12).min(tokens.len())],
+        );
+
+        // Check if this is a safe call
+        if is_safe_call(method_type, &arg) {
+            continue; // Safe call, no diagnostic
+        }
+
+        // Create diagnostic for unsafe call
+        diagnostics.push(create_diagnostic(token, method_type));
     }
 
     diagnostics
@@ -95,92 +133,28 @@ enum ArgumentValue {
     Other,        // Variable, expression, or missing
 }
 
-fn check_call(node: &SyntaxNode) -> Option<Diagnostic> {
-    // Extract method name
-    let (method_name_token, method_name) = extract_method_name(node)?;
-
-    // Check if this is one of the target methods
-    let method_type = is_safe_mode_method(&method_name)?;
-
-    // Extract first argument
-    let arg = extract_first_argument(node)?;
-
-    // Check if this is a safe call
-    if is_safe_call(method_type, &arg) {
-        return None; // Safe call, no diagnostic
-    }
-
-    // Create diagnostic for unsafe call
-    Some(create_diagnostic(&method_name_token, method_type))
-}
-
-fn extract_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    // Check if node has ARG_LIST descendant
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-
-    if !has_arg_list {
-        return None;
-    }
-
-    // Collect all tokens
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    // Find IDENT followed by L_PAREN
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                // Exclude if preceded by DOT (object methods)
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    let text = token.text().to_string();
-                    return Some((token.clone(), text));
-                }
-            }
+/// Extract first argument by looking forward in token stream
+fn extract_first_argument_from_tokens(tokens: &[SyntaxToken]) -> ArgumentValue {
+    for token in tokens {
+        // Skip punctuation and whitespace
+        if matches!(
+            token.kind(),
+            SyntaxKind::L_PAREN | SyntaxKind::R_PAREN | SyntaxKind::COMMA | SyntaxKind::WHITESPACE
+        ) {
+            continue;
         }
+
+        // Check for boolean keyword or identifier
+        let text = token.text().to_lowercase();
+        return match text.as_str() {
+            "истина" | "true" => ArgumentValue::LiteralTrue,
+            "ложь" | "false" => ArgumentValue::LiteralFalse,
+            _ => ArgumentValue::Other, // Variable name or other
+        };
     }
 
-    None
-}
-
-fn extract_first_argument(node: &SyntaxNode) -> Option<ArgumentValue> {
-    // Find ARG_LIST child
-    let arg_list = node.descendants().find(|n| n.kind() == SyntaxKind::ARG_LIST)?;
-
-    // Look through all descendants to find the first meaningful token
-    // (skipping punctuation like parentheses and commas)
-    for element in arg_list.descendants_with_tokens() {
-        if let Some(token) = element.as_token() {
-            // Skip punctuation
-            if matches!(
-                token.kind(),
-                SyntaxKind::L_PAREN
-                    | SyntaxKind::R_PAREN
-                    | SyntaxKind::COMMA
-                    | SyntaxKind::WHITESPACE
-            ) {
-                continue;
-            }
-
-            // Check for boolean keyword or identifier
-            let text = token.text().to_lowercase();
-            return Some(match text.as_str() {
-                "истина" | "true" => ArgumentValue::LiteralTrue,
-                "ложь" | "false" => ArgumentValue::LiteralFalse,
-                _ => ArgumentValue::Other, // Variable name or other
-            });
-        }
-    }
-
-    // No argument found or complex expression
-    Some(ArgumentValue::Other)
+    // No argument found
+    ArgumentValue::Other
 }
 
 fn is_safe_mode_method(name: &str) -> Option<SafeModeMethod> {
