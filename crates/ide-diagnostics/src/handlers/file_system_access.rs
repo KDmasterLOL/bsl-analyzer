@@ -202,20 +202,38 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        // Check NEW_EXPR nodes for file system types
-        if node.kind() == SyntaxKind::NEW_EXPR {
-            if let Some(range) = extract_new_expr_range(&node) {
-                if seen_ranges.insert(range) {
-                    diagnostics.push(create_diagnostic(range));
+    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
+    let all_elements: Vec<_> = root.descendants_with_tokens().collect();
+
+    // Check NEW_EXPR nodes for file system types
+    for element in all_elements.iter() {
+        if let Some(node) = element.as_node() {
+            if node.kind() == SyntaxKind::NEW_EXPR {
+                if let Some(range) = extract_new_expr_range_optimized(node) {
+                    if seen_ranges.insert(range) {
+                        diagnostics.push(create_diagnostic(range));
+                    }
                 }
             }
         }
+    }
 
-        // Check method calls for file system operations
-        if let Some(range) = extract_global_method_range(&node) {
-            if seen_ranges.insert(range) {
-                diagnostics.push(create_diagnostic(range));
+    // Check method calls for file system operations (IDENT + LPAREN pattern)
+    let tokens: Vec<_> = all_elements.iter().filter_map(|el| el.as_token()).collect();
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() == SyntaxKind::IDENT {
+            let next_is_lparen =
+                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+            if next_is_lparen {
+                let method_name = token.text().to_lowercase();
+
+                if GLOBAL_METHODS_PATTERNS.contains(&method_name.as_str()) {
+                    let range = token.text_range();
+                    if seen_ranges.insert(range) {
+                        diagnostics.push(create_diagnostic(range));
+                    }
+                }
             }
         }
     }
@@ -235,65 +253,34 @@ fn create_diagnostic(range: TextRange) -> Diagnostic {
     }
 }
 
-/// Extract range of file system type from NEW_EXPR node.
+/// Extract range of file system type from NEW_EXPR node (optimized).
 ///
-/// Returns the range of the ENTIRE NEW_EXPR node.
+/// Returns the range of the ENTIRE NEW_EXPR node if it matches file system patterns.
 /// This matches Java bsl-language-server behavior (entire "Новый File(...)" expression).
 ///
 /// Examples:
 /// - `Новый File(...)` → range of entire "Новый File(...)"
 /// - `Новый ЗаписьТекста` → range of entire "Новый ЗаписьТекста"
-fn extract_new_expr_range(node: &SyntaxNode) -> Option<TextRange> {
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
+fn extract_new_expr_range_optimized(node: &SyntaxNode) -> Option<TextRange> {
+    // NEW_EXPR pattern: KW_NEW IDENT [LPAREN ...]
+    // We only need to check immediate children tokens, not descendants
     let mut found_new_kw = false;
 
-    for token in tokens.iter() {
-        if token.kind() == SyntaxKind::KW_NEW {
-            found_new_kw = true;
-            continue;
-        }
-
-        if found_new_kw && token.kind() == SyntaxKind::IDENT {
-            let type_name = token.text().to_lowercase();
-
-            if NEW_EXPRESSION_PATTERNS.contains(&type_name.as_str()) {
-                return Some(node.text_range());
+    for element in node.children_with_tokens() {
+        if let Some(token) = element.as_token() {
+            if token.kind() == SyntaxKind::KW_NEW {
+                found_new_kw = true;
+                continue;
             }
 
-            break;
-        }
-    }
+            if found_new_kw && token.kind() == SyntaxKind::IDENT {
+                let type_name = token.text().to_lowercase();
 
-    None
-}
-
-/// Extract range of file system method call from node.
-///
-/// Returns the range of the method name token ONLY (not the full call expression).
-///
-/// Examples:
-/// - `КопироватьФайл(...)` → range of "КопироватьФайл"
-/// - `СоздатьКаталог(...)` → range of "СоздатьКаталог"
-fn extract_global_method_range(node: &SyntaxNode) -> Option<TextRange> {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let method_name = token.text().to_lowercase();
-
-                if GLOBAL_METHODS_PATTERNS.contains(&method_name.as_str()) {
-                    return Some(token.text_range());
+                if NEW_EXPRESSION_PATTERNS.contains(&type_name.as_str()) {
+                    return Some(node.text_range());
                 }
+
+                break;
             }
         }
     }

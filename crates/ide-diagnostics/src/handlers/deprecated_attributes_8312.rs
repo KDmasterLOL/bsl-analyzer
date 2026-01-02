@@ -47,7 +47,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use std::collections::HashMap;
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedAttributes8312) {
@@ -59,10 +59,43 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(diagnostic) = check_node(&node) {
-            if seen_ranges.insert(diagnostic.range) {
-                diagnostics.push(diagnostic);
+    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+
+    // Check dot patterns (Object.Property, Object.Method())
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() == SyntaxKind::DOT {
+            if let Some(diagnostic) = check_dot_pattern(&tokens, i) {
+                if seen_ranges.insert(diagnostic.range) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+        }
+    }
+
+    // Check global methods (IDENT + LPAREN without preceding DOT)
+    for (i, token) in tokens.iter().enumerate() {
+        if token.kind() == SyntaxKind::IDENT {
+            let next_is_lparen =
+                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+            if next_is_lparen {
+                let prev_is_dot = i
+                    .checked_sub(1)
+                    .and_then(|idx| tokens.get(idx))
+                    .map(|t| t.kind() == SyntaxKind::DOT)
+                    .unwrap_or(false);
+
+                if !prev_is_dot {
+                    let method_name = token.text().to_string();
+                    if is_clear_event_log(&method_name) {
+                        let diagnostic =
+                            create_diagnostic(token, &method_name, DeprecatedKind::GlobalMethod);
+                        if seen_ranges.insert(diagnostic.range) {
+                            diagnostics.push(diagnostic);
+                        }
+                    }
+                }
             }
         }
     }
@@ -70,29 +103,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_node(node: &SyntaxNode) -> Option<Diagnostic> {
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::DOT {
-            if let Some(diagnostic) = check_dot_pattern(&tokens, i, node) {
-                return Some(diagnostic);
-            }
-        }
-    }
-
-    if let Some(diagnostic) = check_global_method(node) {
-        return Some(diagnostic);
-    }
-
-    None
-}
-
-fn check_dot_pattern(
-    tokens: &[SyntaxToken],
-    dot_idx: usize,
-    _node: &SyntaxNode,
-) -> Option<Diagnostic> {
+fn check_dot_pattern(tokens: &[SyntaxToken], dot_idx: usize) -> Option<Diagnostic> {
     let before_dot = dot_idx.checked_sub(1).and_then(|idx| tokens.get(idx))?;
     let after_dot = tokens.get(dot_idx + 1)?;
 
@@ -146,45 +157,6 @@ fn check_object_method(
 ) -> Option<Diagnostic> {
     if is_chart(object_name) && is_chart_deprecated_method(method_name) {
         return Some(create_diagnostic(token, method_name, DeprecatedKind::Method));
-    }
-
-    None
-}
-
-fn check_global_method(node: &SyntaxNode) -> Option<Diagnostic> {
-    let (method_name_token, method_name) = extract_global_method_name(node)?;
-
-    if is_clear_event_log(&method_name) {
-        return Some(create_diagnostic(
-            &method_name_token,
-            &method_name,
-            DeprecatedKind::GlobalMethod,
-        ));
-    }
-
-    None
-}
-
-fn extract_global_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    return Some((token.clone(), token.text().to_string()));
-                }
-            }
-        }
     }
 
     None

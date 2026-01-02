@@ -40,7 +40,7 @@
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedMessage) {
@@ -52,38 +52,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if let Some(diagnostic) = check_call(&node) {
-            if seen_ranges.insert(diagnostic.range) {
-                diagnostics.push(diagnostic);
-            }
-        }
-    }
+    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
+    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
 
-    diagnostics
-}
-
-fn check_call(node: &SyntaxNode) -> Option<Diagnostic> {
-    let (method_name_token, method_name) = extract_method_name(node)?;
-
-    if !is_deprecated_message(&method_name) {
-        return None;
-    }
-
-    Some(create_diagnostic(&method_name_token, &method_name))
-}
-
-fn extract_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut method_name_token: Option<SyntaxToken> = None;
-
+    // Find all global method calls (IDENT + LPAREN without preceding DOT)
     for (i, token) in tokens.iter().enumerate() {
         if token.kind() == SyntaxKind::IDENT {
             let next_is_lparen =
@@ -97,17 +69,19 @@ fn extract_method_name(node: &SyntaxNode) -> Option<(SyntaxToken, String)> {
                     .unwrap_or(false);
 
                 if !prev_is_dot {
-                    method_name_token = Some(token.clone());
-                    break;
+                    let method_name = token.text().to_string();
+                    if is_deprecated_message(&method_name) {
+                        let diagnostic = create_diagnostic(token, &method_name);
+                        if seen_ranges.insert(diagnostic.range) {
+                            diagnostics.push(diagnostic);
+                        }
+                    }
                 }
             }
         }
     }
 
-    method_name_token.map(|t| {
-        let text = t.text().to_string();
-        (t, text)
-    })
+    diagnostics
 }
 
 fn is_deprecated_message(name: &str) -> bool {

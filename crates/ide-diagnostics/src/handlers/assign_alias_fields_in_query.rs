@@ -41,9 +41,10 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use parser::parse_sdbl;
+use std::collections::HashMap;
 use syntax::{
     ast::{AstNode, SdblAlias, SdblQuery, SdblQueryPackage, SdblSelectQuery, SdblSelectedField},
-    SyntaxKind, SyntaxNode, TextRange,
+    Parse, SyntaxKind, SyntaxNode, TextRange,
 };
 
 /// Maps SDBL positions back to BSL source positions.
@@ -205,6 +206,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
+    // ✅ OPTIMIZATION: Cache parsed SDBL queries (same query may appear multiple times in template code)
+    // HashMap<query_text, Option<Parse>> - None if parse failed, Some(parse) if successful
+    let mut sdbl_cache: HashMap<String, Option<Parse<SyntaxNode>>> = HashMap::new();
+
     // Walk the tree looking for string literals that might contain SDBL
     for node in root.descendants() {
         if node.kind() == SyntaxKind::LITERAL {
@@ -216,20 +221,45 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             // Try to extract and parse as SDBL
             if let Some(query_text) = extract_string_content(&node) {
+                // ✅ OPTIMIZATION: Skip obviously non-SDBL strings early
+                // Minimum viable SDBL query: "SELECT * FROM Table" (~20 chars)
+                if query_text.len() < 15 {
+                    continue;
+                }
+
                 // Only check if it looks like SDBL (contains SELECT/ВЫБРАТЬ keyword)
                 let uppercase = query_text.to_uppercase();
-                if uppercase.contains("SELECT") || uppercase.contains("ВЫБРАТЬ") {
-                    tracing::debug!(
-                        "Found SDBL query string: {} chars, starts with: {:?}",
-                        query_text.len(),
-                        &query_text.chars().take(50).collect::<String>()
-                    );
+                if !uppercase.contains("SELECT") && !uppercase.contains("ВЫБРАТЬ") {
+                    continue;
+                }
 
-                    // Create position mapper for this string literal
-                    let mapper = SdblPositionMapper::new(&node, &bsl_source);
+                // ✅ OPTIMIZATION: Check cache first to avoid re-parsing identical queries
+                let parse_result = sdbl_cache.entry(query_text.clone()).or_insert_with(|| {
+                    let parse = parse_sdbl(&query_text);
+                    if parse.has_errors() {
+                        None // Cache as invalid SDBL
+                    } else {
+                        Some(parse) // Cache successful parse
+                    }
+                });
 
-                    // Check SDBL query with position mapping
-                    check_sdbl_query_with_mapper(&query_text, &mapper, &mut diagnostics);
+                // Skip if not valid SDBL
+                if parse_result.is_none() {
+                    continue;
+                }
+
+                tracing::debug!(
+                    "Found SDBL query string: {} chars, starts with: {:?}",
+                    query_text.len(),
+                    &query_text.chars().take(50).collect::<String>()
+                );
+
+                // Create position mapper for this string literal
+                let mapper = SdblPositionMapper::new(&node, &bsl_source);
+
+                // Check SDBL query with position mapping (uses cached parse)
+                if let Some(parse) = parse_result {
+                    check_sdbl_query_cached(parse, &query_text, &mapper, &mut diagnostics);
                 }
             }
         }
@@ -336,22 +366,15 @@ fn extract_string_content(node: &SyntaxNode) -> Option<String> {
     Some(result)
 }
 
-/// Check a single SDBL query for fields without AS keyword.
+/// Check a single SDBL query for fields without AS keyword (using cached parse).
 ///
-/// This version uses position mapping to convert SDBL positions to BSL positions.
-fn check_sdbl_query_with_mapper(
-    query_text: &str,
+/// This version uses a pre-parsed SDBL query to avoid re-parsing identical queries.
+fn check_sdbl_query_cached(
+    parse: &Parse<SyntaxNode>,
+    _query_text: &str,
     mapper: &SdblPositionMapper,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // Try to parse as SDBL
-    let parse = parse_sdbl(query_text);
-
-    // If parse has errors, skip (might not be SDBL)
-    if parse.has_errors() {
-        return;
-    }
-
     let root = parse.syntax_node();
 
     // CRITICAL: The SDBL parser strips whitespace from the parse tree!

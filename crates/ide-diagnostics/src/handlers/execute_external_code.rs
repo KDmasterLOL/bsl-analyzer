@@ -49,9 +49,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut seen_ranges = std::collections::HashSet::new();
 
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::EXECUTE_STMT {
-            if !is_in_client_only_context(&node) {
+    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
+    let tokens: Vec<_> = root.descendants_with_tokens().collect();
+
+    // Check EXECUTE_STMT nodes
+    for element in tokens.iter() {
+        if let Some(node) = element.as_node() {
+            if node.kind() == SyntaxKind::EXECUTE_STMT && !is_in_client_only_context(node) {
                 let mut range = node.text_range();
                 if node.text().to_string().ends_with(';') {
                     range = TextRange::new(range.start(), range.end() - TextSize::from(1));
@@ -60,10 +64,49 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     diagnostics.push(create_diagnostic(range));
                 }
             }
-        } else if is_eval_call_node(&node) && !is_in_client_only_context(&node) {
-            if let Some(range) = extract_eval_call_range(&node) {
-                if seen_ranges.insert(range) {
-                    diagnostics.push(create_diagnostic(range));
+        }
+    }
+
+    // Check Eval/Вычислить calls (IDENT + LPAREN without preceding DOT)
+    let token_slice: Vec<_> = tokens.iter().filter_map(|el| el.as_token()).collect();
+    for (i, token) in token_slice.iter().enumerate() {
+        if token.kind() == SyntaxKind::IDENT {
+            let method_name = token.text().to_lowercase();
+            if method_name != "вычислить" && method_name != "eval" {
+                continue;
+            }
+
+            let next_is_lparen =
+                token_slice.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+
+            if next_is_lparen {
+                let prev_is_dot = i
+                    .checked_sub(1)
+                    .and_then(|idx| token_slice.get(idx))
+                    .map(|t| t.kind() == SyntaxKind::DOT)
+                    .unwrap_or(false);
+
+                if !prev_is_dot {
+                    // Found Eval/Вычислить call - check if in client-only context
+                    if let Some(node) = token.parent() {
+                        if !is_in_client_only_context(&node) {
+                            // Extract range (method name + args)
+                            let start = token.text_range().start();
+                            let mut end = token.text_range().end();
+
+                            for next_token in token_slice.iter().skip(i + 1) {
+                                end = next_token.text_range().end();
+                                if next_token.kind() == SyntaxKind::R_PAREN {
+                                    break;
+                                }
+                            }
+
+                            let range = TextRange::new(start, end);
+                            if seen_ranges.insert(range) {
+                                diagnostics.push(create_diagnostic(range));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -141,86 +184,6 @@ fn matches_client_annotation(ann: &Annotation) -> bool {
 fn find_parent_function_or_procedure(node: &SyntaxNode) -> Option<SyntaxNode> {
     node.ancestors()
         .find(|n| matches!(n.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF))
-}
-
-/// Check if node is an Eval/Вычислить call (not Object.Eval()).
-///
-/// Uses the same pattern as deprecated_find: looks for ARG_LIST + IDENT+LPAREN pattern.
-fn is_eval_call_node(node: &SyntaxNode) -> bool {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-    if !has_arg_list {
-        return false;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    let method_name = token.text().to_lowercase();
-                    return method_name == "вычислить" || method_name == "eval";
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Extract range of Eval/Вычислить call expression from node.
-///
-/// Returns the range of the entire call expression (method name + arguments).
-fn extract_eval_call_range(node: &SyntaxNode) -> Option<TextRange> {
-    let has_arg_list = node.descendants().any(|n| n.kind() == SyntaxKind::ARG_LIST);
-    if !has_arg_list {
-        return None;
-    }
-
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    let text_lower = token.text().to_lowercase();
-                    if text_lower == "вычислить" || text_lower == "eval" {
-                        let start = token.text_range().start();
-                        let mut end = token.text_range().end();
-
-                        for next_token in tokens.iter().skip(i + 1) {
-                            end = next_token.text_range().end();
-                            if next_token.kind() == SyntaxKind::R_PAREN {
-                                break;
-                            }
-                        }
-
-                        return Some(TextRange::new(start, end));
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
