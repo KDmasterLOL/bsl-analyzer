@@ -41,7 +41,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use parser::parse_sdbl;
-use std::collections::HashMap;
 use syntax::{
     ast::{AstNode, SdblAlias, SdblQuery, SdblQueryPackage, SdblSelectQuery, SdblSelectedField},
     Parse, SyntaxKind, SyntaxNode, TextRange,
@@ -192,6 +191,10 @@ fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) -> u32
 /// extracts the SDBL, parses it, and checks for fields without AS keyword.
 /// Uses position mapping to report diagnostics at correct BSL source positions.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+
     // Check if diagnostic is disabled
     if ctx.config.is_disabled(DiagnosticCode::AssignAliasFieldsInQuery) {
         return Vec::new();
@@ -206,64 +209,99 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // ✅ OPTIMIZATION: Cache parsed SDBL queries (same query may appear multiple times in template code)
-    // HashMap<query_text, Option<Parse>> - None if parse failed, Some(parse) if successful
-    let mut sdbl_cache: HashMap<String, Option<Parse<SyntaxNode>>> = HashMap::new();
+    // Time measurements
+    let mut time_extracting_strings_ms = 0u128;
+    let mut time_parsing_sdbl_ms = 0u128;
+    let mut time_analyzing_ast_ms = 0u128;
+
+    // Counters for profiling
+    let mut strings_checked = 0;
+    let mut strings_extracted = 0;
+    let mut queries_parsed = 0;
+    let mut queries_analyzed = 0;
 
     // Walk the tree looking for string literals that might contain SDBL
+    let find_start = Instant::now();
     for node in root.descendants() {
         if node.kind() == SyntaxKind::LITERAL {
+            strings_checked += 1;
+
             // Skip if this string literal is part of string concatenation
             // (indicated by "+" or PLUS token after the string)
             if has_string_concatenation(&node) {
                 continue;
             }
 
-            // Try to extract and parse as SDBL
-            if let Some(query_text) = extract_string_content(&node) {
-                // ✅ OPTIMIZATION: Skip obviously non-SDBL strings early
-                // Minimum viable SDBL query: "SELECT * FROM Table" (~20 chars)
-                if query_text.len() < 15 {
-                    continue;
+            // Try to extract string content
+            let extract_start = Instant::now();
+            let query_text = match extract_string_content(&node) {
+                Some(text) => {
+                    strings_extracted += 1;
+                    text
                 }
+                None => continue,
+            };
+            time_extracting_strings_ms += extract_start.elapsed().as_millis();
 
-                // Only check if it looks like SDBL (contains SELECT/ВЫБРАТЬ keyword)
-                let uppercase = query_text.to_uppercase();
-                if !uppercase.contains("SELECT") && !uppercase.contains("ВЫБРАТЬ") {
-                    continue;
-                }
-
-                // ✅ OPTIMIZATION: Check cache first to avoid re-parsing identical queries
-                let parse_result = sdbl_cache.entry(query_text.clone()).or_insert_with(|| {
-                    let parse = parse_sdbl(&query_text);
-                    if parse.has_errors() {
-                        None // Cache as invalid SDBL
-                    } else {
-                        Some(parse) // Cache successful parse
-                    }
-                });
-
-                // Skip if not valid SDBL
-                if parse_result.is_none() {
-                    continue;
-                }
-
-                tracing::debug!(
-                    "Found SDBL query string: {} chars, starts with: {:?}",
-                    query_text.len(),
-                    &query_text.chars().take(50).collect::<String>()
-                );
-
-                // Create position mapper for this string literal
-                let mapper = SdblPositionMapper::new(&node, &bsl_source);
-
-                // Check SDBL query with position mapping (uses cached parse)
-                if let Some(parse) = parse_result {
-                    check_sdbl_query_cached(parse, &query_text, &mapper, &mut diagnostics);
-                }
+            // Skip obviously non-SDBL strings early
+            // Minimum viable SDBL query: "SELECT * FROM Table" (~20 chars)
+            if query_text.len() < 15 {
+                continue;
             }
+
+            // Only check if it looks like SDBL (contains SELECT/ВЫБРАТЬ keyword)
+            let uppercase = query_text.to_uppercase();
+            if !uppercase.contains("SELECT") && !uppercase.contains("ВЫБРАТЬ") {
+                continue;
+            }
+
+            // Parse SDBL
+            let parse_start = Instant::now();
+            let parse = parse_sdbl(&query_text);
+            let parse_elapsed = parse_start.elapsed().as_millis();
+            time_parsing_sdbl_ms += parse_elapsed;
+            queries_parsed += 1;
+
+            // Skip if not valid SDBL
+            if parse.has_errors() {
+                continue;
+            }
+
+            tracing::debug!(
+                parse_time_ms = parse_elapsed,
+                query_len = query_text.len(),
+                "Parsed SDBL query"
+            );
+
+            // Create position mapper for this string literal
+            let mapper = SdblPositionMapper::new(&node, &bsl_source);
+
+            // Check SDBL query with position mapping
+            let analyze_start = Instant::now();
+            check_sdbl_query_cached(&parse, &query_text, &mapper, &mut diagnostics);
+            time_analyzing_ast_ms += analyze_start.elapsed().as_millis();
+            queries_analyzed += 1;
         }
     }
+    let time_finding_strings_ms = find_start.elapsed().as_millis();
+
+    let total_elapsed = start.elapsed().as_millis();
+
+    tracing::info!(
+        total_ms = total_elapsed,
+        finding_strings_ms = time_finding_strings_ms,
+        extracting_strings_ms = time_extracting_strings_ms,
+        parsing_sdbl_ms = time_parsing_sdbl_ms,
+        analyzing_ast_ms = time_analyzing_ast_ms,
+        strings_checked,
+        strings_extracted,
+        queries_parsed,
+        queries_analyzed,
+        diagnostics_found = diagnostics.len(),
+        avg_parse_ms =
+            if queries_parsed > 0 { time_parsing_sdbl_ms / queries_parsed as u128 } else { 0 },
+        "AssignAliasFieldsInQuery completed"
+    );
 
     diagnostics
 }
