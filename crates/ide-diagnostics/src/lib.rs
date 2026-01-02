@@ -110,6 +110,7 @@ pub enum DiagnosticCode {
     FileSystemAccess,
     FormDataToValue,
     GetFormMethod,
+    GlobalContextMethodCollision8312,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -198,6 +199,7 @@ impl DiagnosticCode {
             Self::FileSystemAccess => "FileSystemAccess",
             Self::FormDataToValue => "FormDataToValue",
             Self::GetFormMethod => "GetFormMethod",
+            Self::GlobalContextMethodCollision8312 => "GlobalContextMethodCollision8312",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -246,14 +248,16 @@ impl DiagnosticCode {
 }
 
 /// Diagnostic severity.
+/// Matches bsl-language-server severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    Error,
-    Critical,
-    Major,
-    Warning,
-    Information,
-    Hint,
+    Blocker,     // Highest severity (Java: BLOCKER)
+    Critical,    // Critical issues (Java: CRITICAL)
+    Major,       // Significant issues (Java: MAJOR)
+    Error,       // General errors
+    Warning,     // Minor issues (Java: MINOR)
+    Information, // Informational (Java: INFO)
+    Hint,        // Lowest severity
 }
 
 /// Diagnostic tag for special handling.
@@ -459,6 +463,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
     result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
+    result.extend(run_diagnostic(
+        "GlobalContextMethodCollision8312",
+        ctx,
+        handlers::global_context_method_collision8312::check,
+    ));
     result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
     result.extend(run_diagnostic(
         "CodeAfterAsyncCall",
