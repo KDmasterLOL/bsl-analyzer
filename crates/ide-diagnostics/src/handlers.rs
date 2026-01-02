@@ -61,4 +61,5 @@ pub mod file_system_access;
 pub mod form_data_to_value;
 pub mod full_outer_join_query;
 pub mod function_name_starts_with_get;
+pub mod function_out_parameter;
 // TODO: Add all 181 handlers
