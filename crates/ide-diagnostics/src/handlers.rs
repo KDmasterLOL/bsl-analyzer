@@ -70,4 +70,5 @@ pub mod identical_expressions;
 pub mod if_condition_complexity;
 pub mod if_else_duplicated_code_block;
 pub mod if_else_duplicated_condition;
+pub mod if_else_if_ends_with_else;
 // TODO: Add all 181 handlers
