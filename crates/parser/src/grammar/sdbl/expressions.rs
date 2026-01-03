@@ -245,7 +245,7 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 /// - Otherwise → simple column reference
 ///
 /// Grammar:
-/// ```
+/// ```text
 /// column: identifier (DOT identifier)*
 /// functionCall: identifier LPAREN arguments? RPAREN
 /// ```

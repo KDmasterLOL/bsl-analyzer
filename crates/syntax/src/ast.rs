@@ -781,7 +781,7 @@ impl PreRegionDir {
     /// Returns None for region end directives (#КонецОбласти/#EndRegion).
     ///
     /// # Example
-    /// ```
+    /// ```text
     /// #Область ПрограммныйИнтерфейс  // name() = Some("ПрограммныйИнтерфейс")
     /// #Region Public                 // name() = Some("Public")
     /// #КонецОбласти                  // name() = None

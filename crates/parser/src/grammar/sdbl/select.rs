@@ -97,7 +97,7 @@ fn union_clause(p: &mut Parser) {
 /// Parse a single SELECT query
 ///
 /// Grammar:
-/// ```
+/// ```text
 /// query:
 ///     SELECT limitations?
 ///     columns=selectedFields
@@ -303,7 +303,7 @@ fn from_clause(p: &mut Parser) {
 /// Parse a data source (table, subquery, or parameter)
 ///
 /// Grammar:
-/// ```
+/// ```text
 /// dataSource:
 ///     (LPAREN dataSource RPAREN)
 ///   | ((table | subquery) alias? joins+=joinPart*)
@@ -353,7 +353,7 @@ fn data_source(p: &mut Parser) {
 /// Parse a table reference
 ///
 /// Grammar (simplified):
-/// ```
+/// ```text
 /// table:
 ///     mdo
 ///   | mdo DOT objectTableName=identifier
@@ -441,7 +441,7 @@ fn is_join_keyword(p: &Parser) -> bool {
 /// Parse a JOIN clause
 ///
 /// Grammar:
-/// ```
+/// ```text
 /// joinPart:
 ///     (LEFT | RIGHT | FULL | INNER)? OUTER? JOIN
 ///     source=dataSource (ON | ПО) condition=logicalExpression
