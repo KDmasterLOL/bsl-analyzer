@@ -31,7 +31,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    if let Some(common_module) = find_common_module_for_file(ctx, &configuration) {
+    if is_session_module(ctx) {
+        check_metadata_without_modules(&configuration, max_length, &mut diagnostics);
+    } else if let Some(common_module) = find_common_module_for_file(ctx, &configuration) {
         check_common_module(&common_module, max_length, &mut diagnostics);
     } else if let Some(metadata_object) = find_metadata_object_for_file(ctx, &configuration) {
         check_metadata_object(ctx.db, &metadata_object, max_length, &mut diagnostics);
@@ -40,6 +42,54 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+fn is_session_module(ctx: &DiagnosticsContext) -> bool {
+    if let Some(file_path) = file_path(ctx.db, ctx.file_id) {
+        file_path.ends_with("/Ext/SessionModule.bsl")
+            || file_path.ends_with("\\Ext\\SessionModule.bsl")
+    } else {
+        false
+    }
+}
+
+fn check_metadata_without_modules(
+    configuration: &bsl_metadata::Configuration,
+    max_length: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for mdo in configuration.metadata_objects() {
+        if !has_modules(&mdo.mdo_type) {
+            let name_length = mdo.name.chars().count();
+            if name_length > max_length {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::MetadataObjectNameLength,
+                    message: format!(
+                        "Rename the metadata object `{}` so that the name length is less than {}",
+                        mdo.name, max_length
+                    ),
+                    severity: Severity::Major,
+                    range: TextRange::empty(0.into()),
+                    tags: vec![],
+                    fixes: vec![],
+                });
+            }
+        }
+    }
+}
+
+fn has_modules(mdo_type: &bsl_metadata::MdoType) -> bool {
+    use bsl_metadata::MdoType;
+    matches!(
+        mdo_type,
+        MdoType::Catalog
+            | MdoType::Document
+            | MdoType::BusinessProcess
+            | MdoType::Task
+            | MdoType::ChartOfAccounts
+            | MdoType::ChartOfCalculationTypes
+            | MdoType::ChartOfCharacteristicTypes
+    )
 }
 
 fn check_common_module(
@@ -327,5 +377,32 @@ mod tests {
     #[test]
     fn test_long_name_is_84_chars() {
         assert_eq!(LONG_NAME.chars().count(), 84);
+    }
+
+    #[test]
+    #[ignore = "requires VFS setup for file path resolution"]
+    fn test_is_session_module_detection() {
+        // SessionModule detection will work when full VFS integration is ready
+        // Expected: Files at /Ext/SessionModule.bsl should be detected
+    }
+
+    #[test]
+    #[ignore = "requires VFS setup for file path resolution"]
+    fn test_is_not_session_module() {
+        // SessionModule detection will work when full VFS integration is ready
+        // Expected: Other files should not be detected as SessionModule
+    }
+
+    #[test]
+    fn test_has_modules_classification() {
+        use bsl_metadata::MdoType;
+
+        assert!(has_modules(&MdoType::Catalog));
+        assert!(has_modules(&MdoType::Document));
+        assert!(has_modules(&MdoType::BusinessProcess));
+
+        assert!(!has_modules(&MdoType::Enum));
+        assert!(!has_modules(&MdoType::Constant));
+        assert!(!has_modules(&MdoType::InformationRegister));
     }
 }
