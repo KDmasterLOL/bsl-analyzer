@@ -726,6 +726,7 @@ dependencies = [
  "hir",
  "ide-db",
  "itertools 0.12.1",
+ "once_cell",
  "parser",
  "regex",
  "serde_json",

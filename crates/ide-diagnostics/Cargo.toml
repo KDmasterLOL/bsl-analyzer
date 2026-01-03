@@ -18,6 +18,7 @@ serde_json.workspace = true
 bsl-metadata.workspace = true
 tracing.workspace = true
 regex.workspace = true
+once_cell.workspace = true
 unicase.workspace = true
 
 [dev-dependencies]

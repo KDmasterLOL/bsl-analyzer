@@ -37,6 +37,7 @@ pub enum DiagnosticCode {
     SemicolonPresence,
     SpaceAtStartComment,
     IncorrectLineBreak,
+    IncorrectUseOfStrTemplate,
     ExtraCommas,
     CommentedCode,
     EmptyCodeBlock,
@@ -155,6 +156,7 @@ impl DiagnosticCode {
             Self::SemicolonPresence => "SemicolonPresence",
             Self::SpaceAtStartComment => "SpaceAtStartComment",
             Self::IncorrectLineBreak => "IncorrectLineBreak",
+            Self::IncorrectUseOfStrTemplate => "IncorrectUseOfStrTemplate",
             Self::ExtraCommas => "ExtraCommas",
             Self::CommentedCode => "CommentedCode",
             Self::EmptyCodeBlock => "EmptyCodeBlock",
@@ -431,6 +433,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::if_else_if_ends_with_else::check,
     ));
     result.extend(run_diagnostic("IncorrectLineBreak", ctx, handlers::incorrect_line_break::check));
+    result.extend(run_diagnostic(
+        "IncorrectUseOfStrTemplate",
+        ctx,
+        handlers::incorrect_use_of_str_template::check,
+    ));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(

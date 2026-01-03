@@ -72,4 +72,5 @@ pub mod if_else_duplicated_code_block;
 pub mod if_else_duplicated_condition;
 pub mod if_else_if_ends_with_else;
 pub mod incorrect_line_break;
+pub mod incorrect_use_of_str_template;
 // TODO: Add all 181 handlers
