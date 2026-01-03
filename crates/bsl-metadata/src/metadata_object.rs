@@ -167,6 +167,58 @@ impl MdoType {
             Self::CommonModule,
         ]
     }
+
+    /// Parse MDO type from plural form keyword (case-insensitive, bilingual)
+    ///
+    /// Used for object model calls like `Документы.ПКО.Method()` or `Catalogs.Name.Method()`
+    ///
+    /// # Examples
+    /// ```
+    /// use bsl_metadata::MdoType;
+    ///
+    /// assert_eq!(MdoType::from_plural("Документы"), Some(MdoType::Document));
+    /// assert_eq!(MdoType::from_plural("documents"), Some(MdoType::Document));
+    /// assert_eq!(MdoType::from_plural("Справочники"), Some(MdoType::Catalog));
+    /// assert_eq!(MdoType::from_plural("catalogs"), Some(MdoType::Catalog));
+    /// ```
+    pub fn from_plural(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "документы" | "documents" => Some(Self::Document),
+            "справочники" | "catalogs" => Some(Self::Catalog),
+            "регистрысведений" | "informationregisters" => {
+                Some(Self::InformationRegister)
+            }
+            "регистрынакопления" | "accumulationregisters" => {
+                Some(Self::AccumulationRegister)
+            }
+            "регистрыбухгалтерии" | "accountingregisters" => {
+                Some(Self::AccountingRegister)
+            }
+            "регистрырасчета" | "calculationregisters" => {
+                Some(Self::CalculationRegister)
+            }
+            "планывидовхарактеристик" | "chartsofcharacteristictypes" => {
+                Some(Self::ChartOfCharacteristicTypes)
+            }
+            "планысчетов" | "chartsofaccounts" => Some(Self::ChartOfAccounts),
+            "планывидоврасчета" | "chartsofcalculationtypes" => {
+                Some(Self::ChartOfCalculationTypes)
+            }
+            "бизнеспроцессы" | "businessprocesses" => Some(Self::BusinessProcess),
+            "задачи" | "tasks" => Some(Self::Task),
+            "перечисления" | "enums" => Some(Self::Enum),
+            "внешниеисточникиданных" | "externaldatasources" => {
+                Some(Self::ExternalDataSource)
+            }
+            "кубы" | "cubes" => Some(Self::Cube),
+            "таблицыизмерения" | "dimensiontables" => Some(Self::DimensionTable),
+            "константы" | "constants" => Some(Self::Constant),
+            "обработки" | "dataprocessors" => Some(Self::DataProcessor),
+            "отчеты" | "reports" => Some(Self::Report),
+            "общиемодули" | "commonmodules" => Some(Self::CommonModule),
+            _ => None,
+        }
+    }
 }
 
 /// Simple metadata object
@@ -245,5 +297,31 @@ mod tests {
     fn test_mdo_type_names() {
         assert_eq!(MdoType::Catalog.russian_name(), "Справочник");
         assert_eq!(MdoType::Catalog.english_name(), "Catalog");
+    }
+
+    #[test]
+    fn test_mdo_type_from_plural() {
+        // Russian plural forms
+        assert_eq!(MdoType::from_plural("Документы"), Some(MdoType::Document));
+        assert_eq!(MdoType::from_plural("Справочники"), Some(MdoType::Catalog));
+        assert_eq!(MdoType::from_plural("РегистрыСведений"), Some(MdoType::InformationRegister));
+        assert_eq!(MdoType::from_plural("РегистрыНакопления"), Some(MdoType::AccumulationRegister));
+        assert_eq!(MdoType::from_plural("ПланыСчетов"), Some(MdoType::ChartOfAccounts));
+
+        // English plural forms
+        assert_eq!(MdoType::from_plural("documents"), Some(MdoType::Document));
+        assert_eq!(MdoType::from_plural("catalogs"), Some(MdoType::Catalog));
+        assert_eq!(
+            MdoType::from_plural("InformationRegisters"),
+            Some(MdoType::InformationRegister)
+        );
+
+        // Case insensitive
+        assert_eq!(MdoType::from_plural("ДОКУМЕНТЫ"), Some(MdoType::Document));
+        assert_eq!(MdoType::from_plural("CaTaLoGs"), Some(MdoType::Catalog));
+
+        // Invalid input
+        assert_eq!(MdoType::from_plural("InvalidType"), None);
+        assert_eq!(MdoType::from_plural(""), None);
     }
 }

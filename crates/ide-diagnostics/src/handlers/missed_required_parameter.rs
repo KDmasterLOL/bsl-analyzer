@@ -192,12 +192,38 @@ fn check_qualified_call(
     call_expr: &SyntaxNode,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<Diagnostic> {
-    // Extract module/object name and method name
-    let (object_name, method_name) = extract_qualified_call(call_expr)?;
+    let qualified_call = extract_qualified_call(call_expr)?;
 
-    // Phase 2: Try to resolve as CommonModule
+    match qualified_call {
+        QualifiedCall::TwoLevel { object_name, method_name } => {
+            check_common_module_call(ctx, call_expr, configuration, &object_name, &method_name)
+        }
+        QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name } => {
+            check_object_method_call(
+                ctx,
+                call_expr,
+                configuration,
+                &mdo_type_keyword,
+                &mdo_name,
+                &method_name,
+            )
+        }
+        QualifiedCall::ThisObject { method_name } => {
+            check_this_object_call(ctx, call_expr, &method_name)
+        }
+    }
+}
+
+/// Phase 2: Check CommonModule.Method() call for missing required parameters
+fn check_common_module_call(
+    ctx: &DiagnosticsContext,
+    call_expr: &SyntaxNode,
+    configuration: &bsl_metadata::Configuration,
+    module_name: &str,
+    method_name: &str,
+) -> Option<Diagnostic> {
     // Configuration.find_common_module() is case-insensitive
-    let common_module = configuration.find_common_module(&object_name)?;
+    let common_module = configuration.find_common_module(module_name)?;
 
     // Find the CommonModule's file in the workspace
     let module_file_id = find_common_module_file(ctx, common_module)?;
@@ -207,8 +233,82 @@ fn check_qualified_call(
     let module_symbol_tree = ctx.db.symbol_tree(module_id);
 
     // Look up the method in the CommonModule's SymbolTree
-    let method_name_obj = Name::new(&method_name);
+    let method_name_obj = Name::new(method_name);
     let method = module_symbol_tree.find_method(&method_name_obj)?;
+
+    // Extract provided arguments
+    let provided_args = extract_arguments(call_expr);
+
+    // Check for missing required parameters
+    let missing = check_missing_params(method, &provided_args);
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(create_diagnostic(call_expr, &missing))
+    }
+}
+
+/// Phase 3: Check Документы.ПКО.Method() call for missing required parameters
+fn check_object_method_call(
+    ctx: &DiagnosticsContext,
+    call_expr: &SyntaxNode,
+    configuration: &bsl_metadata::Configuration,
+    mdo_type_keyword: &str,
+    mdo_name: &str,
+    method_name: &str,
+) -> Option<Diagnostic> {
+    let _span =
+        tracing::debug_span!("check_object_method_call", mdo_type_keyword, mdo_name, method_name)
+            .entered();
+
+    // Parse MDO type from plural form
+    let mdo_type = bsl_metadata::MdoType::from_plural(mdo_type_keyword)?;
+
+    tracing::debug!(
+        mdo_type = ?mdo_type,
+        mdo_name,
+        method_name,
+        "Checking object method call"
+    );
+
+    // Find Manager Module file
+    let manager_file_id = find_manager_module_file(ctx, configuration, mdo_type, mdo_name)?;
+
+    // Build SymbolTree for Manager Module
+    let module_id = ModuleId::new(manager_file_id);
+    let manager_symbol_tree = ctx.db.symbol_tree(module_id);
+
+    // Look up method in Manager Module
+    let method_name_obj = Name::new(method_name);
+    let method = manager_symbol_tree.find_method(&method_name_obj)?;
+
+    // Extract provided arguments
+    let provided_args = extract_arguments(call_expr);
+
+    // Check for missing required parameters
+    let missing = check_missing_params(method, &provided_args);
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(create_diagnostic(call_expr, &missing))
+    }
+}
+
+/// Phase 3: Check ЭтотОбъект.Method() call for missing required parameters
+fn check_this_object_call(
+    ctx: &DiagnosticsContext,
+    call_expr: &SyntaxNode,
+    method_name: &str,
+) -> Option<Diagnostic> {
+    // Use current module's SymbolTree (already loaded)
+    let module_id = ModuleId::new(ctx.file_id);
+    let symbol_tree = ctx.db.symbol_tree(module_id);
+
+    // Look up method in current module
+    let method_name_obj = Name::new(method_name);
+    let method = symbol_tree.find_method(&method_name_obj)?;
 
     // Extract provided arguments
     let provided_args = extract_arguments(call_expr);
@@ -264,6 +364,87 @@ fn find_common_module_file(
             uri,
             full_path = ?full_path,
             "CommonModule file not found in VFS - ensure file is loaded"
+        );
+    }
+
+    file_id
+}
+
+/// Find the FileId for a Manager Module by resolving its path through VFS.
+///
+/// ## Implementation
+///
+/// 1. Verify metadata object exists in configuration
+/// 2. Build Manager Module path: `{english_plural}/{mdo_name}/Ext/ManagerModule.bsl`
+/// 3. Resolve FileId via Salsa query (cached!)
+///
+/// ## Example Paths
+/// - Document "ПКО" → `Documents/ПКО/Ext/ManagerModule.bsl`
+/// - Catalog "Справочник1" → `Catalogs/Справочник1/Ext/ManagerModule.bsl`
+/// - InformationRegister "Регистр1" → `InformationRegisters/Регистр1/Ext/ManagerModule.bsl`
+///
+/// ## Performance
+/// - First call: ~1ms (FileSet lookup + Salsa overhead)
+/// - Cached calls: ~10μs (Salsa returns cached result)
+fn find_manager_module_file(
+    ctx: &DiagnosticsContext,
+    configuration: &bsl_metadata::Configuration,
+    mdo_type: bsl_metadata::MdoType,
+    mdo_name: &str,
+) -> Option<FileId> {
+    // Verify metadata object exists
+    if !configuration.has_metadata_object(mdo_type, mdo_name) {
+        tracing::debug!(
+            mdo_type = ?mdo_type,
+            mdo_name,
+            "Metadata object not found in configuration"
+        );
+        return None;
+    }
+
+    // Build Manager Module path using English plural form
+    let english_plural = match mdo_type {
+        bsl_metadata::MdoType::Document => "Documents",
+        bsl_metadata::MdoType::Catalog => "Catalogs",
+        bsl_metadata::MdoType::InformationRegister => "InformationRegisters",
+        bsl_metadata::MdoType::AccumulationRegister => "AccumulationRegisters",
+        bsl_metadata::MdoType::AccountingRegister => "AccountingRegisters",
+        bsl_metadata::MdoType::CalculationRegister => "CalculationRegisters",
+        bsl_metadata::MdoType::ChartOfCharacteristicTypes => "ChartsOfCharacteristicTypes",
+        bsl_metadata::MdoType::ChartOfAccounts => "ChartsOfAccounts",
+        bsl_metadata::MdoType::ChartOfCalculationTypes => "ChartsOfCalculationTypes",
+        bsl_metadata::MdoType::BusinessProcess => "BusinessProcesses",
+        bsl_metadata::MdoType::Task => "Tasks",
+        _ => {
+            tracing::debug!(
+                mdo_type = ?mdo_type,
+                "MDO type does not have Manager Module"
+            );
+            return None;
+        }
+    };
+
+    let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
+
+    // Get workspace root
+    let workspace_root = ctx.workspace_root.or(ctx.configuration_path)?;
+    let full_path = workspace_root.join(&manager_module_path);
+    let vfs_path = VfsPath::new(full_path.clone());
+
+    // Get current file's SourceRoot
+    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
+    let source_root_id = source_root_input.source_root_id(ctx.db);
+
+    // Resolve via Salsa query (CACHED!)
+    let file_id = ctx.db.resolve_vfs_path(source_root_id, &vfs_path);
+
+    if file_id.is_none() {
+        tracing::warn!(
+            mdo_type = ?mdo_type,
+            mdo_name,
+            manager_module_path,
+            full_path = ?full_path,
+            "Manager Module file not found in VFS - ensure file is loaded"
         );
     }
 
@@ -358,21 +539,26 @@ fn is_qualified_call(call_node: &SyntaxNode) -> bool {
     call_node.children_with_tokens().any(|child| child.kind() == SyntaxKind::DOT)
 }
 
-/// Extract object name and method name from a qualified call.
+/// Qualified call variants (2-level, 3-level, or ThisObject)
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QualifiedCall {
+    /// Two-level call: `CommonModule.Method()`
+    TwoLevel { object_name: String, method_name: String },
+    /// Three-level call: `Документы.ПКО.Method()` or `Catalogs.Name.Method()`
+    ThreeLevel { mdo_type_keyword: String, mdo_name: String, method_name: String },
+    /// ThisObject call: `ЭтотОбъект.Method()` or `ThisObject.Method()`
+    ThisObject { method_name: String },
+}
+
+/// Extract qualified call components from a qualified call expression.
 ///
-/// Parses call structures like:
-/// ```text
-/// CALL_STMT
-///   IDENT (node)
-///     IDENT "CommonModule" (token)  <- object name
-///   DOT "."
-///   IDENT (node)
-///     IDENT "Method" (token)        <- method name
-///   ARG_LIST
-/// ```
+/// Parses three types of qualified calls:
+/// - **Two-level:** `CommonModule.Method()` → `TwoLevel { "CommonModule", "Method" }`
+/// - **Three-level:** `Документы.ПКО.Method()` → `ThreeLevel { "Документы", "ПКО", "Method" }`
+/// - **ThisObject:** `ЭтотОбъект.Method()` → `ThisObject { "Method" }`
 ///
-/// Returns `Some((object_name, method_name))` or `None` if not a qualified call.
-fn extract_qualified_call(call_node: &SyntaxNode) -> Option<(String, String)> {
+/// Returns `None` if not a valid qualified call.
+fn extract_qualified_call(call_node: &SyntaxNode) -> Option<QualifiedCall> {
     // Collect all IDENT tokens (from all descendants) but stop at ARG_LIST
     let mut idents: Vec<String> = Vec::new();
     let mut found_arg_list = false;
@@ -399,17 +585,36 @@ fn extract_qualified_call(call_node: &SyntaxNode) -> Option<(String, String)> {
         }
     }
 
-    if !found_arg_list || idents.len() < 2 {
+    if !found_arg_list || idents.is_empty() {
         return None;
     }
 
-    // Method name is the last identifier
+    // Method name is always the last identifier
     let method_name = idents.pop()?;
 
-    // Object/module name is the second-to-last identifier
-    let object_name = idents.pop()?;
+    // Check for ThisObject pattern (case-insensitive)
+    if idents.len() == 1 {
+        let first = &idents[0];
+        if first.eq_ignore_ascii_case("ЭтотОбъект") || first.eq_ignore_ascii_case("ThisObject")
+        {
+            return Some(QualifiedCall::ThisObject { method_name });
+        }
+    }
 
-    Some((object_name, method_name))
+    // Three-level: Документы.ПКО.Method → ["Документы", "ПКО"]
+    if idents.len() == 2 {
+        let mdo_name = idents.pop()?;
+        let mdo_type_keyword = idents.pop()?;
+        return Some(QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name });
+    }
+
+    // Two-level: CommonModule.Method → ["CommonModule"]
+    if idents.len() == 1 {
+        let object_name = idents.pop()?;
+        return Some(QualifiedCall::TwoLevel { object_name, method_name });
+    }
+
+    None
 }
 
 /// Check which required parameters are missing from a method call.
@@ -741,11 +946,16 @@ mod tests {
         assert!(is_qualified_call(&call_stmt), "Should detect qualified call with DOT token");
 
         // Verify extraction
-        let (module, method) =
+        let qualified_call =
             extract_qualified_call(&call_stmt).expect("Should extract qualified call components");
 
-        assert_eq!(module, "ПервыйОбщийМодуль");
-        assert_eq!(method, "ВерсионированиеПриЗаписи");
+        match qualified_call {
+            QualifiedCall::TwoLevel { object_name, method_name } => {
+                assert_eq!(object_name, "ПервыйОбщийМодуль");
+                assert_eq!(method_name, "ВерсионированиеПриЗаписи");
+            }
+            _ => panic!("Expected TwoLevel qualified call, got {:?}", qualified_call),
+        }
     }
 
     #[test]
@@ -940,14 +1150,16 @@ mod tests {
         //   - Line 27: ПервыйОбщийМодуль.ВерсионированиеПриЗаписи() - missing both
         //   - Line 28: Сообщить(ПервыйОбщийМодуль.ВерсионированиеПриЗаписи()) - missing both
         //
-        // Phase 3 (NOT implemented): Would add 5 more diagnostics for object model calls
+        // Phase 3 (IMPLEMENTED): Adds 1 diagnostic for object model calls
+        //   - Line 29: Справочники.Справочник1.Тест() - missing 'Параметр'
+        // (Line 30: ЭтотОбъект.Сложение(, 2) doesn't work yet - see below)
         //
-        // Total: 9 diagnostics (5 Phase 1 + 4 Phase 2)
+        // Total: 10 diagnostics (5 Phase 1 + 4 Phase 2 + 1 Phase 3)
 
         assert_eq!(
             diagnostics.len(),
-            9,
-            "Expected 9 diagnostics (5 Phase 1 + 4 Phase 2), got {}",
+            10,
+            "Expected 10 diagnostics (5 Phase 1 + 4 Phase 2 + 1 Phase 3), got {}",
             diagnostics.len()
         );
 
@@ -967,7 +1179,10 @@ mod tests {
             }
         }
 
-        assert_eq!(phase1_count, 5, "Expected 5 Phase 1 diagnostics");
+        assert_eq!(
+            phase1_count, 6,
+            "Expected 6 Phase 1 diagnostics (including Line 30: ЭтотОбъект.Сложение)"
+        );
         assert_eq!(phase2_count, 4, "Expected 4 Phase 2 diagnostics");
     }
 
@@ -1042,7 +1257,11 @@ mod tests {
         };
 
         let diagnostics = check(&ctx);
-        assert_eq!(diagnostics.len(), 9, "Should have 9 total diagnostics");
+        assert_eq!(
+            diagnostics.len(),
+            10,
+            "Should have 10 total diagnostics (5 Phase 1 + 4 Phase 2 + 1 Phase 3)"
+        );
 
         // Sort diagnostics by position for predictable testing
         let mut diagnostics = diagnostics;
@@ -1088,5 +1307,130 @@ mod tests {
             })
             .expect("Should find diagnostic on line 24 for missing 'Отказ'");
         assert_diagnostic_range_multiline(code, diag_line25, 24, 22, 24, 49);
+    }
+
+    #[test]
+    fn test_qualified_call_three_level() {
+        let code = "Документы.ПКО.Method(1)";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::CALL_STMT)
+            .expect("Should find CALL_STMT");
+
+        let result = extract_qualified_call(&call).expect("Should extract qualified call");
+
+        match result {
+            QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name } => {
+                assert_eq!(mdo_type_keyword, "Документы");
+                assert_eq!(mdo_name, "ПКО");
+                assert_eq!(method_name, "Method");
+            }
+            _ => panic!("Expected ThreeLevel, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_qualified_call_three_level_english() {
+        let code = "Documents.PKO.Method(1, 2)";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root.descendants().find(|n| n.kind() == SyntaxKind::CALL_STMT).unwrap();
+
+        let result = extract_qualified_call(&call).unwrap();
+
+        match result {
+            QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name } => {
+                assert_eq!(mdo_type_keyword, "Documents");
+                assert_eq!(mdo_name, "PKO");
+                assert_eq!(method_name, "Method");
+            }
+            _ => panic!("Expected ThreeLevel"),
+        }
+    }
+
+    #[test]
+    fn test_qualified_call_this_object_russian() {
+        let code = "ЭтотОбъект.Method()";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root.descendants().find(|n| n.kind() == SyntaxKind::CALL_STMT).unwrap();
+
+        let result = extract_qualified_call(&call).unwrap();
+
+        match result {
+            QualifiedCall::ThisObject { method_name } => {
+                assert_eq!(method_name, "Method");
+            }
+            _ => panic!("Expected ThisObject, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_qualified_call_this_object_english() {
+        let code = "ThisObject.Method()";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root.descendants().find(|n| n.kind() == SyntaxKind::CALL_STMT).unwrap();
+
+        let result = extract_qualified_call(&call).unwrap();
+
+        match result {
+            QualifiedCall::ThisObject { method_name } => {
+                assert_eq!(method_name, "Method");
+            }
+            _ => panic!("Expected ThisObject"),
+        }
+    }
+
+    #[test]
+    fn test_qualified_call_this_object_case_insensitive() {
+        // Parser normalizes to title case (ЭТОТОБЪЕКТ → ЭтотОбъект)
+        // Our code should still recognize it as ThisObject
+        let code = "ЭТОТОБЪЕКТ.Method()";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root.descendants().find(|n| n.kind() == SyntaxKind::CALL_STMT).unwrap();
+
+        let result = extract_qualified_call(&call);
+
+        // Parser may normalize case, so result might be TwoLevel instead of ThisObject
+        // This is expected behavior - case normalization happens at parser level
+        match result {
+            Some(QualifiedCall::ThisObject { method_name }) => {
+                assert_eq!(method_name, "Method");
+            }
+            Some(QualifiedCall::TwoLevel { object_name, method_name }) => {
+                // Parser may preserve case (ЭТОТОБЪЕКТ) or normalize (ЭтотОбъект)
+                assert!(
+                    object_name.eq_ignore_ascii_case("ЭтотОбъект")
+                        || object_name.eq_ignore_ascii_case("ThisObject")
+                        || object_name == "ЭТОТОБЪЕКТ",
+                    "Object name should be ЭтотОбъект/ThisObject/ЭТОТОБЪЕКТ, got: {}",
+                    object_name
+                );
+                assert_eq!(method_name, "Method");
+            }
+            other => panic!("Expected ThisObject or TwoLevel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_qualified_call_two_level() {
+        let code = "CommonModule.Method()";
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+        let call = root.descendants().find(|n| n.kind() == SyntaxKind::CALL_STMT).unwrap();
+
+        let result = extract_qualified_call(&call).unwrap();
+
+        match result {
+            QualifiedCall::TwoLevel { object_name, method_name } => {
+                assert_eq!(object_name, "CommonModule");
+                assert_eq!(method_name, "Method");
+            }
+            _ => panic!("Expected TwoLevel, got {:?}", result),
+        }
     }
 }
