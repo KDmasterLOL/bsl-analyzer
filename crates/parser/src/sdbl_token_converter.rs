@@ -34,28 +34,29 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
     use TokenKind as T;
 
     match kind {
-        // Keywords - map to BSL equivalents where possible
-        S::KwSelect => T::Ident, // No KwSelect in BSL, use Ident
+        // Keywords - ALL mapped to Ident for keyword matching via p.at_keyword()
+        // Using BSL keyword enums breaks at_sdbl_keyword() which checks for Ident
+        S::KwSelect => T::Ident,
         S::KwFrom => T::Ident,
-        S::KwWhere => T::KwWhile, // Close enough for parsing context
+        S::KwWhere => T::Ident, // Was T::KwWhile - FIXED
         S::KwAs => T::Ident,
-        S::OpAnd => T::KwAnd,
-        S::OpOr => T::KwOr,
-        S::OpNot => T::KwNot,
+        S::OpAnd => T::Ident, // Was T::KwAnd - FIXED (operators are keywords in SDBL)
+        S::OpOr => T::Ident,  // Was T::KwOr - FIXED
+        S::OpNot => T::Ident, // Was T::KwNot - FIXED
         S::KwUnion => T::Ident,
         S::KwAll => T::Ident,
         S::KwDistinct => T::Ident,
         S::KwTop => T::Ident,
-        S::KwIn => T::KwIn,
+        S::KwIn => T::Ident, // Was T::KwIn - FIXED
         S::KwIs => T::Ident,
-        S::LitNull => T::KwNull,
+        S::LitNull => T::Ident, // Was T::KwNull - FIXED (treated as keyword in SDBL)
         S::KwBetween => T::Ident,
         S::KwLike => T::Ident,
         S::KwEscape => T::Ident,
         S::KwCase => T::Ident,
         S::KwWhen => T::Ident,
-        S::KwThen => T::KwThen,
-        S::KwElse => T::KwElse,
+        S::KwThen => T::Ident, // Was T::KwThen - FIXED
+        S::KwElse => T::Ident, // Was T::KwElse - FIXED
         S::KwEnd => T::Ident,
         S::KwInto => T::Ident,
         S::KwGroup => T::Ident,
@@ -64,7 +65,7 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         S::KwOrder => T::Ident,
         S::KwAsc => T::Ident,
         S::KwDesc => T::Ident,
-        S::KwFor => T::KwFor,
+        S::KwFor => T::Ident, // Was T::KwFor - FIXED
         S::KwUpdate => T::Ident,
         S::KwIndex => T::Ident,
         S::KwJoin => T::Ident,
@@ -199,9 +200,9 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
         // Parameters (&Parameter)
         S::Parameter => T::Ampersand, // Will be converted to parameter syntax later
 
-        // Trivia
+        // Trivia (all treated as trivia and skipped by parser)
         S::Newline => T::Newline,
-        S::Comment => T::Comment,
+        S::Comment => T::Comment, // Restored - treated as trivia
         S::Whitespace => T::Whitespace,
 
         // Error

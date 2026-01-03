@@ -74,4 +74,7 @@ pub mod if_else_if_ends_with_else;
 pub mod incorrect_line_break;
 pub mod incorrect_use_of_str_template;
 pub mod internet_access;
+pub mod invalid_character_in_file;
+pub mod is_in_role_method;
+pub mod join_with_sub_query;
 // TODO: Add all 181 handlers

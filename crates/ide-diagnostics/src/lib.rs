@@ -117,6 +117,7 @@ pub enum DiagnosticCode {
     GetFormMethod,
     GlobalContextMethodCollision8312,
     InternetAccess,
+    IsInRoleMethod,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -141,6 +142,7 @@ pub enum DiagnosticCode {
     AssignAliasFieldsInQuery,
     FieldsFromJoinsWithoutIsNull,
     FullOuterJoinQuery,
+    JoinWithSubQuery,
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }
@@ -189,6 +191,7 @@ impl DiagnosticCode {
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
             Self::FullOuterJoinQuery => "FullOuterJoinQuery",
+            Self::JoinWithSubQuery => "JoinWithSubQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
@@ -212,6 +215,7 @@ impl DiagnosticCode {
             Self::GetFormMethod => "GetFormMethod",
             Self::GlobalContextMethodCollision8312 => "GlobalContextMethodCollision8312",
             Self::InternetAccess => "InternetAccess",
+            Self::IsInRoleMethod => "IsInRoleMethod",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -440,6 +444,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::incorrect_use_of_str_template::check,
     ));
+    result.extend(run_diagnostic(
+        "InvalidCharacterInFile",
+        ctx,
+        handlers::invalid_character_in_file::check,
+    ));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
@@ -514,6 +523,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
+    result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
     result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
     result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
     result.extend(run_diagnostic(
@@ -644,6 +654,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::full_outer_join_query::check,
     ));
+
+    result.extend(run_diagnostic("JoinWithSubQuery", ctx, handlers::join_with_sub_query::check));
 
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list

@@ -228,6 +228,11 @@ fn primary_expr(p: &mut Parser) {
             p.bump(); // StringStart
 
             // Consume everything until STRING_TAIL (without skipping trivia)
+            // BSL allows comments between string continuation lines:
+            //   "Line1
+            //   |Line2
+            //       // Comment here
+            //   |Line3"
             loop {
                 p.check_iteration_limit();
                 match p.current() {
@@ -237,6 +242,7 @@ fn primary_expr(p: &mut Parser) {
                     }
                     Some(TokenKind::Newline)
                     | Some(TokenKind::Whitespace)
+                    | Some(TokenKind::Comment)
                     | Some(TokenKind::StringPart) => {
                         p.bump();
                     }

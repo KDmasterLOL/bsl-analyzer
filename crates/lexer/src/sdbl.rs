@@ -475,6 +475,9 @@ pub enum SdblTokenKind {
     Parameter,
 
     // Line comment: // ...
+    // NOTE: SDBL standard does not define comments, but we support them for:
+    // 1. Robustness when parsing queries extracted from BSL strings that may contain "//" text
+    // 2. Developer convenience when testing queries
     #[regex(r"//[^\n]*")]
     Comment,
 
