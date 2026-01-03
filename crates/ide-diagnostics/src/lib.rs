@@ -404,6 +404,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::identical_expressions::check,
     ));
+    result.extend(run_diagnostic(
+        "IfConditionComplexity",
+        ctx,
+        handlers::if_condition_complexity::check,
+    ));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
