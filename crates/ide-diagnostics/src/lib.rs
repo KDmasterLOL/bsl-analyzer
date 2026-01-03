@@ -430,6 +430,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::if_else_if_ends_with_else::check,
     ));
+    result.extend(run_diagnostic("IncorrectLineBreak", ctx, handlers::incorrect_line_break::check));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(

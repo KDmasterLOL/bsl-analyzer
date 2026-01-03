@@ -71,4 +71,5 @@ pub mod if_condition_complexity;
 pub mod if_else_duplicated_code_block;
 pub mod if_else_duplicated_condition;
 pub mod if_else_if_ends_with_else;
+pub mod incorrect_line_break;
 // TODO: Add all 181 handlers
