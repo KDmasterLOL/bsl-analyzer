@@ -558,9 +558,20 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 
 #### 87. MetadataObjectNameLength
 
+- **Status:** ✅ **Completed - Integrated**
 - **Severity:** `MAJOR` (ERROR)
 - **Tags:** `STANDARD`
-- **Requires:** ⚠️ Metadata
+- **Requires:** ✅ Metadata
+- **Configuration:** `maxMetadataObjectNameLength` (default: 80)
+- **Files:**
+  - Implementation: `crates/ide-diagnostics/src/rules/metadata_object_name_length.rs`
+  - Handler: `crates/ide-diagnostics/src/handlers/metadata_object_name_length.rs`
+  - Test data: `test_data/MetadataObjectNameLengthDiagnostic.bsl`
+- **Notes:**
+  - Message format matches Java exactly
+  - Tests with 82-character metadata object name
+  - Supports configuration via .bsl-language-server.json
+  - Bilingual message support prepared (EN currently, RU for future)
 
 #### 88. MethodSize
 

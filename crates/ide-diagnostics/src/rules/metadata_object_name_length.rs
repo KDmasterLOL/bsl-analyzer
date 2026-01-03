@@ -31,9 +31,9 @@
 //! ## Diagnostic Code
 //!
 //! Code: `MetadataObjectNameLength`
-//! Severity: Warning (MINOR)
-//! Type: Design
-//! Tags: Standard, Badpractice
+//! Severity: Error (MAJOR)
+//! Type: ERROR
+//! Tags: Standard
 //!
 //! ## References
 //!
@@ -47,6 +47,11 @@ use syntax::TextRange;
 
 /// Default maximum length for metadata object names.
 pub const DEFAULT_MAX_NAME_LENGTH: usize = 80;
+
+// Message format matches bsl-language-server:
+// EN: "Rename the metadata object `%s` so that the name length is less than %s"
+// RU: "Переименуйте объект конфигурации `%s` так, чтобы длина наименования была меньше %s"
+// Using English by default; bilingual support to be added when DiagnosticsContext has language field
 
 /// MetadataObjectNameLength diagnostic.
 ///
@@ -106,10 +111,10 @@ impl MetadataDiagnostic for MetadataObjectNameLength {
             vec![Diagnostic {
                 range,
                 message: format!(
-                    "Metadata object name is too long: {} characters (max: {}). Consider shortening '{}'.",
-                    name_length, self.max_length, mdo.name
+                    "Rename the metadata object `{}` so that the name length is less than {}",
+                    mdo.name, self.max_length
                 ),
-                severity: DiagnosticSeverity::Warning,
+                severity: DiagnosticSeverity::Error,
             }]
         } else {
             Vec::new()
@@ -157,10 +162,12 @@ mod tests {
 
         let results = diagnostic.check_metadata(&db, &mdo, range);
         assert_eq!(results.len(), 1);
-        assert!(results[0].message.contains("too long"));
-        assert!(results[0].message.contains("35 characters")); // Actual length
-        assert!(results[0].message.contains("max: 10"));
-        assert_eq!(results[0].severity, DiagnosticSeverity::Warning);
+        // Check new message format matches Java
+        assert_eq!(
+            results[0].message,
+            "Rename the metadata object `VeryLongCatalogNameThatExceedsLimit` so that the name length is less than 10"
+        );
+        assert_eq!(results[0].severity, DiagnosticSeverity::Error);
     }
 
     #[test]
