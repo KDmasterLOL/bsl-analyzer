@@ -116,6 +116,7 @@ pub enum DiagnosticCode {
     FormDataToValue,
     GetFormMethod,
     GlobalContextMethodCollision8312,
+    InternetAccess,
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
 
@@ -210,6 +211,7 @@ impl DiagnosticCode {
             Self::FormDataToValue => "FormDataToValue",
             Self::GetFormMethod => "GetFormMethod",
             Self::GlobalContextMethodCollision8312 => "GlobalContextMethodCollision8312",
+            Self::InternetAccess => "InternetAccess",
             Self::CodeAfterAsyncCall => "CodeAfterAsyncCall",
             Self::CognitiveComplexity => "CognitiveComplexity",
             Self::CyclomaticComplexity => "CyclomaticComplexity",
@@ -511,6 +513,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::external_app_starting::check,
     ));
     result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
+    result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
     result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
     result.extend(run_diagnostic(

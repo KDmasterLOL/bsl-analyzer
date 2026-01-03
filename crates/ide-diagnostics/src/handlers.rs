@@ -73,4 +73,5 @@ pub mod if_else_duplicated_condition;
 pub mod if_else_if_ends_with_else;
 pub mod incorrect_line_break;
 pub mod incorrect_use_of_str_template;
+pub mod internet_access;
 // TODO: Add all 181 handlers
