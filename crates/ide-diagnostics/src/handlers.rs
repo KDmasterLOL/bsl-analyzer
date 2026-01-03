@@ -68,4 +68,5 @@ pub mod get_form_method;
 pub mod global_context_method_collision8312;
 pub mod identical_expressions;
 pub mod if_condition_complexity;
+pub mod if_else_duplicated_code_block;
 // TODO: Add all 181 handlers

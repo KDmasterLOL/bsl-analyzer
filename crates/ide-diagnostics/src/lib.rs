@@ -61,6 +61,7 @@ pub enum DiagnosticCode {
     DuplicatedInsertionIntoCollection,
     ExcessiveAutoTestCheck,
     IdenticalExpressions,
+    IfElseDuplicatedCodeBlock,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -176,6 +177,7 @@ impl DiagnosticCode {
             Self::DuplicatedInsertionIntoCollection => "DuplicatedInsertionIntoCollection",
             Self::ExcessiveAutoTestCheck => "ExcessiveAutoTestCheck",
             Self::IdenticalExpressions => "IdenticalExpressions",
+            Self::IfElseDuplicatedCodeBlock => "IfElseDuplicatedCodeBlock",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -408,6 +410,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "IfConditionComplexity",
         ctx,
         handlers::if_condition_complexity::check,
+    ));
+    result.extend(run_diagnostic(
+        "IfElseDuplicatedCodeBlock",
+        ctx,
+        handlers::if_else_duplicated_code_block::check,
     ));
 
     // Tier 2: Semantic diagnostics
