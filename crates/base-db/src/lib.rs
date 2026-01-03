@@ -767,4 +767,90 @@ mod tests {
         // "SELECT 1" is only 8 chars, should be filtered by minimum length (15)
         assert_eq!(queries.len(), 0, "Should exclude short strings");
     }
+
+    #[test]
+    fn test_sdbl_queries_assignment_patterns() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    // Pattern 1: Direct assignment
+    Запрос = "SELECT Field1 FROM Table1";
+
+    // Pattern 2: Property assignment
+    Запрос.Текст = "SELECT Field2 FROM Table2";
+
+    // Pattern 3: New Query object with separate property assignment
+    Запрос = Новый Запрос;
+    Запрос.Текст = "SELECT Field3 FROM Table3";
+
+    // Pattern 4: Multiline query with property assignment
+    Запрос.Текст = "SELECT Field4
+    |FROM Table4
+    |WHERE Field4 = 1";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+
+        // All 4 queries should be extracted
+        assert_eq!(queries.len(), 4, "Should extract all 4 SDBL queries");
+
+        // Verify each query contains the expected table name
+        let query_texts: Vec<String> = queries.iter().map(|q| q.query_text.clone()).collect();
+
+        assert!(query_texts.iter().any(|q| q.contains("Table1")), "Should find query with Table1");
+        assert!(query_texts.iter().any(|q| q.contains("Table2")), "Should find query with Table2");
+        assert!(query_texts.iter().any(|q| q.contains("Table3")), "Should find query with Table3");
+        assert!(query_texts.iter().any(|q| q.contains("Table4")), "Should find query with Table4");
+    }
+
+    #[test]
+    fn test_sdbl_queries_with_parameters() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    // Query with parameters should be extracted and parsed
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Таблица.Наименование
+    |ИЗ Справочник.Товары КАК Таблица
+    |ГДЕ
+    |   Таблица.Поле1 = &Значение1
+    |   И (Таблица.Поле2 = &Значение2 ИЛИ Таблица.Поле3 = &Значение3)";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.sdbl_queries(file_id);
+
+        // Should extract query with parameters
+        assert_eq!(queries.len(), 1, "Should extract query with parameters");
+
+        // Verify query is valid (parses successfully)
+        assert!(queries[0].is_valid(), "Query with parameters should parse successfully");
+
+        // Verify query text contains parameters
+        assert!(queries[0].query_text.contains("&Значение1"));
+        assert!(queries[0].query_text.contains("&Значение2"));
+        assert!(queries[0].query_text.contains("&Значение3"));
+    }
 }

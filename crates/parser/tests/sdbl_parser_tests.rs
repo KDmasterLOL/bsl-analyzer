@@ -617,3 +617,17 @@ fn test_russian_multi_arg_functions() {
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) ИЗ Товары");
     check_no_errors("ВЫБРАТЬ ЕСТЬNULL(Сумма, 0) КАК Итого ИЗ Товары");
 }
+
+#[test]
+fn test_join_with_complex_on_condition() {
+    let input =
+        "SELECT * FROM T1 INNER JOIN T2 ON T1.ID = T2.ID AND (T1.Amount > 100 OR T2.Price > 500)";
+
+    let parse = parse_sdbl(input);
+
+    assert!(!parse.has_errors(), "Should parse JOIN with complex ON condition");
+
+    let ast_range = parse.syntax_node().text_range();
+    let ast_end: usize = ast_range.end().into();
+    assert_eq!(ast_end, input.len(), "AST should cover full input");
+}

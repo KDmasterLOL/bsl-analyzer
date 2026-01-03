@@ -104,6 +104,7 @@ pub enum NodeKind {
     SdblLogicalAndExpr,
     SdblNotExpr,
     SdblComparisonExpr,
+    SdblInExpr,
     SdblAdditiveExpr,
     SdblMultiplicativeExpr,
     SdblUnaryExpr,

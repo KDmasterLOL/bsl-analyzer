@@ -78,4 +78,7 @@ pub mod invalid_character_in_file;
 pub mod is_in_role_method;
 pub mod join_with_sub_query;
 pub mod latin_and_cyrillic_symbol_in_word;
+pub mod line_length;
+pub mod logical_or_in_join_query_section;
+pub mod logical_or_in_the_where_section_of_query;
 // TODO: Add all 181 handlers

@@ -34,20 +34,25 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
     use TokenKind as T;
 
     match kind {
-        // Keywords - ALL mapped to Ident for keyword matching via p.at_keyword()
-        // Using BSL keyword enums breaks at_sdbl_keyword() which checks for Ident
+        // SDBL clause keywords - mapped to Ident for at_sdbl_keyword() matching
+        // at_sdbl_keyword() checks for Ident + case-insensitive text match
         S::KwSelect => T::Ident,
         S::KwFrom => T::Ident,
-        S::KwWhere => T::Ident, // Was T::KwWhile - FIXED
+        S::KwWhere => T::Ident,
         S::KwAs => T::Ident,
-        S::OpAnd => T::Ident, // Was T::KwAnd - FIXED (operators are keywords in SDBL)
-        S::OpOr => T::Ident,  // Was T::KwOr - FIXED
-        S::OpNot => T::Ident, // Was T::KwNot - FIXED
         S::KwUnion => T::Ident,
         S::KwAll => T::Ident,
         S::KwDistinct => T::Ident,
         S::KwTop => T::Ident,
-        S::KwIn => T::Ident, // Was T::KwIn - FIXED
+
+        // Logical operators - use BSL keyword tokens for type-safe parsing
+        // These are used in expressions and should be checked with p.at(TokenKind::KwAnd)
+        S::OpAnd => T::KwAnd,
+        S::OpOr => T::KwOr,
+        S::OpNot => T::KwNot,
+
+        // Predicates - use BSL keyword tokens
+        S::KwIn => T::KwIn,
         S::KwIs => T::Ident,
         S::LitNull => T::Ident, // Was T::KwNull - FIXED (treated as keyword in SDBL)
         S::KwBetween => T::Ident,

@@ -40,11 +40,16 @@ fn logical_or_expr(p: &mut Parser) {
 
     logical_and_expr(p);
 
-    while p.at(TokenKind::KwOr) {
-        p.check_iteration_limit();
-        p.bump(); // OR
+    loop {
         p.skip_trivia();
-        logical_and_expr(p);
+        if p.at(TokenKind::KwOr) {
+            p.check_iteration_limit();
+            p.bump(); // OR
+            p.skip_trivia();
+            logical_and_expr(p);
+        } else {
+            break;
+        }
     }
 
     m.complete(p, NodeKind::SdblLogicalOrExpr);
@@ -58,11 +63,16 @@ fn logical_and_expr(p: &mut Parser) {
 
     not_expr(p);
 
-    while p.at(TokenKind::KwAnd) {
-        p.check_iteration_limit();
-        p.bump(); // AND
+    loop {
         p.skip_trivia();
-        not_expr(p);
+        if p.at(TokenKind::KwAnd) {
+            p.check_iteration_limit();
+            p.bump(); // AND
+            p.skip_trivia();
+            not_expr(p);
+        } else {
+            break;
+        }
     }
 
     m.complete(p, NodeKind::SdblLogicalAndExpr);
@@ -85,14 +95,65 @@ fn not_expr(p: &mut Parser) {
 
 /// Parse comparison expression
 ///
-/// Grammar: `comparisonExpression: additiveExpression ((= | <> | < | <= | > | >=) additiveExpression)?`
+/// Grammar:
+/// ```text
+/// comparisonExpression:
+///     additiveExpression ((= | <> | < | <= | > | >=) additiveExpression)?
+///   | predicateExpression
+/// ```
 fn comparison_expr(p: &mut Parser) {
+    predicate_expr(p);
+}
+
+/// Parse predicate expression (IN, BETWEEN, IS NULL, etc.)
+///
+/// Grammar:
+/// ```text
+/// predicateExpression:
+///     additiveExpression
+///       ( (IN | В) LPAREN (subquery | valueList) RPAREN
+///       | BETWEEN expr AND expr
+///       | IS (NOT)? NULL
+///       | (= | <> | < | <= | > | >=) additiveExpression
+///       )?
+/// ```
+fn predicate_expr(p: &mut Parser) {
     let m = p.start();
 
     additive_expr(p);
 
+    p.skip_trivia();
+
+    // Check for IN predicate
+    if p.at(TokenKind::KwIn) {
+        p.bump(); // IN / В
+        p.skip_trivia();
+
+        if !p.expect(TokenKind::LParen) {
+            m.complete(p, NodeKind::SdblInExpr);
+            return;
+        }
+        p.skip_trivia();
+
+        // Check if it's a subquery or value list
+        if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
+            // Parse subquery
+            super::select::subquery(p);
+        } else {
+            // Parse value list: expr, expr, ...
+            expression(p);
+            while p.eat(TokenKind::Comma) {
+                p.skip_trivia();
+                expression(p);
+            }
+        }
+
+        p.skip_trivia();
+        p.expect(TokenKind::RParen);
+        m.complete(p, NodeKind::SdblInExpr);
+    }
     // Check for comparison operators
-    if matches!(
+    else if matches!(
         p.current(),
         Some(TokenKind::Eq)
             | Some(TokenKind::Neq)
@@ -198,13 +259,15 @@ fn literal_expr(p: &mut Parser) {
 /// Parse parameter expression (&Parameter)
 ///
 /// Grammar: `parameter: AMPERSAND identifier`
+///
+/// SDBL &Parameter may be lexed as one token or two (Ampersand + Ident). Handle both.
 fn parameter_expr(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // &
+    p.bump();
     p.skip_trivia();
 
-    if !p.expect(TokenKind::Ident) {
-        // Error recovery
+    if p.at(TokenKind::Ident) {
+        p.bump();
     }
 
     m.complete(p, NodeKind::SdblParameter);

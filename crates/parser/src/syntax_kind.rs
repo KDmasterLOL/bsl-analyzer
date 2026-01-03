@@ -96,6 +96,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblLogicalAndExpr => SK::SDBL_LOGICAL_AND_EXPR,
         NodeKind::SdblNotExpr => SK::SDBL_NOT_EXPR,
         NodeKind::SdblComparisonExpr => SK::SDBL_COMPARISON_EXPR,
+        NodeKind::SdblInExpr => SK::SDBL_IN_EXPR,
         NodeKind::SdblAdditiveExpr => SK::SDBL_ADDITIVE_EXPR,
         NodeKind::SdblMultiplicativeExpr => SK::SDBL_MULTIPLICATIVE_EXPR,
         NodeKind::SdblUnaryExpr => SK::SDBL_UNARY_EXPR,

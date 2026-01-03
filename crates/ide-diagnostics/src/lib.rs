@@ -143,6 +143,8 @@ pub enum DiagnosticCode {
     FieldsFromJoinsWithoutIsNull,
     FullOuterJoinQuery,
     JoinWithSubQuery,
+    LogicalOrInJoinQuerySection,
+    LogicalOrInTheWhereSectionOfQuery,
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }
@@ -192,6 +194,8 @@ impl DiagnosticCode {
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
             Self::FullOuterJoinQuery => "FullOuterJoinQuery",
             Self::JoinWithSubQuery => "JoinWithSubQuery",
+            Self::LogicalOrInJoinQuerySection => "LogicalOrInJoinQuerySection",
+            Self::LogicalOrInTheWhereSectionOfQuery => "LogicalOrInTheWhereSectionOfQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
@@ -449,6 +453,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::invalid_character_in_file::check,
     ));
+    result.extend(run_diagnostic("LineLength", ctx, handlers::line_length::check));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
@@ -656,6 +661,16 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
 
     result.extend(run_diagnostic("JoinWithSubQuery", ctx, handlers::join_with_sub_query::check));
+    result.extend(run_diagnostic(
+        "LogicalOrInJoinQuerySection",
+        ctx,
+        handlers::logical_or_in_join_query_section::check,
+    ));
+    result.extend(run_diagnostic(
+        "LogicalOrInTheWhereSectionOfQuery",
+        ctx,
+        handlers::logical_or_in_the_where_section_of_query::check,
+    ));
 
     result.extend(run_diagnostic(
         "LatinAndCyrillicSymbolInWord",
