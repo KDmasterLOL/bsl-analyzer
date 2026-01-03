@@ -657,6 +657,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     result.extend(run_diagnostic("JoinWithSubQuery", ctx, handlers::join_with_sub_query::check));
 
+    result.extend(run_diagnostic(
+        "LatinAndCyrillicSymbolInWord",
+        ctx,
+        handlers::latin_and_cyrillic_symbol_in_word::check,
+    ));
+
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list
 
