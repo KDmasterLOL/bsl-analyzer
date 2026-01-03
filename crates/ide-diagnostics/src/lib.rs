@@ -454,6 +454,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::invalid_character_in_file::check,
     ));
     result.extend(run_diagnostic("LineLength", ctx, handlers::line_length::check));
+    result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
+    result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(

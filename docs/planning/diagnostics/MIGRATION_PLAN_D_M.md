@@ -561,7 +561,6 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - **Severity:** `MAJOR` (ERROR)
 - **Tags:** `STANDARD`
 - **Requires:** ⚠️ Metadata
-- **Notes:** **Defer to Iteration 19**
 
 #### 88. MethodSize
 

@@ -81,4 +81,6 @@ pub mod latin_and_cyrillic_symbol_in_word;
 pub mod line_length;
 pub mod logical_or_in_join_query_section;
 pub mod logical_or_in_the_where_section_of_query;
+pub mod magic_date;
+pub mod magic_number;
 // TODO: Add all 181 handlers

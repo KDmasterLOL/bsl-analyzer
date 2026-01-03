@@ -195,11 +195,13 @@ fn postfix_expr(p: &mut Parser) {
                 }
             }
             Some(TokenKind::LBracket) => {
+                let m = p.start();
                 p.bump();
                 p.skip_trivia();
                 expression(p);
                 p.skip_trivia();
                 p.expect(TokenKind::RBracket);
+                m.complete(p, NodeKind::IndexExpr);
             }
             Some(TokenKind::LParen) => {
                 arg_list(p);
