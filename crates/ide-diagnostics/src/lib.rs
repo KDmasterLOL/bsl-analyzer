@@ -562,6 +562,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::cyclomatic_complexity::check,
     ));
+    result.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
     result.extend(run_diagnostic(
         "FunctionNameStartsWithGet",
         ctx,
