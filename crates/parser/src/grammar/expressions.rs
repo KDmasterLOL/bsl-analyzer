@@ -44,6 +44,12 @@ pub fn expression(p: &mut Parser) {
     or_expr(p);
 }
 
+/// Parses a postfix expression for use in assignment left-hand side.
+/// This allows parsing "Var", "Obj.Field", "Arr[Index]" without consuming `=` as comparison.
+pub fn postfix_expression_for_assignment(p: &mut Parser) {
+    postfix_expr(p);
+}
+
 fn or_expr(p: &mut Parser) {
     let mut lhs = p.start();
     and_expr(p);
@@ -53,22 +59,31 @@ fn or_expr(p: &mut Parser) {
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
         p.skip_trivia();
+        let rhs = p.start();
         and_expr(p);
-        lhs = m;
+        rhs.complete(p, NodeKind::Expr);
+        lhs = m.complete(p, NodeKind::BinaryExpr).precede(p);
     }
 
     lhs.complete(p, NodeKind::Expr);
 }
 
 fn and_expr(p: &mut Parser) {
+    let mut lhs = p.start();
     not_expr(p);
 
     while p.at(TokenKind::KwAnd) {
         p.check_iteration_limit();
+        let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
         p.skip_trivia();
+        let rhs = p.start();
         not_expr(p);
+        rhs.complete(p, NodeKind::Expr);
+        lhs = m.complete(p, NodeKind::BinaryExpr).precede(p);
     }
+
+    lhs.complete(p, NodeKind::Expr);
 }
 
 fn not_expr(p: &mut Parser) {
@@ -85,41 +100,49 @@ fn not_expr(p: &mut Parser) {
 
 fn comparison_expr(p: &mut Parser) {
     let m = p.start();
+    let lhs = p.start();
     additive_expr(p);
 
-    let has_op = match p.current() {
-        // NOTE: TokenKind::Eq is NOT included here to avoid conflict with assignment statements
-        // "A = 5" at statement level should be parsed as assignment, not comparison
-        // This means "Не А = 1" will have parse errors, but diagnostics can still work
-        Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le) | Some(TokenKind::Gt)
-        | Some(TokenKind::Ge) => {
+    match p.current() {
+        // Include Eq for comparisons (needed for diagnostics like IdenticalExpressions)
+        // Context determines if it's assignment or comparison
+        Some(TokenKind::Eq) | Some(TokenKind::Neq) | Some(TokenKind::Lt) | Some(TokenKind::Le)
+        | Some(TokenKind::Gt) | Some(TokenKind::Ge) => {
+            lhs.complete(p, NodeKind::Expr);
             p.bump();
             p.skip_trivia();
+            let rhs = p.start();
             additive_expr(p);
-            true
+            rhs.complete(p, NodeKind::Expr);
+            m.complete(p, NodeKind::BinaryExpr);
         }
-        _ => false,
-    };
-
-    if has_op {
-        m.complete(p, NodeKind::BinaryExpr);
-    } else {
-        m.abandon(p);
+        _ => {
+            lhs.abandon(p);
+            m.abandon(p);
+        }
     }
 }
 
 fn additive_expr(p: &mut Parser) {
+    let mut lhs = p.start();
     multiplicative_expr(p);
 
     while matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
         p.check_iteration_limit();
+        let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
         p.skip_trivia();
+        let rhs = p.start();
         multiplicative_expr(p);
+        rhs.complete(p, NodeKind::Expr);
+        lhs = m.complete(p, NodeKind::BinaryExpr).precede(p);
     }
+
+    lhs.complete(p, NodeKind::Expr);
 }
 
 fn multiplicative_expr(p: &mut Parser) {
+    let mut lhs = p.start();
     unary_expr(p);
 
     while matches!(
@@ -127,10 +150,16 @@ fn multiplicative_expr(p: &mut Parser) {
         Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
     ) {
         p.check_iteration_limit();
+        let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
         p.skip_trivia();
+        let rhs = p.start();
         unary_expr(p);
+        rhs.complete(p, NodeKind::Expr);
+        lhs = m.complete(p, NodeKind::BinaryExpr).precede(p);
     }
+
+    lhs.complete(p, NodeKind::Expr);
 }
 
 fn unary_expr(p: &mut Parser) {
@@ -160,6 +189,9 @@ fn postfix_expr(p: &mut Parser) {
                     p.bump();
                 } else {
                     p.error(); // Expected property name after dot
+                               // ERROR RECOVERY: Don't consume token - just exit loop
+                               // Let upper-level parser decide what to do with it
+                    break;
                 }
             }
             Some(TokenKind::LBracket) => {

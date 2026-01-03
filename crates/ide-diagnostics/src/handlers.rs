@@ -66,4 +66,5 @@ pub mod function_returns_same_primitive;
 pub mod function_should_have_return;
 pub mod get_form_method;
 pub mod global_context_method_collision8312;
+pub mod identical_expressions;
 // TODO: Add all 181 handlers

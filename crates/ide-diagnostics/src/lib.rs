@@ -60,6 +60,7 @@ pub enum DiagnosticCode {
     DuplicateRegion,
     DuplicatedInsertionIntoCollection,
     ExcessiveAutoTestCheck,
+    IdenticalExpressions,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -174,6 +175,7 @@ impl DiagnosticCode {
             Self::DuplicateRegion => "DuplicateRegion",
             Self::DuplicatedInsertionIntoCollection => "DuplicatedInsertionIntoCollection",
             Self::ExcessiveAutoTestCheck => "ExcessiveAutoTestCheck",
+            Self::IdenticalExpressions => "IdenticalExpressions",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -310,6 +312,15 @@ impl DiagnosticsConfig {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_str())
     }
 
+    /// Get a string parameter for a diagnostic (owned version)
+    pub fn get_string_param(&self, code: DiagnosticCode, param: &str) -> Option<String> {
+        self.parameters
+            .get(&code)
+            .and_then(|v| v.get(param))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
     /// Get a float parameter for a diagnostic
     pub fn get_float(&self, code: DiagnosticCode, param: &str) -> Option<f64> {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_f64())
@@ -387,6 +398,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "ExcessiveAutoTestCheck",
         ctx,
         handlers::excessive_auto_test_check::check,
+    ));
+    result.extend(run_diagnostic(
+        "IdenticalExpressions",
+        ctx,
+        handlers::identical_expressions::check,
     ));
 
     // Tier 2: Semantic diagnostics

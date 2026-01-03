@@ -96,11 +96,25 @@ fn check_function(func: &syntax::ast::FunctionDef, diagnostics: &mut Vec<Diagnos
 }
 
 fn get_lvalue_ident(assign_stmt: &syntax::SyntaxNode) -> Option<syntax::SyntaxToken> {
-    let first_expr = assign_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)?;
+    // PARSER CHANGE: ASSIGN_STMT structure changed
+    // Old: ASSIGN_STMT -> EXPR (entire "A = B")
+    // New: ASSIGN_STMT -> [LHS tokens/nodes] -> EXPR (RHS value)
+    //
+    // We need to extract tokens from the left-hand side (before first EXPR)
 
-    let all_tokens: Vec<_> =
-        first_expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
+    // Find the first EXPR child (right-hand side)
+    let rhs_expr = assign_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)?;
+    let rhs_start = rhs_expr.text_range().start();
 
+    // Collect all tokens before the RHS (i.e., left-hand side)
+    let all_tokens: Vec<_> = assign_stmt
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|t| t.text_range().start() < rhs_start)
+        .collect();
+
+    // Check if left-hand side contains complex expressions (field access, indexing, calls)
+    // If so, this is not a simple parameter assignment
     if all_tokens
         .iter()
         .any(|t| matches!(t.kind(), SyntaxKind::DOT | SyntaxKind::L_BRACKET | SyntaxKind::L_PAREN))
@@ -108,6 +122,7 @@ fn get_lvalue_ident(assign_stmt: &syntax::SyntaxNode) -> Option<syntax::SyntaxTo
         return None;
     }
 
+    // Return the first IDENT token (should be the only one for simple assignment)
     all_tokens.into_iter().find(|t| t.kind() == SyntaxKind::IDENT)
 }
 

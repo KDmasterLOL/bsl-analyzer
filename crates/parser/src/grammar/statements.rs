@@ -370,17 +370,21 @@ fn remove_handler_stmt(p: &mut Parser) {
 fn assignment_or_call(p: &mut Parser) {
     let m = p.start();
 
-    expressions::expression(p);
+    // Parse left-hand side as postfix expression (identifier, field access, indexing, call)
+    // This prevents `=` from being consumed as comparison operator
+    expressions::postfix_expression_for_assignment(p);
 
     p.skip_trivia();
 
     if p.eat(TokenKind::Eq) {
+        // This is an assignment: LHS = RHS
         p.skip_trivia();
         expressions::expression(p);
         p.skip_trivia();
         m.complete(p, NodeKind::AssignStmt);
         p.eat(TokenKind::Semicolon);
     } else {
+        // This is a call statement (function call without assignment)
         m.complete(p, NodeKind::CallStmt);
         p.eat(TokenKind::Semicolon);
     }

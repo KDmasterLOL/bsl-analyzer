@@ -280,6 +280,13 @@ fn check_field_with_mapper(
         return;
     }
 
+    // Skip fields with parse errors
+    // Parser creates ERROR nodes for invalid syntax (e.g., "Table." without property name)
+    // These are parse error recovery artifacts that should not generate diagnostics
+    if field.syntax().descendants_with_tokens().any(|el| el.kind() == SyntaxKind::ERROR) {
+        return;
+    }
+
     // Check if field has alias
     if let Some(alias) = field.alias() {
         // Alias exists, check if it has AS keyword

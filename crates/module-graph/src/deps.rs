@@ -57,68 +57,53 @@ impl DependencyExtractor {
     ///
     /// Pattern: `ОбщегоНазначения.Метод()` or `Module.SubModule.Method()`
     ///
-    /// AST structure:
+    /// AST structure (after parser refactoring):
     /// CALL_STMT
-    ///   EXPR
+    ///   IDENT
     ///     IDENT "ОбщегоНазначения"
-    ///     DOT "."
-    ///     IDENT "Метод"
-    ///     ARG_LIST ...
+    ///   DOT "."
+    ///   IDENT "Метод"
+    ///   ARG_LIST ...
     ///
     /// We extract the first IDENT before the first DOT.
+    ///
+    /// NOTE: Parser refactoring removed EXPR wrapper from CALL_STMT,
+    /// so now we search in children_with_tokens directly.
     fn process_call_stmt(&mut self, call_stmt: &SyntaxNode) {
-        // Find EXPR child
-        for child in call_stmt.children() {
-            if child.kind() == SyntaxKind::EXPR {
-                if let Some(module_name) = self.extract_module_from_expr(&child) {
-                    debug!("Found module reference: {}", module_name);
-                    self.module_refs.insert(module_name);
-                }
-            }
-        }
-    }
+        // Look for pattern: IDENT followed by DOT in children_with_tokens
+        let tokens: Vec<_> = call_stmt.children_with_tokens().collect();
 
-    /// Extracts module name from an expression.
-    ///
-    /// For `ОбщегоНазначения.Метод()`, returns "ОбщегоНазначения".
-    /// For `Module.SubModule.Method()`, returns "Module".
-    ///
-    /// Implementation: Find the first IDENT token, check if followed by DOT.
-    ///
-    /// # Limitations (TODO: Iteration 11 - Metadata)
-    ///
-    /// Currently extracts ONLY the first component, which works for CommonModules:
-    /// - `ОбщегоНазначения.Метод()` → "ОбщегоНазначения" ✅
-    ///
-    /// But does NOT handle metadata-based references correctly:
-    /// - `Справочники.Номенклатура.Метод()` → "Справочники" ❌ (should be "Номенклатура")
-    /// - `Документы.ПриходТовара.Создать()` → "Документы" ❌ (should be "ПриходТовара")
-    /// - `Обработки.МояОбработка.Создать()` → "Обработки" ❌ (should be "МояОбработка")
-    ///
-    /// Proper support requires:
-    /// 1. Pattern recognition: `<MetadataClass>.<ObjectName>.<Method>()`
-    /// 2. Metadata knowledge: mapping to ManagerModule/ObjectModule paths
-    /// 3. Configuration.xml parsing
-    ///
-    /// This will be implemented in Iteration 11 (Metadata Infrastructure).
-    fn extract_module_from_expr(&self, expr: &SyntaxNode) -> Option<String> {
-        // Look for pattern: IDENT followed by DOT
-        // This indicates a module reference
-        let tokens: Vec<_> = expr.children_with_tokens().collect();
         for i in 0..tokens.len().saturating_sub(1) {
-            if let Some(token) = tokens[i].as_token() {
+            // Find IDENT token (or IDENT node)
+            let ident_text = if let Some(token) = tokens[i].as_token() {
                 if token.kind() == SyntaxKind::IDENT {
-                    // Check if next element is DOT
-                    if let Some(next_token) = tokens.get(i + 1).and_then(|t| t.as_token()) {
-                        if next_token.kind() == SyntaxKind::DOT {
-                            // This is a module reference
-                            return Some(token.text().to_string());
-                        }
+                    Some(token.text().to_string())
+                } else {
+                    None
+                }
+            } else if let Some(node) = tokens[i].as_node() {
+                if node.kind() == SyntaxKind::IDENT {
+                    // IDENT node contains IDENT token as child
+                    node.first_token().map(|t| t.text().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(module_name) = ident_text {
+                // Check if next element is DOT
+                if let Some(next) = tokens.get(i + 1) {
+                    if next.as_token().map(|t| t.kind()) == Some(SyntaxKind::DOT) {
+                        // This is a module reference
+                        debug!("Found module reference: {}", module_name);
+                        self.module_refs.insert(module_name);
+                        return; // Only extract first module reference
                     }
                 }
             }
         }
-        None
     }
 }
 

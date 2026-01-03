@@ -599,10 +599,30 @@ impl InsertionTracker {
 }
 
 fn extract_lvalue(assign_stmt: &SyntaxNode) -> Option<String> {
-    assign_stmt
-        .children()
-        .find(|n| n.kind() == SyntaxKind::EXPR)
-        .map(|expr| expr.text().to_string().trim().to_string())
+    // PARSER CHANGE: ASSIGN_STMT structure changed
+    // Old: ASSIGN_STMT -> EXPR (entire "A = B" expression)
+    // New: ASSIGN_STMT -> [LHS tokens/nodes] -> EXPR (RHS value)
+    //
+    // Extract left-hand side by taking text before the first EXPR child
+    // (the first EXPR is the right-hand side after `=`)
+
+    let full_text = assign_stmt.text().to_string();
+
+    // Find position of first EXPR child (right-hand side)
+    if let Some(rhs_expr) = assign_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR) {
+        let rhs_start = rhs_expr.text_range().start();
+        let assign_start = assign_stmt.text_range().start();
+        let rhs_offset: usize = (rhs_start - assign_start).into();
+
+        // Left side is everything before RHS
+        let lhs = &full_text[..rhs_offset];
+        // Remove trailing `=` and whitespace
+        let lhs = lhs.trim_end().trim_end_matches('=').trim();
+
+        Some(lhs.to_string())
+    } else {
+        None
+    }
 }
 
 fn extract_insertion_range(
@@ -670,8 +690,9 @@ fn extract_method_call_info(
 
     let method_name = find_ident_before(arg_list)?;
 
-    let full_expr = call_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)?;
-    let full_text = full_expr.text().to_string().trim().to_string();
+    // PARSER CHANGE: CALL_STMT no longer has EXPR child node
+    // Now we use the full CALL_STMT text directly
+    let full_text = call_stmt.text().to_string().trim().to_string();
 
     let method_start = full_text.rfind(&method_name)?;
     let collection = full_text[..method_start].trim_end_matches('.').trim().to_string();
