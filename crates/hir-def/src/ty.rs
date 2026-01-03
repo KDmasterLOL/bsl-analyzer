@@ -3,6 +3,10 @@
 //! This module provides basic type information for BSL values and expressions.
 //! Full type inference is planned for later iterations (12+).
 
+pub mod builtin;
+pub mod doc_types;
+pub mod infer;
+
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;
 
@@ -44,11 +48,45 @@ pub enum Ty {
     /// Map (Соответствие).
     Map,
 
+    /// Type descriptor (returned by ТипЗнч, used in type checks).
+    Type,
+
+    /// ValueTable (ТаблицаЗначений).
+    ValueTable,
+
+    /// ValueList (СписокЗначений).
+    ValueList,
+
+    /// Metadata object reference (Справочники.Товары, etc.).
+    ///
+    /// Represents a reference to a metadata object like Catalog, Document, Register.
+    /// Only populated after type inference with metadata integration (Phase 5).
+    MetadataRef { kind: MetadataKind, name: crate::Name },
+
     /// Function or procedure type.
     ///
     /// In BSL, functions and procedures are first-class values.
     /// params: parameter types, ret: return type (Undefined for procedures).
     Function { params: Box<[Ty]>, ret: Box<Ty> },
+}
+
+/// Metadata object kind.
+///
+/// Represents the kind of metadata object (Catalog, Document, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MetadataKind {
+    /// Catalog reference (СправочникСсылка).
+    CatalogRef,
+    /// Document reference (ДокументСсылка).
+    DocumentRef,
+    /// Document object (ДокументОбъект).
+    DocumentObject,
+    /// Catalog object (СправочникОбъект).
+    CatalogObject,
+    /// Information register record manager (РегистрСведенийМенеджерЗаписи).
+    InformationRegisterRecordManager,
+    /// Accumulation register record set (РегистрНакопленияНаборЗаписей).
+    AccumulationRegisterRecordSet,
 }
 
 impl Ty {
@@ -97,14 +135,22 @@ impl Ty {
     fn from_type_name(name: &str) -> Self {
         let name_lower = name.to_lowercase();
         match name_lower.as_str() {
-            // Russian names
+            // Collection types
             "массив" | "array" => Ty::Array,
             "структура" | "structure" => Ty::Structure,
             "соответствие" | "map" => Ty::Map,
+
+            // Primitive types
             "число" | "number" => Ty::Number,
             "строка" | "string" => Ty::String,
             "булево" | "boolean" => Ty::Boolean,
             "дата" | "date" => Ty::Date,
+
+            // Platform types (NEW in Phase 1)
+            "тип" | "type" => Ty::Type,
+            "таблицазначений" | "valuetable" => Ty::ValueTable,
+            "списокзначений" | "valuelist" => Ty::ValueList,
+
             _ => Ty::Unknown,
         }
     }
@@ -132,6 +178,10 @@ impl Ty {
             Ty::Array => "Array",
             Ty::Structure => "Structure",
             Ty::Map => "Map",
+            Ty::Type => "Type",
+            Ty::ValueTable => "ValueTable",
+            Ty::ValueList => "ValueList",
+            Ty::MetadataRef { .. } => "MetadataRef",
             Ty::Function { .. } => "Function",
         }
     }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base_db::{Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use dashmap::DashMap;
-use hir_def::{DefDatabase, ItemTree, ModuleData, ModuleId, SymbolTree};
+use hir_def::{DefDatabase, InferenceResult, ItemTree, ModuleData, ModuleId, SymbolTree};
 use rustc_hash::FxHasher;
 use vfs::FileId;
 
@@ -59,6 +59,7 @@ pub struct RootDatabaseImpl {
     item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
     module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
     symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
+    infer_types_cache: Arc<DashMap<ModuleId, Arc<InferenceResult>, BuildHasherDefault<FxHasher>>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -76,6 +77,7 @@ impl RootDatabaseImpl {
             item_tree_cache: Arc::new(DashMap::default()),
             module_data_cache: Arc::new(DashMap::default()),
             symbol_tree_cache: Arc::new(DashMap::default()),
+            infer_types_cache: Arc::new(DashMap::default()),
         }
     }
 
@@ -87,6 +89,7 @@ impl RootDatabaseImpl {
         self.item_tree_cache.remove(&file_id);
         self.module_data_cache.remove(&ModuleId::new(file_id));
         self.symbol_tree_cache.remove(&ModuleId::new(file_id));
+        self.infer_types_cache.remove(&ModuleId::new(file_id));
     }
 }
 
@@ -123,6 +126,16 @@ impl SourceDatabase for RootDatabaseImpl {
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot) {
         let files = self.files.clone();
         files.set_source_root(self, source_root_id, source_root);
+    }
+
+    fn resolve_vfs_path(
+        &self,
+        source_root_id: SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<FileId> {
+        let source_root_input = self.source_root_input(source_root_id);
+        let vfs_path_str = vfs_path.as_path().to_string_lossy().to_string();
+        base_db::resolve_vfs_path_query(self, source_root_input, vfs_path_str)
     }
 }
 
@@ -188,6 +201,22 @@ impl DefDatabase for RootDatabaseImpl {
         // Cache the result
         self.symbol_tree_cache.insert(module_id, tree.clone());
         tree
+    }
+
+    fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
+        // Check cache first
+        if let Some(cached) = self.infer_types_cache.get(&module_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("infer_types", ?module_id).entered();
+
+        // Perform type inference
+        let result = Arc::new(hir_def::InferenceContext::infer_module(self, module_id));
+
+        // Cache the result
+        self.infer_types_cache.insert(module_id, result.clone());
+        result
     }
 }
 

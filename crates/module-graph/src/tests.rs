@@ -44,6 +44,16 @@ impl SourceDatabase for TestDatabase {
         let files = self.files.clone();
         files.set_source_root(self, source_root_id, source_root);
     }
+
+    fn resolve_vfs_path(
+        &self,
+        source_root_id: SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<FileId> {
+        let source_root_input = self.source_root_input(source_root_id);
+        let vfs_path_str = vfs_path.as_path().to_string_lossy().to_string();
+        base_db::resolve_vfs_path_query(self, source_root_input, vfs_path_str)
+    }
 }
 
 #[salsa::db]

@@ -8,11 +8,12 @@
 //! will be completed in a later iteration.
 
 use std::hash::BuildHasherDefault;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
-use vfs::FileId;
+use vfs::{FileId, VfsPath};
 
 mod change;
 mod input;
@@ -45,6 +46,12 @@ pub trait SourceDatabase: salsa::Database {
 
     /// Set source root (requires Files helper in implementation).
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
+
+    /// Resolve a VfsPath to FileId within a SourceRoot.
+    ///
+    /// This is a convenience method that wraps resolve_vfs_path_query.
+    /// Used by diagnostics to resolve metadata URIs to FileIds.
+    fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 }
 
 /// Salsa tracked query for parsing.
@@ -97,6 +104,35 @@ pub fn sdbl_queries_in_file(
     tracing::debug!(count = queries.len(), "Extracted and parsed SDBL queries");
 
     Arc::new(queries)
+}
+
+/// Resolve a VfsPath to FileId within a SourceRoot.
+///
+/// Searches the FileSet of a SourceRoot for a given VfsPath.
+/// Used by diagnostics to resolve metadata URIs to FileIds.
+///
+/// # Performance
+/// - O(1) FileSet lookup (HashMap)
+/// - Cached by Salsa (LRU 256)
+/// - Expected: < 1ms after first call
+///
+/// # Parameters
+/// - `source_root_input`: The SourceRoot to search in
+/// - `vfs_path_str`: String representation of VfsPath (PathBuf is not Hash)
+///
+/// # Returns
+/// - `Some(FileId)` if path exists in FileSet
+/// - `None` if path not found
+#[salsa::tracked(lru = 256)]
+pub fn resolve_vfs_path_query(
+    db: &dyn salsa::Database,
+    source_root_input: SourceRootInput,
+    vfs_path_str: String,
+) -> Option<FileId> {
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+    let vfs_path = VfsPath::new(PathBuf::from(vfs_path_str));
+    file_set.file_for_path(&vfs_path).copied()
 }
 
 /// Internal: Extract and parse SDBL queries from BSL AST.
@@ -521,6 +557,16 @@ mod tests {
         fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot) {
             let files = self.files.clone();
             files.set_source_root(self, source_root_id, source_root);
+        }
+
+        fn resolve_vfs_path(
+            &self,
+            source_root_id: SourceRootId,
+            vfs_path: &VfsPath,
+        ) -> Option<FileId> {
+            let source_root_input = self.source_root_input(source_root_id);
+            let vfs_path_str = vfs_path.as_path().to_string_lossy().to_string();
+            resolve_vfs_path_query(self, source_root_input, vfs_path_str)
         }
     }
 
