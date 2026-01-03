@@ -76,7 +76,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Find all EXPR nodes that contain method calls
     for node in root.descendants() {
         if node.kind() == SyntaxKind::EXPR {
             if let Some(diag) = check_expr_for_str_template(&node) {
@@ -105,16 +104,9 @@ fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
 
 /// Find variable assignment backwards from current statement
 /// Example: НовыйШаблон = "text %1"; ... СтрШаблон(НовыйШаблон, arg)
-///
-/// # Performance
-/// Complexity: O(m×k) where m = statements in function (< 100), k = tokens per statement (< 50)
-/// Called only for СтрШаблон with variable in first arg (rare: < 10 per file)
-/// Practical performance: < 1ms per call (tested on real codebases)
 fn find_variable_assignment(var_name: &str, current_stmt: &SyntaxNode) -> Option<String> {
-    // Find parent STMT_LIST
     let stmt_list = current_stmt.ancestors().find(|n| n.kind() == SyntaxKind::STMT_LIST)?;
 
-    // Collect all statements before current
     let current_offset = current_stmt.text_range().start();
     let statements: Vec<_> = stmt_list
         .children()
@@ -122,10 +114,8 @@ fn find_variable_assignment(var_name: &str, current_stmt: &SyntaxNode) -> Option
         .filter(|n| n.text_range().start() < current_offset)
         .collect();
 
-    // Walk backwards through statements
     for stmt in statements.iter().rev() {
         if stmt.kind() == SyntaxKind::ASSIGN_STMT {
-            // Collect tokens once per statement (O(k) where k < 50)
             let tokens: Vec<_> =
                 stmt.descendants_with_tokens().filter_map(|t| t.into_token()).collect();
 
@@ -135,16 +125,13 @@ fn find_variable_assignment(var_name: &str, current_stmt: &SyntaxNode) -> Option
 
             for token in &tokens {
                 if token.kind() == SyntaxKind::DOT && !found_eq {
-                    // Field access (Объект.Property) - skip this assignment
-                    has_dot = true;
+                    has_dot = true; // Skip field access (Объект.Property)
                 } else if token.kind() == SyntaxKind::IDENT && !found_eq {
-                    // IDENT before = is lvalue
                     if token.text().eq_ignore_ascii_case(var_name) {
                         found_ident = true;
                     }
                 } else if token.kind() == SyntaxKind::EQ {
                     if found_ident && !has_dot {
-                        // Simple variable assignment (not field access)
                         found_eq = true;
                     }
                     break;
@@ -152,7 +139,6 @@ fn find_variable_assignment(var_name: &str, current_stmt: &SyntaxNode) -> Option
             }
 
             if found_eq {
-                // Found assignment to our variable - extract STRING from rvalue
                 return find_string_in_node(stmt);
             }
         }
@@ -162,7 +148,6 @@ fn find_variable_assignment(var_name: &str, current_stmt: &SyntaxNode) -> Option
 }
 
 fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
-    // Check if this EXPR contains IDENT "СтрШаблон" followed by ARG_LIST
     let mut has_str_template_ident = false;
     let mut arg_list_node: Option<SyntaxNode> = None;
 
@@ -176,7 +161,6 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
                 }
             }
             syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::IDENT => {
-                // IDENT as a node - extract text from tokens inside
                 let name = n.text().to_string();
                 let name_lower = name.to_lowercase();
                 if name_lower == "стршаблон" || name_lower == "strtemplate" {
@@ -196,7 +180,6 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
 
     let arg_list = arg_list_node.unwrap();
 
-    // Extract template string and count arguments
     let mut template_string: Option<String> = None;
     let mut arg_count = 0;
     let mut is_first_arg = true;
@@ -204,19 +187,15 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
     for child in arg_list.children_with_tokens() {
         match child {
             syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::EXPR => {
-                // First EXPR in ARG_LIST (skip L_PAREN) contains the template
                 if is_first_arg && template_string.is_none() {
-                    // Search for STRING token in EXPR descendants
                     if let Some(string_text) = find_string_in_node(&n) {
                         template_string = Some(string_text);
                     } else {
-                        // Not a string literal - check if it's a variable
-                        // Find first IDENT in first arg
+                        // Not a string literal - try variable resolution
                         for token in n.descendants_with_tokens() {
                             if let syntax::NodeOrToken::Token(t) = token {
                                 if t.kind() == SyntaxKind::IDENT {
                                     let var_name = t.text().to_string();
-                                    // Try to find assignment backwards
                                     if let Some(assigned_value) =
                                         find_variable_assignment(&var_name, node)
                                     {
@@ -238,9 +217,7 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
     }
 
     let template = template_string?;
-    // arg_count is the number of commas, actual args (excluding template) = arg_count
 
-    // Check if wrong template
     if is_wrong_template(&template, arg_count) {
         let range = node.text_range();
         return Some(Diagnostic {
@@ -373,7 +350,6 @@ mod tests {
         let diagnostics = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1, "Should detect missing parameter");
 
-        // Verify exact position (line 2: СтрШаблон(...) without semicolon)
         use crate::test_utils::assert_diagnostic_range;
         assert_diagnostic_range(code, &diagnostics[0], 2, 8, 45);
     }
