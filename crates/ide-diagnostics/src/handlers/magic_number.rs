@@ -39,8 +39,26 @@
 //! Default: `true`
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::MagicNumber` is encountered.
+pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::MagicNumber) {
+        return None;
+    }
+    Some(Diagnostic {
+        code: DiagnosticCode::MagicNumber,
+        message: format!("Магическое число: {}", value),
+        severity: Severity::Warning,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
+}
 
 const DEFAULT_AUTHORIZED_NUMBERS: &str = "-1,0,1";
 const DEFAULT_ALLOW_MAGIC_INDEXES: bool = true;

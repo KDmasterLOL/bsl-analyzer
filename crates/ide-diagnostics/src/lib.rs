@@ -699,11 +699,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::function_returns_same_primitive::check,
     ));
-    result.extend(run_diagnostic(
-        "FunctionShouldHaveReturn",
-        ctx,
-        handlers::function_should_have_return::check,
-    ));
+    // Note: FunctionShouldHaveReturn is now handled via hir_diagnostics (Phase 4)
 
     // Tier 3: Metadata diagnostics
     result.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
@@ -831,11 +827,58 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
 
     // HIR-based diagnostics (collected during AST→HIR lowering)
-    // These are cached and deduplicated with AST-based diagnostics
-    result.extend(run_diagnostic("HirDiagnostics", ctx, handlers::hir_diagnostics::check));
+    // These are cached by Salsa via module_bodies() query
+    result.extend(collect_hir_diagnostics(ctx));
 
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list
 
     result
+}
+
+/// Collect HIR-based diagnostics from module_bodies().
+///
+/// This function retrieves diagnostics collected during HIR lowering
+/// and dispatches them to the appropriate handler's `from_hir()` function.
+fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use hir::ModuleId;
+
+    let module_id = ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
+
+    let mut diagnostics = Vec::new();
+
+    for (_method_id, body_diag) in module_bodies.all_diagnostics() {
+        if let Some(diag) = dispatch_hir_diagnostic(body_diag, ctx) {
+            diagnostics.push(diag);
+        }
+    }
+
+    diagnostics
+}
+
+/// Dispatch BodyDiagnostic to appropriate handler's from_hir() function.
+fn dispatch_hir_diagnostic(
+    body_diag: &hir::BodyDiagnostic,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    use hir::BodyDiagnostic;
+
+    match body_diag {
+        BodyDiagnostic::FunctionShouldHaveReturn { range } => {
+            handlers::function_should_have_return::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::EmptyCodeBlock { range } => {
+            handlers::empty_code_block::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::MagicNumber { value, range } => {
+            handlers::magic_number::from_hir(value, *range, ctx)
+        }
+        BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
+        // Not yet implemented - return None
+        BodyDiagnostic::UnusedVariable { .. }
+        | BodyDiagnostic::UnreachableCode { .. }
+        | BodyDiagnostic::MissingReturn { .. }
+        | BodyDiagnostic::DeprecatedMethod { .. } => None,
+    }
 }

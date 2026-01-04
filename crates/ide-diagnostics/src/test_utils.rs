@@ -157,6 +157,95 @@ pub fn assert_diagnostic_range_multiline(
     );
 }
 
+/// Run HIR-based diagnostics on test code.
+///
+/// Creates a database with the given code and runs all HIR diagnostics.
+/// Used for testing individual HIR diagnostic handlers.
+///
+/// # Arguments
+/// * `code` - The BSL source code to analyze
+///
+/// # Returns
+/// Vector of diagnostics found in the code
+///
+/// # Example
+/// ```ignore
+/// let diagnostics = check_hir_diagnostic(r#"Функция Тест()
+///     Перем Х;
+/// КонецФункции"#);
+/// assert!(diagnostics.iter().any(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn));
+/// ```
+pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
+    use crate::DiagnosticsConfig;
+    use hir::ModuleId;
+    use ide_db::base_db::SourceDatabase;
+    use ide_db::{RootDatabase, RootDatabaseImpl};
+    use std::sync::Arc;
+    use test_fixture::Fixture;
+
+    let fixture_text = format!("//- /test.bsl\n{}", code);
+    let fixture = Fixture::parse(&fixture_text);
+    let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+    let mut db = RootDatabaseImpl::new();
+    for (fid, file) in &fixture.files {
+        db.set_file_text(*fid, &file.content);
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let db = Arc::new(db) as Arc<dyn RootDatabase>;
+    let config = DiagnosticsConfig::default();
+    let ctx = crate::DiagnosticsContext {
+        db: db.as_ref(),
+        config: &config,
+        file_id,
+        workspace_root: None,
+        configuration_path: None,
+        configuration_path_input: None,
+        file_set: None,
+    };
+
+    // Run HIR diagnostics via module_bodies
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
+
+    let mut diagnostics = Vec::new();
+    for (_method_id, body_diag) in module_bodies.all_diagnostics() {
+        if let Some(diag) = convert_hir_diagnostic(body_diag, &ctx) {
+            diagnostics.push(diag);
+        }
+    }
+
+    diagnostics
+}
+
+/// Convert a BodyDiagnostic to Diagnostic for testing.
+fn convert_hir_diagnostic(
+    body_diag: &hir::BodyDiagnostic,
+    ctx: &crate::DiagnosticsContext,
+) -> Option<Diagnostic> {
+    use crate::handlers;
+    use hir::BodyDiagnostic;
+
+    match body_diag {
+        BodyDiagnostic::FunctionShouldHaveReturn { range } => {
+            handlers::function_should_have_return::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::EmptyCodeBlock { range } => {
+            handlers::empty_code_block::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::MagicNumber { value, range } => {
+            handlers::magic_number::from_hir(value, *range, ctx)
+        }
+        BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
+        // Not yet implemented - return None
+        BodyDiagnostic::UnusedVariable { .. }
+        | BodyDiagnostic::UnreachableCode { .. }
+        | BodyDiagnostic::MissingReturn { .. }
+        | BodyDiagnostic::DeprecatedMethod { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

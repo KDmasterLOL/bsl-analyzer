@@ -66,7 +66,6 @@ pub mod function_returns_same_primitive;
 pub mod function_should_have_return;
 pub mod get_form_method;
 pub mod global_context_method_collision8312;
-pub mod hir_diagnostics;
 pub mod identical_expressions;
 pub mod if_condition_complexity;
 pub mod if_else_duplicated_code_block;
@@ -101,4 +100,5 @@ pub mod nested_constructors_in_structure_declaration;
 pub mod nested_function_in_parameters;
 pub mod nested_statements;
 pub mod nested_ternary_operator;
+pub mod self_assign;
 // TODO: Add all 181 handlers

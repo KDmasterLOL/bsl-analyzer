@@ -231,21 +231,115 @@ pub type SyntaxToken = rowan::SyntaxToken<BslLanguage>;
 
 ### 3. Diagnostic Infrastructure
 
-Каждая диагностика - отдельный модуль с единообразным интерфейсом:
+#### Архитектура диагностик (rust-analyzer pattern)
+
+**Принцип:** Диагностики собираются как побочный продукт HIR lowering, не как отдельные AST traversals.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  hir-def/body.rs                                                     │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │ pub enum BodyDiagnostic {                                       ││
+│  │     FunctionShouldHaveReturn { range },                         ││
+│  │     EmptyCodeBlock { range },                                   ││
+│  │     MagicNumber { value, range },                               ││
+│  │     SelfAssign { range },                                       ││
+│  │     UnreachableCode { range },     // CFG-based                 ││
+│  │     MissingReturn { range },       // CFG-based                 ││
+│  │     UnusedVariable { name, range }, // Usage tracking           ││
+│  │     DeprecatedMethod { name, range }, // Metadata               ││
+│  │ }                                                               ││
+│  └─────────────────────────────────────────────────────────────────┘│
+│  Собирается при lowering, кешируется Salsa (module_bodies query)    │
+└─────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  ide-diagnostics/src/lib.rs                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │ // HIR diagnostics dispatch                                     ││
+│  │ for (method_id, body_diag) in module_bodies.all_diagnostics() { ││
+│  │     match body_diag {                                           ││
+│  │         BodyDiagnostic::FunctionShouldHaveReturn { .. } =>      ││
+│  │             handlers::function_should_have_return::from_hir(..) ││
+│  │         BodyDiagnostic::EmptyCodeBlock { .. } =>                ││
+│  │             handlers::empty_code_block::from_hir(..)            ││
+│  │         // ... each diagnostic dispatched to its handler        ││
+│  │     }                                                           ││
+│  │ }                                                               ││
+│  └─────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│  ide-diagnostics/src/handlers/                                       │
+│  ├── function_should_have_return.rs  ← ОТДЕЛЬНЫЙ ФАЙЛ               │
+│  │   ├── pub fn from_hir(diag, ctx) -> Option<Diagnostic>          │
+│  │   └── #[cfg(test)] mod tests { include_str!("fixtures/...") }   │
+│  ├── empty_code_block.rs                                            │
+│  │   ├── pub fn from_hir(...)                                      │
+│  │   └── tests с фикстурами                                        │
+│  └── ...                                                            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### Структура handler файла (HIR-based диагностика)
 
 ```rust
-pub trait Diagnostic: Send + Sync {
-    fn code(&self) -> DiagnosticCode;
-    fn message(&self) -> String;
-    fn severity(&self) -> Severity;
-    fn range(&self) -> TextRange;
-    fn fixes(&self) -> Option<Vec<Assist>>;
+// handlers/function_should_have_return.rs
+
+//! FunctionShouldHaveReturn diagnostic.
+//!
+//! Collected during HIR lowering when function has no return statement.
+
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir::BodyDiagnostic;
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+/// Called from lib.rs dispatch for BodyDiagnostic::FunctionShouldHaveReturn.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::FunctionShouldHaveReturn) {
+        return None;
+    }
+    Some(Diagnostic {
+        code: DiagnosticCode::FunctionShouldHaveReturn,
+        message: "Функция должна содержать хотя бы один оператор Возврат".to_string(),
+        severity: Severity::Major,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_fixture() {
+        // Тесты с реальными фикстурами
+        let code = include_str!("../../tests/fixtures/FunctionShouldHaveReturnDiagnostic.bsl");
+        // ...
+    }
+}
+```
+
+#### Преимущества HIR-based подхода
+
+| Аспект | AST-based (старый) | HIR-based (новый) |
+|--------|-------------------|-------------------|
+| Traversals | 90× O(n) на файл | 1× O(n) + Salsa cache |
+| Кеширование | Нет | Автоматическое через Salsa |
+| Инвалидация | Полный пересчёт | Только изменённые файлы |
+| Архитектура | Отдельные visitors | Побочный продукт lowering |
+
+#### DiagnosticsContext (единый интерфейс)
+
+```rust
 pub struct DiagnosticsContext<'a> {
     pub db: &'a dyn RootDatabase,
     pub config: &'a DiagnosticsConfig,
     pub file_id: FileId,
+    pub workspace_root: Option<&'a Path>,
+    pub configuration_path: Option<&'a Path>,
 }
 ```
 

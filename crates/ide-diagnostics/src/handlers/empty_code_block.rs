@@ -23,7 +23,25 @@
 //!   are NOT considered empty
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::EmptyCodeBlock` is encountered.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::EmptyCodeBlock) {
+        return None;
+    }
+    Some(Diagnostic {
+        code: DiagnosticCode::EmptyCodeBlock,
+        message: "Пустой блок кода".to_string(),
+        severity: Severity::Major,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
+}
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::EmptyCodeBlock) {

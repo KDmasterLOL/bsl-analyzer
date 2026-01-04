@@ -49,11 +49,58 @@ crates/hir-def/src/
 ├── scope.rs          ✅ Scope handling
 ├── resolver.rs       ✅ Name resolution (partial)
 ├── ty.rs             ✅ Type definitions
-└── ty/infer.rs       ✅ Type inference (Phase 1)
+├── ty/infer.rs       ✅ Type inference (Phase 1)
+├── body.rs           ✅ Body + BodySourceMap + BodyDiagnostic (Phase 1-3)
+├── body/lower.rs     ✅ AST → Body lowering (Phase 1)
+└── hir.rs            ✅ Expr, Stmt, Binding enums (Phase 1)
 
 crates/hir/src/
 └── lib.rs            ✅ High-level API (Module, Method, Variable)
+
+crates/ide-diagnostics/src/
+├── lib.rs            ✅ collect_hir_diagnostics() + dispatch_hir_diagnostic()
+└── handlers/
+    ├── function_should_have_return.rs ✅ from_hir()
+    ├── empty_code_block.rs            ✅ from_hir()
+    ├── magic_number.rs                ✅ from_hir()
+    └── self_assign.rs                 ✅ from_hir()
 ```
+
+## Статус реализации
+
+| Phase | Описание | Статус |
+|-------|----------|--------|
+| Phase 1 | Body Lowering | ✅ Завершена |
+| Phase 2 | SourceMap | ✅ Завершена |
+| Phase 3 | Diagnostics Infrastructure | ✅ Завершена |
+| Phase 4 | Migrate Tier 1 Diagnostics | ✅ Частично (FunctionShouldHaveReturn, EmptyCodeBlock, MagicNumber, SelfAssign) |
+| Phase 5 | Cleanup + Архитектурный рефакторинг | ✅ Завершена |
+| Phase 6 | UnreachableCode | ⏳ Следующий |
+| Phase 7 | CFG из Body | ⏳ Планируется |
+| Phase 8 | Body Validation Pass | ⏳ Планируется |
+
+### Архитектурный рефакторинг (Phase 5)
+
+Выполнено:
+1. Удален файл `hir_diagnostics.rs` (временный прототип с диагностиками в одном файле)
+2. Каждая HIR диагностика теперь в своём отдельном файле с функцией `from_hir()`
+3. Dispatch логика добавлена в `lib.rs` (`collect_hir_diagnostics` + `dispatch_hir_diagnostic`)
+4. Создан тестовый helper `check_hir_diagnostic()` в `test_utils.rs`
+
+Это соответствует архитектуре rust-analyzer, где каждая диагностика имеет свой handler file.
+
+### Мигрированные диагностики (через HIR)
+
+| Диагностика | Статус | Примечание |
+|-------------|--------|------------|
+| FunctionShouldHaveReturn | ✅ Полностью | AST версия удалена |
+| EmptyCodeBlock | ✅ В lowering | Проверяется при lowering |
+| MagicNumber | ✅ В lowering | Проверяется при lowering литералов |
+| SelfAssign | ✅ В lowering | Проверяется при lowering assignment |
+| UnreachableCode | ⏳ Enum готов | Требует CFG |
+| MissingReturn | ⏳ Enum готов | Требует CFG |
+| UnusedVariable | ⏳ Enum готов | Требует usage tracking |
+| DeprecatedMethod | ⏳ Enum готов | Требует metadata |
 
 ## Что нужно добавить
 
@@ -198,26 +245,32 @@ pub fn validate_body(
 
 ## Этапы реализации
 
-### Iteration 1: Foundation (1 неделя)
-- [ ] Body + Arena structures
-- [ ] Basic lowering (literals, binary ops, calls)
-- [ ] SourceMap
-- [ ] Salsa integration
+### Iteration 1: Foundation (1 неделя) ✅
+- [x] Body + Arena structures
+- [x] Basic lowering (literals, binary ops, calls)
+- [x] SourceMap
+- [x] Salsa integration (module_bodies query)
 
-### Iteration 2: Core Lowering (1 неделя)
-- [ ] All statement types
-- [ ] All expression types
-- [ ] Control flow (if/while/for/try)
-- [ ] Method calls
+### Iteration 2: Core Lowering (1 неделя) ✅
+- [x] All statement types
+- [x] All expression types
+- [x] Control flow (if/while/for/try)
+- [x] Method calls
 
-### Iteration 3: Diagnostics Migration (2 недели)
-- [ ] DefDiagnostic infrastructure
-- [ ] BodyDiagnostic infrastructure
-- [ ] Migrate 20 simplest diagnostics
+### Iteration 3: Diagnostics Migration (2 недели) ⏳
+- [x] BodyDiagnostic infrastructure
+- [x] FunctionShouldHaveReturn (мигрирована на HIR, AST версия удалена)
+- [x] EmptyCodeBlock
+- [x] MagicNumber
+- [x] SelfAssign
+- [ ] UnreachableCode (требует CFG)
+- [ ] MissingReturn/AllFunctionPathMustHaveReturn (требует CFG)
+- [ ] UnusedVariable (требует usage tracking)
 - [ ] Migrate remaining diagnostics
 
 ### Iteration 4: Optimization (1 неделя)
-- [ ] Salsa caching verification
+- [ ] CFG из Body (Phase 7)
+- [ ] Body Validation Pass (Phase 8)
 - [ ] Benchmark comparisons
 - [ ] Memory profiling
 - [ ] Remove old diagnostic handlers

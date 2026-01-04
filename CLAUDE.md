@@ -153,6 +153,14 @@ bsl-analyzer (LSP Server)
 - Full compatibility with bsl-language-server codes
 - **~90 diagnostics implemented** (of 181 total planned)
 
+**HIR-based Diagnostics (rust-analyzer pattern):**
+
+- Diagnostics are collected as a byproduct of HIR lowering
+- `BodyDiagnostic` enum in `hir-def/body.rs` — collected during AST→HIR transformation
+- Each diagnostic stays in its own handler file with `from_hir()` function
+- Salsa caching via `module_bodies()` query — diagnostics recomputed only when file changes
+- See `docs/architecture/ARCHITECTURE.md` for detailed architecture
+
 **Metadata Infrastructure:**
 
 - **Status:** ✅ Implemented (`bsl-metadata` crate)

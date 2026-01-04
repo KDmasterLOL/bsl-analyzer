@@ -65,7 +65,81 @@ UPDATE_EXPECT=1 cargo test         # Обновить snapshots (только п
 
 ---
 
-### 4. Качество кода
+### 4. HIR-based диагностики (архитектура rust-analyzer)
+
+**Принцип:** Диагностики собираются как побочный продукт HIR lowering, не как отдельные AST traversals.
+
+#### Структура файлов
+
+```
+crates/hir-def/src/body.rs          ← BodyDiagnostic enum (собирается при lowering)
+crates/ide-diagnostics/src/lib.rs   ← Dispatch к handlers по типу BodyDiagnostic
+crates/ide-diagnostics/src/handlers/
+├── function_should_have_return.rs  ← Отдельный файл для каждой диагностики
+├── empty_code_block.rs
+└── ...
+```
+
+#### Правила для HIR диагностик
+
+**✅ ПРАВИЛЬНО:**
+```rust
+// handlers/function_should_have_return.rs
+
+/// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch)
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::FunctionShouldHaveReturn) {
+        return None;
+    }
+    Some(Diagnostic { ... })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_from_fixture() {
+        let code = include_str!("../../tests/fixtures/FunctionShouldHaveReturnDiagnostic.bsl");
+        // ...
+    }
+}
+```
+
+**❌ ЗАПРЕЩЕНО:**
+```rust
+// НЕ собирать все HIR диагностики в одном файле hir_diagnostics.rs
+// Каждая диагностика должна быть в своём файле!
+```
+
+#### Когда использовать HIR vs AST
+
+| Тип проверки | Подход | Пример |
+|--------------|--------|--------|
+| Структура метода (return/empty) | HIR lowering | FunctionShouldHaveReturn, EmptyCodeBlock |
+| Значения литералов | HIR lowering | MagicNumber |
+| Flow-sensitive (достижимость) | HIR + CFG | UnreachableCode, MissingReturn |
+| Синтаксис (форматирование) | AST | LineLength, MissingSpace |
+| Метаданные | AST + Metadata | CommonModuleAssign |
+
+#### Тестирование HIR диагностик
+
+**Обязательно:**
+- Тесты с реальными фикстурами из `tests/fixtures/`
+- Тесты через helper `check_hir_diagnostic()` или аналогичный
+- Проверка что диагностика НЕ срабатывает на правильном коде
+
+```rust
+#[test]
+fn test_function_should_have_return_fixture() {
+    let code = include_str!("../../tests/fixtures/FunctionShouldHaveReturnDiagnostic.bsl");
+    let diagnostics = check_diagnostic(code);
+    assert_eq!(diagnostics.len(), 1);
+    assert_diagnostic_range(&code, &diagnostics[0], 0, 8, 26);
+}
+```
+
+---
+
+### 5. Качество кода
 
 ```bash
 # Обязательно перед коммитом
