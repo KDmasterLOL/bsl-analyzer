@@ -101,4 +101,5 @@ pub mod nested_function_in_parameters;
 pub mod nested_statements;
 pub mod nested_ternary_operator;
 pub mod self_assign;
+pub mod unused_local_variable;
 // TODO: Add all 181 handlers

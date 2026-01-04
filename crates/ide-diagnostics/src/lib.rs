@@ -875,9 +875,11 @@ fn dispatch_hir_diagnostic(
             handlers::magic_number::from_hir(value, *range, ctx)
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
+        BodyDiagnostic::UnusedVariable { name, range } => {
+            handlers::unused_local_variable::from_hir(name, *range, ctx)
+        }
         // Not yet implemented - return None
-        BodyDiagnostic::UnusedVariable { .. }
-        | BodyDiagnostic::UnreachableCode { .. }
+        BodyDiagnostic::UnreachableCode { .. }
         | BodyDiagnostic::MissingReturn { .. }
         | BodyDiagnostic::DeprecatedMethod { .. } => None,
     }

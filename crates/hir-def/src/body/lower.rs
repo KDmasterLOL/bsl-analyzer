@@ -13,6 +13,7 @@
 //! This is more efficient than having separate diagnostic passes
 //! because we traverse the AST only once.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -31,6 +32,14 @@ pub struct LoweringCtx {
     /// Used for diagnostics like FunctionShouldHaveReturn.
     #[allow(dead_code)] // Will be used in Phase 2 for return path analysis
     is_function: bool,
+
+    /// Declared local variables: lowercase name -> (original name, declaration range)
+    /// Used for UnusedVariable diagnostic.
+    local_vars: FxHashMap<String, (Name, TextRange)>,
+
+    /// Used variable names (lowercase).
+    /// When a variable is referenced in an expression, its name is added here.
+    used_vars: FxHashSet<String>,
 }
 
 impl LoweringCtx {
@@ -41,6 +50,31 @@ impl LoweringCtx {
             source_map: BodySourceMap::new(),
             diagnostics: Vec::new(),
             is_function,
+            local_vars: FxHashMap::default(),
+            used_vars: FxHashSet::default(),
+        }
+    }
+
+    /// Register a local variable declaration.
+    /// Called when processing VAR statements and loop variables.
+    fn register_local_var(&mut self, name: Name, range: TextRange) {
+        let key = name.as_str().to_lowercase();
+        self.local_vars.insert(key, (name, range));
+    }
+
+    /// Mark a variable as used.
+    /// Called when a variable is referenced in an expression.
+    fn mark_var_used(&mut self, name: &str) {
+        self.used_vars.insert(name.to_lowercase());
+    }
+
+    /// Emit diagnostics for unused local variables.
+    fn check_unused_variables(&mut self) {
+        for (key, (name, range)) in &self.local_vars {
+            if !self.used_vars.contains(key) {
+                self.diagnostics
+                    .push(BodyDiagnostic::UnusedVariable { name: name.to_string(), range: *range });
+            }
         }
     }
 
@@ -109,6 +143,9 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
             ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
         }
     }
+
+    // Check for unused local variables
+    ctx.check_unused_variables();
 
     LowerResult { body: ctx.body, source_map: ctx.source_map, diagnostics: ctx.diagnostics }
 }
@@ -346,7 +383,13 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         .filter_map(|el| el.into_token())
         .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
 
-    let var = ctx.alloc_binding(Binding::var(Name::new(var_token.text())), var_token.text_range());
+    let name = Name::new(var_token.text());
+    let range = var_token.text_range();
+
+    // Register loop variable for unused variable tracking
+    ctx.register_local_var(name.clone(), range);
+
+    let var = ctx.alloc_binding(Binding::var(name), range);
 
     let mut expr_iter = node.children().filter(|n| {
         matches!(
@@ -391,7 +434,13 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
         .filter_map(|el| el.into_token())
         .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
 
-    let var = ctx.alloc_binding(Binding::var(Name::new(var_token.text())), var_token.text_range());
+    let name = Name::new(var_token.text());
+    let range = var_token.text_range();
+
+    // Register loop variable for unused variable tracking
+    ctx.register_local_var(name.clone(), range);
+
+    let var = ctx.alloc_binding(Binding::var(name), range);
 
     // Collection is the first expression child
     let collection = node
@@ -535,8 +584,13 @@ fn lower_var_decl(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         .filter_map(|el| el.into_token())
         .filter(|tok| tok.kind() == SyntaxKind::IDENT)
     {
-        let binding_id =
-            ctx.alloc_binding(Binding::var(Name::new(ident.text())), ident.text_range());
+        let name = Name::new(ident.text());
+        let range = ident.text_range();
+
+        // Register for unused variable tracking
+        ctx.register_local_var(name.clone(), range);
+
+        let binding_id = ctx.alloc_binding(Binding::var(name), range);
         bindings.push(binding_id);
     }
 
@@ -582,8 +636,9 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
         }
         SyntaxKind::IDENT => {
             // Identifier - variable reference
-            let name = Name::new(node.text().to_string().as_str());
-            Expr::Path(name)
+            let text = node.text().to_string();
+            ctx.mark_var_used(&text);
+            Expr::Path(Name::new(&text))
         }
         SyntaxKind::EXPR => {
             // Wrapped expression
@@ -600,6 +655,7 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
                 .filter_map(|el| el.into_token())
                 .find(|tok| tok.kind() == SyntaxKind::IDENT)
             {
+                ctx.mark_var_used(ident.text());
                 Expr::Path(Name::new(ident.text()))
             } else {
                 Expr::Missing
