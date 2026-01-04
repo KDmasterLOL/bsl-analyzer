@@ -377,11 +377,12 @@ fn find_common_module_file(
     // Get the CommonModule's URI from metadata
     let uri = common_module.uri()?;
 
-    // Get the workspace root or configuration path to build absolute path
-    let workspace_root = ctx.workspace_root.or(ctx.configuration_path)?;
+    // Get the configuration path (where metadata files are) to build absolute path
+    // Configuration path has priority because URIs are relative to it
+    let config_path = ctx.configuration_path.or(ctx.workspace_root)?;
 
-    // Build full absolute path: workspace_root + URI
-    let full_path = workspace_root.join(uri);
+    // Build full absolute path: config_path + URI
+    let full_path = config_path.join(uri);
     let vfs_path = VfsPath::new(full_path.clone());
 
     // Get current file's SourceRoot
