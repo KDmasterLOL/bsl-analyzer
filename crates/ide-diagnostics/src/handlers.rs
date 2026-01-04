@@ -91,4 +91,5 @@ pub mod missing_common_module_method;
 pub mod missing_event_subscription_handler;
 pub mod missing_returned_value_description;
 pub mod missing_space;
+pub mod missing_temporary_file_deletion;
 // TODO: Add all 181 handlers

@@ -95,6 +95,7 @@ pub enum DiagnosticCode {
     MethodSize,
     IfConditionComplexity,
     MissingCodeTryCatchEx,
+    MissingTemporaryFileDeletion,
     UsingGoto,
     BeginTransactionBeforeTryCatch,
     CodeAfterAsyncCall,
@@ -252,6 +253,7 @@ impl DiagnosticCode {
             Self::MethodSize => "MethodSize",
             Self::MissedRequiredParameter => "MissedRequiredParameter",
             Self::MissingCodeTryCatchEx => "MissingCodeTryCatchEx",
+            Self::MissingTemporaryFileDeletion => "MissingTemporaryFileDeletion",
             Self::MissingParameterDescription => "MissingParameterDescription",
             Self::MissingReturnedValueDescription => "MissingReturnedValueDescription",
             Self::MissingVariablesDescription => "MissingVariablesDescription",
@@ -578,6 +580,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MissingCodeTryCatchEx",
         ctx,
         handlers::missing_code_try_catch_ex::check,
+    ));
+    result.extend(run_diagnostic(
+        "MissingTemporaryFileDeletion",
+        ctx,
+        handlers::missing_temporary_file_deletion::check,
     ));
     result.extend(run_diagnostic(
         "FunctionNameStartsWithGet",
