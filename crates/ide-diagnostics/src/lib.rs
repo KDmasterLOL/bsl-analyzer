@@ -5,6 +5,7 @@
 pub mod common_module_helpers;
 pub mod handlers;
 pub mod metadata_diagnostic;
+pub mod method_description;
 pub mod rules;
 pub mod sdbl_utils;
 
@@ -670,6 +671,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MissingCommonModuleMethod",
         ctx,
         handlers::missing_common_module_method::check,
+    ));
+    result.extend(run_diagnostic(
+        "MissingReturnedValueDescription",
+        ctx,
+        handlers::missing_returned_value_description::check,
     ));
 
     // SDBL diagnostics

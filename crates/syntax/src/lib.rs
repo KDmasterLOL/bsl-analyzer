@@ -14,6 +14,7 @@
 //! Based on rust-analyzer's syntax crate architecture.
 
 pub mod ast;
+pub mod ast_utils;
 pub mod sdbl_query;
 mod syntax_kind;
 mod syntax_node;
@@ -23,6 +24,7 @@ use std::marker::PhantomData;
 use rowan::GreenNode;
 
 pub use crate::{
+    ast_utils::extract_leading_comments,
     sdbl_query::SdblQueryInfo,
     syntax_kind::SyntaxKind,
     syntax_node::{
