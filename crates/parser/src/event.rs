@@ -64,6 +64,7 @@ pub enum NodeKind {
     IndexExpr,
     FieldExpr,
     NewExpr,
+    AwaitExpr,
     ParenExpr,
     Literal,
     Ident,

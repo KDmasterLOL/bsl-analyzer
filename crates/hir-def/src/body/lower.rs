@@ -201,16 +201,34 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let value_node = children.next()?;
     let value = lower_expr_node(ctx, &value_node);
 
-    // Check for self-assignment (a = a)
-    if let (Expr::Path(target_name), Expr::Path(value_name)) =
-        (ctx.body.expr(target), ctx.body.expr(value))
-    {
-        if target_name.eq_ignore_case(value_name) {
-            ctx.emit(BodyDiagnostic::SelfAssign { range: node.text_range() });
-        }
+    // Check for self-assignment (a = a, obj.field = obj.field)
+    if exprs_are_equal(&ctx.body, target, value) {
+        ctx.emit(BodyDiagnostic::SelfAssign { range: node.text_range() });
     }
 
     Some(Stmt::Assign { target, value })
+}
+
+/// Check if two expressions are semantically equal (case-insensitive for names).
+/// Used for detecting self-assignment patterns like `a = a` or `obj.field = obj.field`.
+fn exprs_are_equal(body: &Body, lhs: ExprId, rhs: ExprId) -> bool {
+    match (body.expr(lhs), body.expr(rhs)) {
+        // Simple variable: A = a (case-insensitive)
+        (Expr::Path(name1), Expr::Path(name2)) => name1.eq_ignore_case(name2),
+
+        // Field access: obj.field = obj.field
+        (Expr::Field { base: b1, field: f1 }, Expr::Field { base: b2, field: f2 }) => {
+            f1.eq_ignore_case(f2) && exprs_are_equal(body, *b1, *b2)
+        }
+
+        // Index access: arr[i] = arr[i]
+        (Expr::Index { base: b1, index: i1 }, Expr::Index { base: b2, index: i2 }) => {
+            exprs_are_equal(body, *b1, *b2) && exprs_are_equal(body, *i1, *i2)
+        }
+
+        // Different expression types or complex expressions - not equal
+        _ => false,
+    }
 }
 
 /// Lower call statement.

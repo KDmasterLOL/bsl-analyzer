@@ -231,6 +231,28 @@ fn is_in_default_value(token: &SyntaxToken) -> bool {
     false
 }
 
+/// Find method name in a CALL_STMT or CALL_EXPR node.
+/// For method calls like `obj.Method()`, returns "Method".
+fn find_method_name(node: &syntax::SyntaxNode) -> Option<String> {
+    // Look for FIELD_EXPR which contains the method call structure
+    for child in node.descendants() {
+        if child.kind() == SyntaxKind::FIELD_EXPR {
+            // In FIELD_EXPR, method name is the last IDENT token
+            return child
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == SyntaxKind::IDENT)
+                .last()
+                .map(|t| t.text().to_string());
+        }
+        // Don't descend into ARG_LIST
+        if child.kind() == SyntaxKind::ARG_LIST {
+            break;
+        }
+    }
+    None
+}
+
 /// Check if inside Structure.Insert() or Correspondence.Insert()
 /// Simplified: exclude ALL parameters in Insert() calls
 fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
@@ -239,18 +261,10 @@ fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
     while let Some(current) = node {
         // Check if this is a CALL_STMT or CALL_EXPR (method call like Object.Method())
         if matches!(current.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
-            // For CALL_STMT: structure is IDENT DOT IDENT ARG_LIST
-            // For CALL_EXPR with FIELD_EXPR: FIELD_EXPR(receiver, DOT, method) ARG_LIST
-
-            // Find method name - it's the last IDENT before ARG_LIST
-            let idents: Vec<_> = current
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .filter(|t| t.kind() == SyntaxKind::IDENT)
-                .collect();
-
-            if let Some(last_ident) = idents.last() {
-                let name = last_ident.text().to_lowercase();
+            // Find method name - it's in the FIELD_EXPR (for method calls)
+            // With new AST structure: CALL_STMT > CALL_EXPR > FIELD_EXPR > IDENTs
+            if let Some(method_name) = find_method_name(&current) {
+                let name = method_name.to_lowercase();
                 if name == "вставить" || name == "insert" {
                     return true;
                 }
@@ -316,9 +330,10 @@ fn is_in_property_assignment(token: &SyntaxToken) -> bool {
     while let Some(current) = node {
         if current.kind() == SyntaxKind::ASSIGN_STMT {
             // Property assignment has DOT token: Obj.Property = value
-            // Structure: IDENT DOT IDENT EQ EXPR
+            // With new AST: ASSIGN_STMT > FIELD_EXPR > DOT
+            // Use descendants to find DOT in nested structure
             let has_dot = current
-                .children_with_tokens()
+                .descendants_with_tokens()
                 .any(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::DOT));
 
             return has_dot;
@@ -355,37 +370,26 @@ fn is_in_date_function_simple_assignment(token: &SyntaxToken) -> bool {
         return false;
     };
 
-    // 2. Check if ARG_LIST's parent is EXPR containing IDENT "Дата"/"Date"
+    // 2. Check if ARG_LIST's parent is EXPR or CALL_EXPR containing IDENT "Дата"/"Date"
+    // With new AST structure, CALL_EXPR wraps function calls
     let Some(parent_expr) = arg_list.parent() else {
         return false;
     };
 
-    if parent_expr.kind() != SyntaxKind::EXPR {
+    if !matches!(parent_expr.kind(), SyntaxKind::EXPR | SyntaxKind::CALL_EXPR) {
         return false;
     }
 
-    // Find IDENT child of parent_expr (not just direct children, but all descendants)
-    // The IDENT might be wrapped in another node
-    let has_date_ident = parent_expr.children_with_tokens().any(|e| {
-        if let Some(token) = e.as_token() {
-            if token.kind() == SyntaxKind::IDENT {
-                let name = token.text().to_lowercase();
-                return name == "дата" || name == "date";
-            }
-        }
-        // Also check child nodes for IDENT
-        if let Some(node) = e.as_node() {
-            return node
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .filter(|t| t.kind() == SyntaxKind::IDENT)
-                .any(|t| {
-                    let name = t.text().to_lowercase();
-                    name == "дата" || name == "date"
-                });
-        }
-        false
-    });
+    // Find IDENT "Дата"/"Date" in the call expression
+    // For function call like Дата(), look for IDENT at any level (handles nested nodes)
+    let has_date_ident = parent_expr
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .any(|t| {
+            let name = t.text().to_lowercase();
+            name == "дата" || name == "date"
+        });
 
     if !has_date_ident {
         return false;
@@ -397,8 +401,10 @@ fn is_in_date_function_simple_assignment(token: &SyntaxToken) -> bool {
     while let Some(current) = expr_node {
         if current.kind() == SyntaxKind::ASSIGN_STMT {
             // Check if it's a property assignment (has DOT)
+            // With new AST: ASSIGN_STMT > FIELD_EXPR > DOT
+            // Use descendants to find DOT in nested structure
             let has_dot = current
-                .children_with_tokens()
+                .descendants_with_tokens()
                 .any(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::DOT));
 
             if has_dot {

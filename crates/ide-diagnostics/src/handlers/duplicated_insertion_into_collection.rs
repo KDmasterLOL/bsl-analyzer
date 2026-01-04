@@ -703,17 +703,27 @@ fn extract_method_call_info(
 }
 
 fn find_ident_before(arg_list: &SyntaxNode) -> Option<String> {
-    let mut prev_token = arg_list.prev_sibling_or_token();
-    while let Some(sibling) = prev_token {
+    let mut prev = arg_list.prev_sibling_or_token();
+    while let Some(sibling) = prev {
         match sibling {
             syntax::NodeOrToken::Token(token) if token.kind() == SyntaxKind::IDENT => {
                 return Some(token.text().to_string().trim().to_string());
             }
             syntax::NodeOrToken::Token(_) => {
-                prev_token = sibling.prev_sibling_or_token();
+                prev = sibling.prev_sibling_or_token();
             }
-            syntax::NodeOrToken::Node(_) => {
-                prev_token = sibling.prev_sibling_or_token();
+            syntax::NodeOrToken::Node(ref node) => {
+                // With new AST structure, FIELD_EXPR contains the method name
+                // Look for the last IDENT in the node (method name)
+                if node.kind() == SyntaxKind::FIELD_EXPR {
+                    return node
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .filter(|t| t.kind() == SyntaxKind::IDENT)
+                        .last()
+                        .map(|t| t.text().to_string().trim().to_string());
+                }
+                prev = sibling.prev_sibling_or_token();
             }
         }
     }

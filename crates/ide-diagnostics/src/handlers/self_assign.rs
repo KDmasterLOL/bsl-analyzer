@@ -90,13 +90,7 @@ mod tests {
     /// Java test expects: hasSize(2), hasRange(4, 0, 4, 5), hasRange(7, 0, 7, 33)
     ///
     /// NOTE: HIR lowering only processes method bodies, so we wrap fixture content in a procedure.
-    ///
-    /// Current HIR implementation detects:
-    /// 1. Simple path self-assign: А = а (correct)
-    /// 2. Property access with same base: Структура.X = Структура.Y (incorrect - different props)
-    ///
-    /// TODO: Fix HIR lowering to properly compare property access expressions
-    /// (should compare full path, not just the base object).
+    /// Line numbers in this test are offset by +1 due to wrapping.
     #[test]
     fn test_fixture_self_assign() {
         // Content from SelfAssignDiagnostic.bsl wrapped in a procedure
@@ -118,19 +112,22 @@ mod tests {
         let self_assign_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
 
-        // Current implementation detects 3 (has false positive on line 7):
-        // Line 5: А = а; - correct (simple path)
-        // Line 7: Структура.Чтото = Структура.ЧтотоДругое; - FALSE POSITIVE (TODO: fix)
-        // Line 8: Структура.Чтото = СтруКтура.ЧТото; - correct (same property, case-insensitive)
+        // Java expects 2 diagnostics (our lines are +1 due to procedure wrapper):
+        // Line 5 (Java line 4): А = а; - simple path self-assign
+        // Line 8 (Java line 7): Структура.Чтото = СтруКтура.ЧТото; - property self-assign
         //
-        // Java expects only 2: lines 5 and 8 (line indices 4 and 7 in 0-indexed)
-        assert!(
-            !self_assign_diags.is_empty(),
-            "Should detect at least 1 SelfAssign, got {}",
+        // Line 7: Структура.Чтото = Структура.ЧтотоДругое; - NOT self-assign (different props)
+        assert_eq!(
+            self_assign_diags.len(),
+            2,
+            "Should detect exactly 2 SelfAssign diagnostics (matching Java), got {}",
             self_assign_diags.len()
         );
 
-        // Check first diagnostic position: line 5, "А = а"
+        // Check first diagnostic: line 5, "А = а"
         assert_diagnostic_range(code, self_assign_diags[0], 5, 4, 9);
+
+        // Check second diagnostic: line 8, "Структура.Чтото = СтруКтура.ЧТото"
+        assert_diagnostic_range(code, self_assign_diags[1], 8, 4, 37);
     }
 }

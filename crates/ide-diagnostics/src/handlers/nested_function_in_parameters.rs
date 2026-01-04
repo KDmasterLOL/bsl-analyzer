@@ -145,8 +145,9 @@ fn analyze_call_context(arg_list: &SyntaxNode) -> Option<CallInfo> {
                 is_constructor: true,
             })
         }
-        SyntaxKind::CALL_STMT | SyntaxKind::EXPR => {
+        SyntaxKind::CALL_STMT | SyntaxKind::EXPR | SyntaxKind::CALL_EXPR => {
             // Method call: parent contains IDENT(s), DOT(s), ARG_LIST
+            // With new AST: CALL_EXPR > IDENT(node) or FIELD_EXPR > ARG_LIST
             // Find the method name (the IDENT right before ARG_LIST)
             let method_name = find_method_name_before_arg_list(&parent, arg_list)?;
 
@@ -190,46 +191,19 @@ fn find_method_name_before_arg_list(
     let mut last_ident: Option<SyntaxToken> = None;
     let arg_list_start = arg_list.text_range().start();
 
-    for child in parent.children_with_tokens() {
-        let child_range = match &child {
-            syntax::NodeOrToken::Node(n) => n.text_range(),
-            syntax::NodeOrToken::Token(t) => t.text_range(),
-        };
-
-        if child_range.start() >= arg_list_start {
-            break;
-        }
-
-        match child {
-            syntax::NodeOrToken::Node(node) => {
-                // IDENT is a node containing an IDENT token
-                if node.kind() == SyntaxKind::IDENT {
-                    if let Some(token) = get_ident_token(&node) {
-                        last_ident = Some(token);
-                    }
-                }
+    // Use descendants_with_tokens to handle nested IDENT(node) > IDENT(token) and FIELD_EXPR
+    for child in parent.descendants_with_tokens() {
+        if let syntax::NodeOrToken::Token(token) = child {
+            if token.text_range().start() >= arg_list_start {
+                break;
             }
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IDENT {
-                    last_ident = Some(token);
-                }
+            if token.kind() == SyntaxKind::IDENT {
+                last_ident = Some(token);
             }
         }
     }
 
     last_ident
-}
-
-/// Get the IDENT token from an IDENT node
-fn get_ident_token(ident_node: &SyntaxNode) -> Option<SyntaxToken> {
-    for child in ident_node.children_with_tokens() {
-        if let Some(token) = child.into_token() {
-            if token.kind() == SyntaxKind::IDENT {
-                return Some(token);
-            }
-        }
-    }
-    None
 }
 
 /// Find the start position of the call expression
@@ -376,7 +350,7 @@ fn contains_forbidden_call(arg_list: &SyntaxNode, config: &Config) -> bool {
 
 /// Recursively check an expression for forbidden calls
 fn check_expr_for_forbidden_call(expr: &SyntaxNode, config: &Config) -> bool {
-    // Look for ARG_LIST in this expression (indicates a call)
+    // Look for ARG_LIST or CALL_EXPR in this expression (indicates a call)
     for child in expr.children() {
         if child.kind() == SyntaxKind::ARG_LIST {
             // Found a call - determine if it's forbidden
@@ -390,6 +364,22 @@ fn check_expr_for_forbidden_call(expr: &SyntaxNode, config: &Config) -> bool {
                 NestedCallResult::NotACall => {
                     // Continue checking children
                 }
+            }
+        } else if child.kind() == SyntaxKind::CALL_EXPR {
+            // New AST: CALL_EXPR > (IDENT/FIELD_EXPR) + ARG_LIST
+            if let Some(nested_arg_list) =
+                child.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)
+            {
+                let call_result = analyze_nested_call(&child, &nested_arg_list, config);
+                match call_result {
+                    NestedCallResult::Forbidden => return true,
+                    NestedCallResult::AllowedGlobal => continue,
+                    NestedCallResult::NotACall => {}
+                }
+            }
+            // Recurse into CALL_EXPR children
+            if check_expr_for_forbidden_call(&child, config) {
+                return true;
             }
         } else if child.kind() == SyntaxKind::NEW_EXPR {
             // Check if constructor has parameters
@@ -454,64 +444,16 @@ fn analyze_nested_call(
 /// Find method name in an expression containing a call
 fn find_method_name_in_expr(expr: &SyntaxNode, arg_list: &SyntaxNode) -> Option<String> {
     let arg_list_start = arg_list.text_range().start();
-
     let mut last_ident: Option<String> = None;
 
-    for child in expr.children_with_tokens() {
-        let child_start = match &child {
-            syntax::NodeOrToken::Node(n) => n.text_range().start(),
-            syntax::NodeOrToken::Token(t) => t.text_range().start(),
-        };
-
-        if child_start >= arg_list_start {
-            break;
-        }
-
-        match child {
-            syntax::NodeOrToken::Node(node) => {
-                if node.kind() == SyntaxKind::IDENT {
-                    if let Some(token) = get_ident_token(&node) {
-                        last_ident = Some(token.text().to_string());
-                    }
-                } else if node.kind() == SyntaxKind::EXPR {
-                    // Recurse into nested EXPR to find the last IDENT
-                    if let Some(name) = find_last_ident_in_expr(&node) {
-                        last_ident = Some(name);
-                    }
-                }
+    // Use descendants to handle nested IDENT(node) > IDENT(token) and FIELD_EXPR structures
+    for token in expr.descendants_with_tokens() {
+        if let syntax::NodeOrToken::Token(t) = token {
+            if t.text_range().start() >= arg_list_start {
+                break;
             }
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IDENT {
-                    last_ident = Some(token.text().to_string());
-                }
-            }
-        }
-    }
-
-    last_ident
-}
-
-/// Find the last IDENT in a nested expression
-fn find_last_ident_in_expr(expr: &SyntaxNode) -> Option<String> {
-    let mut last_ident: Option<String> = None;
-
-    for child in expr.children_with_tokens() {
-        match child {
-            syntax::NodeOrToken::Node(node) => {
-                if node.kind() == SyntaxKind::IDENT {
-                    if let Some(token) = get_ident_token(&node) {
-                        last_ident = Some(token.text().to_string());
-                    }
-                } else if node.kind() == SyntaxKind::EXPR {
-                    if let Some(name) = find_last_ident_in_expr(&node) {
-                        last_ident = Some(name);
-                    }
-                }
-            }
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IDENT {
-                    last_ident = Some(token.text().to_string());
-                }
+            if t.kind() == SyntaxKind::IDENT {
+                last_ident = Some(t.text().to_string());
             }
         }
     }

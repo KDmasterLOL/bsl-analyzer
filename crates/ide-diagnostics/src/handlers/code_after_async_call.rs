@@ -201,16 +201,34 @@ fn is_async_method(name: &str) -> bool {
 
 /// Check if a CALL_STMT is a global call (not Object.Method()).
 ///
-/// Returns false for qualified calls that contain FIELD_EXPR nodes.
+/// Returns false for qualified calls that contain FIELD_EXPR nodes in the call target.
+/// FIELD_EXPR nodes inside ARG_LIST (parameters) are ignored - they're just argument values.
 fn is_global_call(stmt: &SyntaxNode) -> bool {
     // Must be CALL_STMT
     if stmt.kind() != SyntaxKind::CALL_STMT {
         return false;
     }
 
-    // Skip if contains FIELD_EXPR (qualified call like Object.Method())
-    if stmt.descendants().any(|n| n.kind() == SyntaxKind::FIELD_EXPR) {
-        return false;
+    // Find ARG_LIST position to only check call structure, not arguments
+    let arg_list_start = stmt
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::ARG_LIST)
+        .map(|n| n.text_range().start());
+
+    // Check for FIELD_EXPR only BEFORE ARG_LIST (in the call target, not in arguments)
+    // Qualified calls like Object.Method() have FIELD_EXPR before the ARG_LIST
+    for node in stmt.descendants() {
+        if node.kind() == SyntaxKind::FIELD_EXPR {
+            // Only count as qualified call if FIELD_EXPR is before ARG_LIST
+            if let Some(al_start) = arg_list_start {
+                if node.text_range().start() < al_start {
+                    return false;
+                }
+            } else {
+                // No ARG_LIST found, any FIELD_EXPR means qualified call
+                return false;
+            }
+        }
     }
 
     true

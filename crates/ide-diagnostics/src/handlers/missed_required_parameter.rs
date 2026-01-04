@@ -543,8 +543,9 @@ fn get_method_name(call_node: &SyntaxNode) -> Option<String> {
 ///
 /// Returns true if the call contains a DOT token (indicates qualification).
 fn is_qualified_call(call_node: &SyntaxNode) -> bool {
-    // Check for DOT token in children (not descendants - must be direct child)
-    call_node.children_with_tokens().any(|child| child.kind() == SyntaxKind::DOT)
+    // Check for FIELD_EXPR anywhere in the call (not just direct children)
+    // With new AST: CALL_STMT > CALL_EXPR > FIELD_EXPR > DOT
+    call_node.descendants().any(|child| child.kind() == SyntaxKind::FIELD_EXPR)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,33 +566,34 @@ enum QualifiedCall {
 /// - **ThisObject:** `ЭтотОбъект.Method()` → `ThisObject { "Method" }`
 ///
 fn extract_qualified_call(call_node: &SyntaxNode) -> Option<QualifiedCall> {
-    // Collect all IDENT tokens (from all descendants) but stop at ARG_LIST
+    // With new AST: CALL_STMT > CALL_EXPR > FIELD_EXPR > [IDENT, DOT, IDENT...]
+    // Collect all IDENT tokens before ARG_LIST
     let mut idents: Vec<String> = Vec::new();
-    let mut found_arg_list = false;
+    let mut arg_list_start = None;
 
-    for child in call_node.children_with_tokens() {
-        if child.kind() == SyntaxKind::ARG_LIST {
-            found_arg_list = true;
+    // Find ARG_LIST position first
+    for node in call_node.descendants() {
+        if node.kind() == SyntaxKind::ARG_LIST {
+            arg_list_start = Some(node.text_range().start());
             break;
         }
+    }
 
-        // Collect IDENT tokens from this child
-        if let Some(element) = child.as_node() {
-            for token in element.descendants_with_tokens() {
-                if let Some(t) = token.as_token() {
-                    if t.kind() == SyntaxKind::IDENT {
-                        idents.push(t.text().to_string());
-                    }
-                }
+    let arg_list_pos = arg_list_start?;
+
+    // Collect IDENT tokens that appear before ARG_LIST
+    for token in call_node.descendants_with_tokens() {
+        if let Some(t) = token.as_token() {
+            if t.text_range().start() >= arg_list_pos {
+                break;
             }
-        } else if let Some(token) = child.as_token() {
-            if token.kind() == SyntaxKind::IDENT {
-                idents.push(token.text().to_string());
+            if t.kind() == SyntaxKind::IDENT {
+                idents.push(t.text().to_string());
             }
         }
     }
 
-    if !found_arg_list || idents.is_empty() {
+    if idents.is_empty() {
         return None;
     }
 
@@ -694,21 +696,23 @@ fn create_diagnostic(call_node: &SyntaxNode, missing_params: &[String]) -> Diagn
         // and return range from method name to end of call
         let mut last_ident_start = None;
 
-        for child in call_node.children_with_tokens() {
-            if child.kind() == SyntaxKind::ARG_LIST {
-                break;
-            }
+        // With new AST: CALL_STMT > CALL_EXPR > FIELD_EXPR > [IDENT, DOT, IDENT...]
+        // Find ARG_LIST position first
+        let arg_list_pos = call_node
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
+            .map(|n| n.text_range().start());
 
-            // Find last IDENT (either as node or token) before ARG_LIST
-            if child.kind() == SyntaxKind::IDENT {
-                if let Some(node) = child.as_node() {
-                    // IDENT wrapped in node - get first token
-                    if let Some(token) = node.first_token() {
-                        last_ident_start = Some(token.text_range().start());
+        if let Some(arg_list_start) = arg_list_pos {
+            // Find last IDENT before ARG_LIST
+            for token in call_node.descendants_with_tokens() {
+                if let Some(t) = token.as_token() {
+                    if t.text_range().start() >= arg_list_start {
+                        break;
                     }
-                } else if let Some(token) = child.as_token() {
-                    // Direct IDENT token
-                    last_ident_start = Some(token.text_range().start());
+                    if t.kind() == SyntaxKind::IDENT {
+                        last_ident_start = Some(t.text_range().start());
+                    }
                 }
             }
         }

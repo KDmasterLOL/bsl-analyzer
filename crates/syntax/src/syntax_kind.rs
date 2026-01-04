@@ -192,6 +192,7 @@ pub enum SyntaxKind {
     INDEX_EXPR,
     FIELD_EXPR,
     NEW_EXPR,
+    AWAIT_EXPR,
     PAREN_EXPR,
     LITERAL,
     ARG_LIST,

@@ -138,7 +138,7 @@ fn find_delete_calls(body: &SyntaxNode, collection: &str) -> Vec<TextRange> {
     let collection_lower = collection.to_lowercase().trim().to_string();
 
     for node in body.descendants() {
-        if matches!(node.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR)
+        if node.kind() == SyntaxKind::CALL_STMT
             && is_delete_call(&node)
             && matches_collection(&node, &collection_lower)
         {

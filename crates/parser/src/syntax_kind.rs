@@ -57,6 +57,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::IndexExpr => SK::INDEX_EXPR,
         NodeKind::FieldExpr => SK::FIELD_EXPR,
         NodeKind::NewExpr => SK::NEW_EXPR,
+        NodeKind::AwaitExpr => SK::AWAIT_EXPR,
         NodeKind::ParenExpr => SK::PAREN_EXPR,
         NodeKind::Literal => SK::LITERAL,
         NodeKind::Ident => SK::IDENT,

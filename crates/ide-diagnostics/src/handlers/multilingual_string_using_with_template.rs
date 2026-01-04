@@ -108,17 +108,23 @@ fn extract_language_keys(text: &str) -> HashSet<String> {
 
 /// Check if a node has a StrTemplate call in its ancestors
 fn has_template_in_parents(node: &SyntaxNode) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if parent.kind() == SyntaxKind::EXPR {
-            // Check if this EXPR contains a StrTemplate call
-            // Structure: EXPR > IDENT(node) > IDENT(token)
-            for child in parent.children() {
-                if child.kind() == SyntaxKind::IDENT {
-                    // Look for IDENT token inside the IDENT node
-                    for inner in child.children_with_tokens() {
-                        if let syntax::NodeOrToken::Token(token) = inner {
-                            if token.kind() == SyntaxKind::IDENT && is_template_call(token.text()) {
+    // New AST: CALL_EXPR > IDENT(node) > IDENT(token:СтрШаблон) or
+    // CALL_EXPR > FIELD_EXPR > IDENT(node) > IDENT(token:СтрШаблон)
+    for ancestor in node.ancestors() {
+        if ancestor.kind() == SyntaxKind::CALL_EXPR {
+            // Check if this CALL_EXPR is a StrTemplate call
+            // Look for IDENT tokens directly in descendants
+            for token in ancestor.descendants_with_tokens() {
+                if let syntax::NodeOrToken::Token(t) = token {
+                    if t.kind() == SyntaxKind::IDENT && is_template_call(t.text()) {
+                        // Make sure this IDENT is the call target, not an argument
+                        // The StrTemplate IDENT should be before ARG_LIST
+                        let arg_list_start = ancestor
+                            .descendants()
+                            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
+                            .map(|n| n.text_range().start());
+                        if let Some(al_start) = arg_list_start {
+                            if t.text_range().start() < al_start {
                                 return true;
                             }
                         }
@@ -126,7 +132,6 @@ fn has_template_in_parents(node: &SyntaxNode) -> bool {
                 }
             }
         }
-        current = parent.parent();
     }
     false
 }
@@ -180,9 +185,9 @@ fn is_variable_used_in_template(var_name: &str, nstr_node: &SyntaxNode) -> bool 
 
     let nstr_offset = nstr_node.text_range().start();
 
-    // Look for StrTemplate calls after this NStr
+    // Look for StrTemplate CALL_EXPR nodes after this NStr
     for node in stmt_list.descendants() {
-        if node.kind() != SyntaxKind::EXPR {
+        if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
 
@@ -192,28 +197,26 @@ fn is_variable_used_in_template(var_name: &str, nstr_node: &SyntaxNode) -> bool 
         }
 
         // Check if this is a StrTemplate call
-        // Structure: EXPR > IDENT(node) > IDENT(token) and EXPR > ARG_LIST
+        // New AST: CALL_EXPR > IDENT(node) > IDENT(token:СтрШаблон) > ARG_LIST
+        let arg_list_start = node
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
+            .map(|n| n.text_range().start());
+
         let mut is_str_template = false;
         let mut has_var_in_args = false;
 
-        for child in node.children() {
-            if child.kind() == SyntaxKind::IDENT {
-                // Look for StrTemplate IDENT token inside IDENT node
-                for inner in child.children_with_tokens() {
-                    if let syntax::NodeOrToken::Token(token) = inner {
-                        if token.kind() == SyntaxKind::IDENT && is_template_call(token.text()) {
+        for token in node.descendants_with_tokens() {
+            if let syntax::NodeOrToken::Token(t) = token {
+                if t.kind() == SyntaxKind::IDENT {
+                    // Check if this is the StrTemplate identifier (before ARG_LIST)
+                    if let Some(al_start) = arg_list_start {
+                        if t.text_range().start() < al_start && is_template_call(t.text()) {
                             is_str_template = true;
-                        }
-                    }
-                }
-            } else if child.kind() == SyntaxKind::ARG_LIST {
-                // Check if our variable is in the arguments
-                for arg_token in child.descendants_with_tokens() {
-                    if let syntax::NodeOrToken::Token(t) = arg_token {
-                        if t.kind() == SyntaxKind::IDENT && t.text().eq_ignore_ascii_case(var_name)
+                        } else if t.text_range().start() >= al_start
+                            && t.text().eq_ignore_ascii_case(var_name)
                         {
                             has_var_in_args = true;
-                            break;
                         }
                     }
                 }
@@ -252,20 +255,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         }
 
-        // Walk up to find the EXPR that contains both IDENT and ARG_LIST siblings
-        // The structure is: EXPR > IDENT(node) > IDENT(token) and EXPR > ARG_LIST
-        let Some(ident_node) = tok.parent() else {
-            continue;
+        // AST structure: CALL_EXPR > IDENT(node) > IDENT(token) > ARG_LIST
+        // Or for qualified: CALL_EXPR > FIELD_EXPR > IDENT(node) > IDENT(token)
+        // tok.parent() returns IDENT node, we need to find CALL_EXPR ancestor
+        let call_expr = match tok
+            .parent()
+            .and_then(|p| p.ancestors().find(|n| n.kind() == SyntaxKind::CALL_EXPR))
+        {
+            Some(ce) => ce,
+            None => continue,
         };
-
-        // The EXPR that contains both the IDENT node and ARG_LIST
-        let Some(call_expr) = ident_node.parent() else {
-            continue;
-        };
-
-        if call_expr.kind() != SyntaxKind::EXPR {
-            continue;
-        }
 
         // Check if NStr is inside StrTemplate call OR assigned to variable used in StrTemplate
         let in_template = has_template_in_parents(&call_expr);

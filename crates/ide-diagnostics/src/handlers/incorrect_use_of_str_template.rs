@@ -77,9 +77,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::EXPR {
-            if let Some(diag) = check_expr_for_str_template(&node) {
-                diagnostics.push(diag);
+        // Check CALL_EXPR (not CALL_STMT) since StrTemplate can be in expressions
+        // Skip CALL_EXPR that are nested inside another CALL_EXPR (e.g., method chains)
+        if node.kind() == SyntaxKind::CALL_EXPR {
+            let is_nested_call =
+                node.ancestors().skip(1).any(|a| a.kind() == SyntaxKind::CALL_EXPR);
+            if !is_nested_call {
+                if let Some(diag) = check_expr_for_str_template(&node) {
+                    diagnostics.push(diag);
+                }
             }
         }
     }
@@ -151,8 +157,9 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
     let mut has_str_template_ident = false;
     let mut arg_list_node: Option<SyntaxNode> = None;
 
-    for child in node.children_with_tokens() {
-        match child {
+    // Use descendants to handle nested structure (CALL_STMT > CALL_EXPR > IDENT/ARG_LIST)
+    for descendant in node.descendants_with_tokens() {
+        match descendant {
             syntax::NodeOrToken::Token(token) if token.kind() == SyntaxKind::IDENT => {
                 let name = token.text().to_string();
                 let name_lower = name.to_lowercase();
@@ -160,15 +167,10 @@ fn check_expr_for_str_template(node: &SyntaxNode) -> Option<Diagnostic> {
                     has_str_template_ident = true;
                 }
             }
-            syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::IDENT => {
-                let name = n.text().to_string();
-                let name_lower = name.to_lowercase();
-                if name_lower == "стршаблон" || name_lower == "strtemplate" {
-                    has_str_template_ident = true;
+            syntax::NodeOrToken::Node(ref n) if n.kind() == SyntaxKind::ARG_LIST => {
+                if arg_list_node.is_none() {
+                    arg_list_node = Some(n.clone());
                 }
-            }
-            syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::ARG_LIST => {
-                arg_list_node = Some(n.clone());
             }
             _ => {}
         }

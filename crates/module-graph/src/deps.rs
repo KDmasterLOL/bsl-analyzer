@@ -57,46 +57,35 @@ impl DependencyExtractor {
     ///
     /// Pattern: `ОбщегоНазначения.Метод()` or `Module.SubModule.Method()`
     ///
-    /// AST structure (after parser refactoring):
+    /// AST structure (after parser refactoring with CALL_EXPR/FIELD_EXPR):
     /// CALL_STMT
-    ///   IDENT
-    ///     IDENT "ОбщегоНазначения"
-    ///   DOT "."
-    ///   IDENT "Метод"
-    ///   ARG_LIST ...
+    ///   CALL_EXPR
+    ///     FIELD_EXPR
+    ///       IDENT(node) "ОбщегоНазначения"
+    ///         IDENT(token) "ОбщегоНазначения"
+    ///       DOT "."
+    ///       IDENT(node) "Метод"
+    ///     ARG_LIST ...
     ///
-    /// We extract the first IDENT before the first DOT.
-    ///
-    /// NOTE: Parser refactoring removed EXPR wrapper from CALL_STMT,
-    /// so now we search in children_with_tokens directly.
+    /// We extract the first IDENT before the first DOT from FIELD_EXPR.
     fn process_call_stmt(&mut self, call_stmt: &SyntaxNode) {
-        // Look for pattern: IDENT followed by DOT in children_with_tokens
-        let tokens: Vec<_> = call_stmt.children_with_tokens().collect();
+        // Find FIELD_EXPR within the call (indicates qualified call like Module.Method())
+        let field_expr = call_stmt.descendants().find(|n| n.kind() == SyntaxKind::FIELD_EXPR);
 
-        for i in 0..tokens.len().saturating_sub(1) {
-            // Find IDENT token (or IDENT node)
-            let ident_text = if let Some(token) = tokens[i].as_token() {
-                if token.kind() == SyntaxKind::IDENT {
-                    Some(token.text().to_string())
-                } else {
-                    None
-                }
-            } else if let Some(node) = tokens[i].as_node() {
-                if node.kind() == SyntaxKind::IDENT {
-                    // IDENT node contains IDENT token as child
-                    node.first_token().map(|t| t.text().to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+        let Some(field_expr) = field_expr else {
+            return; // Not a qualified call, no module reference
+        };
 
-            if let Some(module_name) = ident_text {
-                // Check if next element is DOT
-                if let Some(next) = tokens.get(i + 1) {
-                    if next.as_token().map(|t| t.kind()) == Some(SyntaxKind::DOT) {
-                        // This is a module reference
+        // Collect IDENT tokens and DOT position from FIELD_EXPR
+        let mut first_ident: Option<String> = None;
+
+        for element in field_expr.descendants_with_tokens() {
+            if let Some(token) = element.as_token() {
+                if token.kind() == SyntaxKind::IDENT && first_ident.is_none() {
+                    first_ident = Some(token.text().to_string());
+                } else if token.kind() == SyntaxKind::DOT {
+                    // Found DOT, if we have an IDENT before it, that's the module name
+                    if let Some(module_name) = first_ident {
                         debug!("Found module reference: {}", module_name);
                         self.module_refs.insert(module_name);
                         return; // Only extract first module reference

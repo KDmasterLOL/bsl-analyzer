@@ -196,6 +196,37 @@ fn is_in_default_value(token: &SyntaxToken) -> bool {
     false
 }
 
+/// Find method name in a CALL_STMT or CALL_EXPR node.
+/// For method calls like `obj.Method()`, returns "Method".
+/// For function calls like `Func()`, returns "Func".
+fn find_method_name(node: &syntax::SyntaxNode) -> Option<String> {
+    // Look for FIELD_EXPR which contains the method call structure
+    for child in node.descendants() {
+        if child.kind() == SyntaxKind::FIELD_EXPR {
+            // In FIELD_EXPR, method name is the last IDENT token
+            return child
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == SyntaxKind::IDENT)
+                .last()
+                .map(|t| t.text().to_string());
+        }
+        // Don't descend into ARG_LIST
+        if child.kind() == SyntaxKind::ARG_LIST {
+            break;
+        }
+    }
+
+    // For simple function calls without dot, find the first IDENT before ARG_LIST
+    for token in node.children_with_tokens().filter_map(|e| e.into_token()) {
+        if token.kind() == SyntaxKind::IDENT {
+            return Some(token.text().to_string());
+        }
+    }
+
+    None
+}
+
 /// Check if inside Structure.Insert() or Correspondence.Insert()
 /// Simplified: exclude ALL parameters in Insert() calls
 fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
@@ -203,15 +234,11 @@ fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
 
     while let Some(current) = node {
         if matches!(current.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
-            // Find method name - it's the last IDENT before ARG_LIST
-            let idents: Vec<_> = current
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .filter(|t| t.kind() == SyntaxKind::IDENT)
-                .collect();
-
-            if let Some(last_ident) = idents.last() {
-                let name = last_ident.text().to_lowercase();
+            // Find method name - it's in the FIELD_EXPR (for method calls) or CALL_EXPR
+            // With new AST structure: CALL_STMT > CALL_EXPR > FIELD_EXPR > IDENTs
+            // Method name is the last IDENT in FIELD_EXPR (before ARG_LIST)
+            if let Some(method_name) = find_method_name(&current) {
+                let name = method_name.to_lowercase();
                 // Only exclude .Вставить()/.Insert() - Structure/Correspondence method
                 // Do NOT exclude .Добавить()/.Add() - used by Array which should be detected
                 if name == "вставить" || name == "insert" {

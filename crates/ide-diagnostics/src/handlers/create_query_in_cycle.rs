@@ -239,7 +239,7 @@ fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, scope: &mut 
             }
         }
 
-        SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
+        SyntaxKind::CALL_STMT => {
             // Optimized: build token list once and check both has_eq and has_dot
             let tokens: Vec<_> =
                 node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
@@ -523,9 +523,9 @@ fn check_expr_for_execute(
     // Check the EXPR node itself (FOR_EACH source doesn't have CALL_STMT wrapper)
     check_execute_call(expr, diagnostics, scope);
 
-    // Also check any CALL_STMT/CALL_EXPR descendants
+    // Also check any CALL_STMT descendants (CALL_EXPR is nested inside CALL_STMT now)
     for descendant in expr.descendants() {
-        if matches!(descendant.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
+        if descendant.kind() == SyntaxKind::CALL_STMT {
             check_execute_call(&descendant, diagnostics, scope);
         }
     }
