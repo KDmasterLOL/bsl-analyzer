@@ -830,6 +830,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::latin_and_cyrillic_symbol_in_word::check,
     ));
 
+    // HIR-based diagnostics (collected during AST→HIR lowering)
+    // These are cached and deduplicated with AST-based diagnostics
+    result.extend(run_diagnostic("HirDiagnostics", ctx, handlers::hir_diagnostics::check));
+
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list
 

@@ -8,6 +8,9 @@ pub use hir_def::{
     MethodData, MethodId, ModuleData, ModuleId, ParameterData, VariableData, VariableId,
 };
 
+// Re-export HIR body types for diagnostics
+pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
+
 use syntax::TextRange;
 use vfs::FileId;
 

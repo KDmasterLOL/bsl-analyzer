@@ -66,6 +66,7 @@ pub mod function_returns_same_primitive;
 pub mod function_should_have_return;
 pub mod get_form_method;
 pub mod global_context_method_collision8312;
+pub mod hir_diagnostics;
 pub mod identical_expressions;
 pub mod if_condition_complexity;
 pub mod if_else_duplicated_code_block;
