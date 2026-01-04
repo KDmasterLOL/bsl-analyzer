@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use base_db::{Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use dashmap::DashMap;
-use hir_def::{DefDatabase, InferenceResult, ItemTree, ModuleData, ModuleId, SymbolTree};
+use hir_def::{
+    DefDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleData, ModuleId, SymbolTree,
+};
 use rustc_hash::FxHasher;
 use vfs::FileId;
 
@@ -60,6 +62,7 @@ pub struct RootDatabaseImpl {
     module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
     symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
     infer_types_cache: Arc<DashMap<ModuleId, Arc<InferenceResult>, BuildHasherDefault<FxHasher>>>,
+    module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -78,6 +81,7 @@ impl RootDatabaseImpl {
             module_data_cache: Arc::new(DashMap::default()),
             symbol_tree_cache: Arc::new(DashMap::default()),
             infer_types_cache: Arc::new(DashMap::default()),
+            module_bodies_cache: Arc::new(DashMap::default()),
         }
     }
 
@@ -90,6 +94,7 @@ impl RootDatabaseImpl {
         self.module_data_cache.remove(&ModuleId::new(file_id));
         self.symbol_tree_cache.remove(&ModuleId::new(file_id));
         self.infer_types_cache.remove(&ModuleId::new(file_id));
+        self.module_bodies_cache.remove(&ModuleId::new(file_id));
     }
 }
 
@@ -216,6 +221,22 @@ impl DefDatabase for RootDatabaseImpl {
 
         // Cache the result
         self.infer_types_cache.insert(module_id, result.clone());
+        result
+    }
+
+    fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        // Check cache first
+        if let Some(cached) = self.module_bodies_cache.get(&module_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("module_bodies", ?module_id).entered();
+
+        // Lower all method bodies
+        let result = Arc::new(hir_def::lower_module_bodies(self, module_id));
+
+        // Cache the result
+        self.module_bodies_cache.insert(module_id, result.clone());
         result
     }
 }

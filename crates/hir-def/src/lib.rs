@@ -35,6 +35,8 @@ use vfs::FileId;
 
 pub use body::{lower_method, Body, BodyDiagnostic, BodySourceMap, LowerResult};
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
+
+// ModuleBodies is defined in this file, not in body module
 pub use item_tree::ItemTree;
 pub use name::Name;
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
@@ -78,6 +80,17 @@ pub trait DefDatabase: base_db::RootQueryDb {
     ///
     /// Future phases will add support for function calls, method calls, and variables.
     fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult>;
+
+    /// Get all method bodies for a module with their diagnostics.
+    ///
+    /// Returns lowered HIR bodies for all procedures and functions in the module.
+    /// Diagnostics are collected during lowering as a byproduct of semantic analysis.
+    ///
+    /// ## Performance
+    /// - Cached per module
+    /// - Invalidated when file content changes
+    /// - O(n) where n is number of statements in methods
+    fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
 }
 
 /// Module identifier.
@@ -175,5 +188,111 @@ pub struct VariableData {
     pub is_export: bool,
 }
 
-// TODO: Add more HIR structures
-// TODO: Add Salsa tracked queries in future iteration when we solve the FileId/ModuleId parameter issue
+/// All method bodies for a module with their diagnostics.
+///
+/// This structure contains the lowered HIR bodies for all procedures and functions
+/// in a module, along with diagnostics collected during lowering.
+#[derive(Debug)]
+pub struct ModuleBodies {
+    /// Bodies indexed by MethodId.local_id
+    bodies: rustc_hash::FxHashMap<u32, body::LowerResult>,
+    /// All diagnostics from all methods
+    all_diagnostics: Vec<(MethodId, BodyDiagnostic)>,
+}
+
+impl ModuleBodies {
+    /// Create empty ModuleBodies.
+    pub fn new() -> Self {
+        Self { bodies: rustc_hash::FxHashMap::default(), all_diagnostics: Vec::new() }
+    }
+
+    /// Get body for a method by its local_id.
+    pub fn body(&self, local_id: u32) -> Option<&Body> {
+        self.bodies.get(&local_id).map(|r| &r.body)
+    }
+
+    /// Get source map for a method by its local_id.
+    pub fn source_map(&self, local_id: u32) -> Option<&BodySourceMap> {
+        self.bodies.get(&local_id).map(|r| &r.source_map)
+    }
+
+    /// Get diagnostics for a method by its local_id.
+    pub fn diagnostics(&self, local_id: u32) -> Option<&[BodyDiagnostic]> {
+        self.bodies.get(&local_id).map(|r| r.diagnostics.as_slice())
+    }
+
+    /// Get all diagnostics from all methods.
+    pub fn all_diagnostics(&self) -> &[(MethodId, BodyDiagnostic)] {
+        &self.all_diagnostics
+    }
+
+    /// Get LowerResult for a method.
+    pub fn lower_result(&self, local_id: u32) -> Option<&body::LowerResult> {
+        self.bodies.get(&local_id)
+    }
+
+    /// Number of methods with bodies.
+    pub fn len(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// Check if empty.
+    pub fn is_empty(&self) -> bool {
+        self.bodies.is_empty()
+    }
+}
+
+impl Default for ModuleBodies {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Lower all method bodies in a module.
+///
+/// This function walks the AST and lowers each procedure/function body to HIR.
+pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
+    use syntax::SyntaxKind;
+
+    let parse = db.parse(module_id.file_id);
+    let root = parse.syntax_node();
+
+    let mut result = ModuleBodies::new();
+    let mut method_idx = 0u32;
+
+    for node in root.children() {
+        match node.kind() {
+            SyntaxKind::PROCEDURE_DEF => {
+                let lower_result = body::lower_method(&node, false);
+
+                // Collect diagnostics with MethodId
+                let method_id = MethodId { module: module_id, local_id: method_idx };
+                for diag in &lower_result.diagnostics {
+                    result.all_diagnostics.push((method_id, diag.clone()));
+                }
+
+                result.bodies.insert(method_idx, lower_result);
+                method_idx += 1;
+            }
+            SyntaxKind::FUNCTION_DEF => {
+                let lower_result = body::lower_method(&node, true);
+
+                // Collect diagnostics with MethodId
+                let method_id = MethodId { module: module_id, local_id: method_idx };
+                for diag in &lower_result.diagnostics {
+                    result.all_diagnostics.push((method_id, diag.clone()));
+                }
+
+                result.bodies.insert(method_idx, lower_result);
+                method_idx += 1;
+            }
+            SyntaxKind::VAR_DEF => {
+                // Module-level variables don't have bodies, but increment index
+                method_idx += 1;
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
