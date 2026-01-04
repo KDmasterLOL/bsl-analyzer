@@ -607,6 +607,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::cyclomatic_complexity::check,
     ));
     result.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
+    result.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
     result.extend(run_diagnostic(
         "MissedRequiredParameter",
         ctx,

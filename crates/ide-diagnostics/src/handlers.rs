@@ -98,4 +98,5 @@ pub mod multilingual_string_has_all_declared_languages;
 pub mod multilingual_string_using_with_template;
 pub mod nested_constructors_in_structure_declaration;
 pub mod nested_function_in_parameters;
+pub mod nested_statements;
 // TODO: Add all 181 handlers
