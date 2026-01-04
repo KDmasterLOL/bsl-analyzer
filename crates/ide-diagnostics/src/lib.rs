@@ -139,6 +139,7 @@ pub enum DiagnosticCode {
     ExecuteExternalCodeInCommonModule,
     MetadataObjectNameLength,
     MissingCommonModuleMethod,
+    MissingEventSubscriptionHandler,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -240,6 +241,7 @@ impl DiagnosticCode {
             Self::ExecuteExternalCodeInCommonModule => "ExecuteExternalCodeInCommonModule",
             Self::MetadataObjectNameLength => "MetadataObjectNameLength",
             Self::MissingCommonModuleMethod => "MissingCommonModuleMethod",
+            Self::MissingEventSubscriptionHandler => "MissingEventSubscriptionHandler",
             Self::ExportVariables => "ExportVariables",
             Self::FunctionOutParameter => "FunctionOutParameter",
             Self::FunctionNameStartsWithGet => "FunctionNameStartsWithGet",

@@ -4,6 +4,7 @@
 
 use crate::common_module::CommonModule;
 use crate::error::Result;
+use crate::event_subscription::EventSubscription;
 use crate::metadata_object::{MdoType, MetadataObject};
 use crate::register::Register;
 use crate::traits::{MdObject, Module};
@@ -37,6 +38,10 @@ pub struct Configuration {
     #[serde(rename = "registers", default)]
     registers: Vec<Register>,
 
+    /// Event subscriptions
+    #[serde(rename = "eventSubscriptions", default)]
+    event_subscriptions: Vec<EventSubscription>,
+
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
@@ -48,6 +53,10 @@ pub struct Configuration {
     /// Cache: Name -> Register index mapping (not serialized)
     #[serde(skip)]
     name_to_register: HashMap<String, usize>,
+
+    /// Cache: Name -> EventSubscription index mapping (not serialized)
+    #[serde(skip)]
+    name_to_event_subscription: HashMap<String, usize>,
 
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
@@ -66,6 +75,7 @@ impl PartialEq for Configuration {
             && self.common_modules == other.common_modules
             && self.metadata_objects == other.metadata_objects
             && self.registers == other.registers
+            && self.event_subscriptions == other.event_subscriptions
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -82,9 +92,11 @@ impl Configuration {
             common_modules: Vec::new(),
             metadata_objects: Vec::new(),
             registers: Vec::new(),
+            event_subscriptions: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
+            name_to_event_subscription: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
         }
@@ -111,6 +123,7 @@ impl Configuration {
         self.uri_to_module.clear();
         self.name_to_common_module.clear();
         self.name_to_register.clear();
+        self.name_to_event_subscription.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -121,6 +134,10 @@ impl Configuration {
 
         for (idx, register) in self.registers.iter().enumerate() {
             self.name_to_register.insert(register.name().to_lowercase(), idx);
+        }
+
+        for (idx, event_sub) in self.event_subscriptions.iter().enumerate() {
+            self.name_to_event_subscription.insert(event_sub.name().to_lowercase(), idx);
         }
     }
 
@@ -263,6 +280,30 @@ impl Configuration {
         let idx = self.registers.len();
         self.name_to_register.insert(register.name().to_lowercase(), idx);
         self.registers.push(register);
+    }
+
+    /// Get all event subscriptions
+    ///
+    /// Java equivalent: `getEventSubscriptions()`
+    pub fn event_subscriptions(&self) -> &[EventSubscription] {
+        &self.event_subscriptions
+    }
+
+    /// Find event subscription by name (case-insensitive)
+    ///
+    /// Java equivalent: `findEventSubscription(String)`
+    pub fn find_event_subscription(&self, name: &str) -> Option<&EventSubscription> {
+        let name_lower = name.to_lowercase();
+        self.name_to_event_subscription
+            .get(&name_lower)
+            .and_then(|&idx| self.event_subscriptions.get(idx))
+    }
+
+    /// Add event subscription
+    pub(crate) fn add_event_subscription(&mut self, subscription: EventSubscription) {
+        let idx = self.event_subscriptions.len();
+        self.name_to_event_subscription.insert(subscription.name().to_lowercase(), idx);
+        self.event_subscriptions.push(subscription);
     }
 }
 

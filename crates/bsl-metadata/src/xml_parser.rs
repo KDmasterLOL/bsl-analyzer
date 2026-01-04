@@ -6,6 +6,7 @@ use crate::common_module::CommonModule;
 use crate::dimension::Dimension;
 use crate::enums::ReturnValueReuse;
 use crate::error::Result;
+use crate::event_subscription::EventSubscription;
 use crate::metadata_object::MdoType;
 use crate::register::Register;
 use crate::traits::MdObject;
@@ -310,6 +311,127 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
     Ok(register)
 }
 
+/// Root XML structure for EventSubscription
+///
+/// Designer format structure:
+/// ```xml
+/// <MetaDataObject xmlns="...">
+///   <EventSubscription uuid="...">
+///     <Properties>
+///       <Name>...</Name>
+///       <Source><v8:Type>...</v8:Type></Source>  <!-- or v8:TypeSet -->
+///       <Event>OnWrite</Event>
+///       <Handler>CommonModule.Module.Method</Handler>
+///     </Properties>
+///   </EventSubscription>
+/// </MetaDataObject>
+/// ```
+#[derive(Debug, Deserialize)]
+struct EventSubscriptionRoot {
+    #[serde(rename = "EventSubscription")]
+    event_subscription: EventSubscriptionXml,
+}
+
+/// EventSubscription XML structure
+#[derive(Debug, Deserialize)]
+struct EventSubscriptionXml {
+    /// UUID attribute
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    /// Properties block
+    #[serde(rename = "Properties")]
+    properties: EventSubscriptionProperties,
+}
+
+/// EventSubscription Properties
+#[derive(Debug, Deserialize)]
+struct EventSubscriptionProperties {
+    /// Subscription name
+    #[serde(rename = "Name")]
+    name: String,
+
+    /// Comment (optional)
+    #[serde(rename = "Comment", default)]
+    comment: Option<String>,
+
+    /// Source - can contain either v8:Type or v8:TypeSet
+    #[serde(rename = "Source")]
+    source: EventSource,
+
+    /// Event type (e.g., "OnWrite", "BeforeWrite")
+    #[serde(rename = "Event")]
+    event: String,
+
+    /// Handler path (can be empty)
+    #[serde(rename = "Handler", default)]
+    handler: String,
+}
+
+///// Event source - handles both v8:Type and v8:TypeSet variants
+#[derive(Debug, Deserialize)]
+struct EventSource {
+    /// Type variant (can be either v8:Type or v8:TypeSet)
+    #[serde(rename = "Type", alias = "TypeSet", default)]
+    value: String,
+}
+
+impl EventSource {
+    fn as_string(&self) -> String {
+        self.value.clone()
+    }
+}
+
+/// Parse EventSubscription XML from Designer format
+///
+/// # Arguments
+///
+/// * `xml` - XML content as string
+///
+/// # Returns
+///
+/// Parsed `EventSubscription` structure
+///
+/// # Example
+///
+/// ```no_run
+/// # use bsl_metadata::xml_parser::parse_event_subscription_xml;
+/// let xml = std::fs::read_to_string("EventSubscriptions/MySubscription.xml")?;
+/// let subscription = parse_event_subscription_xml(&xml)?;
+/// # Ok::<(), bsl_metadata::MetadataError>(())
+/// ```
+pub fn parse_event_subscription_xml(xml: &str) -> Result<EventSubscription> {
+    let _span = tracing::debug_span!("parse_event_subscription_xml").entered();
+
+    // Parse XML
+    let root: EventSubscriptionRoot = quick_xml::de::from_str(xml)?;
+
+    // Extract UUID
+    let uuid =
+        root.event_subscription.uuid.parse::<Uuid>().map_err(|e| {
+            crate::error::MetadataError::InvalidFormat(format!("Invalid UUID: {}", e))
+        })?;
+
+    // Build EventSubscription using manual construction (no builder pattern needed)
+    let subscription = EventSubscription {
+        uuid,
+        name: root.event_subscription.properties.name,
+        comment: root.event_subscription.properties.comment,
+        source: root.event_subscription.properties.source.as_string(),
+        event: root.event_subscription.properties.event,
+        handler: root.event_subscription.properties.handler,
+    };
+
+    tracing::debug!(
+        subscription_name = %subscription.name(),
+        uuid = %subscription.uuid,
+        handler = %subscription.handler_string(),
+        "parsed event subscription"
+    );
+
+    Ok(subscription)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +680,92 @@ mod tests {
         let register = parse_calculation_register_xml(xml).unwrap();
         assert_eq!(register.name(), "ТестРегистр");
         assert_eq!(register.mdo_type(), MdoType::CalculationRegister);
+    }
+
+    #[test]
+    fn test_parse_event_subscription_xml_with_handler() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <EventSubscription uuid="e557865e-afb4-4f72-b89b-5e7cf98d2029">
+        <Properties>
+            <Name>ПриЗаписиСправочника</Name>
+            <Comment></Comment>
+            <Source>
+                <v8:Type>cfg:CatalogObject.Справочник1</v8:Type>
+            </Source>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийПодпискиНаСобытия.ПриЗаписиСправочника</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#;
+
+        let subscription = parse_event_subscription_xml(xml).unwrap();
+
+        assert_eq!(subscription.name(), "ПриЗаписиСправочника");
+        assert_eq!(subscription.uuid.to_string(), "e557865e-afb4-4f72-b89b-5e7cf98d2029");
+        assert_eq!(subscription.event(), "OnWrite");
+        assert_eq!(
+            subscription.handler_string(),
+            "CommonModule.ОбщийПодпискиНаСобытия.ПриЗаписиСправочника"
+        );
+
+        // Test handler parsing
+        let handler = subscription.parse_handler().unwrap();
+        assert_eq!(handler.module_name, "ОбщийПодпискиНаСобытия");
+        assert_eq!(handler.method_name, "ПриЗаписиСправочника");
+    }
+
+    #[test]
+    fn test_parse_event_subscription_xml_empty_handler() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <EventSubscription uuid="90047d26-54b2-4ea0-a566-a6adc71b4d15">
+        <Properties>
+            <Name>ПередЗаписьюКонстанты</Name>
+            <Comment></Comment>
+            <Source>
+                <v8:TypeSet>cfg:ConstantValueManager</v8:TypeSet>
+            </Source>
+            <Event>BeforeWrite</Event>
+            <Handler></Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#;
+
+        let subscription = parse_event_subscription_xml(xml).unwrap();
+
+        assert_eq!(subscription.name(), "ПередЗаписьюКонстанты");
+        assert_eq!(subscription.event(), "BeforeWrite");
+        assert_eq!(subscription.handler_string(), "");
+
+        // Empty handler should return None
+        assert!(subscription.parse_handler().is_none());
+    }
+
+    #[test]
+    fn test_parse_event_subscription_xml_malformed_handler() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <EventSubscription uuid="12345678-1234-1234-1234-123456789012">
+        <Properties>
+            <Name>TestSubscription</Name>
+            <Source>
+                <v8:Type>cfg:DocumentObject.Test</v8:Type>
+            </Source>
+            <Event>OnWrite</Event>
+            <Handler>CommonModule.ОбщийПодпискиНаСобытия</Handler>
+        </Properties>
+    </EventSubscription>
+</MetaDataObject>"#;
+
+        let subscription = parse_event_subscription_xml(xml).unwrap();
+
+        assert_eq!(subscription.name(), "TestSubscription");
+        assert_eq!(subscription.handler_string(), "CommonModule.ОбщийПодпискиНаСобытия");
+
+        // Malformed handler (missing method) should return Some with empty method_name
+        let handler = subscription.parse_handler().unwrap();
+        assert_eq!(handler.module_name, "ОбщийПодпискиНаСобытия");
+        assert_eq!(handler.method_name, "");
     }
 }

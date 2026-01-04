@@ -77,10 +77,14 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     load_accounting_registers(&path.join("AccountingRegisters"), &mut config)?;
     load_calculation_registers(&path.join("CalculationRegisters"), &mut config)?;
 
+    // Load EventSubscriptions
+    load_event_subscriptions(&path.join("EventSubscriptions"), &mut config)?;
+
     tracing::info!(
         common_modules = config.common_modules().len(),
         metadata_objects = config.metadata_objects().len(),
         registers = config.registers().len(),
+        event_subscriptions = config.event_subscriptions().len(),
         "configuration loaded"
     );
 
@@ -285,6 +289,42 @@ where
                     );
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load EventSubscriptions from directory
+///
+/// **CRITICAL:** EventSubscriptions have NO code files - only XML!
+///
+/// Designer format structure:
+/// - XML: `EventSubscriptions/<Name>.xml` (NO folders, NO code files)
+fn load_event_subscriptions(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_event_subscriptions", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process .xml files (EventSubscriptions have no code)
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
+            let xml = fs::read_to_string(&path)?;
+            let subscription = xml_parser::parse_event_subscription_xml(&xml)?;
+
+            tracing::debug!(
+                subscription = %subscription.name(),
+                handler = %subscription.handler_string(),
+                "loaded event subscription"
+            );
+
+            config.add_event_subscription(subscription);
         }
     }
 
