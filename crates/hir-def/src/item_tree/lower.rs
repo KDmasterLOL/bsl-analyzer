@@ -56,21 +56,22 @@ impl Ctx {
 
     /// Lower all top-level items in a file.
     fn lower_module_items(&mut self, file: &ast::SourceFile) {
-        // Walk through all children and extract top-level items
-        for child in file.syntax().children() {
-            match child.kind() {
+        // Walk through all descendants to find items inside preprocessor regions
+        // BSL allows procedures/functions inside #Область...#КонецОбласти regions
+        for node in file.syntax().descendants() {
+            match node.kind() {
                 SyntaxKind::PROCEDURE_DEF => {
-                    if let Some(proc) = ast::ProcedureDef::cast(child.clone()) {
+                    if let Some(proc) = ast::ProcedureDef::cast(node.clone()) {
                         self.lower_procedure(&proc);
                     }
                 }
                 SyntaxKind::FUNCTION_DEF => {
-                    if let Some(func) = ast::FunctionDef::cast(child.clone()) {
+                    if let Some(func) = ast::FunctionDef::cast(node.clone()) {
                         self.lower_function(&func);
                     }
                 }
                 SyntaxKind::VAR_DEF => {
-                    if let Some(var) = ast::VarDef::cast(child.clone()) {
+                    if let Some(var) = ast::VarDef::cast(node.clone()) {
                         self.lower_variable(&var);
                     }
                 }

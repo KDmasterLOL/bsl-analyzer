@@ -138,6 +138,7 @@ pub enum DiagnosticCode {
     DenyIncompleteValues,
     ExecuteExternalCodeInCommonModule,
     MetadataObjectNameLength,
+    MissingCommonModuleMethod,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
@@ -238,6 +239,7 @@ impl DiagnosticCode {
             Self::CommonModuleNameWords => "CommonModuleNameWords",
             Self::ExecuteExternalCodeInCommonModule => "ExecuteExternalCodeInCommonModule",
             Self::MetadataObjectNameLength => "MetadataObjectNameLength",
+            Self::MissingCommonModuleMethod => "MissingCommonModuleMethod",
             Self::ExportVariables => "ExportVariables",
             Self::FunctionOutParameter => "FunctionOutParameter",
             Self::FunctionNameStartsWithGet => "FunctionNameStartsWithGet",
@@ -661,6 +663,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MetadataObjectNameLength",
         ctx,
         handlers::metadata_object_name_length::check,
+    ));
+    result.extend(run_diagnostic(
+        "MissingCommonModuleMethod",
+        ctx,
+        handlers::missing_common_module_method::check,
     ));
 
     // SDBL diagnostics

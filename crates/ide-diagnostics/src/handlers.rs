@@ -87,4 +87,5 @@ pub mod metadata_object_name_length;
 pub mod method_size;
 pub mod missed_required_parameter;
 pub mod missing_code_try_catch_ex;
+pub mod missing_common_module_method;
 // TODO: Add all 181 handlers
