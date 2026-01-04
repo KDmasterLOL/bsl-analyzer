@@ -34,25 +34,7 @@
 //! - **Severity:** ERROR (MAJOR)
 //! - **Tags:** ERROR
 //! - **Minutes to fix:** 1
-//! - **No configurable parameters** (strict validator)
-//!
-//! ## Implementation Phases
-//!
-//! **Phase 1 (IMPLEMENTED):** Local method calls
-//! - Detects missing parameters for methods defined in the same module
-//! - Uses SymbolTree for O(1) method resolution
-//! - Coverage: 5/14 diagnostics from Java test (35%)
-//!
-//! **Phase 2 (IN PROGRESS):** CommonModule calls
-//! - Supports `CommonModule.Method()` calls with metadata
-//! - Uses Configuration metadata to resolve CommonModule names
-//! - **Limitation:** File resolution needs VFS integration (returns None for now)
-//! - **Workaround:** Tests can manually provide FileIds via extended context
-//!
-//! **Phase 3 (Future - Iteration 12+):** Object model calls
-//! - Will support `Object.Method()` with type inference
-//! - Requires type system beyond Unknown
-//! - Target coverage: 14/14 diagnostics (100%)
+//! - **No configurable parameters**
 //!
 //! ## Reference
 //! Ported from:
@@ -106,15 +88,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Load configuration metadata for Phase 2 (CommonModule calls)
-    // This is cached by Salsa, so subsequent calls are very fast (< 1ms)
-    // NOTE: Currently unused because Phase 2/3 is disabled for performance
-    let _configuration = load_configuration_if_available(ctx);
-
-    // Cache for CommonModule FileIds to avoid repeated VFS lookups
-    // Key: module name (lowercase), Value: FileId
-    // NOTE: Currently unused because Phase 2/3 is disabled for performance
-    let _common_module_file_cache: std::collections::HashMap<String, Option<FileId>> =
+    let configuration = load_configuration_if_available(ctx);
+    let mut common_module_file_cache: std::collections::HashMap<String, Option<FileId>> =
         std::collections::HashMap::new();
 
     // Find all method calls by looking for ARG_LIST nodes
@@ -130,11 +105,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         };
 
-        // Check if this is a qualified call (Object.Method or Module.Method)
         if is_qualified_call(&call_expr) {
-            // Phase 2 & 3: TEMPORARILY DISABLED for performance
-            // CommonModule.Method() validation is too slow due to SymbolTree lookups
-            // TODO: Re-enable when performance is optimized
+            if let Some(ref config) = configuration {
+                if let Some(diagnostic) = check_qualified_call_cached(
+                    ctx,
+                    &call_expr,
+                    config,
+                    &mut common_module_file_cache,
+                ) {
+                    diagnostics.push(diagnostic);
+                }
+            }
             continue;
         }
 
@@ -176,16 +157,6 @@ fn load_configuration_if_available(
     ctx.load_configuration()
 }
 
-// ==================== PHASE 2/3 FUNCTIONS ====================
-// These functions implement CommonModule.Method() and ThisObject validation.
-// Currently disabled in check() for performance reasons.
-// TODO: Re-enable when SymbolTree lookups are optimized.
-
-/// Check a qualified method call with caching for CommonModule file lookups.
-///
-/// This version uses a cache to avoid repeated VFS lookups for the same CommonModule,
-/// significantly improving performance when a file has many calls to the same module.
-#[allow(dead_code)]
 fn check_qualified_call_cached(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -219,8 +190,6 @@ fn check_qualified_call_cached(
     }
 }
 
-/// Phase 2: Check CommonModule.Method() call with cached file lookup
-#[allow(dead_code)]
 fn check_common_module_call_cached(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -329,8 +298,6 @@ fn check_object_method_call(
     }
 }
 
-/// Phase 3: Check ЭтотОбъект.Method() call for missing required parameters
-#[allow(dead_code)]
 fn check_this_object_call(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -367,9 +334,6 @@ fn check_this_object_call(
 /// 2. Build absolute path: workspace_root + URI
 /// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
 ///
-/// ## Performance
-/// - O(1) HashMap lookup in FileSet
-#[allow(dead_code)]
 fn find_common_module_file(
     ctx: &DiagnosticsContext,
     common_module: &bsl_metadata::CommonModule,
@@ -583,9 +547,7 @@ fn is_qualified_call(call_node: &SyntaxNode) -> bool {
     call_node.children_with_tokens().any(|child| child.kind() == SyntaxKind::DOT)
 }
 
-/// Qualified call variants (2-level, 3-level, or ThisObject)
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 enum QualifiedCall {
     /// Two-level call: `CommonModule.Method()`
     TwoLevel { object_name: String, method_name: String },
@@ -602,8 +564,6 @@ enum QualifiedCall {
 /// - **Three-level:** `Документы.ПКО.Method()` → `ThreeLevel { "Документы", "ПКО", "Method" }`
 /// - **ThisObject:** `ЭтотОбъект.Method()` → `ThisObject { "Method" }`
 ///
-/// Returns `None` if not a valid qualified call.
-#[allow(dead_code)]
 fn extract_qualified_call(call_node: &SyntaxNode) -> Option<QualifiedCall> {
     // Collect all IDENT tokens (from all descendants) but stop at ARG_LIST
     let mut idents: Vec<String> = Vec::new();
@@ -1016,7 +976,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_phase2_common_module_with_metadata() {
         use ide_db::base_db::{SourceRoot, SourceRootId};
         use std::path::Path;
@@ -1123,7 +1082,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_full_java_compatibility() {
         // Comprehensive integration test using the full Java test fixture
         // Tests both Phase 1 (local methods) and Phase 2 (CommonModule calls)
@@ -1250,7 +1208,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_diagnostic_positions_java_compatibility() {
         // Test exact diagnostic positions match Java implementation
         // This ensures our ranges are compatible with bsl-language-server
