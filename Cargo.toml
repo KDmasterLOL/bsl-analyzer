@@ -36,6 +36,7 @@ stdx = { path = "crates/stdx" }
 profile = { path = "crates/profile" }
 test-fixture = { path = "crates/test-fixture" }
 test-utils = { path = "crates/test-utils" }
+line-index = { path = "crates/line-index" }
 
 # Salsa for incremental computation
 salsa = { version = "0.25.2", features = ["rayon", "macros"] }

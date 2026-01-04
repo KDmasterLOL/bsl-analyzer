@@ -39,6 +39,7 @@
 //! We detect method calls by finding ARG_LIST nodes and analyzing their context.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use line_index::{LineIndex, TextSize};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 const DEFAULT_ALLOW_ONELINER: bool = true;
@@ -109,13 +110,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let file_text_input = ctx.db.file_text_input(ctx.file_id);
     let file_text = file_text_input.text(ctx.db);
 
+    // Build line index once - O(n)
+    let line_index = LineIndex::new(file_text.as_ref());
+
     let mut diagnostics = Vec::new();
 
     // Find all calls by looking for ARG_LIST nodes
     for node in root.descendants() {
         if node.kind() == SyntaxKind::ARG_LIST {
             if let Some(call_info) = analyze_call_context(&node) {
-                if let Some(diagnostic) = check_call(&call_info, &config, file_text.as_ref()) {
+                if let Some(diagnostic) = check_call(&call_info, &config, &line_index) {
                     diagnostics.push(diagnostic);
                 }
             }
@@ -260,10 +264,10 @@ fn find_call_start(parent: &SyntaxNode, arg_list: &SyntaxNode) -> u32 {
     parent.text_range().start().into()
 }
 
-fn check_call(call_info: &CallInfo, config: &Config, file_text: &str) -> Option<Diagnostic> {
+fn check_call(call_info: &CallInfo, config: &Config, line_index: &LineIndex) -> Option<Diagnostic> {
     // Check if entire call is on one line (only skip if allowOneliner is true)
-    let start_line = get_line_number(file_text, call_info.call_range_start as usize);
-    let end_line = get_line_number(file_text, call_info.call_range_end as usize);
+    let start_line = line_index.line_col(TextSize::from(call_info.call_range_start)).line;
+    let end_line = line_index.line_col(TextSize::from(call_info.call_range_end)).line;
 
     if config.allow_oneliner && start_line == end_line {
         return None;
@@ -276,7 +280,7 @@ fn check_call(call_info: &CallInfo, config: &Config, file_text: &str) -> Option<
 
     // Check multiline param condition (only applies when allowOneliner is true)
     // If allowOneliner and no param spans multiple lines, skip
-    if config.allow_oneliner && !has_multiline_param(&call_info.arg_list, file_text) {
+    if config.allow_oneliner && !has_multiline_param(&call_info.arg_list, line_index) {
         return None;
     }
 
@@ -311,15 +315,15 @@ fn is_empty_arg_list(arg_list: &SyntaxNode) -> bool {
     !arg_list.children().any(|c| c.kind() == SyntaxKind::EXPR)
 }
 
-fn has_multiline_param(arg_list: &SyntaxNode, file_text: &str) -> bool {
+fn has_multiline_param(arg_list: &SyntaxNode, line_index: &LineIndex) -> bool {
     for child in arg_list.children() {
         if child.kind() == SyntaxKind::EXPR {
             // Get the actual content range excluding trailing trivia (newlines, whitespace)
             let start = child.text_range().start();
             let end = get_content_end(&child);
 
-            let start_line = get_line_number(file_text, start.into());
-            let end_line = get_line_number(file_text, end as usize);
+            let start_line = line_index.line_col(start).line;
+            let end_line = line_index.line_col(TextSize::from(end)).line;
             if end_line > start_line {
                 return true;
             }
@@ -565,23 +569,6 @@ fn expr_contains_dot(expr: &SyntaxNode) -> bool {
         }
     }
     false
-}
-
-fn get_line_number(text: &str, byte_offset: usize) -> u32 {
-    let mut line = 0u32;
-    let mut pos = 0usize;
-
-    for ch in text.chars() {
-        if pos >= byte_offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-        }
-        pos += ch.len_utf8();
-    }
-
-    line
 }
 
 #[cfg(test)]

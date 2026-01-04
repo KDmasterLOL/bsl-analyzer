@@ -33,6 +33,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
+use line_index::LineIndex;
 use regex::RegexBuilder;
 use std::collections::{HashMap, HashSet};
 use syntax::{SyntaxKind, TextSize};
@@ -73,6 +74,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 struct IncorrectLineBreakChecker<'a> {
     text: &'a str,
+    line_index: LineIndex,
     check_first_symbol: bool,
     list_of_incorrect_first_symbol: String,
     check_last_symbol: bool,
@@ -89,8 +91,11 @@ impl<'a> IncorrectLineBreakChecker<'a> {
         check_last_symbol: bool,
         list_of_incorrect_last_symbol: &str,
     ) -> Self {
+        // Build line index once - O(n)
+        let line_index = LineIndex::new(text);
         Self {
             text,
+            line_index,
             check_first_symbol,
             list_of_incorrect_first_symbol: list_of_incorrect_first_symbol.to_string(),
             check_last_symbol,
@@ -107,12 +112,13 @@ impl<'a> IncorrectLineBreakChecker<'a> {
         for token in root.descendants_with_tokens() {
             if let Some(token) = token.as_token() {
                 if token.kind() == SyntaxKind::COMMENT {
-                    // Get line and column for this comment
+                    // Get line and column for this comment using LineIndex - O(log n)
                     let range = token.text_range();
-                    let (line, _byte_col) = self.get_line_col(range.start());
+                    let line_col = self.line_index.line_col(range.start());
+                    let line = line_col.line as usize;
 
                     // Calculate character column by counting characters from line start
-                    let line_start_byte = self.get_line_start_byte(line);
+                    let line_start_byte: usize = self.line_index.line_start(line_col.line).into();
                     let comment_byte_offset: usize = range.start().into();
                     let relative_byte_offset = comment_byte_offset - line_start_byte;
 
@@ -127,61 +133,17 @@ impl<'a> IncorrectLineBreakChecker<'a> {
         }
     }
 
-    fn get_line_start_byte(&self, line: usize) -> usize {
-        let mut current_line = 0;
-        let mut byte_pos = 0;
-
-        for c in self.text.chars() {
-            if current_line == line {
-                return byte_pos;
-            }
-            if c == '\n' {
-                current_line += 1;
-                byte_pos += 1;
-            } else {
-                byte_pos += c.len_utf8();
-            }
-        }
-
-        byte_pos
-    }
-
     fn find_query_first_lines(&mut self, root: &syntax::SyntaxNode) {
         // Find all SDBL query nodes
         for node in root.descendants() {
             // Check for SDBL_QUERY_PACKAGE or SDBL_QUERY nodes
             if matches!(node.kind(), SyntaxKind::SDBL_QUERY_PACKAGE | SyntaxKind::SDBL_QUERY) {
-                // Get the first line of query
+                // Get the first line of query using LineIndex - O(log n)
                 let range = node.text_range();
-                let (line, _) = self.get_line_col(range.start());
+                let line = self.line_index.line_col(range.start()).line as usize;
                 self.query_first_lines.insert(line);
             }
         }
-    }
-
-    fn get_line_col(&self, offset: TextSize) -> (usize, usize) {
-        let byte_offset: usize = offset.into();
-        let mut line = 0;
-        let mut col = 0;
-        let mut byte_pos = 0;
-
-        for c in self.text.chars() {
-            // Check if we've reached the target byte offset
-            if byte_pos >= byte_offset {
-                break;
-            }
-
-            if c == '\n' {
-                line += 1;
-                col = 0;
-                byte_pos += 1; // newline is 1 byte
-            } else {
-                col += 1;
-                byte_pos += c.len_utf8(); // increment by UTF-8 byte length
-            }
-        }
-
-        (line, col)
     }
 
     fn check(&self) -> Vec<Diagnostic> {

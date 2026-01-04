@@ -25,7 +25,8 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
-use std::collections::HashMap;
+use line_index::{LineIndex, TextSize};
+use std::collections::HashSet;
 use syntax::{ast::AstNode, SyntaxKind, SyntaxNode};
 
 const DEFAULT_MAX_LINE_LENGTH: usize = 120;
@@ -70,280 +71,17 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Information about a line for length checking.
+#[derive(Debug, Clone, Default)]
 struct LineInfo {
-    max_char_position: usize,
+    /// Maximum character position (end column) of code on this line.
+    max_code_char_pos: usize,
+    /// Maximum character position including comments.
+    max_char_pos: usize,
+    /// Whether this line has any code (non-comment, non-whitespace).
     has_code: bool,
-}
-
-impl LineInfo {
-    fn new() -> Self {
-        Self { max_char_position: 0, has_code: false }
-    }
-}
-
-/// Calculate the line number and character end position for a token.
-/// Returns (line_number, char_position_at_end).
-/// Line numbers are 0-based, character positions count characters not bytes.
-fn calculate_token_end_position(file_text: &str, token_range: TextRange) -> (u32, usize) {
-    let start_byte: usize = token_range.start().into();
-    let end_byte: usize = token_range.end().into();
-
-    let mut line = 0u32;
-    let mut col_start_byte = 0usize;
-    let mut byte_pos = 0usize;
-    let mut token_line = 0u32;
-    let mut token_start_col = 0usize;
-
-    for ch in file_text.chars() {
-        if byte_pos == start_byte {
-            token_line = line;
-            token_start_col = file_text[col_start_byte..start_byte].chars().count();
-            break;
-        }
-
-        if ch == '\n' {
-            line += 1;
-            col_start_byte = byte_pos + 1;
-        }
-
-        byte_pos += ch.len_utf8();
-    }
-
-    let token_text = &file_text[start_byte..end_byte];
-    let token_char_len = token_text.chars().count();
-    let char_end_pos = token_start_col + token_char_len;
-
-    (token_line, char_end_pos)
-}
-
-/// Process code tokens and update line map.
-fn process_code_tokens(root: &SyntaxNode, file_text: &str, line_map: &mut HashMap<u32, LineInfo>) {
-    let mut prev_token_kind: Option<SyntaxKind> = None;
-
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            let kind = token.kind();
-
-            if kind == SyntaxKind::WHITESPACE || kind == SyntaxKind::NEWLINE {
-                continue;
-            }
-
-            if kind == SyntaxKind::COMMENT {
-                continue;
-            }
-
-            if matches!(kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
-                prev_token_kind = Some(kind);
-                continue;
-            }
-
-            if kind == SyntaxKind::SEMICOLON {
-                if let Some(prev) = prev_token_kind {
-                    if matches!(prev, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
-                        prev_token_kind = Some(kind);
-                        continue;
-                    }
-                }
-            }
-
-            let range = token.text_range();
-            let (line, char_pos_end) = calculate_token_end_position(file_text, range);
-
-            let line_info = line_map.entry(line).or_insert_with(LineInfo::new);
-            line_info.max_char_position = line_info.max_char_position.max(char_pos_end);
-            line_info.has_code = true;
-
-            prev_token_kind = Some(kind);
-        }
-    }
-}
-
-/// Find method description comment ranges.
-/// Returns a vector of TextRanges covering method description comments.
-/// Only includes comments that are immediately before a method (no blank lines).
-fn find_method_description_ranges(root: &SyntaxNode) -> Vec<TextRange> {
-    use syntax::ast::{FunctionDef, ProcedureDef};
-
-    let mut all_method_desc_ranges = Vec::new();
-
-    let mut all_comments: Vec<TextRange> = Vec::new();
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if token.kind() == SyntaxKind::COMMENT {
-                all_comments.push(token.text_range());
-            }
-        }
-    }
-
-    for node in root.descendants() {
-        let method_start = ProcedureDef::cast(node.clone())
-            .map(|proc| proc.syntax().text_range().start())
-            .or_else(|| {
-                FunctionDef::cast(node.clone()).map(|func| func.syntax().text_range().start())
-            });
-
-        if let Some(method_start_pos) = method_start {
-            let mut method_desc_comments = Vec::new();
-
-            for &comment_range in &all_comments {
-                if comment_range.end() <= method_start_pos {
-                    method_desc_comments.push(comment_range);
-                }
-            }
-
-            method_desc_comments.sort_by_key(|r| r.start());
-
-            // Java uses MethodSymbol.getDescription() to properly parse method descriptions.
-            // We use a simpler heuristic: take contiguous comment block before method.
-            if !method_desc_comments.is_empty() {
-                let mut desc_block = vec![*method_desc_comments.last().unwrap()];
-
-                for i in (0..method_desc_comments.len() - 1).rev() {
-                    let curr = method_desc_comments[i];
-                    let next = method_desc_comments[i + 1];
-
-                    let gap = usize::from(next.start()) - usize::from(curr.end());
-                    if gap < 100 {
-                        desc_block.push(curr);
-                    } else {
-                        break;
-                    }
-                }
-
-                if let (Some(&first), Some(&last)) = (desc_block.last(), desc_block.first()) {
-                    let desc_range = TextRange::new(first.start(), last.end());
-                    all_method_desc_ranges.push(desc_range);
-                }
-            }
-        }
-    }
-
-    all_method_desc_ranges
-}
-
-/// Process comment tokens and update line map.
-fn process_comments(
-    root: &SyntaxNode,
-    file_text: &str,
-    line_map: &mut HashMap<u32, LineInfo>,
-    method_desc_ranges: &[TextRange],
-    config: &Config,
-) {
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if token.kind() != SyntaxKind::COMMENT {
-                continue;
-            }
-
-            let token_range = token.text_range();
-
-            if !config.check_method_description {
-                let is_method_desc = method_desc_ranges.iter().any(|desc_range| {
-                    token_range.start() >= desc_range.start()
-                        && token_range.end() <= desc_range.end()
-                });
-                if is_method_desc {
-                    continue;
-                }
-            }
-
-            if config.exclude_trailing_comments {
-                let (line, _) = calculate_token_end_position(file_text, token_range);
-                if let Some(line_info) = line_map.get(&line) {
-                    if line_info.has_code {
-                        continue;
-                    }
-                }
-            }
-
-            let (line, char_pos_end) = calculate_token_end_position(file_text, token_range);
-
-            let line_info = line_map.entry(line).or_insert_with(LineInfo::new);
-            line_info.max_char_position = line_info.max_char_position.max(char_pos_end);
-        }
-    }
-}
-
-/// Convert line/column character positions to byte range.
-fn line_char_range_to_byte_range(
-    file_text: &str,
-    line: u32,
-    start_char: usize,
-    end_char: usize,
-) -> TextRange {
-    let mut current_line = 0u32;
-    let mut current_char = 0usize;
-    let mut byte_pos = 0usize;
-    let mut start_byte = None;
-    let mut end_byte = None;
-
-    for ch in file_text.chars() {
-        if current_line == line {
-            if current_char == start_char && start_byte.is_none() {
-                start_byte = Some(byte_pos);
-            }
-            if current_char == end_char {
-                end_byte = Some(byte_pos);
-                break;
-            }
-        }
-
-        if ch == '\n' {
-            // If we're on the target line and reach newline, end is at newline
-            if current_line == line && start_byte.is_some() && end_byte.is_none() {
-                end_byte = Some(byte_pos);
-                break;
-            }
-            current_line += 1;
-            current_char = 0;
-            byte_pos += 1;
-        } else {
-            current_char += 1;
-            byte_pos += ch.len_utf8();
-        }
-    }
-
-    let start = start_byte.unwrap_or(0) as u32;
-    let end = end_byte.unwrap_or(byte_pos) as u32;
-
-    TextRange::new(start.into(), end.into())
-}
-
-/// Generate diagnostics for lines exceeding max length.
-fn generate_diagnostics(
-    line_map: HashMap<u32, LineInfo>,
-    max_line_length: usize,
-    file_text: &str,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    for (line_number, line_info) in line_map {
-        if line_info.max_char_position > max_line_length {
-            let range = line_char_range_to_byte_range(
-                file_text,
-                line_number,
-                0,
-                line_info.max_char_position,
-            );
-
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::LineLength,
-                message: format!(
-                    "Длина строки {} превышает максимальную {}",
-                    line_info.max_char_position, max_line_length
-                ),
-                severity: Severity::Warning,
-                range,
-                tags: vec![],
-                fixes: vec![],
-            });
-        }
-    }
-
-    diagnostics.sort_by_key(|d| d.range.start());
-
-    diagnostics
+    /// Whether this line is part of a multiline string.
+    is_multiline_string: bool,
 }
 
 /// Main entry point for LineLength diagnostic.
@@ -361,21 +99,277 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let file_text_input = ctx.db.file_text_input(ctx.file_id);
     let file_text = file_text_input.text(ctx.db);
+    let file_text = file_text.as_ref();
 
-    let mut line_map: HashMap<u32, LineInfo> = HashMap::new();
-    process_code_tokens(&root, file_text.as_ref(), &mut line_map);
+    // Build line index once - O(n)
+    let line_index = LineIndex::new(file_text);
+    let num_lines = line_index.len_lines();
 
-    let method_desc_ranges = if !config.check_method_description {
-        find_method_description_ranges(&root)
+    // Pre-allocate line info for all lines
+    let mut line_infos: Vec<LineInfo> = vec![LineInfo::default(); num_lines as usize];
+
+    // Find lines that are part of multiline strings (to exclude from checking)
+    mark_multiline_string_lines(&root, &line_index, &mut line_infos);
+
+    // Process code tokens to find max code positions per line
+    process_code_tokens(&root, file_text, &line_index, &mut line_infos);
+
+    // Find method description comment lines (if needed)
+    let method_desc_lines = if !config.check_method_description {
+        find_method_description_lines(&root, &line_index)
     } else {
-        Vec::new()
+        HashSet::new()
     };
 
-    process_comments(&root, file_text.as_ref(), &mut line_map, &method_desc_ranges, &config);
+    // Process comments
+    process_comments(&root, file_text, &line_index, &mut line_infos, &method_desc_lines, &config);
 
-    let diagnostics = generate_diagnostics(line_map, config.max_line_length, file_text.as_ref());
+    // Generate diagnostics
+    let diagnostics =
+        generate_diagnostics(&line_infos, &line_index, file_text, config.max_line_length);
 
     tracing::debug!(count = diagnostics.len(), "LineLength diagnostics found");
+
+    diagnostics
+}
+
+/// Mark lines that are part of multiline strings.
+fn mark_multiline_string_lines(
+    root: &SyntaxNode,
+    line_index: &LineIndex,
+    line_infos: &mut [LineInfo],
+) {
+    for element in root.descendants_with_tokens() {
+        if let Some(token) = element.into_token() {
+            if matches!(token.kind(), SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
+                let range = token.text_range();
+                let start_line = line_index.line_col(range.start()).line;
+                let end_line = line_index.line_col(range.end()).line;
+
+                for line in start_line..=end_line {
+                    if let Some(info) = line_infos.get_mut(line as usize) {
+                        info.is_multiline_string = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Process code tokens and update line info.
+fn process_code_tokens(
+    root: &SyntaxNode,
+    file_text: &str,
+    line_index: &LineIndex,
+    line_infos: &mut [LineInfo],
+) {
+    let mut prev_token_kind: Option<SyntaxKind> = None;
+
+    for element in root.descendants_with_tokens() {
+        if let Some(token) = element.into_token() {
+            let kind = token.kind();
+
+            // Skip whitespace and newlines
+            if kind == SyntaxKind::WHITESPACE || kind == SyntaxKind::NEWLINE {
+                continue;
+            }
+
+            // Skip comments (handled separately)
+            if kind == SyntaxKind::COMMENT {
+                continue;
+            }
+
+            // Skip multiline string parts
+            if matches!(kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
+                prev_token_kind = Some(kind);
+                continue;
+            }
+
+            // Skip semicolon after multiline string
+            if kind == SyntaxKind::SEMICOLON {
+                if let Some(prev) = prev_token_kind {
+                    if matches!(prev, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
+                        prev_token_kind = Some(kind);
+                        continue;
+                    }
+                }
+            }
+
+            let range = token.text_range();
+            let end_pos = line_index.line_col(range.end());
+            let line = end_pos.line as usize;
+
+            if let Some(info) = line_infos.get_mut(line) {
+                // Calculate character position (not byte position)
+                let line_start = line_index.line_start(end_pos.line);
+                let byte_col = u32::from(range.end()) - u32::from(line_start);
+                let line_text_start: usize = line_start.into();
+                let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
+                let char_col = file_text[line_text_start..line_text_end].chars().count();
+
+                info.max_code_char_pos = info.max_code_char_pos.max(char_col);
+                info.max_char_pos = info.max_char_pos.max(char_col);
+                info.has_code = true;
+            }
+
+            prev_token_kind = Some(kind);
+        }
+    }
+}
+
+/// Find lines that contain method description comments.
+fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> HashSet<u32> {
+    use syntax::ast::{FunctionDef, ProcedureDef};
+
+    let mut method_desc_lines = HashSet::new();
+
+    // Collect all comments with their line numbers
+    let mut comments: Vec<(u32, TextRange)> = Vec::new();
+    for element in root.descendants_with_tokens() {
+        if let Some(token) = element.into_token() {
+            if token.kind() == SyntaxKind::COMMENT {
+                let range = token.text_range();
+                let line = line_index.line_col(range.start()).line;
+                comments.push((line, range));
+            }
+        }
+    }
+
+    comments.sort_by_key(|(line, _)| *line);
+
+    // Find method start lines
+    for node in root.descendants() {
+        let method_start = ProcedureDef::cast(node.clone())
+            .map(|proc| proc.syntax().text_range().start())
+            .or_else(|| {
+                FunctionDef::cast(node.clone()).map(|func| func.syntax().text_range().start())
+            });
+
+        if let Some(method_start_pos) = method_start {
+            let method_line = line_index.line_col(method_start_pos).line;
+
+            // Find contiguous comment block immediately before method
+            let mut desc_lines = Vec::new();
+            for &(comment_line, _) in comments.iter().rev() {
+                if comment_line >= method_line {
+                    continue;
+                }
+                if desc_lines.is_empty() || desc_lines.last() == Some(&(comment_line + 1)) {
+                    desc_lines.push(comment_line);
+                } else {
+                    break;
+                }
+            }
+
+            for line in desc_lines {
+                method_desc_lines.insert(line);
+            }
+        }
+    }
+
+    method_desc_lines
+}
+
+/// Process comment tokens and update line info.
+fn process_comments(
+    root: &SyntaxNode,
+    file_text: &str,
+    line_index: &LineIndex,
+    line_infos: &mut [LineInfo],
+    method_desc_lines: &HashSet<u32>,
+    config: &Config,
+) {
+    for element in root.descendants_with_tokens() {
+        if let Some(token) = element.into_token() {
+            if token.kind() != SyntaxKind::COMMENT {
+                continue;
+            }
+
+            let range = token.text_range();
+            let start_pos = line_index.line_col(range.start());
+            let line = start_pos.line as usize;
+
+            // Skip method description comments if configured
+            if !config.check_method_description && method_desc_lines.contains(&(line as u32)) {
+                continue;
+            }
+
+            // Skip trailing comments if configured
+            if config.exclude_trailing_comments {
+                if let Some(info) = line_infos.get(line) {
+                    if info.has_code {
+                        continue;
+                    }
+                }
+            }
+
+            // Calculate character position at end of comment
+            let end_pos = line_index.line_col(range.end());
+            let end_line = end_pos.line as usize;
+
+            if let Some(info) = line_infos.get_mut(end_line) {
+                let line_start = line_index.line_start(end_pos.line);
+                let byte_col = u32::from(range.end()) - u32::from(line_start);
+                let line_text_start: usize = line_start.into();
+                let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
+                let char_col = file_text[line_text_start..line_text_end].chars().count();
+
+                info.max_char_pos = info.max_char_pos.max(char_col);
+            }
+        }
+    }
+}
+
+/// Generate diagnostics for lines exceeding max length.
+fn generate_diagnostics(
+    line_infos: &[LineInfo],
+    line_index: &LineIndex,
+    file_text: &str,
+    max_line_length: usize,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for (line_num, info) in line_infos.iter().enumerate() {
+        // Skip multiline string lines
+        if info.is_multiline_string {
+            continue;
+        }
+
+        if info.max_char_pos > max_line_length {
+            let line = line_num as u32;
+            let line_start = line_index.line_start(line);
+
+            // Calculate byte position for max_char_pos
+            let line_text_start: usize = line_start.into();
+            let line_range = line_index.line_range(line);
+            let line_text_end: usize =
+                line_range.map(|r| r.end().into()).unwrap_or(file_text.len());
+            let line_text = &file_text[line_text_start..line_text_end.min(file_text.len())];
+
+            // Find byte offset for max_char_pos characters
+            let mut byte_offset = 0usize;
+            for (i, ch) in line_text.chars().enumerate() {
+                if i >= info.max_char_pos {
+                    break;
+                }
+                byte_offset += ch.len_utf8();
+            }
+
+            let range = TextRange::new(line_start, line_start + TextSize::from(byte_offset as u32));
+
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::LineLength,
+                message: format!(
+                    "Длина строки {} превышает максимальную {}",
+                    info.max_char_pos, max_line_length
+                ),
+                severity: Severity::Warning,
+                range,
+                tags: vec![],
+                fixes: vec![],
+            });
+        }
+    }
 
     diagnostics
 }

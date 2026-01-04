@@ -726,6 +726,7 @@ dependencies = [
  "hir",
  "ide-db",
  "itertools 0.12.1",
+ "line-index",
  "once_cell",
  "parser",
  "regex",
@@ -886,6 +887,13 @@ name = "libc"
 version = "0.2.178"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
+
+[[package]]
+name = "line-index"
+version = "0.1.0"
+dependencies = [
+ "text-size",
+]
 
 [[package]]
 name = "litemap"
