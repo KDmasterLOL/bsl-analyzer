@@ -95,6 +95,7 @@ pub enum DiagnosticCode {
     MethodSize,
     IfConditionComplexity,
     MissingCodeTryCatchEx,
+    MissingTempStorageDeletion,
     MissingTemporaryFileDeletion,
     UsingGoto,
     BeginTransactionBeforeTryCatch,
@@ -253,6 +254,7 @@ impl DiagnosticCode {
             Self::MethodSize => "MethodSize",
             Self::MissedRequiredParameter => "MissedRequiredParameter",
             Self::MissingCodeTryCatchEx => "MissingCodeTryCatchEx",
+            Self::MissingTempStorageDeletion => "MissingTempStorageDeletion",
             Self::MissingTemporaryFileDeletion => "MissingTemporaryFileDeletion",
             Self::MissingParameterDescription => "MissingParameterDescription",
             Self::MissingReturnedValueDescription => "MissingReturnedValueDescription",
@@ -580,6 +582,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MissingCodeTryCatchEx",
         ctx,
         handlers::missing_code_try_catch_ex::check,
+    ));
+    result.extend(run_diagnostic(
+        "MissingTempStorageDeletion",
+        ctx,
+        handlers::missing_temp_storage_deletion::check,
     ));
     result.extend(run_diagnostic(
         "MissingTemporaryFileDeletion",
