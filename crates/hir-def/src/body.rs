@@ -204,6 +204,9 @@ pub struct LowerResult {
     pub source_map: BodySourceMap,
     /// Diagnostics collected during lowering.
     pub diagnostics: Vec<BodyDiagnostic>,
+    /// Variables referenced but not locally declared (potential module-level variables).
+    /// Lowercase names for case-insensitive comparison.
+    pub referenced_externals: rustc_hash::FxHashSet<String>,
 }
 
 /// Diagnostic collected during body lowering.
@@ -258,6 +261,13 @@ impl BodyDiagnostic {
 /// This is the main entry point for body lowering.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
     lower::lower_method(method_node, is_function)
+}
+
+/// Lower module-level code (statements outside procedures/functions).
+///
+/// This handles initialization code that runs when the module is loaded.
+pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
+    lower::lower_module_code(root)
 }
 
 #[cfg(test)]

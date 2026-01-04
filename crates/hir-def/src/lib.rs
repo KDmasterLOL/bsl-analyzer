@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use vfs::FileId;
 
-pub use body::{lower_method, Body, BodyDiagnostic, BodySourceMap, LowerResult};
+pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, LowerResult};
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies is defined in this file, not in body module
@@ -188,6 +188,17 @@ pub struct VariableData {
     pub is_export: bool,
 }
 
+/// Module-level variable declaration for tracking usage.
+#[derive(Debug, Clone)]
+pub struct ModuleVarDecl {
+    /// Variable name (original case).
+    pub name: String,
+    /// Source range of the declaration.
+    pub range: text_size::TextRange,
+    /// Whether the variable is exported.
+    pub is_export: bool,
+}
+
 /// All method bodies for a module with their diagnostics.
 ///
 /// This structure contains the lowered HIR bodies for all procedures and functions
@@ -198,12 +209,21 @@ pub struct ModuleBodies {
     bodies: rustc_hash::FxHashMap<u32, body::LowerResult>,
     /// All diagnostics from all methods
     all_diagnostics: Vec<(MethodId, BodyDiagnostic)>,
+    /// Module-level variable declarations
+    module_vars: Vec<ModuleVarDecl>,
+    /// Module-level code body (statements outside procedures)
+    module_code: Option<body::LowerResult>,
 }
 
 impl ModuleBodies {
     /// Create empty ModuleBodies.
     pub fn new() -> Self {
-        Self { bodies: rustc_hash::FxHashMap::default(), all_diagnostics: Vec::new() }
+        Self {
+            bodies: rustc_hash::FxHashMap::default(),
+            all_diagnostics: Vec::new(),
+            module_vars: Vec::new(),
+            module_code: None,
+        }
     }
 
     /// Get body for a method by its local_id.
@@ -251,7 +271,9 @@ impl Default for ModuleBodies {
 /// Lower all method bodies in a module.
 ///
 /// This function walks the AST and lowers each procedure/function body to HIR.
+/// Also tracks module-level variables and emits diagnostics for unused ones.
 pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
+    use rustc_hash::FxHashSet;
     use syntax::SyntaxKind;
 
     let parse = db.parse(module_id.file_id);
@@ -259,7 +281,16 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
 
     let mut result = ModuleBodies::new();
     let mut method_idx = 0u32;
+    let mut all_referenced_externals: FxHashSet<String> = FxHashSet::default();
 
+    // First pass: collect module-level variable declarations
+    for node in root.children() {
+        if node.kind() == SyntaxKind::VAR_DEF {
+            collect_module_vars(&node, &mut result.module_vars);
+        }
+    }
+
+    // Second pass: lower methods and collect referenced externals
     for node in root.children() {
         match node.kind() {
             SyntaxKind::PROCEDURE_DEF => {
@@ -270,6 +301,9 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
                 for diag in &lower_result.diagnostics {
                     result.all_diagnostics.push((method_id, diag.clone()));
                 }
+
+                // Collect referenced externals
+                all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
 
                 result.bodies.insert(method_idx, lower_result);
                 method_idx += 1;
@@ -283,16 +317,72 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
                     result.all_diagnostics.push((method_id, diag.clone()));
                 }
 
+                // Collect referenced externals
+                all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
+
                 result.bodies.insert(method_idx, lower_result);
                 method_idx += 1;
             }
             SyntaxKind::VAR_DEF => {
-                // Module-level variables don't have bodies, but increment index
                 method_idx += 1;
             }
             _ => {}
         }
     }
 
+    // Third pass: lower module-level code (statements outside procedures)
+    let module_code_result = body::lower_module_code(&root);
+
+    // Collect diagnostics from module-level code
+    // Use a special MethodId with local_id = u32::MAX to indicate module-level code
+    let module_method_id = MethodId { module: module_id, local_id: u32::MAX };
+    for diag in &module_code_result.diagnostics {
+        result.all_diagnostics.push((module_method_id, diag.clone()));
+    }
+
+    // Collect referenced externals from module code
+    all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
+
+    result.module_code = Some(module_code_result);
+
+    // Fourth pass: check for unused module variables
+    for var in &result.module_vars {
+        // Skip exported variables (externally visible)
+        if var.is_export {
+            continue;
+        }
+
+        let key = var.name.to_lowercase();
+        if !all_referenced_externals.contains(&key) {
+            // Variable is not used anywhere
+            result.all_diagnostics.push((
+                module_method_id,
+                BodyDiagnostic::UnusedVariable { name: var.name.clone(), range: var.range },
+            ));
+        }
+    }
+
     result
+}
+
+/// Collect module-level variable declarations from a VAR_DEF node.
+fn collect_module_vars(var_def: &syntax::SyntaxNode, vars: &mut Vec<ModuleVarDecl>) {
+    use syntax::SyntaxKind;
+
+    // Check if any variable in this VAR_DEF has Export
+    let has_export = var_def
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|tok| tok.kind() == SyntaxKind::KW_EXPORT);
+
+    // Find all IDENT tokens (variable names)
+    for token in var_def.children_with_tokens().filter_map(|el| el.into_token()) {
+        if token.kind() == SyntaxKind::IDENT {
+            vars.push(ModuleVarDecl {
+                name: token.text().to_string(),
+                range: token.text_range(),
+                is_export: has_export,
+            });
+        }
+    }
 }

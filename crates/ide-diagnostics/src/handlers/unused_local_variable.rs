@@ -288,4 +288,82 @@ mod tests {
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
+
+    /// Test module-level variable tracking.
+    ///
+    /// Module-level variables should be flagged if unused, unless exported.
+    #[test]
+    fn test_module_level_unused_variable() {
+        // Module-level variable that is never used
+        let code = r#"Перем НеИспользуемая;
+
+Процедура Тест()
+    Сообщить("Привет");
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(unused_diags.len(), 1, "Unused module variable should trigger diagnostic");
+        // Check it's the right variable
+        assert!(
+            unused_diags[0].message.contains("НеИспользуемая"),
+            "Diagnostic should mention the variable name"
+        );
+    }
+
+    #[test]
+    fn test_module_level_export_variable_not_flagged() {
+        // Exported module-level variable should NOT be flagged
+        let code = r#"Перем ЭкспортнаяПеременная Экспорт;
+
+Процедура Тест()
+    Сообщить("Привет");
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        assert!(
+            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
+            "Exported variable should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_module_level_used_variable() {
+        // Module-level variable used in a method should NOT be flagged
+        let code = r#"Перем ИспользуемаяПеременная;
+
+Процедура Тест()
+    Сообщить(ИспользуемаяПеременная);
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        assert!(
+            diagnostics.iter().all(|d| d.code != DiagnosticCode::UnusedLocalVariable),
+            "Used module variable should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_module_level_code_unused_variable() {
+        // Module-level code: variable assigned but never read
+        let code = r#"НеИспользуемаяВМодуле = 30;
+ИспользуемаяВМодуле = 40;
+Сообщить(ИспользуемаяВМодуле);"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "Module-level code should detect unused implicit variable"
+        );
+        assert!(
+            unused_diags[0].message.contains("НеИспользуемаяВМодуле"),
+            "Diagnostic should mention the variable name"
+        );
+    }
 }

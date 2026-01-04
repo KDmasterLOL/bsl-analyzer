@@ -84,6 +84,12 @@ impl LoweringCtx {
         }
     }
 
+    /// Get variables that were referenced but not locally declared.
+    /// These are potential module-level variable references.
+    fn referenced_externals(&self) -> FxHashSet<String> {
+        self.used_vars.iter().filter(|name| !self.local_vars.contains_key(*name)).cloned().collect()
+    }
+
     /// Allocate an expression and record its source range.
     fn alloc_expr(&mut self, expr: Expr, range: TextRange) -> ExprId {
         let id = self.body.exprs.alloc(expr);
@@ -153,7 +159,62 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
     // Check for unused local variables
     ctx.check_unused_variables();
 
-    LowerResult { body: ctx.body, source_map: ctx.source_map, diagnostics: ctx.diagnostics }
+    // Collect referenced externals before consuming ctx
+    let referenced_externals = ctx.referenced_externals();
+
+    LowerResult {
+        body: ctx.body,
+        source_map: ctx.source_map,
+        diagnostics: ctx.diagnostics,
+        referenced_externals,
+    }
+}
+
+/// Lower module-level code (statements outside procedures/functions).
+///
+/// This handles initialization code that runs when the module is loaded.
+pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
+    let mut ctx = LoweringCtx::new(false);
+
+    // Find all top-level statements (not in procedures/functions)
+    let stmt_kinds = [
+        SyntaxKind::ASSIGN_STMT,
+        SyntaxKind::CALL_STMT,
+        SyntaxKind::IF_STMT,
+        SyntaxKind::WHILE_STMT,
+        SyntaxKind::FOR_STMT,
+        SyntaxKind::FOR_EACH_STMT,
+        SyntaxKind::TRY_STMT,
+        SyntaxKind::RETURN_STMT,
+        SyntaxKind::RAISE_STMT,
+        SyntaxKind::EXECUTE_STMT,
+        SyntaxKind::GOTO_STMT,
+        SyntaxKind::LABEL_STMT,
+        SyntaxKind::ADD_HANDLER_STMT,
+        SyntaxKind::REMOVE_HANDLER_STMT,
+    ];
+
+    let mut stmts = Vec::new();
+    for node in root.children() {
+        if stmt_kinds.contains(&node.kind()) {
+            if let Some(stmt_id) = lower_stmt(&mut ctx, &node) {
+                stmts.push(stmt_id);
+            }
+        }
+    }
+    ctx.body.body_stmts = stmts.into_boxed_slice();
+
+    // Check for unused local variables (implicit module-level variables)
+    ctx.check_unused_variables();
+
+    let referenced_externals = ctx.referenced_externals();
+
+    LowerResult {
+        body: ctx.body,
+        source_map: ctx.source_map,
+        diagnostics: ctx.diagnostics,
+        referenced_externals,
+    }
 }
 
 /// Check if a statement list contains at least one return statement.
