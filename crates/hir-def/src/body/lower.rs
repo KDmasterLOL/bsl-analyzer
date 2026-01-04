@@ -62,10 +62,16 @@ impl LoweringCtx {
         self.local_vars.insert(key, (name, range));
     }
 
-    /// Mark a variable as used.
+    /// Mark a variable as used (read).
     /// Called when a variable is referenced in an expression.
     fn mark_var_used(&mut self, name: &str) {
         self.used_vars.insert(name.to_lowercase());
+    }
+
+    /// Unmark a variable as used.
+    /// Called for assignment targets - they are written, not read.
+    fn unmark_var_used(&mut self, name: &str) {
+        self.used_vars.remove(&name.to_lowercase());
     }
 
     /// Emit diagnostics for unused local variables.
@@ -234,6 +240,27 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let target_node = children.next()?;
     let target = lower_expr_node(ctx, &target_node);
 
+    // For simple variable assignment (X = value), the target is WRITTEN, not read.
+    // We need to unmark it from used_vars since lower_expr incorrectly marked it.
+    // For field/index access (Obj.Field = value, Arr[i] = value), the base IS read.
+    //
+    // Also, if the target is a simple Path and not already in local_vars,
+    // this is an implicit variable declaration (BSL allows this).
+    let target_name = if let Expr::Path(name) = ctx.body.expr(target) {
+        Some((name.clone(), get_target_range(&target_node)))
+    } else {
+        None
+    };
+    if let Some((name, range)) = target_name {
+        let key = name.as_str().to_lowercase();
+        // Register implicit variable if not already declared
+        if !ctx.local_vars.contains_key(&key) {
+            ctx.register_local_var(name.clone(), range);
+        }
+        // Unmark from used - assignment is a write, not a read
+        ctx.unmark_var_used(name.as_str());
+    }
+
     // Second child should be value expression (or EXPR wrapper)
     let value_node = children.next()?;
     let value = lower_expr_node(ctx, &value_node);
@@ -244,6 +271,22 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     }
 
     Some(Stmt::Assign { target, value })
+}
+
+/// Get the range of the target identifier in an assignment.
+/// Looks for the first IDENT token within the node.
+fn get_target_range(node: &SyntaxNode) -> TextRange {
+    // Find IDENT token in the target expression
+    fn find_ident(node: &SyntaxNode) -> Option<TextRange> {
+        for token in node.descendants_with_tokens() {
+            if token.kind() == SyntaxKind::IDENT {
+                return Some(token.text_range());
+            }
+        }
+        None
+    }
+
+    find_ident(node).unwrap_or_else(|| node.text_range())
 }
 
 /// Check if two expressions are semantically equal (case-insensitive for names).
