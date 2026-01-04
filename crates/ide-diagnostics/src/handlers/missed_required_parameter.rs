@@ -126,13 +126,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Check if this is a qualified call (Object.Method or Module.Method)
         if is_qualified_call(&call_expr) {
-            // Phase 2: Handle CommonModule.Method() calls
-            if let Some(ref config) = configuration {
-                if let Some(diagnostic) = check_qualified_call(ctx, &call_expr, config) {
-                    diagnostics.push(diagnostic);
-                }
+            // Phase 2 & 3: Handle qualified calls (CommonModule, Object, ThisObject)
+
+            // Try to get diagnostic:
+            let diagnostic = if let Some(ref config) = configuration {
+                // Have configuration - check all qualified calls
+                check_qualified_call(ctx, &call_expr, config)
+            } else {
+                // No configuration - only check ThisObject calls (don't need metadata)
+                extract_qualified_call(&call_expr).and_then(|qualified_call| {
+                    match qualified_call {
+                        QualifiedCall::ThisObject { method_name } => {
+                            check_this_object_call(ctx, &call_expr, &method_name)
+                        }
+                        _ => None, // Other qualified calls need configuration
+                    }
+                })
+            };
+
+            if let Some(diag) = diagnostic {
+                diagnostics.push(diag);
             }
-            // Skip if no configuration available (can't resolve CommonModule)
             continue;
         }
 
@@ -236,6 +250,16 @@ fn check_common_module_call(
     let method_name_obj = Name::new(method_name);
     let method = module_symbol_tree.find_method(&method_name_obj)?;
 
+    // Only check exported methods for qualified calls
+    if !method.is_export {
+        tracing::debug!(
+            module_name,
+            method_name,
+            "Method is not exported, skipping qualified call validation"
+        );
+        return None;
+    }
+
     // Extract provided arguments
     let provided_args = extract_arguments(call_expr);
 
@@ -283,6 +307,17 @@ fn check_object_method_call(
     let method_name_obj = Name::new(method_name);
     let method = manager_symbol_tree.find_method(&method_name_obj)?;
 
+    // Only check exported methods for qualified calls
+    if !method.is_export {
+        tracing::debug!(
+            mdo_type = ?mdo_type,
+            mdo_name,
+            method_name,
+            "Method is not exported, skipping object method call validation"
+        );
+        return None;
+    }
+
     // Extract provided arguments
     let provided_args = extract_arguments(call_expr);
 
@@ -302,6 +337,8 @@ fn check_this_object_call(
     call_expr: &SyntaxNode,
     method_name: &str,
 ) -> Option<Diagnostic> {
+    let _span = tracing::debug_span!("check_this_object_call", method = method_name).entered();
+
     // Use current module's SymbolTree (already loaded)
     let module_id = ModuleId::new(ctx.file_id);
     let symbol_tree = ctx.db.symbol_tree(module_id);
@@ -799,9 +836,12 @@ mod tests {
 
         let diagnostics = check(&ctx);
 
-        // Phase 1: expect 5 diagnostics for local methods only
-        // Lines 25-29 (CommonModule calls) are skipped until Phase 2
-        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics for local method calls");
+        // Phase 1 + Phase 3 (ThisObject): expect 6 diagnostics
+        // - 5 local method calls
+        // - 1 ThisObject call (Line 30: ЭтотОбъект.Сложение)
+        // Lines 25-28 (CommonModule calls) are skipped (no metadata)
+        // Line 29 (Справочники.Справочник1) is skipped (no metadata)
+        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics (5 local + 1 ThisObject)");
 
         // Verify exact positions match Java implementation (0-indexed)
         // Line 3: Сложение(, 2) - Missing 'Левый'
@@ -818,6 +858,10 @@ mod tests {
 
         // Line 19: Менеджер("Справочник") - Missing 'Вид' (Тип has default)
         assert_diagnostic_range_multiline(code, &diagnostics[4], 18, 13, 18, 35);
+
+        // Line 30: ЭтотОбъект.Сложение(, 2) - Missing 'Левый'
+        // Range starts at method name "Сложение" (qualified call behavior)
+        assert_diagnostic_range_multiline(code, &diagnostics[5], 29, 27, 29, 40);
     }
 
     #[test]
@@ -1150,9 +1194,9 @@ mod tests {
         //   - Line 27: ПервыйОбщийМодуль.ВерсионированиеПриЗаписи() - missing both
         //   - Line 28: Сообщить(ПервыйОбщийМодуль.ВерсионированиеПриЗаписи()) - missing both
         //
-        // Phase 3 (IMPLEMENTED): Adds 1 diagnostic for object model calls
-        //   - Line 29: Справочники.Справочник1.Тест() - missing 'Параметр'
-        // (Line 30: ЭтотОбъект.Сложение(, 2) doesn't work yet - see below)
+        // Phase 3 (IMPLEMENTED): Adds 1 diagnostic for ThisObject calls
+        //   - Line 30: ЭтотОбъект.Сложение(, 2) - missing 'Левый'
+        // (Line 29: Справочники.Справочник1.Тест() - excluded: method not exported)
         //
         // Total: 10 diagnostics (5 Phase 1 + 4 Phase 2 + 1 Phase 3)
 
@@ -1307,6 +1351,19 @@ mod tests {
             })
             .expect("Should find diagnostic on line 24 for missing 'Отказ'");
         assert_diagnostic_range_multiline(code, diag_line25, 24, 22, 24, 49);
+
+        // Phase 3: ThisObject call (Line 30)
+        // Line 30: Результат = ЭтотОбъект.Сложение(, 2);
+        // Expected: missing 'Левый'
+        // Range starts at method name "Сложение", not "ЭтотОбъект" (qualified call behavior)
+        let diag_line30 = diagnostics
+            .iter()
+            .find(|d| {
+                let (start_line, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
+                start_line == 29 && d.message.contains("Левый") // Line 30 in file = line 29 (0-indexed)
+            })
+            .expect("Should find diagnostic on line 30 for missing 'Левый' in ThisObject call");
+        assert_diagnostic_range_multiline(code, diag_line30, 29, 27, 29, 40);
     }
 
     #[test]
