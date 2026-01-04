@@ -67,6 +67,7 @@ pub enum DiagnosticCode {
     IfElseDuplicatedCondition,
     IfElseIfEndsWithElse,
     MultilingualStringHasAllDeclaredLanguages,
+    MultilingualStringUsingWithTemplate,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -200,6 +201,7 @@ impl DiagnosticCode {
             Self::MultilingualStringHasAllDeclaredLanguages => {
                 "MultilingualStringHasAllDeclaredLanguages"
             }
+            Self::MultilingualStringUsingWithTemplate => "MultilingualStringUsingWithTemplate",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -478,6 +480,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MultilingualStringHasAllDeclaredLanguages",
         ctx,
         handlers::multilingual_string_has_all_declared_languages::check,
+    ));
+    result.extend(run_diagnostic(
+        "MultilingualStringUsingWithTemplate",
+        ctx,
+        handlers::multilingual_string_using_with_template::check,
     ));
 
     // Tier 2: Semantic diagnostics

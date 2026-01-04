@@ -95,4 +95,5 @@ pub mod missing_temp_storage_deletion;
 pub mod missing_temporary_file_deletion;
 pub mod multiline_string_in_query;
 pub mod multilingual_string_has_all_declared_languages;
+pub mod multilingual_string_using_with_template;
 // TODO: Add all 181 handlers

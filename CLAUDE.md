@@ -11,6 +11,7 @@ BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) writt
 **Performance (Real Data):**
 
 **✅ Real project doc3 (121 MB, 6,540 BSL files):**
+
 - **Full analysis**: **11.2 seconds** (vs 58.9 seconds in Java) — **5.3x faster** ⚡
 - **CPU efficiency**: 59.3s user time (vs 337.1s) — **5.7x less CPU** 🚀
 - **I/O efficiency**: 2.8s system time (vs 28.8s) — **10.3x less I/O** 💾
@@ -18,6 +19,7 @@ BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) writt
 - **Peak memory**: **1,426 MB** (vs 3,822 MB) — **2.7x less** 💪
 
 **Extrapolation for 4GB project (~33x larger):**
+
 - **Full analysis**: **~6 minutes** (vs ~32 minutes in Java) — **5-6x faster**
 - **Peak memory**: **~46 GB** (vs ~123 GB) — **2.7x less**
 
@@ -119,6 +121,7 @@ bsl-analyzer (LSP Server)
 ### Key Architectural Components
 
 **Incremental Computation (Salsa 0.25.2):**
+
 - **Status:** ✅ Integrated
 - Uses Salsa framework for incremental computation
 - All queries are cached and invalidated automatically
@@ -129,34 +132,40 @@ bsl-analyzer (LSP Server)
   - Thread-safe parallel computation with Rayon
 
 **Red-Green Trees (Rowan):**
+
 - Immutable CST (Concrete Syntax Tree) representation
 - Full-fidelity parsing (preserves all tokens including whitespace)
 - Efficient memory sharing between versions
 - Typed AST wrappers over untyped CST
 
 **Event-Based Parser:**
+
 - Parser generates events, not AST directly
 - Enables error recovery
 - Events are consumed by SyntaxTreeBuilder to create Rowan tree
 
 **Diagnostic System:**
+
 - Each diagnostic is a separate module in `ide-diagnostics/src/handlers/`
 - Uniform interface via `DiagnosticContext`
 - Full compatibility with bsl-language-server codes
 - **~90 diagnostics implemented** (of 181 total planned)
 
 **Metadata Infrastructure:**
+
 - **Status:** ✅ Implemented (`bsl-metadata` crate)
 - Configuration, CommonModule, Register, EventSubscription structures
 - XML loader for Designer format
 - Salsa integration for caching
 
 **ModuleGraph:**
+
 - **Status:** ✅ Implemented (`module-graph` crate)
 - Dependency graph for BSL modules
 - Cycle detection and incremental CI support
 
 **Control Flow Graph (CFG):**
+
 - **Status:** ✅ Implemented (`cfg` crate)
 - CFG construction from Rowan AST
 - Used for flow-sensitive diagnostics
@@ -187,6 +196,7 @@ bsl-analyzer (LSP Server)
 ### 1. Always Check Library Documentation First
 
 Before using any external crate, consult its current documentation using the Context7 MCP tool:
+
 - Use `resolve-library-id` to find the library
 - Use `query-docs` to get up-to-date documentation
 - Key libraries: `rowan`, `salsa`, `logos`, `lsp-types`, `lsp-server`
@@ -194,6 +204,7 @@ Before using any external crate, consult its current documentation using the Con
 ### 2. Reference Source Projects
 
 When implementing features, reference these source projects (see `docs/planning/SOURCES.md`):
+
 - **rust-analyzer** (`/Users/kiriller/src/lsp/rust-analyzer/`) - Architecture patterns, Rowan/Salsa usage
 - **bsl-language-server** (`/Users/kiriller/src/lsp/bsl-language-server/`) - Compatibility target (diagnostics, config, metadata)
 - **bsl-parser** (`/Users/kiriller/src/lsp/bsl-parser/`) - BSL/SDBL grammar (ANTLR4)
@@ -201,9 +212,10 @@ When implementing features, reference these source projects (see `docs/planning/
 - **bsl-language-server-rust** (`/Users/kiriller/src/lsp/bsl-language-server-rust/`) - Existing Rust components (diagnostics, metadata)
 - **salsa** (`/Users/kiriller/src/lsp/salsa/`) - Incremental computation framework (v0.25.2)
 
-### 3. Logging: Use tracing, Never println!
+### 3. Logging: Use tracing, Never println
 
 **Required:**
+
 ```rust
 use tracing::{trace, debug, info, warn, error};
 
@@ -219,6 +231,7 @@ pub fn parse_file(input: &str) -> Parse {
 ```
 
 **Forbidden:**
+
 ```rust
 println!("Debug: {:?}", value);  // ❌ Never use for debugging
 eprintln!("Error: {}", error);   // ❌ Never use
@@ -232,12 +245,14 @@ dbg!(value);                     // ❌ Never use
 Minimize comments. Use expressive names, extract functions, and use type system instead.
 
 **Allowed comments:**
+
 - Explaining non-obvious logic (BSL language quirks, compatibility notes)
 - SAFETY comments for unsafe code
 - References to issues/specs
 - Doc comments (`///`) for public API
 
 **Forbidden comments:**
+
 - Duplicating what code does
 - Obvious statements
 - Commented-out code
@@ -265,11 +280,13 @@ Use `#[allow(...)]` only with explanation comment.
 All test files must be copied into this repository. Never use absolute paths to external projects:
 
 **Correct:**
+
 ```rust
 let input = include_str!("fixtures/Module.bsl");
 ```
 
 **Wrong:**
+
 ```rust
 let path = "/Users/kiriller/src/lsp/bsl-parser/...";  // ❌
 ```
@@ -277,23 +294,27 @@ let path = "/Users/kiriller/src/lsp/bsl-parser/...";  // ❌
 ## BSL Language Specifics
 
 **Bilingual Keywords:**
+
 - BSL supports both Russian and English keywords
 - Example: `Процедура` = `Procedure`, `Функция` = `Function`
 - Case-insensitive: `ПРОЦЕДУРА`, `процедура`, `Процедура` are all valid
 - Preprocessor symbols are also case-insensitive
 
 **Preprocessor Directives:**
+
 - `#Если`, `#ИначеЕсли`, `#Иначе`, `#КонецЕсли`
 - `#Область` / `#КонецОбласти` (regions)
 - `#Использовать` (imports)
 
 **Annotations:**
+
 - Method annotations: `&НаКлиенте`, `&НаСервере`, `&НаКлиентеНаСервере`
 - Compiler directives: `&До`, `&После`, `&Вместо`
 
 ## Current Development Status
 
 **Completed:**
+
 - ✅ Lexer with 80+ BSL tokens + 150+ SDBL tokens
 - ✅ Parser for BSL (expressions, statements, preprocessor)
 - ✅ SDBL infrastructure (tokens, parser, SyntaxKind nodes)
@@ -308,6 +329,7 @@ let path = "/Users/kiriller/src/lsp/bsl-parser/...";  // ❌
 - ✅ CI/CD with GitLab
 
 **Next Steps:**
+
 - Remaining ~91 diagnostics (of 181 total)
 - LSP Server integration
 - IDE features (hover, completion, etc.)
@@ -317,18 +339,19 @@ See `docs/planning/ROADMAP.md` for details.
 ## Important Files
 
 **Architecture & Planning:**
+
 - **docs/architecture/ARCHITECTURE.md** - Detailed architecture documentation
 - **docs/architecture/SOURCES.md** - Source projects reference
-- **docs/planning/ROADMAP.md** - Development plan with progress tracking
-- **docs/planning/DIAGNOSTICS_MIGRATION.md** - Plan for 181 diagnostics migration
 
 **Development:**
+
 - **docs/contributing/DEVELOPMENT_RULES.md** - Development guidelines
 - **docs/contributing/CONTRIBUTING.md** - Contribution process
 
 ## Compatibility Requirements
 
 Must maintain 100% compatibility with bsl-language-server:
+
 - Same diagnostic codes
 - Same severity levels
 - Same configuration format (`.bslls.json`)
