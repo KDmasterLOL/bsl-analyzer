@@ -276,6 +276,26 @@ Minimize comments. Use expressive names, extract functions, and use type system 
 - Use snapshot tests (`expect-test`) for parser/AST
 - Copy test fixtures from source projects into our repo (no external paths)
 
+**Testing diagnostics with Java fixtures:**
+
+When porting diagnostics from bsl-language-server (Java), use the same test fixtures and verify that diagnostic positions match exactly:
+
+```rust
+// ✅ CORRECT: use helper methods with line/column positions
+assert_diagnostic_range_multiline(&code, &diagnostics[0], 3, 0, 5, 13);
+assert_diagnostic_range(&code, &diagnostics[0], 5, 1, 6);  // single line
+
+// ❌ FORBIDDEN: magic numbers for TextRange (byte offsets)
+assert_eq!(diagnostics[0].range, TextRange::new(42.into(), 156.into()));
+```
+
+**Available helpers** (`crates/ide-diagnostics/src/test_utils.rs`):
+- `assert_diagnostic_range_multiline(code, diag, start_line, start_col, end_line, end_col)`
+- `assert_diagnostic_range(code, diag, line, start_col, end_col)` — single line
+- `check_hir_diagnostic(code)` — run HIR diagnostics on test code
+
+**Why:** Java tests specify line/column positions. Using helpers ensures we match Java behavior exactly and makes tests readable.
+
 ### 6. No Warnings Allowed
 
 ```bash
