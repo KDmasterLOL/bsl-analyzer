@@ -502,6 +502,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::nested_function_in_parameters::check,
     ));
+    result.extend(run_diagnostic(
+        "NestedTernaryOperator",
+        ctx,
+        handlers::nested_ternary_operator::check,
+    ));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
