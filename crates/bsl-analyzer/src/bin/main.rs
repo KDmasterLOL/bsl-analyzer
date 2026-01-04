@@ -202,12 +202,7 @@ fn analyze(
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
 
-    // Setup source root
-    let source_root_id = base_db::SourceRootId(0);
-    let source_root = base_db::SourceRoot::new_local(vfs::FileSet::new());
-    db.set_source_root(source_root_id, source_root);
-
-    // Find all BSL files
+    // Find all BSL files first
     tracing::info!("Finding BSL files in {:?}", source_dir);
     let mut bsl_files = Vec::new();
     for entry in WalkDir::new(&source_dir).follow_links(true) {
@@ -223,18 +218,28 @@ fn analyze(
 
     tracing::info!("Found {} BSL files", bsl_files.len());
 
-    // Load files into database
+    // Build FileSet with all discovered files for VFS path resolution
     tracing::info!("Loading files into database");
+    let mut file_set = vfs::FileSet::new();
     let mut file_ids = Vec::new();
 
     for (idx, path) in bsl_files.iter().enumerate() {
         let file_id = FileId(idx as u32);
-        let content = fs::read_to_string(path)?;
-
-        db.set_file_source_root(file_id, source_root_id);
-        db.set_file_text(file_id, &content);
-
+        let vfs_path = vfs::VfsPath::new(path.clone());
+        file_set.insert(file_id, vfs_path);
         file_ids.push((file_id, path.clone()));
+    }
+
+    // Setup source root with populated FileSet
+    let source_root_id = base_db::SourceRootId(0);
+    let source_root = base_db::SourceRoot::new_local(file_set);
+    db.set_source_root(source_root_id, source_root);
+
+    // Load file contents into database
+    for (file_id, path) in &file_ids {
+        let content = fs::read_to_string(path)?;
+        db.set_file_source_root(*file_id, source_root_id);
+        db.set_file_text(*file_id, &content);
     }
 
     tracing::info!(
