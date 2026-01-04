@@ -68,6 +68,7 @@ pub enum DiagnosticCode {
     IfElseIfEndsWithElse,
     MultilingualStringHasAllDeclaredLanguages,
     MultilingualStringUsingWithTemplate,
+    NestedConstructorsInStructureDeclaration,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -202,6 +203,9 @@ impl DiagnosticCode {
                 "MultilingualStringHasAllDeclaredLanguages"
             }
             Self::MultilingualStringUsingWithTemplate => "MultilingualStringUsingWithTemplate",
+            Self::NestedConstructorsInStructureDeclaration => {
+                "NestedConstructorsInStructureDeclaration"
+            }
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -485,6 +489,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MultilingualStringUsingWithTemplate",
         ctx,
         handlers::multilingual_string_using_with_template::check,
+    ));
+    result.extend(run_diagnostic(
+        "NestedConstructorsInStructureDeclaration",
+        ctx,
+        handlers::nested_constructors_in_structure_declaration::check,
     ));
 
     // Tier 2: Semantic diagnostics
