@@ -66,6 +66,7 @@ pub enum DiagnosticCode {
     IfElseDuplicatedCodeBlock,
     IfElseDuplicatedCondition,
     IfElseIfEndsWithElse,
+    MultilingualStringHasAllDeclaredLanguages,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -196,6 +197,9 @@ impl DiagnosticCode {
             Self::IfElseDuplicatedCodeBlock => "IfElseDuplicatedCodeBlock",
             Self::IfElseDuplicatedCondition => "IfElseDuplicatedCondition",
             Self::IfElseIfEndsWithElse => "IfElseIfEndsWithElse",
+            Self::MultilingualStringHasAllDeclaredLanguages => {
+                "MultilingualStringHasAllDeclaredLanguages"
+            }
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -470,6 +474,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
     result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
     result.extend(run_diagnostic("MissingSpace", ctx, handlers::missing_space::check));
+    result.extend(run_diagnostic(
+        "MultilingualStringHasAllDeclaredLanguages",
+        ctx,
+        handlers::multilingual_string_has_all_declared_languages::check,
+    ));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
