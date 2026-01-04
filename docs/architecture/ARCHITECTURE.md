@@ -7,61 +7,33 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    bsl-analyzer (LSP Server)                 │
-│  - JSON-RPC handling                                         │
-│  - LSP protocol implementation                               │
-│  - CLI interface                                             │
+│  - JSON-RPC handling, LSP protocol, CLI interface           │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                         ide                                  │
 │  - High-level API for IDE features                          │
-│  - Coordinates all subsystems                               │
 └─────────────────────────────────────────────────────────────┘
         │                     │                     │
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│ ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│ - 181 diagnostics│  │ - Code actions│    │ - RootDatabase│
-│ - Quick fixes   │  │ - Refactorings│    │ - Queries     │
+│ ide-diagnostics│   │  ide-assists  │    │    ide-db     │
+│ - ~90 diagnostics│ │ - Code actions│    │ - RootDatabase│
 └───────────────┘    └───────────────┘    └───────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                          hir                                 │
-│  - High-level Intermediate Representation                   │
-│  - OOP-style API for semantic information                   │
+│                    hir / hir-def                             │
+│  - ItemTree, SymbolTree, type inference                     │
+│  - Name resolution, Resolver                                │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                        hir-def                               │
-│  - Definitions (modules, methods, variables)                │
-│  - Name resolution                                          │
-│  - Symbol table                                             │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                        syntax                                │
-│  - CST (Concrete Syntax Tree) based on Rowan               │
-│  - AST typed wrappers                                       │
-│  - SyntaxNode, SyntaxToken                                  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                        parser                                │
-│  - BSL grammar implementation                               │
-│  - Error recovery                                           │
-│  - SDBL (query language) support                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                        lexer                                 │
-│  - Tokenization of BSL source code                          │
-│  - Based on logos crate                                     │
+│                   syntax / parser / lexer                    │
+│  - Rowan CST, typed AST wrappers                            │
+│  - Event-based parser, logos tokenizer                      │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -70,12 +42,10 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 │ base-db      │ Source database, Salsa integration           │
 │ vfs          │ Virtual file system                          │
 │ bsl-metadata │ 1C metadata (Configuration, CommonModule)    │
-│ project-model│ Project structure (configurations, etc.)     │
-│ intern       │ String/ID interning                          │
-│ stdx         │ Standard library extensions                  │
-│ profile      │ Profiling utilities                          │
-│ test-fixture │ Test fixtures                                │
-│ test-utils   │ Test utilities                               │
+│ module-graph │ Module dependency graph for incremental CI   │
+│ cfg          │ Control Flow Graph for diagnostics           │
+│ project-model│ Project structure (.bslls.json)              │
+│ intern/stdx  │ Utilities                                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -551,19 +521,28 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 ### ide-diagnostics
 Диагностики:
 - `lib.rs` - инфраструктура
-- `handlers/` - 181 диагностика
+- `handlers/` - ~90 диагностик (из 181 запланированных)
 
 ### bsl-metadata
 Метаданные 1С:
-- `lib.rs` - публичный API с примерами использования
-- `configuration.rs` - Configuration (с PartialEq для Salsa)
-- `common_module.rs` - CommonModule (все execution context flags)
-- `metadata_object.rs` - MetadataObject + MdoType enum
+- `configuration.rs` - Configuration
+- `common_module.rs` - CommonModule
+- `register.rs` - Information/AccumulationRegister
 - `loader.rs` - загрузка из Designer format
-- `xml_parser.rs` - парсинг XML с quick-xml + serde
-- `traits.rs` - MdObject, Module traits
-- `enums.rs` - ReturnValueReuse, ModuleType, ObjectBelonging, SupportVariant
-- `error.rs` - MetadataError + Result type
+- `xml_parser.rs` - парсинг XML с quick-xml
+
+### module-graph
+Граф зависимостей модулей:
+- `graph.rs` - ModuleGraph, ModuleGraphData
+- `builder.rs` - ModuleGraphBuilder с детекцией циклов
+- `deps.rs` - DependencyExtractor из AST
+- `incremental.rs` - инкрементальный CI режим
+
+### cfg
+Control Flow Graph:
+- `graph.rs` - ControlFlowGraph на базе petgraph
+- `builder.rs` - CfgBuilder из Rowan AST
+- `vertex.rs` - типы вершин (BasicBlock, Conditional, Loop)
 
 ## Потоки данных
 

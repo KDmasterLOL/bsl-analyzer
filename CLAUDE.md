@@ -106,10 +106,11 @@ The project uses a layered architecture inspired by rust-analyzer:
 ```
 bsl-analyzer (LSP Server)
     └── ide (High-level API)
-        ├── ide-diagnostics (181 diagnostics)
+        ├── ide-diagnostics (~90 diagnostics implemented)
         ├── ide-assists (Code actions)
-        └── ide-db (Database)
+        └── ide-db (Database + Salsa)
             └── hir (Semantic analysis)
+                ├── cfg (Control Flow Graph)
                 └── syntax (AST with Rowan)
                     └── parser (Event-based)
                         └── lexer (logos-based)
@@ -118,18 +119,14 @@ bsl-analyzer (LSP Server)
 ### Key Architectural Components
 
 **Incremental Computation (Salsa 0.25.2):**
-- **Repository:** `/Users/kiriller/src/lsp/salsa/`
-- **Status:** Full integration planned for Iteration 10 (see `docs/planning/SALSA_TODO.md`)
+- **Status:** ✅ Integrated
 - Uses Salsa framework for incremental computation
-- Minimizes recomputation on file changes
 - All queries are cached and invalidated automatically
-- **Critical for performance:** Without Salsa, the project would be 10-100x slower
 - **Key features:**
   - Automatic cache invalidation based on dependencies
   - LRU eviction (only 128-512 most recent files in memory)
   - Durability levels: HIGH for metadata (rarely change), LOW for source code
   - Thread-safe parallel computation with Rayon
-- **Example:** User edits a comment → Salsa checks "did interface change?" → NO → returns cached result (20ms instead of 500ms)
 
 **Red-Green Trees (Rowan):**
 - Immutable CST (Concrete Syntax Tree) representation
@@ -143,44 +140,26 @@ bsl-analyzer (LSP Server)
 - Events are consumed by SyntaxTreeBuilder to create Rowan tree
 
 **Diagnostic System:**
-- Each diagnostic is a separate module
+- Each diagnostic is a separate module in `ide-diagnostics/src/handlers/`
 - Uniform interface via `DiagnosticContext`
 - Full compatibility with bsl-language-server codes
-- **3 Tiers:**
-  - Tier 1 (Syntax): ~60 diagnostics, fast AST checks
-  - Tier 2 (Semantic): ~60 diagnostics, require HIR/symbols
-  - Tier 3 (Metadata): ~40 diagnostics, require 1C metadata
+- **~90 diagnostics implemented** (of 181 total planned)
 
-**Metadata Infrastructure (Iteration 11):**
-- **Status:** Planned (see `docs/planning/METADATA_PLAN.md`)
-- **Critical for:** ~40 Tier 3 diagnostics, Navigation, SDBL analysis
-- **What it is:** 1C:Enterprise metadata (Configuration, CommonModules, Catalogs, Documents, Registers)
-- **Integration with Salsa:** Metadata loaded once (~1 sec), cached with `Durability::HIGH`, accessed in < 1ms
-- **Key components:**
-  - XML loader (parses Configuration.xml and other metadata files)
-  - Metadata structures (Configuration, CommonModule, MetadataObject)
-  - Salsa queries for efficient caching
-  - AbstractMetadataDiagnostic pattern (ported from bsl-language-server)
-- **Performance:** Metadata loading < 1 sec, cached access < 1ms (critical for large projects)
+**Metadata Infrastructure:**
+- **Status:** ✅ Implemented (`bsl-metadata` crate)
+- Configuration, CommonModule, Register, EventSubscription structures
+- XML loader for Designer format
+- Salsa integration for caching
 
-**ModuleGraph & Incremental CI (Iteration 9.5):**
-- **Status:** Planned (see `docs/planning/INCREMENTAL_CI.md`)
-- **Critical for:** CI/CD incremental analysis (5x-30x speedup), cross-module diagnostics, LSP navigation
-- **What it is:** Dependency graph of BSL modules (CommonModules, ObjectModules, FormModules)
-- **Key use cases:**
-  - **GitLab CI incremental mode:** Analyze only changed modules + dependencies (pt_erp: 10-15 sec → 0.5-1 sec for typical commit)
-  - **Graph-based diagnostics:** UnusedModule, CircularDependency, ModuleCoupling metrics
-  - **LSP navigation:** Call Hierarchy, Find Usages across modules
-- **Key components:**
-  - ModuleGraph (Arena-based, like rust-analyzer's CrateGraph)
-  - ModuleGraphBuilder with cycle detection
-  - Dependency extraction from AST (function calls, #Использовать, metadata)
-  - CLI: `--incremental --changed-files` or `--git-diff HEAD~1`
-- **Performance (pt_erp, 25,090 modules):**
-  - Full scan: 10-15 seconds
-  - Incremental (1 module changed): 0.5-1 second (10x-30x faster)
-  - Incremental (5 modules): 1-2 seconds (5x-15x faster)
-- **Relation to Salsa:** Salsa provides incremental computation INSIDE analysis, ModuleGraph provides INPUT FILTERING for CI/CD
+**ModuleGraph:**
+- **Status:** ✅ Implemented (`module-graph` crate)
+- Dependency graph for BSL modules
+- Cycle detection and incremental CI support
+
+**Control Flow Graph (CFG):**
+- **Status:** ✅ Implemented (`cfg` crate)
+- CFG construction from Rowan AST
+- Used for flow-sensitive diagnostics
 
 ### Crate Structure
 
@@ -191,11 +170,13 @@ bsl-analyzer (LSP Server)
 - **hir** / **hir-def** - High-level IR and semantic analysis
 - **ide** - High-level API coordinating all subsystems
 - **ide-db** - RootDatabase with Salsa integration
-- **ide-diagnostics** - 181 diagnostics from bsl-language-server
+- **ide-diagnostics** - ~90 diagnostics implemented (of 181 planned)
 - **ide-assists** - Code actions and refactorings
 - **base-db** - Source database with Salsa
 - **vfs** - Virtual file system
-- **bsl-metadata** - 1C metadata (Configuration, CommonModule, etc.) with XML loader and Salsa integration
+- **bsl-metadata** - 1C metadata (Configuration, CommonModule, etc.)
+- **module-graph** - Module dependency graph for incremental CI
+- **cfg** - Control Flow Graph for flow-sensitive analysis
 - **project-model** - Project configuration (.bslls.json support)
 - **intern** / **stdx** - Utilities
 - **profile** - Profiling utilities
@@ -312,52 +293,38 @@ let path = "/Users/kiriller/src/lsp/bsl-parser/...";  // ❌
 
 ## Current Development Status
 
-**Completed (Iterations 1-5):**
-- ✅ Lexer with 80+ BSL tokens + 150+ SDBL tokens (49 tests passing)
+**Completed:**
+- ✅ Lexer with 80+ BSL tokens + 150+ SDBL tokens
 - ✅ Parser for BSL (expressions, statements, preprocessor)
-- ✅ SDBL infrastructure (tokens, parser entry point, SyntaxKind nodes)
-- ✅ Syntax trees (Rowan integration with 23+ AST wrappers)
-- ✅ **Base Infrastructure (VFS, SourceDatabase)** - Iteration 5 complete
-  - VFS with change tracking (PathInterner, FileSet)
-  - SourceDatabase traits (Files helper with DashMap caching)
-  - Parse query with caching (82+ tests passing)
-  - ⚠️ Full Salsa integration deferred (see `docs/planning/SALSA_TODO.md`)
-- ✅ Performance: 225 MB/s parsing speed (4.5x faster than goal!)
+- ✅ SDBL infrastructure (tokens, parser, SyntaxKind nodes)
+- ✅ Syntax trees (Rowan integration)
+- ✅ Base Infrastructure (VFS, SourceDatabase with Salsa)
+- ✅ HIR / hir-def (ItemTree, SymbolTree, type inference)
+- ✅ Metadata Infrastructure (`bsl-metadata` crate)
+- ✅ ModuleGraph (`module-graph` crate)
+- ✅ Control Flow Graph (`cfg` crate)
+- ✅ ~90 diagnostics implemented
 - ✅ Tracing infrastructure (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 - ✅ CI/CD with GitLab
 
 **Next Steps:**
-- **Iteration 6-9:** HIR Foundation & Symbol Resolution
-- **Iteration 9.5:** ModuleGraph & Incremental CI Mode (dependency graph for 5x-30x CI speedup)
-- **Iteration 10:** IDE-DB & Full Salsa 0.25.2 Integration
-- **Iteration 11:** Metadata Infrastructure (Configuration, CommonModule, XML loader)
-- **Iterations 12-25:** Diagnostics migration (181 diagnostics)
-  - Tier 1 (Syntax): 12-14
-  - Tier 2 (Semantic): 15-18
-  - Tier 3 (Metadata): 19-23 ← **requires Iteration 11**
-  - SDBL: 24-25
-- **Iterations 26-30:** LSP Server integration
+- Remaining ~91 diagnostics (of 181 total)
+- LSP Server integration
+- IDE features (hover, completion, etc.)
 
-See `docs/planning/ROADMAP.md` for full 30-iteration plan.
+See `docs/planning/ROADMAP.md` for details.
 
 ## Important Files
 
 **Architecture & Planning:**
-- **docs/architecture/ARCHITECTURE.md** - Detailed architecture documentation (Salsa, Rowan, Metadata)
-- **docs/planning/ROADMAP.md** - 30-iteration development plan with progress tracking
-- **docs/planning/SOURCES.md** - Source projects and their roles (rust-analyzer, bsl-language-server, salsa)
-- **docs/planning/ITERATIONS.md** - Detailed breakdown of each iteration
-- **docs/planning/SALSA_TODO.md** - Plan for Salsa 0.25.2 integration (Iteration 10)
-- **docs/planning/METADATA_PLAN.md** - Plan for 1C metadata infrastructure (Iteration 11)
-- **docs/planning/INCREMENTAL_CI.md** - ✅ **NEW:** ModuleGraph for incremental CI/CD (Iteration 9.5, 5x-30x speedup)
-- **docs/planning/PERFORMANCE_REAL_DATA.md** - ✅ **Real measurements** from pt_erp project (121 MB, 1 hour → 10-15 sec)
-- **docs/planning/PERFORMANCE_ESTIMATES.md** - Performance extrapolations for projects up to 4GB
+- **docs/architecture/ARCHITECTURE.md** - Detailed architecture documentation
+- **docs/architecture/SOURCES.md** - Source projects reference
+- **docs/planning/ROADMAP.md** - Development plan with progress tracking
 - **docs/planning/DIAGNOSTICS_MIGRATION.md** - Plan for 181 diagnostics migration
 
 **Development:**
-- **docs/contributing/DEVELOPMENT_RULES.md** - Comprehensive development guidelines
+- **docs/contributing/DEVELOPMENT_RULES.md** - Development guidelines
 - **docs/contributing/CONTRIBUTING.md** - Contribution process
-- **docs/contributing/VERSIONING.md** - Versioning policy
 
 ## Compatibility Requirements
 
