@@ -41,7 +41,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::check_hir_diagnostic;
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
 
     #[test]
@@ -57,6 +57,9 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
             .collect();
         assert_eq!(return_diags.len(), 1, "Expected 1 FunctionShouldHaveReturn diagnostic");
+
+        // Check position: function name "БезВозврата" on line 0
+        assert_diagnostic_range(code, return_diags[0], 0, 8, 19);
     }
 
     #[test]
@@ -152,6 +155,8 @@ EndFunction"#;
         assert_eq!(return_diags.len(), 1, "English function without return should trigger");
     }
 
+    /// Test with Java fixture - must match Java test expectations exactly
+    /// Java test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
     #[test]
     fn test_fixture_function_should_have_return() {
         let code = include_str!("../../tests/fixtures/FunctionShouldHaveReturnDiagnostic.bsl");
@@ -162,13 +167,15 @@ EndFunction"#;
             .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
             .collect();
 
-        // According to fixture: only "ФункцияБезВозврата" and "СошибкойРазбора2" should trigger
-        // (Function F has Return, ФункцияСВозвратом has Return, procedures don't need returns,
-        //  СошибкойРазбора has Return at the end)
-        assert!(
-            !return_diags.is_empty(),
-            "Should have at least 1 FunctionShouldHaveReturn diagnostic from fixture, got {}",
+        // Java expects exactly 1 diagnostic
+        assert_eq!(
+            return_diags.len(),
+            1,
+            "Java test expects 1 diagnostic, got {}",
             return_diags.len()
         );
+
+        // Java expects: hasRange(0, 8, 0, 26) - function name "ФункцияБезВозврата"
+        assert_diagnostic_range(code, return_diags[0], 0, 8, 26);
     }
 }
