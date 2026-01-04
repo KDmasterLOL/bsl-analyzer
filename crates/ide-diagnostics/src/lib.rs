@@ -569,6 +569,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::missed_required_parameter::check,
     ));
     result.extend(run_diagnostic(
+        "MissingCodeTryCatchEx",
+        ctx,
+        handlers::missing_code_try_catch_ex::check,
+    ));
+    result.extend(run_diagnostic(
         "FunctionNameStartsWithGet",
         ctx,
         handlers::function_name_starts_with_get::check,
