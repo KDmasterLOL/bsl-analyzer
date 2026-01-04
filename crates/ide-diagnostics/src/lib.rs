@@ -69,6 +69,7 @@ pub enum DiagnosticCode {
     MultilingualStringHasAllDeclaredLanguages,
     MultilingualStringUsingWithTemplate,
     NestedConstructorsInStructureDeclaration,
+    NestedFunctionInParameters,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
@@ -206,6 +207,7 @@ impl DiagnosticCode {
             Self::NestedConstructorsInStructureDeclaration => {
                 "NestedConstructorsInStructureDeclaration"
             }
+            Self::NestedFunctionInParameters => "NestedFunctionInParameters",
             Self::AllFunctionPathMustHaveReturn => "AllFunctionPathMustHaveReturn",
             Self::AssignAliasFieldsInQuery => "AssignAliasFieldsInQuery",
             Self::FieldsFromJoinsWithoutIsNull => "FieldsFromJoinsWithoutIsNull",
@@ -494,6 +496,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "NestedConstructorsInStructureDeclaration",
         ctx,
         handlers::nested_constructors_in_structure_declaration::check,
+    ));
+    result.extend(run_diagnostic(
+        "NestedFunctionInParameters",
+        ctx,
+        handlers::nested_function_in_parameters::check,
     ));
 
     // Tier 2: Semantic diagnostics
