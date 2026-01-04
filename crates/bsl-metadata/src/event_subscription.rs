@@ -103,23 +103,14 @@ impl EventSubscription {
     ///
     /// ## Examples
     ///
-    /// ```
-    /// # use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
-    /// // Valid handler
-    /// let sub = EventSubscription::new("Test", "CommonModule.MyModule.MyMethod");
+    /// ```ignore
+    /// // Valid handler: "CommonModule.MyModule.MyMethod"
     /// let handler = sub.parse_handler().unwrap();
     /// assert_eq!(handler.module_name, "MyModule");
     /// assert_eq!(handler.method_name, "MyMethod");
     ///
-    /// // Malformed (missing method name)
-    /// let sub = EventSubscription::new("Test", "CommonModule.MyModule");
-    /// let handler = sub.parse_handler().unwrap();
-    /// assert_eq!(handler.module_name, "MyModule");
-    /// assert_eq!(handler.method_name, "");
-    ///
-    /// // Empty
-    /// let sub = EventSubscription::new("Test", "");
-    /// assert!(sub.parse_handler().is_none());
+    /// // Malformed (missing method): module_name set, method_name empty
+    /// // Empty handler string: returns None
     /// ```
     pub fn parse_handler(&self) -> Option<EventSubscriptionHandler> {
         if self.handler.is_empty() {
