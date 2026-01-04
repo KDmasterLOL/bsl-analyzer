@@ -368,17 +368,26 @@ struct EventSubscriptionProperties {
     handler: String,
 }
 
-///// Event source - handles both v8:Type and v8:TypeSet variants
+/// Event source - handles both v8:Type and v8:TypeSet variants
+/// Can contain multiple Type or TypeSet elements
 #[derive(Debug, Deserialize)]
 struct EventSource {
-    /// Type variant (can be either v8:Type or v8:TypeSet)
-    #[serde(rename = "Type", alias = "TypeSet", default)]
-    value: String,
+    /// Type elements (v8:Type)
+    #[serde(rename = "Type", default)]
+    types: Vec<String>,
+
+    /// TypeSet elements (v8:TypeSet)
+    #[serde(rename = "TypeSet", default)]
+    type_sets: Vec<String>,
 }
 
 impl EventSource {
     fn as_string(&self) -> String {
-        self.value.clone()
+        // Combine all types into a single string, separated by semicolons
+        let mut all_types: Vec<&str> = Vec::new();
+        all_types.extend(self.types.iter().map(|s| s.as_str()));
+        all_types.extend(self.type_sets.iter().map(|s| s.as_str()));
+        all_types.join(";")
     }
 }
 
