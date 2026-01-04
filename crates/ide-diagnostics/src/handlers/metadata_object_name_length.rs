@@ -218,9 +218,10 @@ fn extract_metadata_object_name(file_path: &str) -> Option<String> {
     for object_type in &object_types {
         if let Some(pos) = file_path.find(object_type) {
             let after_type = &file_path[pos + object_type.len()..];
-            if let Some(name_end) = after_type.find('/') {
-                let name_start = after_type.chars().position(|c| c != '/')?;
-                return Some(after_type[name_start..name_end].to_string());
+            // Skip leading slash(es) first
+            let trimmed = after_type.trim_start_matches('/');
+            if let Some(name_end) = trimmed.find('/') {
+                return Some(trimmed[..name_end].to_string());
             }
         }
     }
@@ -239,9 +240,10 @@ fn extract_register_name(file_path: &str) -> Option<String> {
     for register_type in &register_types {
         if let Some(pos) = file_path.find(register_type) {
             let after_type = &file_path[pos + register_type.len()..];
-            if let Some(name_end) = after_type.find('/') {
-                let name_start = after_type.chars().position(|c| c != '/')?;
-                return Some(after_type[name_start..name_end].to_string());
+            // Skip leading slash(es) first
+            let trimmed = after_type.trim_start_matches('/');
+            if let Some(name_end) = trimmed.find('/') {
+                return Some(trimmed[..name_end].to_string());
             }
         }
     }
