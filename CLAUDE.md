@@ -25,6 +25,8 @@ BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) writt
 
 See `docs/planning/PERFORMANCE_REAL_DATA.md` for detailed benchmark data and methodology.
 
+**Benchmark project:** `~/src/doc3` (121 MB, 6,540 BSL files)
+
 ## Common Commands
 
 ### Building and Testing

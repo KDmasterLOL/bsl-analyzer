@@ -2,7 +2,26 @@
 //!
 //! This crate contains definitions and data structures for the
 //! High-level Intermediate Representation.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! AST (syntax) → HIR (hir-def) → Diagnostics + Type inference
+//!                    │
+//!                    ├── ItemTree (signatures only, invalidation barrier)
+//!                    ├── Body (method bodies, expressions/statements)
+//!                    └── SourceMap (HIR ↔ AST mapping for diagnostics)
+//! ```
+//!
+//! ## Key components
+//!
+//! - **ItemTree**: Module-level definitions (procedures, functions, variables)
+//! - **Body**: HIR representation of method bodies
+//! - **hir**: Expression and statement types (Expr, Stmt, Literal)
+//! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
+pub mod body;
+pub mod hir;
 pub mod item_tree;
 pub mod name;
 pub mod resolver;
@@ -14,6 +33,8 @@ use std::sync::Arc;
 
 use vfs::FileId;
 
+pub use body::{lower_method, Body, BodyDiagnostic, BodySourceMap, LowerResult};
+pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 pub use item_tree::ItemTree;
 pub use name::Name;
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
