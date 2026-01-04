@@ -249,6 +249,7 @@ pub enum SyntaxKind {
     SDBL_COLUMN_REF,    // Column reference
     SDBL_FUNCTION_CALL, // Function call
     SDBL_LITERAL,       // Literal value (number, string, boolean, null)
+    SDBL_MULTI_STRING,  // Multiple string tokens or string with newlines (multiString: STR+)
     SDBL_PARAMETER,     // Parameter reference (&Parameter)
 
     // Future (Phase 2+)

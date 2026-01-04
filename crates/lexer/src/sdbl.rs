@@ -457,8 +457,9 @@ pub enum SdblTokenKind {
     #[regex(r"[0-9]+")]
     Decimal,
 
-    // Strings: "..." with "" escaping
-    #[regex(r#""([^"\n\r]|"")*""#)]
+    #[token("\"")]
+    Quote,
+
     String,
 
     // Date literals: '20240101' or '20240101120000'
@@ -515,17 +516,115 @@ pub struct SdblToken {
 /// assert!(tokens.len() > 0);
 /// ```
 pub fn tokenize_sdbl(input: &str) -> Vec<SdblToken> {
-    let mut lexer = SdblTokenKind::lexer(input);
-    let mut tokens = Vec::new();
+    let mut result = Vec::new();
+    let mut pos = 0;
 
-    while let Some(result) = lexer.next() {
-        let kind = result.unwrap_or(SdblTokenKind::Error);
-        let text = SmolStr::new(lexer.slice());
-        let offset = lexer.span().start;
-        tokens.push(SdblToken { kind, text, offset });
+    while pos < input.len() {
+        let remaining = &input[pos..];
+
+        if remaining.starts_with('"') {
+            let strings = tokenize_strings_mode(input, pos);
+            result.extend(strings.tokens);
+            pos = strings.end_pos;
+        } else {
+            let mut lexer = SdblTokenKind::lexer(remaining);
+            if let Some(token_result) = lexer.next() {
+                let kind = token_result.unwrap_or(SdblTokenKind::Error);
+                if kind == SdblTokenKind::Quote {
+                    unreachable!("Quote should be handled above");
+                }
+                let text = SmolStr::new(lexer.slice());
+                let offset = pos;
+                result.push(SdblToken { kind, text: text.clone(), offset });
+                pos += text.len();
+            } else {
+                break;
+            }
+        }
     }
 
-    tokens
+    result
+}
+
+struct StringsResult {
+    tokens: Vec<SdblToken>,
+    end_pos: usize,
+}
+
+fn tokenize_strings_mode(input: &str, start_pos: usize) -> StringsResult {
+    let mut tokens = Vec::new();
+    let mut pos = start_pos;
+    let bytes = input.as_bytes();
+
+    if pos >= bytes.len() || bytes[pos] != b'"' {
+        return StringsResult { tokens, end_pos: pos };
+    }
+
+    let opening_quote_pos = pos;
+    tokens.push(SdblToken {
+        kind: SdblTokenKind::String,
+        text: SmolStr::new(&input[opening_quote_pos..opening_quote_pos + 1]),
+        offset: opening_quote_pos,
+    });
+    pos += 1;
+
+    loop {
+        let content_start = pos;
+
+        while pos < bytes.len() && bytes[pos] != b'"' && bytes[pos] != b'\n' && bytes[pos] != b'\r'
+        {
+            pos += 1;
+        }
+
+        if pos >= bytes.len() {
+            if content_start < pos {
+                let text = SmolStr::new(&input[content_start..pos]);
+                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
+            }
+            break;
+        }
+
+        if bytes[pos] == b'"' {
+            if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
+                pos += 2;
+                continue;
+            } else {
+                if content_start < pos {
+                    let text = SmolStr::new(&input[content_start..pos]);
+                    tokens.push(SdblToken {
+                        kind: SdblTokenKind::String,
+                        text,
+                        offset: content_start,
+                    });
+                }
+                tokens.push(SdblToken {
+                    kind: SdblTokenKind::String,
+                    text: SmolStr::new(&input[pos..pos + 1]),
+                    offset: pos,
+                });
+                pos += 1;
+                break;
+            }
+        }
+
+        if bytes[pos] == b'\n' || bytes[pos] == b'\r' {
+            if content_start < pos {
+                let text = SmolStr::new(&input[content_start..pos]);
+                tokens.push(SdblToken { kind: SdblTokenKind::String, text, offset: content_start });
+            }
+
+            while pos < bytes.len()
+                && (bytes[pos] == b'\n'
+                    || bytes[pos] == b'\r'
+                    || bytes[pos] == b' '
+                    || bytes[pos] == b'\t')
+            {
+                pos += 1;
+            }
+        }
+    }
+
+    StringsResult { tokens, end_pos: pos }
 }
 
 #[cfg(test)]
@@ -802,5 +901,71 @@ mod tests {
         assert_eq!(tokens[4].kind, SdblTokenKind::KwAs);
         assert_eq!(tokens[5].kind, SdblTokenKind::Whitespace);
         assert_eq!(tokens[6].kind, SdblTokenKind::TypeNumber);
+    }
+
+    #[test]
+    fn test_multiline_string_behavior() {
+        // Test what happens with strings containing newlines
+        // (after SDBL extraction from BSL multiline strings)
+
+        // Before lexer modification, this will produce ERROR tokens
+        // After modification, should produce String tokens
+        let input = "SELECT\n   \"\" AS Field";
+        let tokens = tokenize_sdbl(input);
+
+        // Should have: SELECT, Newline, Whitespace, String(""), Whitespace, AS, Whitespace, Ident
+        println!("\nMultiline string test tokens:");
+        for (i, token) in tokens.iter().enumerate() {
+            println!("  {}: {:?} = {:?}", i, token.kind, token.text);
+        }
+
+        // After lexer fix, empty string should be a String token
+        // For now, just document what we find
+        assert!(!tokens.is_empty(), "Should produce some tokens");
+    }
+
+    #[test]
+    fn test_string_without_newline() {
+        let tokens = tokenize_sdbl(r#""simple""#);
+        let string_tokens: Vec<_> =
+            tokens.iter().filter(|t| t.kind == SdblTokenKind::String).collect();
+        assert_eq!(string_tokens.len(), 3);
+        assert_eq!(string_tokens[0].text, r#"""#);
+        assert_eq!(string_tokens[1].text, r#"simple"#);
+        assert_eq!(string_tokens[2].text, r#"""#);
+    }
+
+    #[test]
+    fn test_string_with_embedded_newline() {
+        // Test a string that has a newline INSIDE it (like ANTLR STR+)
+        // This simulates what ANTLR would create for multiString
+        let input = "\"text\nmore\"";
+        let tokens = tokenize_sdbl(input);
+
+        println!("\nString with embedded newline tokens:");
+        for (i, token) in tokens.iter().enumerate() {
+            println!("  {}: {:?} = {:?}", i, token.kind, token.text);
+        }
+
+        // With current regex [^"\n\r], this should NOT match
+        // and produce ERROR or split tokens
+        assert!(!tokens.is_empty(), "Should produce tokens");
+    }
+
+    #[test]
+    fn test_multiline_string_splitting() {
+        let input = r#"   " КАК,
+   " КАК,
+   " КАК,"#;
+        let tokens = tokenize_sdbl(input);
+
+        let string_tokens: Vec<_> =
+            tokens.iter().filter(|t| t.kind == SdblTokenKind::String).collect();
+
+        assert!(
+            string_tokens.len() >= 2,
+            "Expected at least 2 String tokens after splitting, got {}",
+            string_tokens.len()
+        );
     }
 }

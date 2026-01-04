@@ -113,6 +113,7 @@ pub enum NodeKind {
     SdblColumnRef,
     SdblFunctionCall,
     SdblLiteral,
+    SdblMultiString,
     SdblParameter,
     SdblError,
 

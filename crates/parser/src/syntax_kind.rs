@@ -105,6 +105,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblColumnRef => SK::SDBL_COLUMN_REF,
         NodeKind::SdblFunctionCall => SK::SDBL_FUNCTION_CALL,
         NodeKind::SdblLiteral => SK::SDBL_LITERAL,
+        NodeKind::SdblMultiString => SK::SDBL_MULTI_STRING,
         NodeKind::SdblParameter => SK::SDBL_PARAMETER,
         NodeKind::SdblError => SK::SDBL_ERROR,
 

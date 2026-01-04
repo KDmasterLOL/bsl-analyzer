@@ -93,4 +93,5 @@ pub mod missing_returned_value_description;
 pub mod missing_space;
 pub mod missing_temp_storage_deletion;
 pub mod missing_temporary_file_deletion;
+pub mod multiline_string_in_query;
 // TODO: Add all 181 handlers

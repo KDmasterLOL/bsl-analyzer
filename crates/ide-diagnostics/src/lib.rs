@@ -151,6 +151,7 @@ pub enum DiagnosticCode {
     JoinWithSubQuery,
     LogicalOrInJoinQuerySection,
     LogicalOrInTheWhereSectionOfQuery,
+    MultilineStringInQuery,
     // TODO: Add all 181 codes
     // See DIAGNOSTICS_MIGRATION.md for full list
 }
@@ -202,6 +203,7 @@ impl DiagnosticCode {
             Self::JoinWithSubQuery => "JoinWithSubQuery",
             Self::LogicalOrInJoinQuerySection => "LogicalOrInJoinQuerySection",
             Self::LogicalOrInTheWhereSectionOfQuery => "LogicalOrInTheWhereSectionOfQuery",
+            Self::MultilineStringInQuery => "MultilineStringInQuery",
             Self::BeginTransactionBeforeTryCatch => "BeginTransactionBeforeTryCatch",
             Self::CachedPublic => "CachedPublic",
             Self::CommitTransactionOutsideTryCatch => "CommitTransactionOutsideTryCatch",
@@ -720,6 +722,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "LogicalOrInTheWhereSectionOfQuery",
         ctx,
         handlers::logical_or_in_the_where_section_of_query::check,
+    ));
+
+    result.extend(run_diagnostic(
+        "MultilineStringInQuery",
+        ctx,
+        handlers::multiline_string_in_query::check,
     ));
 
     result.extend(run_diagnostic(

@@ -207,10 +207,10 @@ fn convert_sdbl_token_kind(kind: SdblTokenKind) -> TokenKind {
 
         // Trivia (all treated as trivia and skipped by parser)
         S::Newline => T::Newline,
-        S::Comment => T::Comment, // Restored - treated as trivia
+        S::Comment => T::Comment,
         S::Whitespace => T::Whitespace,
 
-        // Error
+        S::Quote => T::Error,
         S::Error => T::Error,
     }
 }

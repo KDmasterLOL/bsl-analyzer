@@ -251,9 +251,46 @@ fn primary_expr(p: &mut Parser) {
 
 /// Parse literal expression (numbers, strings, booleans, null)
 fn literal_expr(p: &mut Parser) {
+    // Special handling for String tokens to detect multiString
+    if p.at(TokenKind::String) {
+        string_literal_or_multi(p);
+    } else {
+        // Other literals (numbers, booleans, null)
+        let m = p.start();
+        p.bump();
+        m.complete(p, NodeKind::SdblLiteral);
+    }
+}
+
+/// Parse string literal or multiString
+///
+/// Grammar: `multiString: STR+`
+///
+/// Creates SDBL_MULTI_STRING if multiple consecutive String tokens.
+/// For single String token, creates SDBL_LITERAL (even if it contains newlines).
+///
+/// NOTE: The diagnostic handler will check BOTH:
+/// 1. SDBL_MULTI_STRING nodes (multiple strings)
+/// 2. SDBL_LITERAL nodes with String tokens containing newlines
+fn string_literal_or_multi(p: &mut Parser) {
     let m = p.start();
-    p.bump(); // Literal token
-    m.complete(p, NodeKind::SdblLiteral);
+
+    // Bump first String token
+    p.bump();
+
+    // Check for consecutive String tokens (multiString: STR+)
+    let mut count = 1;
+    while p.at(TokenKind::String) {
+        p.bump();
+        count += 1;
+    }
+
+    // Create SDBL_MULTI_STRING only if multiple consecutive strings
+    if count > 1 {
+        m.complete(p, NodeKind::SdblMultiString);
+    } else {
+        m.complete(p, NodeKind::SdblLiteral);
+    }
 }
 
 /// Parse parameter expression (&Parameter)
