@@ -463,6 +463,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(run_diagnostic("LineLength", ctx, handlers::line_length::check));
     result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
     result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
+    result.extend(run_diagnostic("MissingSpace", ctx, handlers::missing_space::check));
 
     // Tier 2: Semantic diagnostics
     result.extend(run_diagnostic(
