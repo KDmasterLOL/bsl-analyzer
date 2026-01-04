@@ -14,20 +14,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Use pre-created ConfigurationPathInput for Salsa caching
-    let path_input = match ctx.configuration_path_input {
-        Some(input) => input,
-        None => {
-            // Fallback: create input if not provided (for tests)
-            let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-                Some(path) => path,
-                None => return Vec::new(),
-            };
-            let config_path_str = config_path.to_string_lossy().to_string();
-            ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str)
-        }
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
+        None => return Vec::new(),
     };
-    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
 
     // Build HashSet of common module names (lowercase) for O(1) lookup
     // This avoids O(N) iteration for each assignment statement
@@ -115,6 +105,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         check(&ctx)

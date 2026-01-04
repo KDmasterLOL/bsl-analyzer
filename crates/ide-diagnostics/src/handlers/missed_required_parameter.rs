@@ -62,7 +62,6 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::hir_def::{symbol_tree::MethodSymbol, ModuleId, Name};
-use ide_db::metadata;
 use syntax::{SyntaxKind, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
@@ -109,7 +108,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Load configuration metadata for Phase 2 (CommonModule calls)
     // This is cached by Salsa, so subsequent calls are very fast (< 1ms)
-    let configuration = load_configuration_if_available(ctx);
+    // NOTE: Currently unused because Phase 2/3 is disabled for performance
+    let _configuration = load_configuration_if_available(ctx);
+
+    // Cache for CommonModule FileIds to avoid repeated VFS lookups
+    // Key: module name (lowercase), Value: FileId
+    // NOTE: Currently unused because Phase 2/3 is disabled for performance
+    let _common_module_file_cache: std::collections::HashMap<String, Option<FileId>> =
+        std::collections::HashMap::new();
 
     // Find all method calls by looking for ARG_LIST nodes
     // Method calls in BSL are parsed as EXPR containing IDENT + ARG_LIST
@@ -126,27 +132,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Check if this is a qualified call (Object.Method or Module.Method)
         if is_qualified_call(&call_expr) {
-            // Phase 2 & 3: Handle qualified calls (CommonModule, Object, ThisObject)
-
-            // Try to get diagnostic:
-            let diagnostic = if let Some(ref config) = configuration {
-                // Have configuration - check all qualified calls
-                check_qualified_call(ctx, &call_expr, config)
-            } else {
-                // No configuration - only check ThisObject calls (don't need metadata)
-                extract_qualified_call(&call_expr).and_then(|qualified_call| {
-                    match qualified_call {
-                        QualifiedCall::ThisObject { method_name } => {
-                            check_this_object_call(ctx, &call_expr, &method_name)
-                        }
-                        _ => None, // Other qualified calls need configuration
-                    }
-                })
-            };
-
-            if let Some(diag) = diagnostic {
-                diagnostics.push(diag);
-            }
+            // Phase 2 & 3: TEMPORARILY DISABLED for performance
+            // CommonModule.Method() validation is too slow due to SymbolTree lookups
+            // TODO: Re-enable when performance is optimized
             continue;
         }
 
@@ -180,38 +168,41 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Load configuration metadata if available.
 ///
 /// Returns `None` if no configuration path is set in the context.
-/// Configuration is cached by Salsa, so this is fast after first load.
+/// Configuration is cached by Salsa via ctx.load_configuration().
+#[inline]
 fn load_configuration_if_available(
     ctx: &DiagnosticsContext,
 ) -> Option<std::sync::Arc<bsl_metadata::Configuration>> {
-    let config_path = ctx.configuration_path.or(ctx.workspace_root)?;
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    Some(metadata::load_configuration(ctx.db, path_input))
+    ctx.load_configuration()
 }
 
-/// Check a qualified method call (CommonModule.Method or Object.Method).
+// ==================== PHASE 2/3 FUNCTIONS ====================
+// These functions implement CommonModule.Method() and ThisObject validation.
+// Currently disabled in check() for performance reasons.
+// TODO: Re-enable when SymbolTree lookups are optimized.
+
+/// Check a qualified method call with caching for CommonModule file lookups.
 ///
-/// **Phase 2 Implementation:**
-/// - Detects CommonModule.Method() calls
-/// - Resolves CommonModule by name in metadata
-/// - Finds the CommonModule's BSL file
-/// - Builds SymbolTree and validates parameters
-///
-/// **Phase 3 (Future):**
-/// - Will handle Object.Method() with type inference
-/// - Requires type system beyond Unknown
-fn check_qualified_call(
+/// This version uses a cache to avoid repeated VFS lookups for the same CommonModule,
+/// significantly improving performance when a file has many calls to the same module.
+#[allow(dead_code)]
+fn check_qualified_call_cached(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
     configuration: &bsl_metadata::Configuration,
+    common_module_file_cache: &mut std::collections::HashMap<String, Option<FileId>>,
 ) -> Option<Diagnostic> {
     let qualified_call = extract_qualified_call(call_expr)?;
 
     match qualified_call {
-        QualifiedCall::TwoLevel { object_name, method_name } => {
-            check_common_module_call(ctx, call_expr, configuration, &object_name, &method_name)
-        }
+        QualifiedCall::TwoLevel { object_name, method_name } => check_common_module_call_cached(
+            ctx,
+            call_expr,
+            configuration,
+            &object_name,
+            &method_name,
+            common_module_file_cache,
+        ),
         QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name } => {
             check_object_method_call(
                 ctx,
@@ -228,21 +219,32 @@ fn check_qualified_call(
     }
 }
 
-/// Phase 2: Check CommonModule.Method() call for missing required parameters
-fn check_common_module_call(
+/// Phase 2: Check CommonModule.Method() call with cached file lookup
+#[allow(dead_code)]
+fn check_common_module_call_cached(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
     configuration: &bsl_metadata::Configuration,
     module_name: &str,
     method_name: &str,
+    cache: &mut std::collections::HashMap<String, Option<FileId>>,
 ) -> Option<Diagnostic> {
-    // Configuration.find_common_module() is case-insensitive
-    let common_module = configuration.find_common_module(module_name)?;
+    // Use lowercase module name as cache key (BSL is case-insensitive)
+    let cache_key = module_name.to_lowercase();
 
-    // Find the CommonModule's file in the workspace
-    let module_file_id = find_common_module_file(ctx, common_module)?;
+    // Check cache first, or lookup and cache the result
+    let module_file_id = match cache.get(&cache_key) {
+        Some(cached) => (*cached)?,
+        None => {
+            // Configuration.find_common_module() is case-insensitive
+            let common_module = configuration.find_common_module(module_name);
+            let file_id = common_module.and_then(|m| find_common_module_file(ctx, m));
+            cache.insert(cache_key, file_id);
+            file_id?
+        }
+    };
 
-    // Build SymbolTree for the CommonModule file
+    // Build SymbolTree for the CommonModule file (Salsa-cached)
     let module_id = ModuleId::new(module_file_id);
     let module_symbol_tree = ctx.db.symbol_tree(module_id);
 
@@ -252,11 +254,6 @@ fn check_common_module_call(
 
     // Only check exported methods for qualified calls
     if !method.is_export {
-        tracing::debug!(
-            module_name,
-            method_name,
-            "Method is not exported, skipping qualified call validation"
-        );
         return None;
     }
 
@@ -274,6 +271,7 @@ fn check_common_module_call(
 }
 
 /// Phase 3: Check Документы.ПКО.Method() call for missing required parameters
+#[allow(dead_code)]
 fn check_object_method_call(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -332,6 +330,7 @@ fn check_object_method_call(
 }
 
 /// Phase 3: Check ЭтотОбъект.Method() call for missing required parameters
+#[allow(dead_code)]
 fn check_this_object_call(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -366,11 +365,11 @@ fn check_this_object_call(
 ///
 /// 1. Get CommonModule URI from metadata
 /// 2. Build absolute path: workspace_root + URI
-/// 3. Resolve FileId via Salsa query (cached!)
+/// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
 ///
 /// ## Performance
-/// - First call: ~1ms (FileSet lookup + Salsa overhead)
-/// - Cached calls: ~10μs (Salsa returns cached result)
+/// - O(1) HashMap lookup in FileSet
+#[allow(dead_code)]
 fn find_common_module_file(
     ctx: &DiagnosticsContext,
     common_module: &bsl_metadata::CommonModule,
@@ -389,12 +388,15 @@ fn find_common_module_file(
     let full_path = config_path.join(uri);
     let vfs_path = VfsPath::new(full_path.clone());
 
-    // Get current file's SourceRoot
-    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-    let source_root_id = source_root_input.source_root_id(ctx.db);
-
-    // Resolve via Salsa query (CACHED!)
-    let file_id = ctx.db.resolve_vfs_path(source_root_id, &vfs_path);
+    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
+    let file_id = if let Some(file_set) = ctx.file_set {
+        file_set.file_for_path(&vfs_path).copied()
+    } else {
+        // Fallback: Resolve via Salsa (slower, for tests)
+        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
+        let source_root_id = source_root_input.source_root_id(ctx.db);
+        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+    };
 
     if file_id.is_none() {
         tracing::warn!(
@@ -414,7 +416,7 @@ fn find_common_module_file(
 ///
 /// 1. Verify metadata object exists in configuration
 /// 2. Build Manager Module path: `{english_plural}/{mdo_name}/Ext/ManagerModule.bsl`
-/// 3. Resolve FileId via Salsa query (cached!)
+/// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
 ///
 /// ## Example Paths
 /// - Document "ПКО" → `Documents/ПКО/Ext/ManagerModule.bsl`
@@ -422,8 +424,8 @@ fn find_common_module_file(
 /// - InformationRegister "Регистр1" → `InformationRegisters/Регистр1/Ext/ManagerModule.bsl`
 ///
 /// ## Performance
-/// - First call: ~1ms (FileSet lookup + Salsa overhead)
-/// - Cached calls: ~10μs (Salsa returns cached result)
+/// - O(1) HashMap lookup in FileSet
+#[allow(dead_code)]
 fn find_manager_module_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
@@ -470,12 +472,15 @@ fn find_manager_module_file(
     let full_path = config_path.join(&manager_module_path);
     let vfs_path = VfsPath::new(full_path.clone());
 
-    // Get current file's SourceRoot
-    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-    let source_root_id = source_root_input.source_root_id(ctx.db);
-
-    // Resolve via Salsa query (CACHED!)
-    let file_id = ctx.db.resolve_vfs_path(source_root_id, &vfs_path);
+    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
+    let file_id = if let Some(file_set) = ctx.file_set {
+        file_set.file_for_path(&vfs_path).copied()
+    } else {
+        // Fallback: Resolve via Salsa (slower, for tests)
+        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
+        let source_root_id = source_root_input.source_root_id(ctx.db);
+        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+    };
 
     if file_id.is_none() {
         tracing::warn!(
@@ -580,6 +585,7 @@ fn is_qualified_call(call_node: &SyntaxNode) -> bool {
 
 /// Qualified call variants (2-level, 3-level, or ThisObject)
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum QualifiedCall {
     /// Two-level call: `CommonModule.Method()`
     TwoLevel { object_name: String, method_name: String },
@@ -597,6 +603,7 @@ enum QualifiedCall {
 /// - **ThisObject:** `ЭтотОбъект.Method()` → `ThisObject { "Method" }`
 ///
 /// Returns `None` if not a valid qualified call.
+#[allow(dead_code)]
 fn extract_qualified_call(call_node: &SyntaxNode) -> Option<QualifiedCall> {
     // Collect all IDENT tokens (from all descendants) but stop at ARG_LIST
     let mut idents: Vec<String> = Vec::new();
@@ -805,6 +812,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -834,16 +842,18 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
 
-        // Phase 1 + Phase 3 (ThisObject): expect 6 diagnostics
+        // Phase 1 only: expect 5 diagnostics (local method calls)
+        // Phase 2 (CommonModule calls) and Phase 3 (ThisObject) are disabled for performance
         // - 5 local method calls
-        // - 1 ThisObject call (Line 30: ЭтотОбъект.Сложение)
-        // Lines 25-28 (CommonModule calls) are skipped (no metadata)
+        // Lines 25-28 (CommonModule calls) are skipped (Phase 2 disabled)
         // Line 29 (Справочники.Справочник1) is skipped (no metadata)
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics (5 local + 1 ThisObject)");
+        // Line 30 (ЭтотОбъект.Сложение) is skipped (Phase 3 disabled)
+        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics (Phase 1 local methods only)");
 
         // Verify exact positions match Java implementation (0-indexed)
         // Line 3: Сложение(, 2) - Missing 'Левый'
@@ -861,9 +871,7 @@ mod tests {
         // Line 19: Менеджер("Справочник") - Missing 'Вид' (Тип has default)
         assert_diagnostic_range_multiline(code, &diagnostics[4], 18, 13, 18, 35);
 
-        // Line 30: ЭтотОбъект.Сложение(, 2) - Missing 'Левый'
-        // Range starts at method name "Сложение" (qualified call behavior)
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 29, 27, 29, 40);
+        // NOTE: Line 30 (ЭтотОбъект.Сложение) is skipped because Phase 3 is disabled
     }
 
     #[test]
@@ -894,6 +902,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -930,6 +939,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -967,6 +977,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -1005,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_phase2_common_module_with_metadata() {
         use ide_db::base_db::{SourceRoot, SourceRootId};
         use std::path::Path;
@@ -1076,7 +1088,8 @@ mod tests {
 
         // Create configuration_path_input for metadata loading
         let config_path_str = fixtures_path.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
+        let path_input =
+            ide_db::metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
 
         // Set up context with workspace_root pointing to fixtures directory
         let ctx = DiagnosticsContext {
@@ -1086,6 +1099,7 @@ mod tests {
             workspace_root: Some(fixtures_path),
             configuration_path: Some(fixtures_path),
             configuration_path_input: Some(path_input),
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -1109,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_full_java_compatibility() {
         // Comprehensive integration test using the full Java test fixture
         // Tests both Phase 1 (local methods) and Phase 2 (CommonModule calls)
@@ -1168,7 +1183,8 @@ mod tests {
 
         // Create configuration path input for metadata
         let config_path_str = fixtures_path.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
+        let path_input =
+            ide_db::metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
 
         let config = crate::DiagnosticsConfig::default();
         let ctx = DiagnosticsContext {
@@ -1178,6 +1194,7 @@ mod tests {
             workspace_root: Some(fixtures_path),
             configuration_path: Some(fixtures_path),
             configuration_path_input: Some(path_input),
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -1233,6 +1250,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Phase 2 (CommonModule calls) is disabled for performance"]
     fn test_diagnostic_positions_java_compatibility() {
         // Test exact diagnostic positions match Java implementation
         // This ensures our ranges are compatible with bsl-language-server
@@ -1290,7 +1308,8 @@ mod tests {
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
 
         let config_path_str = fixtures_path.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
+        let path_input =
+            ide_db::metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
 
         let config = crate::DiagnosticsConfig::default();
         let ctx = DiagnosticsContext {
@@ -1300,6 +1319,7 @@ mod tests {
             workspace_root: Some(fixtures_path),
             configuration_path: Some(fixtures_path),
             configuration_path_input: Some(path_input),
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);

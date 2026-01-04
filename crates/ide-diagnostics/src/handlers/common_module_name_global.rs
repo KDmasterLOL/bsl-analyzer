@@ -20,14 +20,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => return Vec::new(),
     };
-
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
 
     let module = match common_module_helpers::find_common_module_for_file(ctx, &configuration) {
         Some(m) => m,
@@ -80,6 +76,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         if !module.is_global() {

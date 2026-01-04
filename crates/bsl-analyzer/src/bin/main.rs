@@ -219,6 +219,8 @@ fn analyze(
     tracing::info!("Found {} BSL files", bsl_files.len());
 
     // Build FileSet with all discovered files for VFS path resolution
+    // CRITICAL: FileSet is kept OUTSIDE of Salsa (SourceRoot uses EMPTY FileSet)
+    // This avoids O(n) hash/compare operations when Salsa tracks dependencies.
     tracing::info!("Loading files into database");
     let mut file_set = vfs::FileSet::new();
     let mut file_ids = Vec::new();
@@ -230,9 +232,10 @@ fn analyze(
         file_ids.push((file_id, path.clone()));
     }
 
-    // Setup source root with populated FileSet
+    // Setup source root with EMPTY FileSet (for Salsa)
+    // The populated file_set is passed separately to DiagnosticsContext
     let source_root_id = base_db::SourceRootId(0);
-    let source_root = base_db::SourceRoot::new_local(file_set);
+    let source_root = base_db::SourceRoot::new_local(vfs::FileSet::new());
     db.set_source_root(source_root_id, source_root);
 
     // Load file contents into database
@@ -279,6 +282,9 @@ fn analyze(
     let source_dir_arc = Arc::new(source_dir.clone());
     let configuration_path_arc = Arc::new(configuration_path);
     let clones_count = Arc::new(AtomicUsize::new(0));
+    // CRITICAL: FileSet is passed separately to DiagnosticsContext (not in SourceRoot)
+    // This avoids Salsa's O(n) hash/compare on large FileSet
+    let file_set_arc = Arc::new(file_set);
 
     let all_diagnostics: Vec<FileAnalysis> = file_ids
         .par_iter()
@@ -301,6 +307,7 @@ fn analyze(
                 workspace_root: Some(&source_dir_arc),
                 configuration_path: configuration_path_arc.as_deref(),
                 configuration_path_input: config_path_input,
+                file_set: Some(&file_set_arc),
             };
 
             // Catch panics to continue analyzing other files if one fails

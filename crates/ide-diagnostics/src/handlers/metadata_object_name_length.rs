@@ -20,14 +20,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_int(DiagnosticCode::MetadataObjectNameLength, "maxMetadataObjectNameLength")
         .unwrap_or(80) as usize;
 
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => return Vec::new(),
     };
-
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
 
     let mut diagnostics = Vec::new();
 
@@ -45,7 +41,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn is_session_module(ctx: &DiagnosticsContext) -> bool {
-    if let Some(file_path) = file_path(ctx.db, ctx.file_id) {
+    if let Some(file_path) = ctx.file_path() {
         file_path.ends_with("/Ext/SessionModule.bsl")
             || file_path.ends_with("\\Ext\\SessionModule.bsl")
     } else {
@@ -161,14 +157,14 @@ fn find_common_module_for_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_uri = file_uri(ctx.db, ctx.file_id)?;
+    let file_path = ctx.file_path()?;
 
     configuration
         .common_modules()
         .iter()
         .find(|module| {
             if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_uri.to_lowercase()
+                module_uri.to_lowercase() == file_path.to_lowercase()
             } else {
                 false
             }
@@ -180,7 +176,7 @@ fn find_metadata_object_for_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::MetadataObject> {
-    let file_path = file_path(ctx.db, ctx.file_id)?;
+    let file_path = ctx.file_path()?;
     let object_name = extract_metadata_object_name(&file_path)?;
 
     configuration
@@ -194,7 +190,7 @@ fn find_register_for_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::Register> {
-    let file_path = file_path(ctx.db, ctx.file_id)?;
+    let file_path = ctx.file_path()?;
     let register_name = extract_register_name(&file_path)?;
 
     configuration.find_register(&register_name).cloned()
@@ -251,20 +247,6 @@ fn extract_register_name(file_path: &str) -> Option<String> {
     None
 }
 
-fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-    Some(vfs_path.as_path().to_string_lossy().to_string())
-}
-
-fn file_path(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    file_uri(db, file_id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +282,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         check(&ctx)
@@ -318,6 +301,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -336,6 +320,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -366,6 +351,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let max_length = ctx

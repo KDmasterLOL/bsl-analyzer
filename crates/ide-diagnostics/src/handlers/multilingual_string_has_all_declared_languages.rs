@@ -401,6 +401,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         (check(&ctx), file_content)

@@ -36,25 +36,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn is_command_module(ctx: &DiagnosticsContext) -> bool {
-    let file_uri = match file_uri(ctx.db, ctx.file_id) {
-        Some(uri) => uri,
+    let file_path = match ctx.file_path() {
+        Some(path) => path,
         None => return false,
     };
 
     matches!(
-        ide_db::metadata::get_module_type_from_uri(&file_uri),
+        ide_db::metadata::get_module_type_from_uri(&file_path),
         Some(bsl_metadata::ModuleType::CommandModule)
     )
-}
-
-fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-    Some(vfs_path.as_path().to_string_lossy().to_string())
 }
 
 fn find_exported_methods(root: &SyntaxNode) -> Vec<Diagnostic> {

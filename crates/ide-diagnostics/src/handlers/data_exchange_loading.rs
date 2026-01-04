@@ -64,12 +64,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn is_applicable_module(ctx: &DiagnosticsContext) -> bool {
-    let file_uri = match file_uri(ctx.db, ctx.file_id) {
-        Some(uri) => uri,
+    let file_path = match ctx.file_path() {
+        Some(path) => path,
         None => return false, // No source root - skip check (not in configuration)
     };
 
-    match ide_db::metadata::get_module_type_from_uri(&file_uri) {
+    match ide_db::metadata::get_module_type_from_uri(&file_path) {
         Some(module_type) => matches!(
             module_type,
             bsl_metadata::ModuleType::ObjectModule
@@ -78,16 +78,6 @@ fn is_applicable_module(ctx: &DiagnosticsContext) -> bool {
         ),
         None => false, // Module type unknown - skip check (not in supported module types)
     }
-}
-
-fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-    Some(vfs_path.as_path().to_string_lossy().to_string())
 }
 
 fn check_procedure(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>, find_first: bool) {

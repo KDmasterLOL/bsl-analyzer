@@ -56,19 +56,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Workspace integration required for metadata access
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    // Load configuration metadata via ctx.load_configuration() for Salsa caching
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => {
             tracing::debug!("No workspace root - skipping DenyIncompleteValues check");
             return Vec::new();
         }
     };
-
-    // Load configuration metadata via Salsa
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
 
     // Find register for current file
     let register = match find_register_for_file(ctx, &configuration) {
@@ -137,8 +132,8 @@ fn find_register_for_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::Register> {
-    // Get file path from VFS
-    let file_path = file_path(ctx.db, ctx.file_id)?;
+    // Get file path using ctx.file_path() (CRITICAL: bypasses Salsa for performance)
+    let file_path = ctx.file_path()?;
 
     // Extract register name from path
     // Path format: .../InformationRegisters/<Name>/Ext/ManagerModule.bsl
@@ -174,25 +169,6 @@ fn extract_register_name(file_path: &str) -> Option<String> {
     }
 
     None
-}
-
-/// Get file path from VFS.
-fn file_path(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    // Get source root for file
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-
-    // Get source root
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-
-    // Get file path from FileSet
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-
-    // Convert VfsPath to path string
-    let path_str = vfs_path.as_path().to_string_lossy().to_string();
-    Some(path_str)
 }
 
 #[cfg(test)]
@@ -287,6 +263,7 @@ mod tests {
             workspace_root: None, // No workspace - should skip check
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);

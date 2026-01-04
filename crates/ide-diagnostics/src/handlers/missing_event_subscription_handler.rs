@@ -61,7 +61,6 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use ide_db::hir_def::{ModuleId, Name};
-use ide_db::metadata;
 use syntax::TextRange;
 use vfs::FileId;
 
@@ -93,14 +92,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // 3. Load configuration metadata
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => return Vec::new(),
     };
-
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    let configuration = metadata::load_configuration(ctx.db, path_input);
 
     // 4. Process all event subscriptions
     let mut diagnostics = Vec::new();
@@ -113,17 +108,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Check if current file is SessionModule
 fn is_session_module(ctx: &DiagnosticsContext) -> bool {
-    // Get file path from VFS using file_source_root_input pattern
-    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-    let source_root_id = source_root_input.source_root_id(ctx.db);
-    let source_root_input = ctx.db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(ctx.db);
-    let file_set = source_root.file_set();
-    let vfs_path = match file_set.path_for_file(&ctx.file_id) {
+    // Get file path using ctx.file_path() (CRITICAL: bypasses Salsa for performance)
+    let file_path = match ctx.file_path() {
         Some(path) => path,
         None => return false,
     };
-    let file_path = vfs_path.as_path().to_string_lossy();
 
     // SessionModule is at Configuration/Ext/SessionModule.bsl
     file_path.ends_with("/Ext/SessionModule.bsl") || file_path.ends_with("\\Ext\\SessionModule.bsl")
@@ -308,8 +297,8 @@ fn find_common_module_file(
     // Get module URI (e.g., "CommonModules/ModuleName/Ext/Module.bsl")
     let uri = common_module.uri()?;
 
-    // Get workspace root
-    let workspace_root = ctx.workspace_root?;
+    // Get workspace root (prefer configuration_path for proper path resolution)
+    let workspace_root = ctx.configuration_path.or(ctx.workspace_root)?;
 
     // Build absolute path
     let full_path = workspace_root.join(uri);
@@ -317,12 +306,15 @@ fn find_common_module_file(
     // Convert to VfsPath
     let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
 
-    // Get source root from file_id
-    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-    let source_root_id = source_root_input.source_root_id(ctx.db);
-
-    // Resolve via Salsa query (CACHED!)
-    let file_id = ctx.db.resolve_vfs_path(source_root_id, &vfs_path);
+    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
+    let file_id = if let Some(file_set) = ctx.file_set {
+        file_set.file_for_path(&vfs_path).copied()
+    } else {
+        // Fallback: Resolve via Salsa (slower, for tests)
+        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
+        let source_root_id = source_root_input.source_root_id(ctx.db);
+        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+    };
 
     if file_id.is_none() {
         tracing::warn!(
@@ -399,6 +391,7 @@ mod tests {
             workspace_root: Some(&workspace_root),
             configuration_path: Some(&workspace_root),
             configuration_path_input: Some(configuration_path_input),
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -492,6 +485,7 @@ mod tests {
             workspace_root: Some(&workspace_root),
             configuration_path: Some(&workspace_root),
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);

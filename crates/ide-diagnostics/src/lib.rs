@@ -384,6 +384,62 @@ pub struct DiagnosticsContext<'a> {
     /// Pre-created ConfigurationPathInput for metadata queries (CRITICAL for Salsa caching!)
     /// If None, diagnostics should create it once from configuration_path/workspace_root
     pub configuration_path_input: Option<ide_db::metadata::ConfigurationPathInput<'a>>,
+    /// FileSet for path lookups (CRITICAL for performance!)
+    /// Keeping FileSet outside of Salsa avoids O(n) hash/compare operations.
+    /// If None, falls back to Salsa lookup (slower, for tests only).
+    pub file_set: Option<&'a vfs::FileSet>,
+}
+
+impl<'a> DiagnosticsContext<'a> {
+    /// Load configuration metadata using cached ConfigurationPathInput.
+    ///
+    /// CRITICAL: This method uses ctx.configuration_path_input if available
+    /// to ensure Salsa caching works properly. Creating a new ConfigurationPathInput
+    /// for each file would break caching and cause massive performance degradation!
+    ///
+    /// Returns `None` if no configuration path is available.
+    pub fn load_configuration(&self) -> Option<std::sync::Arc<bsl_metadata::Configuration>> {
+        // Use pre-created path_input for proper Salsa caching
+        if let Some(path_input) = self.configuration_path_input {
+            return Some(ide_db::metadata::load_configuration(self.db, path_input));
+        }
+
+        // Fallback: create path_input (less efficient, but needed for tests)
+        let config_path = self.configuration_path.or(self.workspace_root)?;
+        let config_path_str = config_path.to_string_lossy().to_string();
+        let path_input = ide_db::metadata::ConfigurationPathInput::new(self.db, config_path_str);
+        Some(ide_db::metadata::load_configuration(self.db, path_input))
+    }
+
+    /// Get the file path for the current file.
+    ///
+    /// CRITICAL for performance: Uses the provided FileSet directly (O(1) lookup)
+    /// instead of going through Salsa (which would require O(n) hash/compare
+    /// of the entire FileSet).
+    ///
+    /// Returns `None` if file path cannot be resolved.
+    pub fn file_path(&self) -> Option<String> {
+        // Fast path: use provided FileSet (bypasses Salsa)
+        if let Some(file_set) = self.file_set {
+            let vfs_path = file_set.path_for_file(&self.file_id)?;
+            return Some(vfs_path.as_path().to_string_lossy().to_string());
+        }
+
+        // Slow path: go through Salsa (for tests without FileSet)
+        self.file_path_via_salsa()
+    }
+
+    /// Fallback: get file path through Salsa database.
+    /// This is slower because Salsa needs to track the SourceRoot dependency.
+    fn file_path_via_salsa(&self) -> Option<String> {
+        let source_root_input = self.db.file_source_root_input(self.file_id);
+        let source_root_id = source_root_input.source_root_id(self.db);
+        let source_root_input = self.db.source_root_input(source_root_id);
+        let source_root = source_root_input.root(self.db);
+        let file_set = source_root.file_set();
+        let vfs_path = file_set.path_for_file(&self.file_id)?;
+        Some(vfs_path.as_path().to_string_lossy().to_string())
+    }
 }
 
 /// Helper to run a diagnostic and log if it's slow (>80ms)

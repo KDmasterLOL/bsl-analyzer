@@ -78,25 +78,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new(); // Early exit - no public regions, no need to check metadata
     }
 
-    // Workspace integration required for metadata access
-    let _config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    // Load configuration metadata
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => {
             // No workspace - skip metadata check (used in standalone tests)
             tracing::debug!("No workspace root - skipping CachedPublic check");
             return Vec::new();
         }
     };
-
-    // OPTIMIZATION 2: Only load metadata if there are public regions
-    // Load configuration metadata
-    // Workaround for trait object limitation: call Salsa query function directly
-    // instead of using trait method (which requires Self: Sized)
-    let config_path_str = _config_path.to_string_lossy().to_string();
-    let path_input = ide_db::metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-
-    // Upcast &dyn RootDatabase to &dyn salsa::Database to call the free function
-    let configuration = ide_db::metadata::load_configuration(ctx.db, path_input);
 
     // Find CommonModule for current file
     let common_module = match find_common_module_for_file(ctx, &configuration) {
@@ -222,8 +212,8 @@ fn find_common_module_for_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::CommonModule> {
-    // Get file URI from VFS
-    let file_uri = file_uri(ctx.db, ctx.file_id)?;
+    // Get file path using ctx.file_path() (CRITICAL: bypasses Salsa for performance)
+    let file_path = ctx.file_path()?;
 
     // Search configuration.common_modules() for matching URI
     configuration
@@ -232,41 +222,12 @@ fn find_common_module_for_file(
         .find(|module| {
             // Match by URI (Module trait method)
             if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_uri.to_lowercase()
+                module_uri.to_lowercase() == file_path.to_lowercase()
             } else {
                 false
             }
         })
         .cloned()
-}
-
-/// Get file URI from VFS.
-///
-/// Converts FileId to URI string by looking up the file path through SourceRoot.
-///
-/// Steps:
-/// 1. Get SourceRootId for file
-/// 2. Get SourceRoot for SourceRootId
-/// 3. Get FileSet from SourceRoot
-/// 4. Look up VfsPath for FileId
-/// 5. Convert Path to URI string
-fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    // Get source root for file
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-
-    // Get source root
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-
-    // Get file path from FileSet
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-
-    // Convert VfsPath to URI string
-    // Note: In 1C, URIs are typically file:// URLs, but metadata uses lowercase paths
-    let path_str = vfs_path.as_path().to_string_lossy().to_string();
-    Some(path_str)
 }
 
 /// Check code with specific module (test-only helper).
@@ -337,6 +298,7 @@ mod tests {
             workspace_root: None, // No workspace in unit tests
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -421,6 +383,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         // Create mock module with DuringRequest (mimics Java's spy)
@@ -461,6 +424,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         // Create mock module with DuringSession
@@ -491,6 +455,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         // Create mock module with DontUse (not cached)

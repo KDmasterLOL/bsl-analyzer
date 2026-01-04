@@ -57,7 +57,6 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::hir_def::{ModuleId, Name};
-use ide_db::metadata;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
@@ -84,16 +83,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Early return if no metadata
-    let config_path = match ctx.configuration_path.or(ctx.workspace_root) {
-        Some(path) => path,
+    // Load metadata via ctx.load_configuration() for Salsa caching
+    let configuration = match ctx.load_configuration() {
+        Some(config) => config,
         None => return Vec::new(),
     };
-
-    // Load metadata via Salsa (cached!)
-    let config_path_str = config_path.to_string_lossy().to_string();
-    let path_input = metadata::ConfigurationPathInput::new(ctx.db, config_path_str);
-    let configuration = metadata::load_configuration(ctx.db, path_input);
 
     let root = ctx.db.parse(ctx.file_id).syntax_node();
     let mut diagnostics = Vec::new();
@@ -362,12 +356,11 @@ fn extract_qualified_call(call_node: &SyntaxNode) -> Option<(String, String)> {
 ///
 /// 1. Get CommonModule URI from metadata
 /// 2. Build absolute path: workspace_root + URI
-/// 3. Resolve FileId via Salsa query (cached!)
+/// 3. Resolve FileId via ctx.file_set (bypasses Salsa for performance)
 ///
 /// ## Performance
 ///
-/// - First call: ~1ms (FileSet lookup + Salsa overhead)
-/// - Cached calls: ~10μs (Salsa returns cached result)
+/// - O(1) HashMap lookup in FileSet
 fn find_common_module_file(
     ctx: &DiagnosticsContext,
     common_module: &bsl_metadata::CommonModule,
@@ -385,12 +378,15 @@ fn find_common_module_file(
     let full_path = config_path.join(uri);
     let vfs_path = VfsPath::new(full_path.clone());
 
-    // Get current file's SourceRoot
-    let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-    let source_root_id = source_root_input.source_root_id(ctx.db);
-
-    // Resolve via Salsa query (CACHED!)
-    let file_id = ctx.db.resolve_vfs_path(source_root_id, &vfs_path);
+    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
+    let file_id = if let Some(file_set) = ctx.file_set {
+        file_set.file_for_path(&vfs_path).copied()
+    } else {
+        // Fallback: Resolve via Salsa (slower, for tests)
+        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
+        let source_root_id = source_root_input.source_root_id(ctx.db);
+        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+    };
 
     if file_id.is_none() {
         tracing::warn!(
@@ -557,7 +553,8 @@ mod tests {
 
         // Create configuration path input
         let config_path_str = fixtures_path.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
+        let path_input =
+            ide_db::metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
 
         // Run diagnostic
         let ctx = DiagnosticsContext {
@@ -567,6 +564,7 @@ mod tests {
             workspace_root: Some(fixtures_path),
             configuration_path: Some(fixtures_path),
             configuration_path_input: Some(path_input),
+            file_set: None,
         };
 
         // Verify parsing
@@ -606,6 +604,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -644,6 +643,7 @@ mod tests {
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
@@ -711,7 +711,8 @@ mod tests {
 
         // Create configuration path input
         let config_path_str = fixtures_path.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
+        let path_input =
+            ide_db::metadata::ConfigurationPathInput::new(db.as_ref(), config_path_str);
 
         let ctx = DiagnosticsContext {
             db: db.as_ref(),
@@ -720,6 +721,7 @@ mod tests {
             workspace_root: Some(fixtures_path),
             configuration_path: Some(fixtures_path),
             configuration_path_input: Some(path_input),
+            file_set: None,
         };
 
         let diagnostics = check(&ctx);
