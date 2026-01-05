@@ -488,6 +488,13 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::incorrect_line_break::check(ctx));
     diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
     diagnostics.extend(handlers::space_at_start_comment::check(ctx));
+    diagnostics.extend(handlers::commented_code::check(ctx));
+
+    // Region-related diagnostics (file-level)
+    diagnostics.extend(handlers::duplicate_region::check(ctx));
+    diagnostics.extend(handlers::non_standard_region::check(ctx));
+    diagnostics.extend(handlers::code_block_before_sub::check(ctx));
+    diagnostics.extend(handlers::code_out_of_region::check(ctx));
 
     // Single traversal for all node-based text diagnostics
     // FIXME: This iterates the entire file which is expensive.
@@ -498,6 +505,7 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
         handlers::extra_commas::check_node(&node, &mut diagnostics, ctx);
         handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+        handlers::empty_region::check_node(&node, &mut diagnostics, ctx);
         // TODO: Add more node-based text diagnostics here:
         // handlers::commented_code::check_node(&node, &mut diagnostics, ctx);
         // handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
@@ -521,15 +529,18 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::canonical_spelling_keywords::check,
     ));
-    result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
+    // NOTE: CommentedCode migrated to text-based collection (collect_text_diagnostics)
+    // result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
     result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
     result.extend(run_diagnostic(
         "DuplicateStringLiteral",
         ctx,
         handlers::duplicate_string_literal::check,
     ));
-    result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
-    result.extend(run_diagnostic("NonStandardRegion", ctx, handlers::non_standard_region::check));
+    // NOTE: DuplicateRegion migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
+    // NOTE: NonStandardRegion migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic("NonStandardRegion", ctx, handlers::non_standard_region::check));
     result.extend(run_diagnostic(
         "DuplicatedInsertionIntoCollection",
         ctx,
@@ -539,7 +550,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // The HIR version is collected during lowering via BodyDiagnostic::EmptyCodeBlock
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("EmptyCodeBlock", ctx, handlers::empty_code_block::check));
-    result.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
+    // NOTE: EmptyRegion migrated to text-based collection (collect_text_diagnostics - node-based)
+    // result.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
     // NOTE: EmptyStatement migrated to text-based collection (collect_text_diagnostics)
     // result.extend(run_diagnostic("EmptyStatement", ctx, handlers::empty_statement::check));
     // NOTE: ExtraCommas migrated to text-based collection (collect_text_diagnostics)
@@ -713,12 +725,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::code_after_async_call::check,
     ));
-    result.extend(run_diagnostic(
-        "CodeBlockBeforeSub",
-        ctx,
-        handlers::code_block_before_sub::check,
-    ));
-    result.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
+    // NOTE: CodeBlockBeforeSub migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic(
+    //     "CodeBlockBeforeSub",
+    //     ctx,
+    //     handlers::code_block_before_sub::check,
+    // ));
+    // NOTE: CodeOutOfRegion migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
     result.extend(run_diagnostic(
         "CognitiveComplexity",
         ctx,

@@ -42,6 +42,30 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
 use syntax::{ast::AstNode, ast::PreRegionDir, SyntaxKind, SyntaxNode};
 
+/// Check a single syntax node for empty regions (node-based API).
+///
+/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Check if disabled
+    if ctx.config.is_disabled(DiagnosticCode::EmptyRegion) {
+        return;
+    }
+
+    // Only check PRE_REGION_DIR nodes
+    if node.kind() != SyntaxKind::PRE_REGION_DIR {
+        return;
+    }
+
+    if let Some(region) = PreRegionDir::cast(node.clone()) {
+        if is_empty_region(node) {
+            if let Some(name) = region.name() {
+                acc.push(create_diagnostic(name, node.text_range()));
+            }
+        }
+    }
+}
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("EmptyRegion::check").entered();
 
