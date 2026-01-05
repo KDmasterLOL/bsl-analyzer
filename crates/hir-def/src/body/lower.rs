@@ -178,8 +178,10 @@ pub fn lower_method_with_externals(
         let stmts = lower_stmt_list(&mut ctx, &stmt_list);
         ctx.body.body_stmts = stmts.into_boxed_slice();
 
-        // Check for FunctionShouldHaveReturn
-        if is_function && !has_return_statement(&stmt_list) {
+        let has_return = has_return_statement(&stmt_list);
+
+        // Check for FunctionShouldHaveReturn (no return statement at all)
+        if is_function && !has_return {
             // Get function name range for diagnostic
             let name_range = method_node
                 .children_with_tokens()
@@ -189,6 +191,20 @@ pub fn lower_method_with_externals(
                 .unwrap_or_else(|| method_node.text_range());
 
             ctx.emit(BodyDiagnostic::FunctionShouldHaveReturn { range: name_range });
+        }
+
+        // Check for MissingReturn (some paths don't return)
+        // Only check if function has at least one return (otherwise FunctionShouldHaveReturn fires)
+        if is_function && has_return && check_missing_return_paths(&stmt_list) {
+            // Get function name range for diagnostic
+            let name_range = method_node
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT)
+                .map(|tok| tok.text_range())
+                .unwrap_or_else(|| method_node.text_range());
+
+            ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
         }
 
         // Check for empty body
@@ -313,6 +329,135 @@ fn find_first_unreachable_at_root(root: &SyntaxNode, after_range: TextRange) -> 
 /// Check if a statement list contains at least one return statement.
 fn has_return_statement(stmt_list: &SyntaxNode) -> bool {
     stmt_list.descendants().any(|n| n.kind() == SyntaxKind::RETURN_STMT)
+}
+
+/// Check if function has missing return paths using CFG analysis.
+///
+/// Returns true if some execution paths don't have explicit return statements.
+/// This uses the same CFG analysis as AllFunctionPathMustHaveReturn diagnostic.
+fn check_missing_return_paths(stmt_list: &SyntaxNode) -> bool {
+    use cfg::{CfgBuilder, CfgEdgeType, CfgVertex};
+
+    // Build CFG with default configuration (loops executed at least once)
+    let mut builder = CfgBuilder::new();
+    builder.produce_loop_iterations(true); // Default: assume loops execute at least once
+    let cfg = builder.build_graph(stmt_list);
+
+    let exit_point = cfg.exit_point();
+
+    // Check all incoming edges to exit point
+    let incoming: Vec<_> = cfg.incoming_edges(exit_point).collect();
+
+    for (source_idx, edge_type) in incoming.iter() {
+        if let Some(vertex) = cfg.vertex(*source_idx) {
+            // Check if this path has missing return
+            let has_missing = match vertex {
+                CfgVertex::BasicBlock(block) => {
+                    // Check incoming edges
+                    let incoming_edges: Vec<_> = cfg.incoming_edges(*source_idx).collect();
+
+                    // Endless loop bypass is unreachable
+                    let from_endless_loop = incoming_edges.iter().any(|(src_idx, edge)| {
+                        matches!(edge, CfgEdgeType::FalseBranch)
+                            && matches!(
+                                cfg.vertex(*src_idx),
+                                Some(CfgVertex::WhileLoop(loop_v)) if loop_v.is_endless()
+                            )
+                    });
+
+                    if from_endless_loop {
+                        false
+                    } else {
+                        check_basic_block_missing_return(*source_idx, block, &cfg)
+                    }
+                }
+                CfgVertex::WhileLoop(loop_vertex) => {
+                    // Endless loops are assumed to return inside
+                    if loop_vertex.is_endless() {
+                        false
+                    } else {
+                        // Loop false branch (didn't execute) is OK if loops_executed_at_least_once
+                        **edge_type != CfgEdgeType::FalseBranch
+                    }
+                }
+                CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => {
+                    // Loop false branch (didn't execute) is OK
+                    **edge_type != CfgEdgeType::FalseBranch
+                }
+                CfgVertex::Conditional(_) => {
+                    // Missing else clause
+                    true
+                }
+                _ => false,
+            };
+
+            if has_missing {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if a basic block has missing return.
+fn check_basic_block_missing_return(
+    vertex_idx: cfg::NodeIndex,
+    block: &cfg::BasicBlockVertex,
+    cfg: &cfg::ControlFlowGraph,
+) -> bool {
+    use cfg::CfgEdgeType;
+    use cfg::CfgVertex;
+
+    if block.is_empty() {
+        // Check incoming edges
+        let incoming_edges: Vec<_> = cfg.incoming_edges(vertex_idx).collect();
+
+        // Loop false branch is OK
+        let from_loop_false = incoming_edges.iter().any(|(source_idx, edge)| {
+            matches!(edge, CfgEdgeType::FalseBranch)
+                && matches!(
+                    cfg.vertex(*source_idx),
+                    Some(
+                        CfgVertex::WhileLoop(_) | CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_)
+                    )
+                )
+        });
+
+        if from_loop_false {
+            return false;
+        }
+
+        // Missing else clause
+        let from_conditional_false = incoming_edges.iter().any(|(source_idx, edge)| {
+            matches!(edge, CfgEdgeType::FalseBranch)
+                && matches!(cfg.vertex(*source_idx), Some(CfgVertex::Conditional(_)))
+        });
+
+        if from_conditional_false {
+            return true;
+        }
+
+        // Check if all incoming edges have returns
+        let all_have_returns = incoming_edges.iter().all(|(source_idx, _)| {
+            if let Some(CfgVertex::BasicBlock(src_block)) = cfg.vertex(*source_idx) {
+                src_block.last_statement().is_some_and(|stmt| {
+                    matches!(stmt.kind(), SyntaxKind::RETURN_STMT | SyntaxKind::RAISE_STMT)
+                })
+            } else {
+                false
+            }
+        });
+
+        return !all_have_returns;
+    }
+
+    // Non-empty block: check last statement
+    let has_explicit_return = block.last_statement().is_some_and(|stmt| {
+        matches!(stmt.kind(), SyntaxKind::RETURN_STMT | SyntaxKind::RAISE_STMT)
+    });
+
+    !has_explicit_return
 }
 
 /// Lower parameter list.

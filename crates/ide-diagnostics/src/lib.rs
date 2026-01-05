@@ -565,11 +565,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
 
     // Tier 2: Semantic diagnostics
-    result.extend(run_diagnostic(
-        "AllFunctionPathMustHaveReturn",
-        ctx,
-        handlers::all_function_path_must_have_return::check,
-    ));
+    // NOTE: AllFunctionPathMustHaveReturn migrated to HIR-based MissingReturn
+    // The HIR version is collected during lowering via BodyDiagnostic::MissingReturn
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "AllFunctionPathMustHaveReturn",
+    //     ctx,
+    //     handlers::all_function_path_must_have_return::check,
+    // ));
     result.extend(run_diagnostic(
         "BeginTransactionBeforeTryCatch",
         ctx,
@@ -881,7 +884,8 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::UnreachableCode { range } => {
             handlers::unreachable_code::from_hir(*range, ctx)
         }
+        BodyDiagnostic::MissingReturn { range } => handlers::missing_return::from_hir(*range, ctx),
         // Not yet implemented - return None
-        BodyDiagnostic::MissingReturn { .. } | BodyDiagnostic::DeprecatedMethod { .. } => None,
+        BodyDiagnostic::DeprecatedMethod { .. } => None,
     }
 }

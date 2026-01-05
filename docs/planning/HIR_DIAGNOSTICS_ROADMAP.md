@@ -7,6 +7,28 @@
 **Текущее состояние:** ~27s на 6.5K файлов (90× O(n) traversals)
 **Целевое состояние:** ~10-15s (1× traversal + Salsa caching)
 
+## Текущие достижения (2026-01-05)
+
+✅ **6 из 8 HIR-диагностик реализованы и работают:**
+- FunctionShouldHaveReturn (простая проверка наличия return)
+- EmptyCodeBlock (пустые if/while/for/try блоки)
+- MagicNumber (магические числа в коде)
+- SelfAssign (самоприсваивание a = a)
+- UnusedLocalVariable (неиспользуемые локальные переменные + module-level tracking)
+- UnreachableCode (недостижимый код после return/raise/break/continue)
+
+⏳ **Осталось реализовать:**
+- MissingReturn (enum готов, нужен handler + CFG integration)
+- DeprecatedMethod (enum готов, нужен handler + metadata integration)
+
+✅ **Инфраструктура готова:**
+- Body lowering (AST → HIR)
+- BodySourceMap (HIR ↔ AST mapping)
+- BodyDiagnostic enum
+- Salsa integration (module_bodies query)
+- CFG crate (control flow graph на основе AST)
+- Dispatch система в ide-diagnostics
+
 ## Архитектурное сравнение
 
 ```
@@ -63,7 +85,12 @@ crates/ide-diagnostics/src/
     ├── function_should_have_return.rs ✅ from_hir()
     ├── empty_code_block.rs            ✅ from_hir()
     ├── magic_number.rs                ✅ from_hir()
-    └── self_assign.rs                 ✅ from_hir()
+    ├── self_assign.rs                 ✅ from_hir()
+    ├── unused_local_variable.rs       ✅ from_hir()
+    └── unreachable_code.rs            ✅ from_hir()
+
+crates/cfg/src/
+└── lib.rs            ✅ CFG построение из AST для flow-sensitive diagnostics
 ```
 
 ## Статус реализации
@@ -73,11 +100,11 @@ crates/ide-diagnostics/src/
 | Phase 1 | Body Lowering | ✅ Завершена |
 | Phase 2 | SourceMap | ✅ Завершена |
 | Phase 3 | Diagnostics Infrastructure | ✅ Завершена |
-| Phase 4 | Migrate Tier 1 Diagnostics | ✅ Частично (FunctionShouldHaveReturn, EmptyCodeBlock, MagicNumber, SelfAssign) |
+| Phase 4 | Migrate Tier 1 Diagnostics | ✅ Завершена (6 из 8 диагностик) |
 | Phase 5 | Cleanup + Архитектурный рефакторинг | ✅ Завершена |
-| Phase 6 | UnreachableCode | ⏳ Следующий |
-| Phase 7 | CFG из Body | ⏳ Планируется |
-| Phase 8 | Body Validation Pass | ⏳ Планируется |
+| Phase 6 | UnreachableCode + UnusedLocalVariable | ✅ Завершена |
+| Phase 7 | CFG Infrastructure | ✅ Завершена (на основе AST) |
+| Phase 8 | Remaining Diagnostics | ⏳ Следующий (MissingReturn, DeprecatedMethod) |
 
 ### Архитектурный рефакторинг (Phase 5)
 
@@ -94,13 +121,15 @@ crates/ide-diagnostics/src/
 | Диагностика | Статус | Примечание |
 |-------------|--------|------------|
 | FunctionShouldHaveReturn | ✅ Полностью | AST версия удалена |
-| EmptyCodeBlock | ✅ В lowering | Проверяется при lowering |
-| MagicNumber | ✅ В lowering | Проверяется при lowering литералов |
-| SelfAssign | ✅ В lowering | Проверяется при lowering assignment |
-| UnreachableCode | ⏳ Enum готов | Требует CFG |
-| MissingReturn | ⏳ Enum готов | Требует CFG |
-| UnusedVariable | ⏳ Enum готов | Требует usage tracking |
-| DeprecatedMethod | ⏳ Enum готов | Требует metadata |
+| EmptyCodeBlock | ✅ Полностью | Проверяется при lowering |
+| MagicNumber | ✅ Полностью | Проверяется при lowering литералов |
+| SelfAssign | ✅ Полностью | Проверяется при lowering assignment |
+| UnusedLocalVariable | ✅ Полностью | Usage tracking + module-level support |
+| UnreachableCode | ✅ Полностью | Control flow analysis в lowering |
+| MissingReturn | ⏳ Enum готов | Требует реализацию handler + CFG |
+| DeprecatedMethod | ⏳ Enum готов | Требует реализацию handler + metadata |
+
+**Примечание:** AllFunctionPathMustHaveReturn реализована как отдельная AST-based диагностика с использованием CFG crate. В будущем можно мигрировать на HIR-based подход.
 
 ## Что нужно добавить
 
@@ -257,23 +286,24 @@ pub fn validate_body(
 - [x] Control flow (if/while/for/try)
 - [x] Method calls
 
-### Iteration 3: Diagnostics Migration (2 недели) ⏳
+### Iteration 3: Diagnostics Migration (2 недели) ✅
 - [x] BodyDiagnostic infrastructure
 - [x] FunctionShouldHaveReturn (мигрирована на HIR, AST версия удалена)
 - [x] EmptyCodeBlock
 - [x] MagicNumber
 - [x] SelfAssign
-- [ ] UnreachableCode (требует CFG)
-- [ ] MissingReturn/AllFunctionPathMustHaveReturn (требует CFG)
-- [ ] UnusedVariable (требует usage tracking)
-- [ ] Migrate remaining diagnostics
+- [x] UnreachableCode (реализована с control flow analysis)
+- [x] UnusedLocalVariable (реализована с usage tracking + module-level support)
+- [ ] MissingReturn (enum готов, требует handler)
+- [ ] DeprecatedMethod (enum готов, требует handler)
 
-### Iteration 4: Optimization (1 неделя)
-- [ ] CFG из Body (Phase 7)
-- [ ] Body Validation Pass (Phase 8)
+### Iteration 4: Remaining Work ⏳
+- [x] CFG Infrastructure (Phase 7) - реализована на основе AST
+- [ ] MissingReturn handler (требует CFG integration)
+- [ ] DeprecatedMethod handler (требует metadata integration)
+- [ ] Body Validation Pass (Phase 8) - опционально
 - [ ] Benchmark comparisons
 - [ ] Memory profiling
-- [ ] Remove old diagnostic handlers
 
 ## Ожидаемые результаты
 

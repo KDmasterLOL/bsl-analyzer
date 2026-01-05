@@ -244,8 +244,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::UnreachableCode { range } => {
             handlers::unreachable_code::from_hir(*range, ctx)
         }
+        BodyDiagnostic::MissingReturn { range } => handlers::missing_return::from_hir(*range, ctx),
         // Not yet implemented - return None
-        BodyDiagnostic::MissingReturn { .. } | BodyDiagnostic::DeprecatedMethod { .. } => None,
+        BodyDiagnostic::DeprecatedMethod { .. } => None,
     }
 }
 

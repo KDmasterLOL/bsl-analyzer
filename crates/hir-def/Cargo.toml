@@ -16,6 +16,7 @@ la-arena.workspace = true
 smol_str.workspace = true
 text-size.workspace = true
 tracing.workspace = true
+cfg.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
