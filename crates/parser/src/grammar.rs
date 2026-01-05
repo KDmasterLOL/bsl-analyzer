@@ -10,9 +10,9 @@ use lexer::TokenKind;
 use crate::event::NodeKind;
 use crate::parser::Parser;
 
-/// Parses an annotated item (procedure or function with compiler directives).
+/// Parses an annotated item (procedure, function, or variable with compiler directives).
 fn annotated_item(p: &mut Parser) {
-    // Start the outer node for the procedure/function
+    // Start the outer node for the procedure/function/variable
     let outer = p.start();
 
     // Parse annotations as children
@@ -29,7 +29,7 @@ fn annotated_item(p: &mut Parser) {
         p.skip_trivia();
     }
 
-    // Now parse the actual procedure/function
+    // Now parse the actual procedure/function/variable
     match p.current() {
         Some(TokenKind::KwAsync) => match p.nth(1) {
             Some(TokenKind::KwProcedure) => {
@@ -52,6 +52,10 @@ fn annotated_item(p: &mut Parser) {
         Some(TokenKind::KwFunction) => {
             items::function_def_content(p);
             outer.complete(p, NodeKind::FunctionDef);
+        }
+        Some(TokenKind::KwVar) => {
+            items::var_declaration_content(p);
+            outer.complete(p, NodeKind::VarDef);
         }
         _ => {
             outer.abandon(p);
@@ -166,15 +170,8 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
             | Some(TokenKind::AnnAtServerNoContext)
             | Some(TokenKind::AnnAtClientAtServer)
             | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                items::compiler_directive(p);
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) | Some(TokenKind::KwProcedure) => {
-                        items::procedure_def(p)
-                    }
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
-                }
+                // Use annotated_item to handle procedure, function, or variable
+                annotated_item(p);
             }
             Some(TokenKind::AnnBefore)
             | Some(TokenKind::AnnAfter)
@@ -188,6 +185,7 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
                         items::procedure_def(p)
                     }
                     Some(TokenKind::KwFunction) => items::function_def(p),
+                    Some(TokenKind::KwVar) => items::var_declaration(p),
                     _ => p.error(),
                 }
             }
@@ -284,15 +282,8 @@ fn preproc_content(p: &mut Parser) {
             | Some(TokenKind::AnnAtServerNoContext)
             | Some(TokenKind::AnnAtClientAtServer)
             | Some(TokenKind::AnnAtClientAtServerNoContext) => {
-                items::compiler_directive(p);
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) | Some(TokenKind::KwProcedure) => {
-                        items::procedure_def(p)
-                    }
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
-                }
+                // Use annotated_item to handle procedure, function, or variable
+                annotated_item(p);
             }
             Some(TokenKind::AnnBefore)
             | Some(TokenKind::AnnAfter)
@@ -306,6 +297,7 @@ fn preproc_content(p: &mut Parser) {
                         items::procedure_def(p)
                     }
                     Some(TokenKind::KwFunction) => items::function_def(p),
+                    Some(TokenKind::KwVar) => items::var_declaration(p),
                     _ => p.error(),
                 }
             }

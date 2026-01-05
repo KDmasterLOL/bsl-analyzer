@@ -90,6 +90,8 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
         assert_eq!(unused_diags.len(), 1, "Unused loop variable should trigger diagnostic");
+        // "Индекс" on line 1, col 8-14 (after "    Для ")
+        assert_diagnostic_range(code, unused_diags[0], 1, 8, 14);
     }
 
     #[test]
@@ -120,6 +122,8 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
         assert_eq!(unused_diags.len(), 1, "Unused foreach variable should trigger diagnostic");
+        // "Элемент" on line 1, col 16-23 (after "    Для Каждого ")
+        assert_diagnostic_range(code, unused_diags[0], 1, 16, 23);
     }
 
     #[test]
@@ -135,6 +139,15 @@ mod tests {
 
         // А and В are unused, Б is used
         assert_eq!(unused_diags.len(), 2, "Expected 2 unused variables (А and В)");
+        // Check positions: "А" at col 10-11, "В" at col 16-17 on line 1
+        assert!(
+            unused_diags.iter().any(|d| d.message.contains("А")),
+            "Should detect unused variable А"
+        );
+        assert!(
+            unused_diags.iter().any(|d| d.message.contains("В")),
+            "Should detect unused variable В"
+        );
     }
 
     #[test]
@@ -169,6 +182,8 @@ mod tests {
             1,
             "Variable assigned but never read should trigger diagnostic"
         );
+        // "ТолькоПрисвоение" on line 1, col 10-26 (after "    Перем ")
+        assert_diagnostic_range(code, unused_diags[0], 1, 10, 26);
     }
 
     #[test]
@@ -201,6 +216,8 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
         assert_eq!(unused_diags.len(), 1, "Variable never read should trigger diagnostic");
+        // "Результат" on line 1, col 10-19 (after "    Перем ")
+        assert_diagnostic_range(code, unused_diags[0], 1, 10, 19);
     }
 
     #[test]
@@ -306,11 +323,8 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
         assert_eq!(unused_diags.len(), 1, "Unused module variable should trigger diagnostic");
-        // Check it's the right variable
-        assert!(
-            unused_diags[0].message.contains("НеИспользуемая"),
-            "Diagnostic should mention the variable name"
-        );
+        // "НеИспользуемая" on line 0, col 6-20 (after "Перем ")
+        assert_diagnostic_range(code, unused_diags[0], 0, 6, 20);
     }
 
     #[test]
@@ -361,9 +375,72 @@ mod tests {
             1,
             "Module-level code should detect unused implicit variable"
         );
+        // "НеИспользуемаяВМодуле" on line 0, col 0-21
+        assert_diagnostic_range(code, unused_diags[0], 0, 0, 21);
+    }
+
+    /// Full Java fixture test.
+    ///
+    /// Java test expects 5 diagnostics:
+    /// - hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
+    /// - hasRange(19, 10, 35): Line 19, `ЛокальнаяБезИспользования`
+    /// - hasRange(19, 37, 63): Line 19, `ТолькоСПрисвоениемЗначения`
+    /// - hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
+    /// - hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
+    ///
+    /// Note: Java uses 0-indexed lines. Our implementation may differ because:
+    /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
+    /// - We may detect additional unused variables Java doesn't flag
+    #[test]
+    fn test_java_fixture_full() {
+        let code = include_str!("../../tests/fixtures/UnusedLocalVariableDiagnostic.bsl");
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        // Print all diagnostics for debugging
+        println!("Found {} UnusedLocalVariable diagnostics:", unused_diags.len());
+        for (i, diag) in unused_diags.iter().enumerate() {
+            println!("  {}: {}", i + 1, diag.message);
+        }
+        println!("\nAll diagnostics ({}):", diagnostics.len());
+        for (i, diag) in diagnostics.iter().enumerate() {
+            println!("  {}: [{:?}] {}", i + 1, diag.code, diag.message);
+        }
+
+        // Check that we detect the key cases from Java test
+        let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
+
+        // These should be detected (matching Java):
         assert!(
-            unused_diags[0].message.contains("НеИспользуемаяВМодуле"),
-            "Diagnostic should mention the variable name"
+            messages.iter().any(|m| m.contains("ЛокальнаяБезИспользования")),
+            "Should detect ЛокальнаяБезИспользования"
         );
+        assert!(
+            messages.iter().any(|m| m.contains("ТолькоСПрисвоениемЗначения")),
+            "Should detect ТолькоСПрисвоениемЗначения"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("ВПроцедуреНеИспользуемая")),
+            "Should detect ВПроцедуреНеИспользуемая"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("ВнеПроцедурНеИспользуемая")),
+            "Should detect ВнеПроцедурНеИспользуемая"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("ПеременнаяМодуляНеИспользуемая")),
+            "Should detect ПеременнаяМодуляНеИспользуемая"
+        );
+
+        // Java expects exactly 5 diagnostics.
+        // Note: ПеременнаяМодуляНеИспользуемая appears twice in fixture:
+        // - Line 2: &НаКлиенте Перем ПеременнаяМодуляНеИспользуемая; // Error (first declaration)
+        // - Line 5: &НаСервере Перем ПеременнаяМодуляНеИспользуемая; // Ignored (duplicate name)
+        //
+        // Java ignores duplicate module variable declarations (VariableSymbolComputer.visitModuleVarDeclaration:88-89).
+        // We now match this behavior by skipping duplicates in SymbolTreeBuilder.add_variable.
+        assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables (matching Java)");
     }
 }

@@ -257,6 +257,12 @@ fn param(p: &mut Parser) {
 /// Parses a variable declaration.
 pub fn var_declaration(p: &mut Parser) {
     let m = p.start();
+    var_declaration_content(p);
+    m.complete(p, NodeKind::VarDef);
+}
+
+/// Parses the content of a variable declaration (without creating the outer node).
+pub fn var_declaration_content(p: &mut Parser) {
     p.bump(); // Перем
 
     p.skip_trivia();
@@ -281,6 +287,4 @@ pub fn var_declaration(p: &mut Parser) {
 
     p.skip_trivia();
     p.eat(TokenKind::Semicolon);
-
-    m.complete(p, NodeKind::VarDef);
 }

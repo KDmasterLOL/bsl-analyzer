@@ -253,6 +253,14 @@ impl SymbolTreeBuilder {
     }
 
     fn add_variable(&mut self, local_id: u32, var: &crate::item_tree::Variable) {
+        let key: SmolStr = var.name.as_str().to_lowercase().into();
+
+        // Skip duplicate module variable declarations (matching Java behavior)
+        // Java: VariableSymbolComputer.visitModuleVarDeclaration checks moduleVariables.containsKey
+        if self.variables_by_name.contains_key(&key) {
+            return;
+        }
+
         let variable_id = VariableId { module: self.module_id, local_id };
 
         let symbol = VariableSymbol {
@@ -262,9 +270,7 @@ impl SymbolTreeBuilder {
             source_range: var.source_range,
         };
 
-        let key: SmolStr = symbol.name.as_str().to_lowercase().into();
         let idx = self.variables.alloc(symbol);
-
         self.variables_by_name.entry(key).or_default().push(idx);
     }
 

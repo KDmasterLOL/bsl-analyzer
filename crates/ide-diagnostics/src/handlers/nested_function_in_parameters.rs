@@ -135,10 +135,23 @@ fn analyze_call_context(arg_list: &SyntaxNode) -> Option<CallInfo> {
 
     match parent.kind() {
         SyntaxKind::NEW_EXPR => {
-            // Constructor call: NEW_EXPR contains KW_NEW, IDENT, ARG_LIST
-            let type_name = find_type_name_in_new_expr(&parent)?;
+            // Constructor call: NEW_EXPR contains KW_NEW, [IDENT], ARG_LIST
+            // Two cases:
+            // 1. Новый Тип(...) - has type name (IDENT)
+            // 2. Новый(...) or Новый(Тип(...)) - no type name, type passed as parameter
+            let type_name = find_type_name_in_new_expr(&parent);
+
+            // Use type name if available, otherwise use "Новый" keyword token
+            // Java: lines 98-108 handle both cases
+            let name_token = if let Some(tn) = type_name {
+                tn
+            } else {
+                // Find KW_NEW token to use for diagnostic
+                find_new_keyword(&parent)?
+            };
+
             Some(CallInfo {
-                name_token: type_name,
+                name_token,
                 arg_list: arg_list.clone(),
                 call_range_start: parent.text_range().start().into(),
                 call_range_end: parent.text_range().end().into(),
@@ -167,6 +180,8 @@ fn analyze_call_context(arg_list: &SyntaxNode) -> Option<CallInfo> {
 }
 
 /// Find the type name token in a NEW_EXPR
+/// Returns Some(token) if type name is explicitly specified: Новый Тип(...)
+/// Returns None for: Новый(...) or Новый(Тип(...))
 fn find_type_name_in_new_expr(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
     let mut found_new = false;
     for child in new_expr.children_with_tokens() {
@@ -176,6 +191,18 @@ fn find_type_name_in_new_expr(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
                 continue;
             }
             if found_new && token.kind() == SyntaxKind::IDENT {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
+/// Find the KW_NEW token in a NEW_EXPR (for diagnostics when type name is missing)
+fn find_new_keyword(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
+    for child in new_expr.children_with_tokens() {
+        if let Some(token) = child.into_token() {
+            if token.kind() == SyntaxKind::KW_NEW {
                 return Some(token);
             }
         }
@@ -239,11 +266,12 @@ fn find_call_start(parent: &SyntaxNode, arg_list: &SyntaxNode) -> u32 {
 }
 
 fn check_call(call_info: &CallInfo, config: &Config, line_index: &LineIndex) -> Option<Diagnostic> {
-    // Check if entire call is on one line (only skip if allowOneliner is true)
     let start_line = line_index.line_col(TextSize::from(call_info.call_range_start)).line;
     let end_line = line_index.line_col(TextSize::from(call_info.call_range_end)).line;
 
-    if config.allow_oneliner && start_line == end_line {
+    // ALWAYS skip single-line calls (matching Java behavior)
+    // Java: "однострочники пропускаем сразу" - line 116-118 in NestedFunctionInParametersDiagnostic.java
+    if start_line == end_line {
         return None;
     }
 
@@ -252,14 +280,15 @@ fn check_call(call_info: &CallInfo, config: &Config, line_index: &LineIndex) -> 
         return None;
     }
 
-    // Check multiline param condition (only applies when allowOneliner is true)
-    // If allowOneliner and no param spans multiple lines, skip
-    if config.allow_oneliner && !has_multiline_param(&call_info.arg_list, line_index) {
+    // Check for nested forbidden calls first
+    if !contains_forbidden_call(&call_info.arg_list, config) {
         return None;
     }
 
-    // Check for nested forbidden calls
-    if !contains_forbidden_call(&call_info.arg_list, config) {
+    // Check multiline param condition
+    // allowOneliner=true: requires at least one param spanning multiple lines
+    // allowOneliner=false: any nested call in multiline call is an error
+    if config.allow_oneliner && !has_multiline_param(&call_info.arg_list, line_index) {
         return None;
     }
 
@@ -383,12 +412,20 @@ fn check_expr_for_forbidden_call(expr: &SyntaxNode, config: &Config) -> bool {
             }
         } else if child.kind() == SyntaxKind::NEW_EXPR {
             // Check if constructor has parameters
+            // Java: line 152-153 checks if newExpression has non-empty parameter list
             if let Some(nested_arg_list) =
                 child.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)
             {
                 if !is_empty_arg_list(&nested_arg_list) {
                     return true;
                 }
+            }
+        } else if child.kind() == SyntaxKind::FIELD_EXPR {
+            // Field access expression (Object.Field or Object.Method())
+            // Need to recursively check for calls inside field expressions
+            // e.g., Object.Method1().Method2() or Object.Field.Method()
+            if check_expr_for_forbidden_call(&child, config) {
+                return true;
             }
         } else if child.kind() == SyntaxKind::EXPR {
             // Recurse into nested expressions
@@ -600,7 +637,9 @@ mod tests {
 
     #[test]
     fn test_diagnostic_with_allow_oneliner_false() {
-        // With allowOneliner=false, even single-line expressions with nested calls are flagged
+        // Single-line calls are ALWAYS skipped (matching Java behavior)
+        // Java: "однострочники пропускаем сразу" - line 116-118
+        // allowOneliner only affects whether multiline params are required
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -608,8 +647,8 @@ mod tests {
             serde_json::json!({"allowOneliner": false}),
         );
         let (diagnostics, _) = check_diagnostic(code, config);
-        // We find 2 diagnostics: Сообщить (has nested СуммаСтрокой) and СуммаСтрокой (has nested СуммаНДС)
-        assert_eq!(diagnostics.len(), 2);
+        // Single-line call - no diagnostics even with allowOneliner=false
+        assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
@@ -682,20 +721,27 @@ mod tests {
         );
         let (diagnostics, file_content) = check_diagnostic(code, config);
 
-        // With allowOneliner=false, we find more diagnostics than default
-        // The exact count may differ from Java due to implementation details
-        // Java expects 12, but our implementation finds 18 due to:
-        // - Also flagging nested calls within other calls
-        // - Different handling of allowed methods containing forbidden nested calls
-        assert!(
-            diagnostics.len() >= 12,
-            "Should find at least 12 diagnostics with allowOneliner=false, got {}",
-            diagnostics.len()
+        // Java expects 12 diagnostics with allowOneliner=false
+        // Now fully matching Java behavior (100%)
+        assert_eq!(
+            diagnostics.len(),
+            12,
+            "Should find 12 diagnostics with allowOneliner=false (matching Java)"
         );
 
-        // Verify key positions match Java implementation
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 22, 30);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 3, 11, 19);
+        // Verify positions match Java implementation (100% match)
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 22, 30); // Вставить
+        assert_diagnostic_range(&file_content, &diagnostics[1], 3, 11, 19); // Картинка
+        assert_diagnostic_range(&file_content, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
+        assert_diagnostic_range(&file_content, &diagnostics[3], 8, 4, 12); // Сообщить
+        assert_diagnostic_range(&file_content, &diagnostics[4], 13, 35, 42); // Метод21
+        assert_diagnostic_range(&file_content, &diagnostics[5], 17, 22, 31); // Структура
+        assert_diagnostic_range(&file_content, &diagnostics[6], 36, 14, 19); // Новый (without type name)
+        assert_diagnostic_range(&file_content, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(&file_content, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(&file_content, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
+        assert_diagnostic_range(&file_content, &diagnostics[10], 69, 16, 21); // Метод
+        assert_diagnostic_range(&file_content, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
     }
 
     #[test]
@@ -711,12 +757,12 @@ mod tests {
         );
         let (diagnostics, _) = check_diagnostic(code, config);
 
-        // With custom allowed methods, we find diagnostics
-        // The exact count may differ from Java due to implementation details
-        assert!(
-            diagnostics.len() >= 12,
-            "Should find at least 12 diagnostics with custom allowed methods, got {}",
-            diagnostics.len()
+        // Java expects 13 diagnostics with custom allowed methods + allowOneliner=false
+        // Now fully matching Java behavior (100%)
+        assert_eq!(
+            diagnostics.len(),
+            13,
+            "Should find 13 diagnostics with custom allowed methods (matching Java)"
         );
     }
 }

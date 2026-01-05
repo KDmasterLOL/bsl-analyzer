@@ -241,10 +241,11 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::UnusedVariable { name, range } => {
             handlers::unused_local_variable::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::UnreachableCode { range } => {
+            handlers::unreachable_code::from_hir(*range, ctx)
+        }
         // Not yet implemented - return None
-        BodyDiagnostic::UnreachableCode { .. }
-        | BodyDiagnostic::MissingReturn { .. }
-        | BodyDiagnostic::DeprecatedMethod { .. } => None,
+        BodyDiagnostic::MissingReturn { .. } | BodyDiagnostic::DeprecatedMethod { .. } => None,
     }
 }
 

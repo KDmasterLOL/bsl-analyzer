@@ -40,11 +40,24 @@ pub struct LoweringCtx {
     /// Used variable names (lowercase).
     /// When a variable is referenced in an expression, its name is added here.
     used_vars: FxHashSet<String>,
+
+    /// Known external variable names (lowercase) - module variables, etc.
+    /// These should not be registered as implicit local variables.
+    known_externals: FxHashSet<String>,
+
+    /// Parameter names (lowercase).
+    /// Parameters should not trigger "unused variable" even if only assigned.
+    param_names: FxHashSet<String>,
 }
 
 impl LoweringCtx {
     /// Create a new lowering context.
     pub fn new(is_function: bool) -> Self {
+        Self::new_with_externals(is_function, FxHashSet::default())
+    }
+
+    /// Create a new lowering context with known external variable names.
+    pub fn new_with_externals(is_function: bool, known_externals: FxHashSet<String>) -> Self {
         Self {
             body: Body::new(),
             source_map: BodySourceMap::new(),
@@ -52,7 +65,14 @@ impl LoweringCtx {
             is_function,
             local_vars: FxHashMap::default(),
             used_vars: FxHashSet::default(),
+            known_externals,
+            param_names: FxHashSet::default(),
         }
+    }
+
+    /// Register a parameter name.
+    fn register_param(&mut self, name: &str) {
+        self.param_names.insert(name.to_lowercase());
     }
 
     /// Register a local variable declaration.
@@ -77,11 +97,20 @@ impl LoweringCtx {
     /// Emit diagnostics for unused local variables.
     fn check_unused_variables(&mut self) {
         for (key, (name, range)) in &self.local_vars {
+            // Skip parameters - they're inputs and may be modified for output
+            if self.param_names.contains(key) {
+                continue;
+            }
             if !self.used_vars.contains(key) {
                 self.diagnostics
                     .push(BodyDiagnostic::UnusedVariable { name: name.to_string(), range: *range });
             }
         }
+    }
+
+    /// Check if a name is a known external (module variable).
+    fn is_known_external(&self, name: &str) -> bool {
+        self.known_externals.contains(&name.to_lowercase())
     }
 
     /// Get variables that were referenced but not locally declared.
@@ -124,7 +153,19 @@ impl LoweringCtx {
 
 /// Lower a method AST node to HIR.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
-    let mut ctx = LoweringCtx::new(is_function);
+    lower_method_with_externals(method_node, is_function, FxHashSet::default())
+}
+
+/// Lower a method AST node to HIR with known external variable names.
+///
+/// External variable names (like module-level variables) are passed to avoid
+/// registering them as implicit local variables.
+pub fn lower_method_with_externals(
+    method_node: &SyntaxNode,
+    is_function: bool,
+    known_externals: FxHashSet<String>,
+) -> LowerResult {
+    let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
 
     // Lower parameters
     if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {
@@ -173,35 +214,73 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.
+/// Also detects unreachable code at the module level.
 pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
     let mut ctx = LoweringCtx::new(false);
 
-    // Find all top-level statements (not in procedures/functions)
-    let stmt_kinds = [
-        SyntaxKind::ASSIGN_STMT,
-        SyntaxKind::CALL_STMT,
-        SyntaxKind::IF_STMT,
-        SyntaxKind::WHILE_STMT,
-        SyntaxKind::FOR_STMT,
-        SyntaxKind::FOR_EACH_STMT,
-        SyntaxKind::TRY_STMT,
-        SyntaxKind::RETURN_STMT,
-        SyntaxKind::RAISE_STMT,
-        SyntaxKind::EXECUTE_STMT,
-        SyntaxKind::GOTO_STMT,
-        SyntaxKind::LABEL_STMT,
-        SyntaxKind::ADD_HANDLER_STMT,
-        SyntaxKind::REMOVE_HANDLER_STMT,
-    ];
-
     let mut stmts = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
     for node in root.children() {
-        if stmt_kinds.contains(&node.kind()) {
+        // Handle preprocessor directives at module level
+        if node.kind() == SyntaxKind::PRE_IF_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(node.text_range());
+            }
+            process_preproc_if(&mut ctx, &node);
+            continue;
+        }
+        if node.kind() == SyntaxKind::PRE_REGION_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(node.text_range());
+            }
+            process_preproc_region(&mut ctx, &node);
+            continue;
+        }
+
+        // Skip non-statement nodes (procedures, functions, var declarations, etc.)
+        if !is_statement_node(&node) {
+            continue;
+        }
+
+        // Skip VAR_DEF - module-level Перем declarations are tracked separately
+        // in lower_module_bodies via module_vars. Processing them here would cause
+        // duplicate unused variable diagnostics.
+        if node.kind() == SyntaxKind::VAR_DEF {
+            continue;
+        }
+
+        // If we're in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(node.text_range());
             if let Some(stmt_id) = lower_stmt(&mut ctx, &node) {
                 stmts.push(stmt_id);
             }
+            continue;
+        }
+
+        // Lower the statement
+        if let Some(stmt_id) = lower_stmt(&mut ctx, &node) {
+            stmts.push(stmt_id);
+
+            // Check if this statement is a control flow that makes subsequent code unreachable
+            if is_control_flow_terminator(&node)
+                || (node.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&node))
+            {
+                unreachable_start = Some(node.text_range());
+            }
         }
     }
+
+    // Emit unreachable code diagnostic for module-level code
+    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
+        if let Some(first_unreachable) = find_first_unreachable_at_root(root, start) {
+            let range = TextRange::new(first_unreachable.start(), end.end());
+            ctx.emit(BodyDiagnostic::UnreachableCode { range });
+        }
+    }
+
     ctx.body.body_stmts = stmts.into_boxed_slice();
 
     // Check for unused local variables (implicit module-level variables)
@@ -215,6 +294,20 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
         diagnostics: ctx.diagnostics,
         referenced_externals,
     }
+}
+
+/// Find the first unreachable node at module root level.
+fn find_first_unreachable_at_root(root: &SyntaxNode, after_range: TextRange) -> Option<TextRange> {
+    for child in root.children() {
+        let child_start = child.text_range().start();
+        if child_start > after_range.end()
+            && (is_statement_node(&child)
+                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
+        {
+            return Some(child.text_range());
+        }
+    }
+    None
 }
 
 /// Check if a statement list contains at least one return statement.
@@ -247,21 +340,431 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
         .filter_map(|el| el.into_token())
         .any(|tok| tok.kind() == SyntaxKind::KW_VAL);
 
+    // Register parameter name so it's not flagged as unused
+    ctx.register_param(name_token.text());
+
     let binding = Binding::new(Name::new(name_token.text()), is_val);
     Some(ctx.alloc_binding(binding, name_token.text_range()))
 }
 
 /// Lower a statement list.
+///
+/// Also detects unreachable code after control flow statements (return, raise, break, continue)
+/// and after if-else where all branches terminate.
 fn lower_stmt_list(ctx: &mut LoweringCtx, stmt_list: &SyntaxNode) -> Vec<StmtId> {
+    lower_stmt_list_with_unreachable(ctx, stmt_list, true)
+}
+
+/// Lower a statement list with optional unreachable code detection.
+///
+/// The `emit_diagnostics` parameter controls whether to emit unreachable code diagnostics.
+/// This is useful for recursive processing where we want to collect statements but not
+/// emit duplicate diagnostics.
+fn lower_stmt_list_with_unreachable(
+    ctx: &mut LoweringCtx,
+    stmt_list: &SyntaxNode,
+    emit_diagnostics: bool,
+) -> Vec<StmtId> {
     let mut stmts = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
 
     for child in stmt_list.children() {
+        // Handle preprocessor directives - process content recursively
+        if child.kind() == SyntaxKind::PRE_IF_DIR {
+            // Check if this directive is unreachable
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            } else {
+                process_preproc_if(ctx, &child);
+                // Check if all branches terminate - subsequent code is unreachable
+                if preproc_if_all_branches_terminate(&child) {
+                    unreachable_start = Some(child.text_range());
+                }
+            }
+            continue;
+        }
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            // Check if this region is unreachable
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            } else {
+                process_preproc_region(ctx, &child);
+                // Check if region terminates - propagate unreachable state
+                if preproc_region_terminates(&child) {
+                    unreachable_start = Some(child.text_range());
+                }
+            }
+            continue;
+        }
+
+        // Skip non-statement nodes
+        if !is_statement_node(&child) {
+            continue;
+        }
+
+        // If we're in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(child.text_range());
+            // Still lower the statement (for completeness), but we've marked it unreachable
+            if let Some(stmt_id) = lower_stmt(ctx, &child) {
+                stmts.push(stmt_id);
+            }
+            continue;
+        }
+
+        // Lower the statement
         if let Some(stmt_id) = lower_stmt(ctx, &child) {
             stmts.push(stmt_id);
+
+            // Check if this statement is a control flow that makes subsequent code unreachable
+            if is_control_flow_terminator(&child) {
+                // Mark that subsequent statements are unreachable
+                // The range will start from the next statement
+                unreachable_start = Some(child.text_range());
+            }
+            // Check if if-statement has all branches terminating
+            else if child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child) {
+                unreachable_start = Some(child.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic if we found any
+    if emit_diagnostics {
+        if let (Some(_start), Some(end)) = (unreachable_start, unreachable_end) {
+            // Find the first unreachable statement's range
+            // We need to get the range from after the control flow statement to the end
+            if let Some(first_unreachable) = find_first_unreachable_stmt(stmt_list, _start) {
+                let range = TextRange::new(first_unreachable.start(), end.end());
+                ctx.emit(BodyDiagnostic::UnreachableCode { range });
+            }
         }
     }
 
     stmts
+}
+
+/// Check if a node is a statement (vs whitespace, comments, etc.)
+fn is_statement_node(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::ASSIGN_STMT
+            | SyntaxKind::CALL_STMT
+            | SyntaxKind::RETURN_STMT
+            | SyntaxKind::IF_STMT
+            | SyntaxKind::WHILE_STMT
+            | SyntaxKind::FOR_STMT
+            | SyntaxKind::FOR_EACH_STMT
+            | SyntaxKind::TRY_STMT
+            | SyntaxKind::RAISE_STMT
+            | SyntaxKind::BREAK_STMT
+            | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::GOTO_STMT
+            | SyntaxKind::LABEL_STMT
+            | SyntaxKind::EXECUTE_STMT
+            | SyntaxKind::ADD_HANDLER_STMT
+            | SyntaxKind::REMOVE_HANDLER_STMT
+            | SyntaxKind::VAR_DEF
+    )
+}
+
+/// Check if a statement terminates control flow (making subsequent code unreachable).
+fn is_control_flow_terminator(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::RETURN_STMT
+            | SyntaxKind::RAISE_STMT
+            | SyntaxKind::BREAK_STMT
+            | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::GOTO_STMT
+    )
+}
+
+/// Find the first statement after a control flow terminator.
+fn find_first_unreachable_stmt(
+    stmt_list: &SyntaxNode,
+    after_range: TextRange,
+) -> Option<TextRange> {
+    for child in stmt_list.children() {
+        if is_statement_node(&child) && child.text_range().start() > after_range.end() {
+            return Some(child.text_range());
+        }
+        // Also check for preprocessor directives as unreachable
+        if matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR)
+            && child.text_range().start() > after_range.end()
+        {
+            return Some(child.text_range());
+        }
+    }
+    None
+}
+
+/// Process preprocessor `#Если` directive, analyzing each branch for unreachable code.
+fn process_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) {
+    // Process the main branch (content after condition, before elsif/else/endif)
+    process_preproc_branch_content(ctx, node);
+
+    // Process ElsIf clauses
+    for elsif in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSIF_CLAUSE) {
+        process_preproc_branch_content(ctx, &elsif);
+    }
+
+    // Process Else clause
+    for else_clause in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE) {
+        process_preproc_branch_content(ctx, &else_clause);
+    }
+}
+
+/// Process preprocessor `#Область` directive, analyzing content for unreachable code.
+fn process_preproc_region(ctx: &mut LoweringCtx, node: &SyntaxNode) {
+    process_preproc_branch_content(ctx, node);
+}
+
+/// Process content within a preprocessor branch (or region).
+///
+/// Looks for statements and nested preprocessor directives, tracking unreachable code.
+fn process_preproc_branch_content(ctx: &mut LoweringCtx, node: &SyntaxNode) {
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
+    for child in node.children() {
+        // Handle nested preprocessor directives
+        if child.kind() == SyntaxKind::PRE_IF_DIR {
+            // Check if this preprocessor directive is unreachable
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            } else {
+                // Process the preprocessor directive
+                process_preproc_if(ctx, &child);
+                // Check if all branches of this preprocessor terminate
+                if preproc_if_all_branches_terminate(&child) {
+                    unreachable_start = Some(child.text_range());
+                }
+            }
+            continue;
+        }
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            }
+            process_preproc_region(ctx, &child);
+            continue;
+        }
+
+        // Handle statement lists within the branch
+        if child.kind() == SyntaxKind::STMT_LIST {
+            // Process the statement list for unreachable code
+            lower_stmt_list_with_unreachable(ctx, &child, true);
+            // Check if stmt_list terminates - propagate unreachable state
+            if unreachable_start.is_none() && stmt_list_terminates(&child) {
+                unreachable_start = Some(child.text_range());
+            }
+            continue;
+        }
+
+        // Handle individual statements (might appear directly in preprocessor content)
+        if is_statement_node(&child) {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+                lower_stmt(ctx, &child);
+                continue;
+            }
+
+            lower_stmt(ctx, &child);
+
+            if is_control_flow_terminator(&child)
+                || (child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child))
+            {
+                unreachable_start = Some(child.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic for this branch
+    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
+        if let Some(first_unreachable) = find_first_unreachable_in_preproc(node, start) {
+            let range = TextRange::new(first_unreachable.start(), end.end());
+            ctx.emit(BodyDiagnostic::UnreachableCode { range });
+        }
+    }
+}
+
+/// Find the first unreachable node in preprocessor content.
+fn find_first_unreachable_in_preproc(
+    node: &SyntaxNode,
+    after_range: TextRange,
+) -> Option<TextRange> {
+    for child in node.children() {
+        let child_start = child.text_range().start();
+        if child_start > after_range.end()
+            && (is_statement_node(&child)
+                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
+        {
+            return Some(child.text_range());
+        }
+    }
+    None
+}
+
+/// Check if an if-statement has all branches terminating (with return/raise).
+///
+/// This returns true only if:
+/// 1. The if-statement has an else branch
+/// 2. All branches (then, elsif*, else) end with a terminator or another if-all-branches-terminate
+fn if_all_branches_terminate(node: &SyntaxNode) -> bool {
+    // Must have an else clause for all branches to be covered
+    let has_else = node.children().any(|n| n.kind() == SyntaxKind::ELSE_CLAUSE);
+    if !has_else {
+        return false;
+    }
+
+    // Check then branch (first STMT_LIST)
+    let then_stmt_list = node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+    if !then_stmt_list.is_some_and(|n| stmt_list_terminates(&n)) {
+        return false;
+    }
+
+    // Check all elsif branches
+    for elsif in node.children().filter(|n| n.kind() == SyntaxKind::ELSIF_CLAUSE) {
+        let elsif_stmt_list = elsif.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+        if !elsif_stmt_list.is_some_and(|n| stmt_list_terminates(&n)) {
+            return false;
+        }
+    }
+
+    // Check else branch
+    let else_clause = node.children().find(|n| n.kind() == SyntaxKind::ELSE_CLAUSE);
+    if let Some(else_node) = else_clause {
+        let else_stmt_list = else_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+        if !else_stmt_list.is_some_and(|n| stmt_list_terminates(&n)) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a statement list ends with a terminator.
+///
+/// A statement list terminates if its last statement is a terminator (return/raise/break/continue)
+/// or an if-statement where all branches terminate.
+fn stmt_list_terminates(stmt_list: &SyntaxNode) -> bool {
+    // Get the last statement (skip preprocessor directives, regions, etc.)
+    let last_stmt = stmt_list
+        .children()
+        .filter(|n| {
+            is_statement_node(n)
+                || n.kind() == SyntaxKind::PRE_IF_DIR
+                || n.kind() == SyntaxKind::PRE_REGION_DIR
+        })
+        .last();
+
+    match last_stmt {
+        Some(node) => {
+            if is_control_flow_terminator(&node) {
+                true
+            } else if node.kind() == SyntaxKind::IF_STMT {
+                if_all_branches_terminate(&node)
+            } else if node.kind() == SyntaxKind::PRE_IF_DIR {
+                // For preprocessor #Если, we can't statically know which branch runs,
+                // so conservatively return false
+                false
+            } else if node.kind() == SyntaxKind::PRE_REGION_DIR {
+                // Check if region ends with terminator
+                preproc_region_terminates(&node)
+            } else {
+                false
+            }
+        }
+        None => false,
+    }
+}
+
+/// Check if a preprocessor region ends with a terminator.
+fn preproc_region_terminates(region: &SyntaxNode) -> bool {
+    // Get the last statement/directive in the region
+    let last = region
+        .children()
+        .filter(|n| {
+            is_statement_node(n)
+                || n.kind() == SyntaxKind::PRE_IF_DIR
+                || n.kind() == SyntaxKind::PRE_REGION_DIR
+                || n.kind() == SyntaxKind::STMT_LIST
+        })
+        .last();
+
+    match last {
+        Some(node) if node.kind() == SyntaxKind::STMT_LIST => stmt_list_terminates(&node),
+        Some(node) if is_control_flow_terminator(&node) => true,
+        Some(node) if node.kind() == SyntaxKind::IF_STMT => if_all_branches_terminate(&node),
+        Some(node) if node.kind() == SyntaxKind::PRE_REGION_DIR => preproc_region_terminates(&node),
+        Some(node) if node.kind() == SyntaxKind::PRE_IF_DIR => {
+            preproc_if_all_branches_terminate(&node)
+        }
+        _ => false,
+    }
+}
+
+/// Check if a preprocessor #Если directive has all branches terminating.
+///
+/// For code after #КонецЕсли to be unreachable, ALL branches must terminate:
+/// - The main branch (after #Если ... Тогда)
+/// - All #ИначеЕсли branches
+/// - The #Иначе branch (must exist)
+fn preproc_if_all_branches_terminate(node: &SyntaxNode) -> bool {
+    // Must have an #Иначе clause for all branches to be covered
+    let has_else = node.children().any(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE);
+    if !has_else {
+        return false;
+    }
+
+    // Check main branch (content directly in PRE_IF_DIR before any clause)
+    if !preproc_branch_terminates(node) {
+        return false;
+    }
+
+    // Check all #ИначеЕсли branches
+    for elsif in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSIF_CLAUSE) {
+        if !preproc_branch_terminates(&elsif) {
+            return false;
+        }
+    }
+
+    // Check #Иначе branch
+    let else_clause = node.children().find(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE);
+    if let Some(else_node) = else_clause {
+        if !preproc_branch_terminates(&else_node) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a preprocessor branch (main, elsif, or else) terminates.
+fn preproc_branch_terminates(branch: &SyntaxNode) -> bool {
+    // Get the last statement/directive/stmt_list in the branch
+    let last = branch
+        .children()
+        .filter(|n| {
+            is_statement_node(n)
+                || n.kind() == SyntaxKind::PRE_IF_DIR
+                || n.kind() == SyntaxKind::PRE_REGION_DIR
+                || n.kind() == SyntaxKind::STMT_LIST
+        })
+        .last();
+
+    match last {
+        Some(node) if node.kind() == SyntaxKind::STMT_LIST => stmt_list_terminates(&node),
+        Some(node) if is_control_flow_terminator(&node) => true,
+        Some(node) if node.kind() == SyntaxKind::IF_STMT => if_all_branches_terminate(&node),
+        Some(node) if node.kind() == SyntaxKind::PRE_REGION_DIR => preproc_region_terminates(&node),
+        Some(node) if node.kind() == SyntaxKind::PRE_IF_DIR => {
+            preproc_if_all_branches_terminate(&node)
+        }
+        _ => false,
+    }
 }
 
 /// Lower a single statement.
@@ -314,8 +817,12 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     };
     if let Some((name, range)) = target_name {
         let key = name.as_str().to_lowercase();
-        // Register implicit variable if not already declared
-        if !ctx.local_vars.contains_key(&key) {
+        // Register implicit variable if not already declared.
+        // But don't register if it's a known external (module variable) or parameter.
+        if !ctx.local_vars.contains_key(&key)
+            && !ctx.is_known_external(name.as_str())
+            && !ctx.param_names.contains(&key)
+        {
             ctx.register_local_var(name.clone(), range);
         }
         // Unmark from used - assignment is a write, not a read

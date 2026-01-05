@@ -263,6 +263,18 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
     lower::lower_method(method_node, is_function)
 }
 
+/// Lower a method AST node to HIR Body with known external variable names.
+///
+/// External variables (module-level) are passed so they're not registered
+/// as implicit local variables.
+pub fn lower_method_with_externals(
+    method_node: &SyntaxNode,
+    is_function: bool,
+    known_externals: rustc_hash::FxHashSet<String>,
+) -> LowerResult {
+    lower::lower_method_with_externals(method_node, is_function, known_externals)
+}
+
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.

@@ -284,17 +284,43 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     let mut all_referenced_externals: FxHashSet<String> = FxHashSet::default();
 
     // First pass: collect module-level variable declarations
-    for node in root.children() {
+    // Use descendants() to find variables inside preprocessor regions too
+    // But skip VAR_DEFs that are inside methods (local variable declarations)
+    for node in root.descendants() {
         if node.kind() == SyntaxKind::VAR_DEF {
-            collect_module_vars(&node, &mut result.module_vars);
+            // Check if this VAR_DEF is inside a method by looking for ancestor PROCEDURE_DEF/FUNCTION_DEF
+            let is_inside_method = node
+                .ancestors()
+                .any(|n| matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF));
+
+            if !is_inside_method {
+                collect_module_vars(&node, &mut result.module_vars);
+            }
         }
     }
 
+    // Deduplicate module variables (matching Java behavior)
+    // Java: VariableSymbolComputer.visitModuleVarDeclaration:88-89 skips duplicate names
+    // We keep only the first declaration with each name (case-insensitive)
+    {
+        let mut seen_names: FxHashSet<String> = FxHashSet::default();
+        result.module_vars.retain(|var| {
+            let key = var.name.to_lowercase();
+            seen_names.insert(key)
+        });
+    }
+
+    // Create set of module variable names (lowercase) for passing to method lowering
+    let module_var_names: FxHashSet<String> =
+        result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
+
     // Second pass: lower methods and collect referenced externals
-    for node in root.children() {
+    // Use descendants() to find methods inside preprocessor regions (#Область, #Если)
+    for node in root.descendants() {
         match node.kind() {
             SyntaxKind::PROCEDURE_DEF => {
-                let lower_result = body::lower_method(&node, false);
+                let lower_result =
+                    body::lower_method_with_externals(&node, false, module_var_names.clone());
 
                 // Collect diagnostics with MethodId
                 let method_id = MethodId { module: module_id, local_id: method_idx };
@@ -309,7 +335,8 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
                 method_idx += 1;
             }
             SyntaxKind::FUNCTION_DEF => {
-                let lower_result = body::lower_method(&node, true);
+                let lower_result =
+                    body::lower_method_with_externals(&node, true, module_var_names.clone());
 
                 // Collect diagnostics with MethodId
                 let method_id = MethodId { module: module_id, local_id: method_idx };
@@ -321,9 +348,6 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
                 all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
 
                 result.bodies.insert(method_idx, lower_result);
-                method_idx += 1;
-            }
-            SyntaxKind::VAR_DEF => {
                 method_idx += 1;
             }
             _ => {}
