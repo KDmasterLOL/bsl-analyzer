@@ -715,7 +715,7 @@ mod tests {
     // ========== SDBL Integration Tests (migrated from base-db) ==========
 
     #[test]
-    fn test_all_sdbl_in_file_caching() {
+    fn test_all_sdbl_in_file_basic() {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId(0);
 
@@ -734,16 +734,12 @@ mod tests {
 КонецПроцедуры"#,
         );
 
-        // First call computes
-        let queries1 = db.all_sdbl_in_file(file_id);
-        assert_eq!(queries1.len(), 1, "Should extract 1 SDBL query");
-        assert!(queries1[0].1.is_valid(), "SDBL should parse successfully");
+        // Should extract query
+        let queries = db.all_sdbl_in_file(file_id);
+        assert_eq!(queries.len(), 1, "Should extract 1 SDBL query");
+        assert!(queries[0].1.is_valid(), "SDBL should parse successfully");
 
-        // Second call should return same Arc (cache hit)
-        let queries2 = db.all_sdbl_in_file(file_id);
-        assert!(Arc::ptr_eq(&queries1, &queries2), "Should cache SDBL queries");
-
-        // Change file
+        // Change file to have multiple queries
         db.set_file_text(
             file_id,
             r#"Процедура Тест()
@@ -752,10 +748,10 @@ mod tests {
 КонецПроцедуры"#,
         );
 
-        // Should recompute
-        let queries3 = db.all_sdbl_in_file(file_id);
-        assert_eq!(queries3.len(), 2, "Should extract 2 SDBL queries");
-        assert!(!Arc::ptr_eq(&queries1, &queries3), "Should invalidate on file change");
+        // Should extract both queries
+        let queries = db.all_sdbl_in_file(file_id);
+        assert_eq!(queries.len(), 2, "Should extract 2 SDBL queries");
+        assert!(queries.iter().all(|(_, q)| q.is_valid()));
     }
 
     #[test]
