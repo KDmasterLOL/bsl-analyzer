@@ -58,6 +58,10 @@ pub struct Body {
     pub params: Box<[BindingId]>,
     /// Top-level statements in the method body.
     pub body_stmts: Box<[StmtId]>,
+
+    /// SDBL queries found in this method body.
+    /// Maps ExprId (Expr::Literal with SDBL string) to parsed SDBL query info.
+    pub sdbl_exprs: Vec<(ExprId, syntax::SdblQueryInfo)>,
 }
 
 impl Default for Body {
@@ -75,6 +79,7 @@ impl Body {
             bindings: Arena::new(),
             params: Box::new([]),
             body_stmts: Box::new([]),
+            sdbl_exprs: Vec::new(),
         }
     }
 
@@ -121,6 +126,11 @@ impl Body {
     /// Iterate over all bindings.
     pub fn bindings_iter(&self) -> impl Iterator<Item = (BindingId, &Binding)> {
         self.bindings.iter()
+    }
+
+    /// Get all SDBL expressions in this body.
+    pub fn sdbl_exprs(&self) -> &[(ExprId, syntax::SdblQueryInfo)] {
+        &self.sdbl_exprs
     }
 }
 
