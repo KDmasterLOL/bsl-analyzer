@@ -1,6 +1,40 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use syntax::{SyntaxKind, SyntaxNode};
 
+/// Check a single syntax node for nested ternary operators (node-based API).
+///
+/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Check if disabled
+    if ctx.config.is_disabled(DiagnosticCode::NestedTernaryOperator) {
+        return;
+    }
+
+    match node.kind() {
+        SyntaxKind::IF_STMT => {
+            if let Some(condition) = find_if_condition(node) {
+                find_and_report_ternaries(&condition, acc);
+            }
+        }
+        SyntaxKind::ELSIF_CLAUSE => {
+            if let Some(condition) = find_elsif_condition(node) {
+                find_and_report_ternaries(&condition, acc);
+            }
+        }
+        SyntaxKind::TERNARY_EXPR => {
+            for nested in node.descendants().skip(1) {
+                if nested.kind() == SyntaxKind::TERNARY_EXPR {
+                    acc.push(make_diagnostic(&nested));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Main entry point for NestedTernaryOperator diagnostic (for backward compatibility).
+/// TODO: Remove after migration to text-based API is complete.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::NestedTernaryOperator) {
         return Vec::new();
@@ -11,26 +45,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::IF_STMT => {
-                if let Some(condition) = find_if_condition(&node) {
-                    find_and_report_ternaries(&condition, &mut diagnostics);
-                }
-            }
-            SyntaxKind::ELSIF_CLAUSE => {
-                if let Some(condition) = find_elsif_condition(&node) {
-                    find_and_report_ternaries(&condition, &mut diagnostics);
-                }
-            }
-            SyntaxKind::TERNARY_EXPR => {
-                for nested in node.descendants().skip(1) {
-                    if nested.kind() == SyntaxKind::TERNARY_EXPR {
-                        diagnostics.push(make_diagnostic(&nested));
-                    }
-                }
-            }
-            _ => {}
-        }
+        check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics

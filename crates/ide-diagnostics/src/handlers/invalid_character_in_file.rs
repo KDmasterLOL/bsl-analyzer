@@ -65,6 +65,8 @@ fn create_diagnostic(range: TextRange, char_type: InvalidCharType) -> Diagnostic
     }
 }
 
+/// Main entry point for InvalidCharacterInFile diagnostic (file-level text-based).
+/// This diagnostic scans all STRING, COMMENT, and ERROR tokens for illegal characters.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::InvalidCharacterInFile) {
         return Vec::new();

@@ -25,6 +25,35 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 
+/// Check a single syntax node for trailing commas (node-based API).
+///
+/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Check if disabled
+    if ctx.config.is_disabled(DiagnosticCode::ExtraCommas) {
+        return;
+    }
+
+    // Only process ARG_LIST nodes
+    if node.kind() != SyntaxKind::ARG_LIST {
+        return;
+    }
+
+    if let Some(comma_range) = find_trailing_comma(node) {
+        acc.push(Diagnostic {
+            code: DiagnosticCode::ExtraCommas,
+            message: "Trailing comma".to_string(),
+            severity: Severity::Critical,
+            range: comma_range,
+            tags: vec![],
+            fixes: vec![],
+        });
+    }
+}
+
+/// Main entry point for ExtraCommas diagnostic (for backward compatibility).
+/// TODO: Remove after migration to text-based API is complete.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::ExtraCommas) {
         return Vec::new();
@@ -35,18 +64,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::ARG_LIST {
-            if let Some(comma_range) = find_trailing_comma(&node) {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::ExtraCommas,
-                    message: "Trailing comma".to_string(),
-                    severity: Severity::Critical,
-                    range: comma_range,
-                    tags: vec![],
-                    fixes: vec![],
-                });
-            }
-        }
+        check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics

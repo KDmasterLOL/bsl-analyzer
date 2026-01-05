@@ -26,10 +26,10 @@
 **Всего реализовано:** ~101 диагностика (из 181 запланированных)
 
 **Распределение по статусу:**
-- **Text-based (check_node API):** 1/~50 (2%)
+- **Text-based (collect_text_diagnostics):** 5/~50 (10%)
 - **HIR-based (collect_hir_diagnostics):** 9/~20 (45%)
 - **Metadata-based (collect_metadata_diagnostics):** 9/~10 (90%)
-- **AST-based (старый API, требуют миграции):** ~82 диагностики
+- **AST-based (старый API, требуют миграции):** ~78 диагностики
 
 ## Приоритеты миграции
 
@@ -61,11 +61,6 @@
    - ExecuteExternalCode, DisableSafeMode
    - ExternalAppStarting, FileSystemAccess, InternetAccess
    - IsInRoleMethod, FormDataToValue, GetFormMethod
-
-7. **SDBL синтаксис:**
-   - FullOuterJoinQuery, JoinWithSubQuery
-   - LogicalOrInJoinQuerySection, LogicalOrInTheWhereSectionOfQuery
-   - MultilineStringInQuery, AssignAliasFieldsInQuery
 
 ### Phase 3.2: HIR-based миграция (~15-20 диагностик)
 
@@ -108,6 +103,37 @@
 - ExecuteExternalCodeInCommonModule
 - GlobalContextMethodCollision8312
 
+### Phase 3.5: SDBL диагностики (уже используют BSL HIR!)
+
+**Статус:** ✅ Уже реализованы через `all_sdbl_in_file()` (Этап 1 из SDBL_HIR_ROADMAP.md)
+
+**Архитектура:**
+```rust
+// SDBL запросы собираются во время BSL HIR lowering (нет отдельного прохода AST!)
+parse() → module_bodies() → Body.sdbl_exprs
+                               ↓
+                  all_sdbl_in_file() → Vec<(ExprId, SdblQueryInfo)>
+                               ↓
+                  SDBL диагностики читают SDBL AST
+```
+
+**Syntax-only (8 диагностик) - ✅ Готовы:**
+- AssignAliasFieldsInQuery
+- FullOuterJoinQuery
+- LogicalOrInJoinQuerySection
+- LogicalOrInTheWhereSectionOfQuery
+- MultilineStringInQuery
+- JoinWithSubQuery
+- FieldsFromJoinsWithoutIsNull
+- IncorrectUseLikeInQuery
+
+**Semantic (3-5 диагностик) - ⚠️ Требуют SDBL HIR (Этап 3, будущее):**
+- QueryToMissingMetadata (требует metadata)
+- JoinWithVirtualTable (требует metadata)
+- VirtualTableCallWithoutParameters (требует metadata)
+
+**См.** `docs/planning/SDBL_HIR_ROADMAP.md` для деталей
+
 ## Детальная таблица
 
 | # | Диагностика | Текущий API | Рекомендация | Причина |
@@ -130,13 +156,13 @@
 | 16 | **IfElseDuplicatedCodeBlock** | AST-based | → Text-based | AST сравнение |
 | 17 | **IfElseDuplicatedCondition** | AST-based | → Text-based | AST сравнение |
 | 18 | **IfElseIfEndsWithElse** | AST-based | → Text-based | Наличие Else |
-| 19 | **IncorrectLineBreak** | AST-based | → Text-based | Позиция переносов |
+| 19 | **IncorrectLineBreak** | Text-based ✅ | Оставить | Позиция переносов |
 | 20 | **IncorrectUseOfStrTemplate** | AST-based | → Text-based | Использование СтрШаблон |
 | 21 | **InvalidCharacterInFile** | AST-based | → Text-based | Недопустимые символы |
-| 22 | **LineLength** | AST-based | → Text-based | Длина строк |
+| 22 | **LineLength** | Text-based ✅ | Оставить | Длина строк |
 | 23 | **MagicDate** | AST-based | → Text-based | Даты-литералы |
 | 24 | **MagicNumber** | HIR-based ✅ | Оставить | Числа в выражениях |
-| 25 | **MissingSpace** | AST-based | → Text-based | Пробелы |
+| 25 | **MissingSpace** | Text-based ✅ | Оставить | Пробелы |
 | 26 | **MultilingualStringHasAllDeclaredLanguages** | AST-based | → Text-based | НСтр() языки |
 | 27 | **MultilingualStringUsingWithTemplate** | AST-based | → Text-based | НСтр() с шаблонами |
 | 28 | **NestedConstructorsInStructureDeclaration** | AST-based | → Text-based | Вложенные конструкторы |
@@ -215,7 +241,7 @@
 
 1. ✅ **Phase 1:** Откат HIR инфраструктуры для BadWords
 2. ✅ **Phase 2:** Создание единого text-based прохода
-3. ⏳ **Phase 3.1:** Миграция 30-40 text-based диагностик
+3. 🚧 **Phase 3.1:** Миграция 30-40 text-based диагностик (5/40 готово: BadWords, LineLength, MissingSpace, IncorrectLineBreak, SpaceAtStartComment)
 4. ⏳ **Phase 3.2:** Миграция 15-20 HIR-based диагностик
 5. ⏳ **Phase 3.3:** Завершение metadata-based диагностик
 6. ⏳ **Phase 3.4:** Реализация hybrid диагностик
@@ -223,8 +249,8 @@
 ## Производительность
 
 **Текущее состояние:**
-- 82 отдельных прохода по AST (каждая AST-based диагностика)
-- 1 единый проход для текстовых диагностик (BadWords)
+- 78 отдельных прохода по AST (каждая AST-based диагностика)
+- 1 единый проход для текстовых диагностик (5 диагностики: BadWords, LineLength, MissingSpace, IncorrectLineBreak, SpaceAtStartComment)
 
 **После Phase 3.1:**
 - 1 единый проход для ~30-40 текстовых диагностик

@@ -9,8 +9,42 @@
 //! They make code less readable and can be confusing.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::SyntaxKind;
+use syntax::{SyntaxKind, SyntaxNode};
 
+/// Check a single syntax node for empty statements (node-based API).
+///
+/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Check if disabled
+    if ctx.config.is_disabled(DiagnosticCode::EmptyStatement) {
+        return;
+    }
+
+    // Only process EMPTY_STMT nodes
+    if node.kind() != SyntaxKind::EMPTY_STMT {
+        return;
+    }
+
+    // Check if parent or siblings contain ERROR nodes
+    // (Java: !Trees.treeContainsErrors(previousNode))
+    let has_error =
+        node.parent().map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR)).unwrap_or(false);
+
+    if !has_error {
+        acc.push(Diagnostic {
+            code: DiagnosticCode::EmptyStatement,
+            message: "Empty statement".to_string(),
+            severity: Severity::Information,
+            range: node.text_range(),
+            tags: vec![],
+            fixes: vec![],
+        });
+    }
+}
+
+/// Main entry point for EmptyStatement diagnostic (for backward compatibility).
+/// TODO: Remove after migration to text-based API is complete.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::EmptyStatement) {
         return Vec::new();
@@ -22,25 +56,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Traverse all nodes looking for EMPTY_STMT
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::EMPTY_STMT {
-            // Check if parent or siblings contain ERROR nodes
-            // (Java: !Trees.treeContainsErrors(previousNode))
-            let has_error = node
-                .parent()
-                .map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR))
-                .unwrap_or(false);
-
-            if !has_error {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::EmptyStatement,
-                    message: "Empty statement".to_string(),
-                    severity: Severity::Information,
-                    range: node.text_range(),
-                    tags: vec![],
-                    fixes: vec![],
-                });
-            }
-        }
+        check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics

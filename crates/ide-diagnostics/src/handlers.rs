@@ -107,6 +107,7 @@ pub mod nested_ternary_operator;
 pub mod non_export_methods_in_api_region;
 pub mod non_standard_region;
 pub mod self_assign;
+pub mod space_at_start_comment;
 pub mod unreachable_code;
 pub mod unused_local_variable;
 // TODO: Add all 181 handlers

@@ -482,16 +482,25 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Single traversal for all text-based diagnostics
+    // File-level text-based diagnostics (called once per file)
+    diagnostics.extend(handlers::line_length::check(ctx));
+    diagnostics.extend(handlers::missing_space::check(ctx));
+    diagnostics.extend(handlers::incorrect_line_break::check(ctx));
+    diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
+    diagnostics.extend(handlers::space_at_start_comment::check(ctx));
+
+    // Single traversal for all node-based text diagnostics
     // FIXME: This iterates the entire file which is expensive.
     // Salsa caching + incremental re-parse would be better (rust-analyzer TODO)
     for node in root.descendants() {
-        // Text-based diagnostic handlers (node API)
+        // Node-based diagnostic handlers (check_node API)
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
-        // TODO: Add more text-based diagnostics here:
+        handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
+        handlers::extra_commas::check_node(&node, &mut diagnostics, ctx);
+        handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+        // TODO: Add more node-based text diagnostics here:
         // handlers::commented_code::check_node(&node, &mut diagnostics, ctx);
         // handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
-        // handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
         // ...
     }
 
@@ -531,8 +540,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("EmptyCodeBlock", ctx, handlers::empty_code_block::check));
     result.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
-    result.extend(run_diagnostic("EmptyStatement", ctx, handlers::empty_statement::check));
-    result.extend(run_diagnostic("ExtraCommas", ctx, handlers::extra_commas::check));
+    // NOTE: EmptyStatement migrated to text-based collection (collect_text_diagnostics)
+    // result.extend(run_diagnostic("EmptyStatement", ctx, handlers::empty_statement::check));
+    // NOTE: ExtraCommas migrated to text-based collection (collect_text_diagnostics)
+    // result.extend(run_diagnostic("ExtraCommas", ctx, handlers::extra_commas::check));
     result.extend(run_diagnostic(
         "ExcessiveAutoTestCheck",
         ctx,
@@ -563,24 +574,20 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::if_else_if_ends_with_else::check,
     ));
-    result.extend(run_diagnostic("IncorrectLineBreak", ctx, handlers::incorrect_line_break::check));
+    // NOTE: IncorrectLineBreak migrated to text-based collection (collect_text_diagnostics)
     result.extend(run_diagnostic(
         "IncorrectUseOfStrTemplate",
         ctx,
         handlers::incorrect_use_of_str_template::check,
     ));
-    result.extend(run_diagnostic(
-        "InvalidCharacterInFile",
-        ctx,
-        handlers::invalid_character_in_file::check,
-    ));
-    result.extend(run_diagnostic("LineLength", ctx, handlers::line_length::check));
+    // NOTE: InvalidCharacterInFile migrated to text-based collection (collect_text_diagnostics - file-level)
+    // NOTE: LineLength migrated to text-based collection (collect_text_diagnostics)
     result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
     // NOTE: MagicNumber migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::MagicNumber
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
-    result.extend(run_diagnostic("MissingSpace", ctx, handlers::missing_space::check));
+    // NOTE: MissingSpace migrated to text-based collection (collect_text_diagnostics)
     result.extend(run_diagnostic(
         "MultilingualStringHasAllDeclaredLanguages",
         ctx,
@@ -601,11 +608,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::nested_function_in_parameters::check,
     ));
-    result.extend(run_diagnostic(
-        "NestedTernaryOperator",
-        ctx,
-        handlers::nested_ternary_operator::check,
-    ));
+    // NOTE: NestedTernaryOperator migrated to text-based collection (collect_text_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "NestedTernaryOperator",
+    //     ctx,
+    //     handlers::nested_ternary_operator::check,
+    // ));
     result.extend(run_diagnostic(
         "NonExportMethodsInApiRegion",
         ctx,
