@@ -496,6 +496,10 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::code_block_before_sub::check(ctx));
     diagnostics.extend(handlers::code_out_of_region::check(ctx));
 
+    // String/Date literal diagnostics (file-level)
+    diagnostics.extend(handlers::magic_date::check(ctx));
+    diagnostics.extend(handlers::duplicate_string_literal::check(ctx));
+
     // Single traversal for all node-based text diagnostics
     // FIXME: This iterates the entire file which is expensive.
     // Salsa caching + incremental re-parse would be better (rust-analyzer TODO)
@@ -532,11 +536,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // NOTE: CommentedCode migrated to text-based collection (collect_text_diagnostics)
     // result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
     result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
-    result.extend(run_diagnostic(
-        "DuplicateStringLiteral",
-        ctx,
-        handlers::duplicate_string_literal::check,
-    ));
+    // NOTE: DuplicateStringLiteral migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic(
+    //     "DuplicateStringLiteral",
+    //     ctx,
+    //     handlers::duplicate_string_literal::check,
+    // ));
     // NOTE: DuplicateRegion migrated to text-based collection (collect_text_diagnostics - file-level)
     // result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
     // NOTE: NonStandardRegion migrated to text-based collection (collect_text_diagnostics - file-level)
@@ -594,7 +599,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     // NOTE: InvalidCharacterInFile migrated to text-based collection (collect_text_diagnostics - file-level)
     // NOTE: LineLength migrated to text-based collection (collect_text_diagnostics)
-    result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
+    // NOTE: MagicDate migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
     // NOTE: MagicNumber migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::MagicNumber
     // and dispatched through collect_hir_diagnostics()
