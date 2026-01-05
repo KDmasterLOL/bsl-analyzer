@@ -253,6 +253,13 @@ pub enum BodyDiagnostic {
     /// Emitted during lowering for potential CommonModule calls.
     /// Module name and method name are stored for validation in from_hir().
     MissingCommonModuleMethod { module: String, method: String, range: TextRange },
+
+    /// BeginTransaction/НачатьТранзакцию call not immediately followed by Try statement.
+    /// Detects three violation patterns:
+    /// 1. Code between BeginTransaction and Try
+    /// 2. BeginTransaction inside Try block
+    /// 3. BeginTransaction without subsequent Try
+    BeginTransactionBeforeTryCatch { range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -268,6 +275,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UnusedVariable { range, .. } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
             BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
+            BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
         }
     }
 }

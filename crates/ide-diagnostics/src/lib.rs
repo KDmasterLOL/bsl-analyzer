@@ -647,11 +647,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::all_function_path_must_have_return::check,
     // ));
-    result.extend(run_diagnostic(
-        "BeginTransactionBeforeTryCatch",
-        ctx,
-        handlers::begin_transaction_before_try_catch::check,
-    ));
+    // NOTE: BeginTransactionBeforeTryCatch migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::BeginTransactionBeforeTryCatch
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "BeginTransactionBeforeTryCatch",
+    //     ctx,
+    //     handlers::begin_transaction_before_try_catch::check,
+    // ));
     result.extend(run_diagnostic(
         "CommitTransactionOutsideTryCatch",
         ctx,
@@ -986,6 +989,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
+        }
+        BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
+            handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }
     }
 }

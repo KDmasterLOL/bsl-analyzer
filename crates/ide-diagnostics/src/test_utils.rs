@@ -342,6 +342,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }
+        BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
+            handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
+        }
     }
 }
 

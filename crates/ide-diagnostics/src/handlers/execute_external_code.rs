@@ -36,7 +36,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
-use syntax::ast::{Annotation, AstNode, FunctionDef, ProcedureDef};
 use syntax::{SyntaxKind, SyntaxNode, TextSize};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -134,50 +133,42 @@ fn is_in_client_only_context(node: &SyntaxNode) -> bool {
         return false;
     };
 
-    match parent.kind() {
-        SyntaxKind::FUNCTION_DEF => {
-            if let Some(func) = FunctionDef::cast(parent) {
-                is_client_only_function(&func)
-            } else {
-                false
-            }
-        }
-        SyntaxKind::PROCEDURE_DEF => {
-            if let Some(proc) = ProcedureDef::cast(parent) {
-                is_client_only_procedure(&proc)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
+    is_client_only_method(&parent)
 }
 
-/// Check if function has ONLY &НаКлиенте annotation.
-fn is_client_only_function(func: &FunctionDef) -> bool {
-    let annotations: Vec<_> = func.annotations().collect();
+/// Check if method (function or procedure) has ONLY &НаКлиенте annotation.
+///
+/// Uses text-based API: works directly with SyntaxNode instead of typed AST wrappers.
+fn is_client_only_method(method: &SyntaxNode) -> bool {
+    let annotations = find_annotations(method);
 
+    // Must have exactly ONE annotation
     if annotations.len() != 1 {
         return false;
     }
 
-    matches_client_annotation(&annotations[0])
+    is_client_annotation(&annotations[0])
 }
 
-/// Check if procedure has ONLY &НаКлиенте annotation.
-fn is_client_only_procedure(proc: &ProcedureDef) -> bool {
-    let annotations: Vec<_> = proc.annotations().collect();
-
-    if annotations.len() != 1 {
-        return false;
-    }
-
-    matches_client_annotation(&annotations[0])
+/// Find all ANNOTATION nodes that are children of the method.
+///
+/// Annotations can be either ANNOTATION or COMPILER_DIRECTIVE nodes.
+fn find_annotations(method: &SyntaxNode) -> Vec<SyntaxNode> {
+    method
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect()
 }
 
 /// Check if annotation is &НаКлиенте or &AtClient.
-fn matches_client_annotation(ann: &Annotation) -> bool {
-    ann.kind_token().map(|t| t.kind() == SyntaxKind::ANN_AT_CLIENT).unwrap_or(false)
+///
+/// Uses text-based API: searches for ANN_AT_CLIENT token inside the annotation node.
+fn is_client_annotation(ann: &SyntaxNode) -> bool {
+    ann.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|token| token.kind() == SyntaxKind::ANN_AT_CLIENT)
 }
 
 /// Find parent function or procedure node.

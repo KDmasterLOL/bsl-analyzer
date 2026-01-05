@@ -518,6 +518,9 @@ fn lower_stmt_list_with_unreachable(
     let mut unreachable_start: Option<TextRange> = None;
     let mut unreachable_end: Option<TextRange> = None;
 
+    // Track pending BeginTransaction node for BeginTransactionBeforeTryCatch diagnostic
+    let mut pending_begin_transaction: Option<SyntaxNode> = None;
+
     for child in stmt_list.children() {
         // Handle preprocessor directives - process content recursively
         if child.kind() == SyntaxKind::PRE_IF_DIR {
@@ -552,6 +555,11 @@ fn lower_stmt_list_with_unreachable(
             continue;
         }
 
+        // BeginTransactionBeforeTryCatch: Check for Try statement (consumes pending BeginTransaction)
+        if emit_diagnostics && child.kind() == SyntaxKind::TRY_STMT {
+            pending_begin_transaction = None;
+        }
+
         // If we're in unreachable mode, extend the range
         if unreachable_start.is_some() {
             unreachable_end = Some(child.text_range());
@@ -560,6 +568,42 @@ fn lower_stmt_list_with_unreachable(
                 stmts.push(stmt_id);
             }
             continue;
+        }
+
+        // BeginTransactionBeforeTryCatch: Check for BeginTransaction call
+        if emit_diagnostics {
+            let is_begin_trans = is_global_begin_transaction_call(&child);
+
+            if is_begin_trans {
+                // If we have pending BeginTransaction, emit diagnostic for it
+                if let Some(pending_node) = pending_begin_transaction.take() {
+                    let extended_range =
+                        extend_range_with_semicolon(&pending_node, pending_node.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                }
+
+                // Check if BeginTransaction is inside Try body
+                if is_inside_try_body(&child) {
+                    let extended_range = extend_range_with_semicolon(&child, child.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                } else {
+                    // Store as pending (will be consumed by Try or reported as error)
+                    pending_begin_transaction = Some(child.clone());
+                }
+            } else if child.kind() != SyntaxKind::TRY_STMT {
+                // Any other statement (not Try, not BeginTransaction) while pending → ERROR
+                if let Some(pending_node) = pending_begin_transaction.take() {
+                    let extended_range =
+                        extend_range_with_semicolon(&pending_node, pending_node.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                }
+            }
         }
 
         // Lower the statement
@@ -588,6 +632,13 @@ fn lower_stmt_list_with_unreachable(
                 let range = TextRange::new(first_unreachable.start(), end.end());
                 ctx.emit(BodyDiagnostic::UnreachableCode { range });
             }
+        }
+
+        // BeginTransactionBeforeTryCatch: If there's still pending at end of list → ERROR
+        if let Some(pending_node) = pending_begin_transaction {
+            let extended_range =
+                extend_range_with_semicolon(&pending_node, pending_node.text_range());
+            ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch { range: extended_range });
         }
     }
 
@@ -1815,6 +1866,67 @@ fn is_deprecated_method(name: &str) -> bool {
             | "получитьформу"
             | "getform"
     )
+}
+
+/// Check if a statement is a global BeginTransaction/НачатьТранзакцию call.
+///
+/// Returns true if the statement is a non-qualified call to BeginTransaction/НачатьТранзакцию.
+/// Filters out:
+/// - Non-CALL_STMT nodes
+/// - Qualified calls like `Connector.BeginTransaction()`
+fn is_global_begin_transaction_call(node: &SyntaxNode) -> bool {
+    // Must be CALL_STMT
+    if node.kind() != SyntaxKind::CALL_STMT {
+        return false;
+    }
+
+    // Skip if contains FIELD_EXPR (qualified call like Object.Method())
+    if node.descendants().any(|n| n.kind() == SyntaxKind::FIELD_EXPR) {
+        return false;
+    }
+
+    // Get first identifier token (method name)
+    let ident = node
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT);
+
+    let Some(ident) = ident else {
+        return false;
+    };
+
+    let name = ident.text().to_lowercase();
+    name == "начатьтранзакцию" || name == "begintransaction"
+}
+
+/// Check if a node is inside a Try-Catch block body.
+///
+/// Walks up the AST tree looking for TRY_STMT ancestors.
+fn is_inside_try_body(node: &SyntaxNode) -> bool {
+    let mut current = node.clone();
+    while let Some(parent) = current.parent() {
+        if parent.kind() == SyntaxKind::TRY_STMT {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Extend a text range to include the following semicolon token if present.
+///
+/// Java BSLParser.StatementContext includes the SEMICOLON in the statement range.
+/// Our CALL_STMT does not include SEMICOLON (it's a separate token).
+/// To match Java ranges, we extend the range to include the semicolon.
+fn extend_range_with_semicolon(node: &SyntaxNode, original_range: TextRange) -> TextRange {
+    use syntax::NodeOrToken;
+
+    if let Some(NodeOrToken::Token(token)) = node.next_sibling_or_token() {
+        if token.kind() == SyntaxKind::SEMICOLON {
+            return original_range.cover(token.text_range());
+        }
+    }
+    original_range
 }
 
 /// Check if string looks like SDBL query.

@@ -24,10 +24,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use std::collections::HashSet;
-use syntax::{
-    ast::{Annotation, AstNode, FunctionDef, ProcedureDef},
-    SyntaxKind, SyntaxNode, TextRange,
-};
+use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// Main check function for FormDataToValue diagnostic.
 ///
@@ -106,43 +103,36 @@ fn find_parent_method(node: &SyntaxNode) -> Option<SyntaxNode> {
 /// Returns true if method has:
 /// - @НаСервереБезКонтекста / @AtServerNoContext
 /// - @НаКлиентеНаСервереБезКонтекста / @AtClientAtServerNoContext
+///
+/// Uses text-based API: works directly with SyntaxNode instead of typed AST wrappers.
 fn has_no_context_annotation(method_node: &SyntaxNode) -> bool {
-    match method_node.kind() {
-        SyntaxKind::FUNCTION_DEF => {
-            if let Some(func) = FunctionDef::cast(method_node.clone()) {
-                func.annotations().any(|ann| is_no_context_annotation(&ann))
-            } else {
-                false
-            }
-        }
-        SyntaxKind::PROCEDURE_DEF => {
-            if let Some(proc) = ProcedureDef::cast(method_node.clone()) {
-                proc.annotations().any(|ann| is_no_context_annotation(&ann))
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
+    let annotations = find_annotations(method_node);
+    annotations.iter().any(is_no_context_annotation)
+}
+
+/// Find all ANNOTATION nodes that are children of the method.
+///
+/// Annotations can be either ANNOTATION or COMPILER_DIRECTIVE nodes.
+fn find_annotations(method: &SyntaxNode) -> Vec<SyntaxNode> {
+    method
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect()
 }
 
 /// Check if annotation is a "БезКонтекста" annotation.
-fn is_no_context_annotation(ann: &Annotation) -> bool {
-    if let Some(kind_token) = ann.kind_token() {
-        // Check both SyntaxKind and text (fallback to text for compatibility)
-        if matches!(
-            kind_token.kind(),
+///
+/// Uses text-based API: searches for ANN_AT_SERVER_NO_CONTEXT or ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+/// tokens inside the annotation node.
+fn is_no_context_annotation(ann: &SyntaxNode) -> bool {
+    ann.descendants_with_tokens().filter_map(|el| el.into_token()).any(|token| {
+        matches!(
+            token.kind(),
             SyntaxKind::ANN_AT_SERVER_NO_CONTEXT | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
-        ) {
-            return true;
-        }
-
-        // Fallback: check text content (case-insensitive)
-        let text = kind_token.text().to_lowercase();
-        text.contains("безконтекста") || text.contains("nocontext")
-    } else {
-        false
-    }
+        )
+    })
 }
 
 /// Create diagnostic for FormDataToValue usage.
