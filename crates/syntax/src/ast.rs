@@ -80,22 +80,8 @@ impl ProcedureDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        let mut anns = Vec::new();
-        let mut prev = self.0.prev_sibling();
-        while let Some(node) = prev {
-            if let Some(ann) = Annotation::cast(node.clone()) {
-                anns.push(ann);
-                prev = node.prev_sibling();
-            } else if matches!(
-                node.kind(),
-                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-            ) {
-                prev = node.prev_sibling();
-            } else {
-                break;
-            }
-        }
-        anns.into_iter().rev()
+        // Annotations are parsed as children of the procedure/function node by annotated_item()
+        self.0.children().filter_map(Annotation::cast)
     }
 
     pub fn body(&self) -> Option<StmtList> {
@@ -145,22 +131,8 @@ impl FunctionDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        let mut anns = Vec::new();
-        let mut prev = self.0.prev_sibling();
-        while let Some(node) = prev {
-            if let Some(ann) = Annotation::cast(node.clone()) {
-                anns.push(ann);
-                prev = node.prev_sibling();
-            } else if matches!(
-                node.kind(),
-                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-            ) {
-                prev = node.prev_sibling();
-            } else {
-                break;
-            }
-        }
-        anns.into_iter().rev()
+        // Annotations are parsed as children of the procedure/function node by annotated_item()
+        self.0.children().filter_map(Annotation::cast)
     }
 
     pub fn body(&self) -> Option<StmtList> {

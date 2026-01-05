@@ -15,7 +15,7 @@ fn annotated_item(p: &mut Parser) {
     // Start the outer node for the procedure/function/variable
     let outer = p.start();
 
-    // Parse annotations as children
+    // Parse all types of annotations as children
     while matches!(
         p.current(),
         Some(TokenKind::AnnAtClient)
@@ -23,9 +23,27 @@ fn annotated_item(p: &mut Parser) {
             | Some(TokenKind::AnnAtServerNoContext)
             | Some(TokenKind::AnnAtClientAtServer)
             | Some(TokenKind::AnnAtClientAtServerNoContext)
+            | Some(TokenKind::AnnBefore)
+            | Some(TokenKind::AnnAfter)
+            | Some(TokenKind::AnnAround)
+            | Some(TokenKind::AnnChangeAndValidate)
+            | Some(TokenKind::AnnCustom)
     ) {
         p.check_iteration_limit();
-        items::compiler_directive(p);
+        // For built-in annotations, use compiler_directive
+        // For custom annotations, use annotation
+        match p.current() {
+            Some(TokenKind::AnnAtClient)
+            | Some(TokenKind::AnnAtServer)
+            | Some(TokenKind::AnnAtServerNoContext)
+            | Some(TokenKind::AnnAtClientAtServer)
+            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+                items::compiler_directive(p);
+            }
+            _ => {
+                items::annotation(p);
+            }
+        }
         p.skip_trivia();
     }
 
@@ -178,16 +196,8 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
             | Some(TokenKind::AnnAround)
             | Some(TokenKind::AnnChangeAndValidate)
             | Some(TokenKind::AnnCustom) => {
-                items::annotation(p);
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) | Some(TokenKind::KwProcedure) => {
-                        items::procedure_def(p)
-                    }
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    Some(TokenKind::KwVar) => items::var_declaration(p),
-                    _ => p.error(),
-                }
+                // Use annotated_item for consistency with other annotations
+                annotated_item(p);
             }
             // Module-level statements in regions
             _ => {
@@ -290,16 +300,8 @@ fn preproc_content(p: &mut Parser) {
             | Some(TokenKind::AnnAround)
             | Some(TokenKind::AnnChangeAndValidate)
             | Some(TokenKind::AnnCustom) => {
-                items::annotation(p);
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) | Some(TokenKind::KwProcedure) => {
-                        items::procedure_def(p)
-                    }
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    Some(TokenKind::KwVar) => items::var_declaration(p),
-                    _ => p.error(),
-                }
+                // Use annotated_item for consistency with other annotations
+                annotated_item(p);
             }
             // Module-level statements in preprocessor content
             _ => {

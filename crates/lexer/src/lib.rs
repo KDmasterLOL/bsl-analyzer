@@ -226,7 +226,7 @@ pub enum TokenKind {
     #[regex(r"&(?i)после|&(?i)after")]
     AnnAfter,
 
-    #[regex(r"&(?i)вместо|&(?i)around")]
+    #[regex(r"&(?i)вместо|&(?i)instead")]
     AnnAround,
 
     #[regex(r"&(?i)изменениеиконтроль|&(?i)changeandvalidate")]
