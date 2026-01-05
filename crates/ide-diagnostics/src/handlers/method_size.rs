@@ -34,8 +34,13 @@
 //! Ported from: MethodSizeDiagnostic.java (bsl-language-server)
 //!
 //! Algorithm: Calculates line difference (stop_line - start_line) matching Java's ANTLR behavior.
+//!
+//! ## Performance
+//! Uses LineIndex for O(1) line number lookups instead of scanning the entire
+//! file text for each method. LineIndex is built once O(n) at the start.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 #[derive(Debug, Clone)]
@@ -53,6 +58,8 @@ impl Config {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let _span = tracing::debug_span!("MethodSize::check").entered();
+
     if ctx.config.is_disabled(DiagnosticCode::MethodSize) {
         return Vec::new();
     }
@@ -60,7 +67,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let config = Config::from_context(ctx);
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
-    let file_text = ctx.db.file_text_input(ctx.file_id).text(ctx.db);
+    let file_text_input = ctx.db.file_text_input(ctx.file_id);
+    let file_text = file_text_input.text(ctx.db);
+
+    // Build LineIndex once - O(n), then all lookups are O(1)
+    let line_index = LineIndex::new(&file_text);
 
     let mut diagnostics = Vec::new();
 
@@ -79,9 +90,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 continue;
             }
 
-            // Calculate method size using line difference
-            // This matches Java's subCodeBlock calculation
-            let size = calculate_method_size_from_node(&node, &file_text);
+            // Calculate method size using line difference - O(1) per method
+            let size = calculate_method_size(&node, &line_index);
 
             if size > config.max_method_size {
                 let name_token = get_method_name(&node);
@@ -107,14 +117,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
+    tracing::debug!(count = diagnostics.len(), "MethodSize diagnostics found");
+
     diagnostics
 }
 
 /// Calculate method size using line difference (matches Java ANTLR behavior).
 ///
+/// Uses LineIndex for O(1) line lookups instead of scanning file text.
+///
 /// Java calculates: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
-/// where subCodeBlock spans from the first statement (skipping blank lines after declaration)
-/// to the last statement (skipping blank lines before end keyword).
+/// where subCodeBlock spans from the first statement to the last statement.
 ///
 /// The typical BSL method structure:
 /// Line N:   Процедура Name()
@@ -125,34 +138,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Line M-1: (blank line)
 /// Line M:   КонецПроцедуры
 ///
-/// ANTLR's subCodeBlock: (N+2) to (M-2), difference = M-2 - (N+2) = M - N - 4
-/// Our PROCEDURE_DEF: N to M, difference = M - N
-/// To match: (M - N) - 4 = M - N - 4
-///
-/// However, empirically we need to subtract 5 to match Java exactly:
-/// - Процедура201Строка: 212 - 7 - 5 = 200 (Java gets 201, close)
-/// - Actually, let me reconsider...
-fn calculate_method_size_from_node(method_node: &SyntaxNode, file_text: &str) -> usize {
+/// Rowan PROCEDURE_DEF spans from N to M, so we subtract 4 to match Java's subCodeBlock.
+fn calculate_method_size(method_node: &SyntaxNode, line_index: &LineIndex) -> usize {
     let range = method_node.text_range();
-    let start_offset: usize = range.start().into();
-    let end_offset: usize = range.end().into();
 
-    let start_line = byte_offset_to_1indexed_line(file_text, start_offset);
-    let end_line = byte_offset_to_1indexed_line(file_text, end_offset);
+    // O(1) lookups using LineIndex
+    let start_line = line_index.line_col(range.start()).line as usize;
+    let end_line = line_index.line_col(range.end()).line as usize;
 
     // Rowan PROCEDURE_DEF spans from declaration to end keyword
     // Java subCodeBlock spans from first statement to last statement
-    // Subtract 4: declaration line + blank after declaration + blank before end + end keyword line?
-    // Actually, empirically we need to subtract 4 to match Java
+    // Subtract 4 to match Java behavior
     let total_span = end_line.saturating_sub(start_line);
     total_span.saturating_sub(4)
-}
-
-/// Convert byte offset to 1-indexed line number (matches Java ANTLR getLine() behavior).
-fn byte_offset_to_1indexed_line(text: &str, byte_offset: usize) -> usize {
-    let safe_offset = byte_offset.min(text.len());
-    let newlines_before = text[..safe_offset].bytes().filter(|&b| b == b'\n').count();
-    newlines_before + 1
 }
 
 /// Check if method body is empty (no executable statements).
@@ -306,13 +304,14 @@ mod tests {
         let parse = db.parse(file_id);
         let root = parse.syntax_node();
         let file_text = db.file_text_input(file_id).text(db.as_ref());
+        let line_index = LineIndex::new(&file_text);
 
         let procedure = root
             .descendants()
             .find(|n| n.kind() == SyntaxKind::PROCEDURE_DEF)
             .expect("Should find procedure");
 
-        let size = calculate_method_size_from_node(&procedure, &file_text);
+        let size = calculate_method_size(&procedure, &line_index);
 
         // Line 1: Процедура Тест()
         // Line 2-4: body (3 lines)

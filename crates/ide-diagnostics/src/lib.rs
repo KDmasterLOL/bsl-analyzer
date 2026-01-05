@@ -500,6 +500,9 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::magic_date::check(ctx));
     diagnostics.extend(handlers::duplicate_string_literal::check(ctx));
 
+    // Keyword spelling diagnostics (file-level, token-based)
+    diagnostics.extend(handlers::canonical_spelling_keywords::check(ctx));
+
     // Single traversal for all node-based text diagnostics
     // FIXME: This iterates the entire file which is expensive.
     // Salsa caching + incremental re-parse would be better (rust-analyzer TODO)
@@ -528,11 +531,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Tier 1: Syntax diagnostics (TODO: migrate to collect_text_diagnostics)
     // result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));
-    result.extend(run_diagnostic(
-        "CanonicalSpellingKeywords",
-        ctx,
-        handlers::canonical_spelling_keywords::check,
-    ));
+    // NOTE: CanonicalSpellingKeywords migrated to text-based collection (collect_text_diagnostics - file-level)
+    // result.extend(run_diagnostic(
+    //     "CanonicalSpellingKeywords",
+    //     ctx,
+    //     handlers::canonical_spelling_keywords::check,
+    // ));
     // NOTE: CommentedCode migrated to text-based collection (collect_text_diagnostics)
     // result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
     result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
