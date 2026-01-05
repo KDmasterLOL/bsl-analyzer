@@ -105,6 +105,7 @@ pub mod nested_function_in_parameters;
 pub mod nested_statements;
 pub mod nested_ternary_operator;
 pub mod non_export_methods_in_api_region;
+pub mod non_standard_region;
 pub mod self_assign;
 pub mod unreachable_code;
 pub mod unused_local_variable;

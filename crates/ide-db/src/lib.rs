@@ -163,6 +163,11 @@ impl RootQueryDb for RootDatabaseImpl {
         let input = self.file_text_input(file_id);
         base_db::method_regions(self, input)
     }
+
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
+        let input = self.file_text_input(file_id);
+        base_db::module_level_regions(self, input)
+    }
 }
 
 impl DefDatabase for RootDatabaseImpl {

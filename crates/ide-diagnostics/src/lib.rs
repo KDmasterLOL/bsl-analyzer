@@ -8,6 +8,7 @@ pub mod metadata_diagnostic;
 pub mod method_description;
 pub mod rules;
 pub mod sdbl_utils;
+pub mod utils;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -61,6 +62,7 @@ pub enum DiagnosticCode {
     BadWords,
     DuplicateStringLiteral,
     DuplicateRegion,
+    NonStandardRegion,
     DuplicatedInsertionIntoCollection,
     ExcessiveAutoTestCheck,
     IdenticalExpressions,
@@ -196,6 +198,7 @@ impl DiagnosticCode {
             Self::BadWords => "BadWords",
             Self::DuplicateStringLiteral => "DuplicateStringLiteral",
             Self::DuplicateRegion => "DuplicateRegion",
+            Self::NonStandardRegion => "NonStandardRegion",
             Self::DuplicatedInsertionIntoCollection => "DuplicatedInsertionIntoCollection",
             Self::ExcessiveAutoTestCheck => "ExcessiveAutoTestCheck",
             Self::IdenticalExpressions => "IdenticalExpressions",
@@ -486,6 +489,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::duplicate_string_literal::check,
     ));
     result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
+    result.extend(run_diagnostic("NonStandardRegion", ctx, handlers::non_standard_region::check));
     result.extend(run_diagnostic(
         "DuplicatedInsertionIntoCollection",
         ctx,

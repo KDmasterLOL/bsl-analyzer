@@ -21,6 +21,12 @@ mod input;
 pub use change::FileChange;
 pub use input::{FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionInfo {
+    pub name: String,
+    pub range: syntax::TextRange,
+}
+
 /// The main Salsa database trait for source file operations.
 ///
 /// This trait provides access to file contents and source root information.
@@ -201,6 +207,72 @@ fn is_api_region(name: &str) -> bool {
     const API_REGIONS: &[&str] =
         &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
     API_REGIONS.contains(&name.to_lowercase().as_str())
+}
+
+/// Extract all module-level region names and their text ranges.
+///
+/// This query collects information about all top-level regions in a BSL file.
+/// Only module-level regions are collected (nested regions inside methods are excluded).
+///
+/// # Performance
+/// - LRU cache: 256 files (region collection is inexpensive)
+/// - Depends on: parse_query (automatic invalidation via Salsa)
+/// - Recomputed only when file content changes
+/// - Shared by ALL region-based diagnostics (NonStandardRegion, DuplicateRegion, EmptyRegion, etc.)
+///
+/// # Returns
+/// Vector of RegionInfo containing region names and their text ranges (first line only).
+/// Ranges point to the #Область/#Region directive line.
+#[salsa::tracked(lru = 256)]
+pub fn module_level_regions(
+    db: &dyn salsa::Database,
+    input: FileTextInput,
+) -> Arc<Vec<RegionInfo>> {
+    let _span = tracing::info_span!("module_level_regions").entered();
+
+    let parse = parse_query(db, input);
+    let root = parse.syntax_node();
+
+    let regions = collect_module_level_regions(&root);
+
+    tracing::debug!(count = regions.len(), "Collected module-level regions");
+
+    Arc::new(regions)
+}
+
+/// Collect module-level regions (not nested inside methods).
+///
+/// Walks root.children() (not descendants) to get only top-level regions.
+/// For each region start directive, extracts name and range of first line.
+fn collect_module_level_regions(root: &syntax::SyntaxNode) -> Vec<RegionInfo> {
+    use syntax::{
+        ast::{self, AstNode},
+        SyntaxKind, TextRange, TextSize,
+    };
+
+    let mut regions = Vec::new();
+
+    for child in root.children() {
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
+                if region.is_start() {
+                    if let Some(name) = region.name() {
+                        let text = child.text().to_string();
+                        let first_line = text.lines().next().unwrap_or(&text);
+                        let first_line_len = first_line.len();
+
+                        let start = child.text_range().start();
+                        let end = start + TextSize::from(first_line_len as u32);
+                        let range = TextRange::new(start, end);
+
+                        regions.push(RegionInfo { name, range });
+                    }
+                }
+            }
+        }
+    }
+
+    regions
 }
 
 /// Resolve a VfsPath to FileId within a SourceRoot.
@@ -484,6 +556,31 @@ pub trait RootQueryDb: SourceDatabase {
         &self,
         file_id: FileId,
     ) -> Arc<std::collections::HashMap<syntax::TextRange, String>>;
+
+    /// Extract all module-level regions from a BSL file.
+    ///
+    /// Returns cached list of region names with their source ranges.
+    /// Used by region-based diagnostics (NonStandardRegion, DuplicateRegion, EmptyRegion, CodeOutOfRegion).
+    ///
+    /// ## Performance Benefits
+    ///
+    /// - **Salsa-cached**: AST traversal happens once per file change (LRU 256)
+    /// - **Shared across diagnostics**: 4+ region diagnostics reuse same cache
+    /// - **Auto-invalidation**: Salsa invalidates when file changes
+    ///
+    /// ## Usage in Diagnostics
+    ///
+    /// ```ignore
+    /// pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    ///     let regions = ctx.db.module_level_regions(ctx.file_id);
+    ///
+    ///     for region in regions.iter() {
+    ///         // region.name contains region name
+    ///         // region.range contains first line of #Область directive
+    ///     }
+    /// }
+    /// ```
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>>;
 }
 
 /// Helper structure for managing file state with concurrent access.
@@ -718,6 +815,11 @@ mod tests {
         ) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
             let input = self.file_text_input(file_id);
             method_regions(self, input)
+        }
+
+        fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>> {
+            let input = self.file_text_input(file_id);
+            module_level_regions(self, input)
         }
     }
 
