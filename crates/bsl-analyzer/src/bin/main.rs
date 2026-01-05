@@ -281,25 +281,13 @@ fn analyze(
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     let source_dir_arc = Arc::new(source_dir.clone());
     let configuration_path_arc = Arc::new(configuration_path);
-    let clones_count = Arc::new(AtomicUsize::new(0));
     // CRITICAL: FileSet is passed separately to DiagnosticsContext (not in SourceRoot)
     // This avoids Salsa's O(n) hash/compare on large FileSet
     let file_set_arc = Arc::new(file_set);
 
     let all_diagnostics: Vec<FileAnalysis> = file_ids
         .par_iter()
-        .map_with((db.clone(), clones_count.clone()), |(db_snapshot, clones), (file_id, path)| {
-            // Log database cloning - this should happen once per thread!
-            let clone_num = clones.fetch_add(1, Ordering::Relaxed);
-            if clone_num < 20 {
-                // Log first 20 clones to see the pattern
-                tracing::debug!(
-                    clone_num = clone_num,
-                    thread = ?std::thread::current().id(),
-                    "Database cloned for thread worker"
-                );
-            }
-
+        .map_with(db.clone(), |db_snapshot, (file_id, path)| {
             let ctx = DiagnosticsContext {
                 db: db_snapshot,
                 config: &config,
@@ -365,20 +353,6 @@ fn analyze(
     }
 
     let elapsed = start.elapsed();
-    let total_clones = clones_count.load(Ordering::Relaxed);
-    tracing::info!(
-        total_clones = total_clones,
-        expected_clones = rayon::current_num_threads(),
-        "Database cloning statistics"
-    );
-
-    if total_clones > rayon::current_num_threads() * 2 {
-        tracing::warn!(
-            "Database cloned {} times (expected ~{}). This may indicate excessive cloning!",
-            total_clones,
-            rayon::current_num_threads()
-        );
-    }
 
     // Create analysis results
     let total_diagnostics: usize = all_diagnostics.iter().map(|f| f.diagnostics.len()).sum();
