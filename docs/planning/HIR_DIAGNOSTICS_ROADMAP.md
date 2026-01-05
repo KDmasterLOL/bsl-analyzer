@@ -9,17 +9,17 @@
 
 ## Текущие достижения (2026-01-05)
 
-✅ **6 из 8 HIR-диагностик реализованы и работают:**
+✅ **ВСЕ 8 HIR-диагностик реализованы и работают:**
 - FunctionShouldHaveReturn (простая проверка наличия return)
 - EmptyCodeBlock (пустые if/while/for/try блоки)
 - MagicNumber (магические числа в коде)
 - SelfAssign (самоприсваивание a = a)
 - UnusedLocalVariable (неиспользуемые локальные переменные + module-level tracking)
 - UnreachableCode (недостижимый код после return/raise/break/continue)
+- MissingReturn (CFG-based проверка всех путей выполнения функции)
+- DeprecatedMethod (deprecated методы 8.3.10 и 8.3.17)
 
-⏳ **Осталось реализовать:**
-- MissingReturn (enum готов, нужен handler + CFG integration)
-- DeprecatedMethod (enum готов, нужен handler + metadata integration)
+🎉 **Phase 8 завершена!** Все целевые HIR-диагностики мигрированы.
 
 ✅ **Инфраструктура готова:**
 - Body lowering (AST → HIR)
@@ -104,7 +104,7 @@ crates/cfg/src/
 | Phase 5 | Cleanup + Архитектурный рефакторинг | ✅ Завершена |
 | Phase 6 | UnreachableCode + UnusedLocalVariable | ✅ Завершена |
 | Phase 7 | CFG Infrastructure | ✅ Завершена (на основе AST) |
-| Phase 8 | Remaining Diagnostics | ⏳ Следующий (MissingReturn, DeprecatedMethod) |
+| Phase 8 | Remaining Diagnostics | ✅ Завершена (MissingReturn, DeprecatedMethod) |
 
 ### Архитектурный рефакторинг (Phase 5)
 
@@ -126,10 +126,10 @@ crates/cfg/src/
 | SelfAssign | ✅ Полностью | Проверяется при lowering assignment |
 | UnusedLocalVariable | ✅ Полностью | Usage tracking + module-level support |
 | UnreachableCode | ✅ Полностью | Control flow analysis в lowering |
-| MissingReturn | ⏳ Enum готов | Требует реализацию handler + CFG |
-| DeprecatedMethod | ⏳ Enum готов | Требует реализацию handler + metadata |
+| DeprecatedMethod | ✅ Полностью | Проверяет deprecated методы 8.3.10 и 8.3.17 |
+| MissingReturn | ✅ Полностью | CFG-based проверка всех путей выполнения |
 
-**Примечание:** AllFunctionPathMustHaveReturn реализована как отдельная AST-based диагностика с использованием CFG crate. В будущем можно мигрировать на HIR-based подход.
+**Примечание:** Старые AST-based версии (all_function_path_must_have_return, deprecated_methods_8310, deprecated_methods_8317) удалены. Все диагностики теперь работают через HIR с Salsa кэшированием.
 
 ## Что нужно добавить
 
@@ -294,14 +294,15 @@ pub fn validate_body(
 - [x] SelfAssign
 - [x] UnreachableCode (реализована с control flow analysis)
 - [x] UnusedLocalVariable (реализована с usage tracking + module-level support)
-- [ ] MissingReturn (enum готов, требует handler)
-- [ ] DeprecatedMethod (enum готов, требует handler)
+- [x] MissingReturn (реализована с CFG integration)
+- [x] DeprecatedMethod (реализована с metadata integration)
 
-### Iteration 4: Remaining Work ⏳
+### Iteration 4: Cleanup & Completion ✅
 - [x] CFG Infrastructure (Phase 7) - реализована на основе AST
-- [ ] MissingReturn handler (требует CFG integration)
-- [ ] DeprecatedMethod handler (требует metadata integration)
-- [ ] Body Validation Pass (Phase 8) - опционально
+- [x] MissingReturn handler (реализован с CFG integration)
+- [x] DeprecatedMethod handler (реализован с metadata integration)
+- [x] Удаление старых AST-based handlers (all_function_path_must_have_return, deprecated_methods_8310/8317)
+- [ ] Body Validation Pass (опционально для будущих диагностик)
 - [ ] Benchmark comparisons
 - [ ] Memory profiling
 

@@ -1605,6 +1605,26 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         Some(n) => n,
         None => return Expr::Missing,
     };
+
+    // Check if this is a global call to a deprecated method
+    // Unwrap EXPR wrapper if present
+    let actual_callee = if callee_node.kind() == SyntaxKind::EXPR {
+        callee_node.children().next().unwrap_or_else(|| callee_node.clone())
+    } else {
+        callee_node.clone()
+    };
+
+    // Only check for IDENT (global function call), not FIELD_EXPR (method call)
+    if actual_callee.kind() == SyntaxKind::IDENT {
+        let name = actual_callee.text().to_string();
+        if is_deprecated_method(&name) {
+            // Emit DeprecatedMethod diagnostic
+            // Range covers the entire call expression including arguments
+            ctx.diagnostics
+                .push(BodyDiagnostic::DeprecatedMethod { name, range: node.text_range() });
+        }
+    }
+
     let callee = lower_expr_node(ctx, &callee_node);
 
     // Arguments
@@ -1681,6 +1701,40 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         .unwrap_or_default();
 
     Expr::New { type_name, args: args.into_boxed_slice() }
+}
+
+/// Check if a method name is deprecated (8.3.10 or 8.3.17).
+/// Returns true if the method is deprecated.
+fn is_deprecated_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+
+    // Deprecated methods from 8.3.10 and 8.3.17
+    matches!(
+        lower.as_str(),
+        // 8.3.10 - Client application methods
+        "установитькраткийзаголовокприложения"
+            | "получитькраткийзаголовокприложения"
+            | "установитьзаголовокклиентскогоприложения"
+            | "получитьзаголовокклиентскогоприложения"
+            | "текущийвариантосновногошрифтаклиентскогоприложения"
+            | "текущийвариантинтерфейсаклиентскогоприложения"
+            | "setshortapplicationcaption"
+            | "getshortapplicationcaption"
+            | "setclientapplicationcaption"
+            | "getclientapplicationcaption"
+            | "clientapplicationbasefontcurrentvariant"
+            | "clientapplicationinterfacecurrentvariant"
+            // 8.3.17 - Error handling methods
+            | "краткоепредставлениеошибки"
+            | "подробноепредставлениеошибки"
+            | "показатьинформациюобошибке"
+            | "brieferrorrepresentation"
+            | "detailederrorrepresentation"
+            | "showerrorinformation"
+            // Common
+            | "получитьформу"
+            | "getform"
+    )
 }
 
 #[cfg(test)]

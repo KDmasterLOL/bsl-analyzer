@@ -2,7 +2,8 @@
 //!
 //! Each diagnostic has its own handler module.
 
-pub mod all_function_path_must_have_return;
+// NOTE: Replaced with HIR-based missing_return diagnostic
+// pub mod all_function_path_must_have_return;
 pub mod assign_alias_fields_in_query;
 pub mod bad_words;
 pub mod begin_transaction_before_try_catch;
@@ -39,8 +40,10 @@ pub mod deprecated_attributes_8312;
 pub mod deprecated_current_date;
 pub mod deprecated_find;
 pub mod deprecated_message;
-pub mod deprecated_methods_8310;
-pub mod deprecated_methods_8317;
+pub mod deprecated_method;
+// NOTE: Replaced with HIR-based deprecated_method diagnostic
+// pub mod deprecated_methods_8310;
+// pub mod deprecated_methods_8317;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;

@@ -612,16 +612,19 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::deprecated_type_managed_form::check,
     ));
-    result.extend(run_diagnostic(
-        "DeprecatedMethods8310",
-        ctx,
-        handlers::deprecated_methods_8310::check,
-    ));
-    result.extend(run_diagnostic(
-        "DeprecatedMethods8317",
-        ctx,
-        handlers::deprecated_methods_8317::check,
-    ));
+    // NOTE: Replaced with HIR-based DeprecatedMethod diagnostic
+    // The HIR version is collected during lowering via BodyDiagnostic::DeprecatedMethod
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "DeprecatedMethods8310",
+    //     ctx,
+    //     handlers::deprecated_methods_8310::check,
+    // ));
+    // result.extend(run_diagnostic(
+    //     "DeprecatedMethods8317",
+    //     ctx,
+    //     handlers::deprecated_methods_8317::check,
+    // ));
     result.extend(run_diagnostic(
         "DeprecatedAttributes8312",
         ctx,
@@ -885,7 +888,8 @@ fn dispatch_hir_diagnostic(
             handlers::unreachable_code::from_hir(*range, ctx)
         }
         BodyDiagnostic::MissingReturn { range } => handlers::missing_return::from_hir(*range, ctx),
-        // Not yet implemented - return None
-        BodyDiagnostic::DeprecatedMethod { .. } => None,
+        BodyDiagnostic::DeprecatedMethod { name, range } => {
+            handlers::deprecated_method::from_hir(name, *range, ctx)
+        }
     }
 }
