@@ -271,6 +271,14 @@ mod tests {
             let input = self.file_text_input(file_id);
             base_db::sdbl_queries_in_file(self, input)
         }
+
+        fn method_regions(
+            &self,
+            file_id: FileId,
+        ) -> std::sync::Arc<std::collections::HashMap<syntax::TextRange, String>> {
+            let input = self.file_text_input(file_id);
+            base_db::method_regions(self, input)
+        }
     }
 
     fn lower(input: &str) -> Arc<ItemTree> {

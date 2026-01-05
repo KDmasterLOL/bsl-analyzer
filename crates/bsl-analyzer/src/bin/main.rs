@@ -316,8 +316,8 @@ fn analyze(
                 match catch_unwind(AssertUnwindSafe(|| ide_diagnostics::diagnostics(&ctx))) {
                     Ok(diags) => {
                         let elapsed = file_start.elapsed();
-                        if elapsed.as_millis() > 100 {
-                            // Log slow files
+                        if elapsed.as_millis() > 100 && env::var("BSL_LOG_SLOW_FILES").is_ok() {
+                            // Log slow files (only if BSL_LOG_SLOW_FILES is set)
                             tracing::warn!(
                                 file = ?path,
                                 elapsed_ms = elapsed.as_millis(),

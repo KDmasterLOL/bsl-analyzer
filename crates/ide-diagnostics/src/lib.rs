@@ -54,6 +54,7 @@ pub enum DiagnosticCode {
     InvalidCharacterInFile,
     DoubleNegatives,
     NestedTernaryOperator,
+    NonExportMethodsInApiRegion,
     TernaryOperatorUsage,
     UnaryPlusInConcatenation,
     UselessTernaryOperator,
@@ -188,6 +189,7 @@ impl DiagnosticCode {
             Self::InvalidCharacterInFile => "InvalidCharacterInFile",
             Self::DoubleNegatives => "DoubleNegatives",
             Self::NestedTernaryOperator => "NestedTernaryOperator",
+            Self::NonExportMethodsInApiRegion => "NonExportMethodsInApiRegion",
             Self::TernaryOperatorUsage => "TernaryOperatorUsage",
             Self::UnaryPlusInConcatenation => "UnaryPlusInConcatenation",
             Self::UselessTernaryOperator => "UselessTernaryOperator",
@@ -562,6 +564,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "NestedTernaryOperator",
         ctx,
         handlers::nested_ternary_operator::check,
+    ));
+    result.extend(run_diagnostic(
+        "NonExportMethodsInApiRegion",
+        ctx,
+        handlers::non_export_methods_in_api_region::check,
     ));
 
     // Tier 2: Semantic diagnostics

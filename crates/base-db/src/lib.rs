@@ -106,6 +106,103 @@ pub fn sdbl_queries_in_file(
     Arc::new(queries)
 }
 
+/// Map from method source ranges to parent API region names.
+///
+/// This query identifies all methods (procedures/functions) that are inside
+/// API regions (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal)
+/// and returns a mapping from their TextRange to the root region name.
+///
+/// # Performance
+/// - LRU cache: 256 files (region analysis is inexpensive)
+/// - Depends on: parse_query (automatic invalidation via Salsa)
+/// - Recomputed only when file content changes
+/// - Shared by region-based diagnostics (no redundant tree walking)
+///
+/// # Root Region Lookup
+/// For nested regions, always returns the TOP-LEVEL (root) region name,
+/// not the immediate parent. This matches bsl-language-server behavior.
+///
+/// Example:
+/// ```bsl
+/// #Region Public
+///     #Region Internal
+///         Procedure MyProc()  // Maps to "Public" (root), not "Internal"
+///         EndProcedure
+///     #EndRegion
+/// #EndRegion
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn method_regions(
+    db: &dyn salsa::Database,
+    input: FileTextInput,
+) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
+    let _span = tracing::info_span!("method_regions").entered();
+
+    let parse = parse_query(db, input);
+    let root = parse.syntax_node();
+
+    let mut map = std::collections::HashMap::new();
+    collect_methods_in_regions(&root, &mut Vec::new(), &mut map);
+
+    tracing::debug!(count = map.len(), "Collected methods in API regions");
+
+    Arc::new(map)
+}
+
+/// Recursively collect methods in API regions.
+///
+/// Tracks region stack to identify root (first) region for nested structures.
+fn collect_methods_in_regions(
+    node: &syntax::SyntaxNode,
+    region_stack: &mut Vec<String>,
+    map: &mut std::collections::HashMap<syntax::TextRange, String>,
+) {
+    use syntax::{
+        ast::{self, AstNode},
+        SyntaxKind,
+    };
+
+    for child in node.children() {
+        match child.kind() {
+            SyntaxKind::PRE_REGION_DIR => {
+                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
+                    if region.is_start() {
+                        if let Some(name) = region.name() {
+                            region_stack.push(name);
+                            collect_methods_in_regions(region.syntax(), region_stack, map);
+                            region_stack.pop();
+                        }
+                    }
+                }
+            }
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                if let Some(root_region) = region_stack.first() {
+                    if is_api_region(root_region) {
+                        let range = child.text_range();
+                        map.insert(range, root_region.clone());
+                    }
+                }
+            }
+            _ => {
+                if child.kind() != SyntaxKind::PRE_REGION_DIR {
+                    collect_methods_in_regions(&child, region_stack, map);
+                }
+            }
+        }
+    }
+}
+
+/// Check if a region name is an API region.
+///
+/// API regions (case-insensitive):
+/// - ПрограммныйИнтерфейс / Public
+/// - СлужебныйПрограммныйИнтерфейс / Internal
+fn is_api_region(name: &str) -> bool {
+    const API_REGIONS: &[&str] =
+        &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
+    API_REGIONS.contains(&name.to_lowercase().as_str())
+}
+
 /// Resolve a VfsPath to FileId within a SourceRoot.
 ///
 /// Searches the FileSet of a SourceRoot for a given VfsPath.
@@ -354,6 +451,39 @@ pub trait RootQueryDb: SourceDatabase {
     /// }
     /// ```
     fn sdbl_queries(&self, file_id: FileId) -> Arc<Vec<syntax::SdblQueryInfo>>;
+
+    /// Map from method source ranges to parent API region names.
+    ///
+    /// Returns a HashMap mapping TextRange (of method definitions) to their
+    /// parent API region name (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal).
+    ///
+    /// Only methods inside API regions are included in the map.
+    /// For nested regions, the root (top-level) region name is returned.
+    ///
+    /// ## Performance Benefits
+    ///
+    /// - **Salsa-cached**: Recomputed only when file changes
+    /// - **Shared across diagnostics**: Multiple region-based diagnostics reuse the same cache
+    /// - **Auto-invalidation**: Salsa invalidates when file changes
+    ///
+    /// ## Usage in Diagnostics
+    ///
+    /// ```ignore
+    /// pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    ///     let method_regions = ctx.db.method_regions(ctx.file_id);
+    ///     let item_tree = ctx.db.item_tree(ctx.file_id);
+    ///
+    ///     for (_, proc) in item_tree.procedures() {
+    ///         if let Some(region_name) = method_regions.get(&proc.source_range) {
+    ///             // proc is in an API region named region_name
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    fn method_regions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<std::collections::HashMap<syntax::TextRange, String>>;
 }
 
 /// Helper structure for managing file state with concurrent access.
@@ -580,6 +710,14 @@ mod tests {
         fn sdbl_queries(&self, file_id: FileId) -> Arc<Vec<syntax::SdblQueryInfo>> {
             let input = self.file_text_input(file_id);
             sdbl_queries_in_file(self, input)
+        }
+
+        fn method_regions(
+            &self,
+            file_id: FileId,
+        ) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
+            let input = self.file_text_input(file_id);
+            method_regions(self, input)
         }
     }
 

@@ -80,13 +80,22 @@ impl ProcedureDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        self.0.children().filter_map(|node| {
-            if node.kind() == SyntaxKind::COMPILER_DIRECTIVE {
-                Some(Annotation(node))
+        let mut anns = Vec::new();
+        let mut prev = self.0.prev_sibling();
+        while let Some(node) = prev {
+            if let Some(ann) = Annotation::cast(node.clone()) {
+                anns.push(ann);
+                prev = node.prev_sibling();
+            } else if matches!(
+                node.kind(),
+                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            ) {
+                prev = node.prev_sibling();
             } else {
-                None
+                break;
             }
-        })
+        }
+        anns.into_iter().rev()
     }
 
     pub fn body(&self) -> Option<StmtList> {
@@ -136,13 +145,22 @@ impl FunctionDef {
     }
 
     pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
-        self.0.children().filter_map(|node| {
-            if node.kind() == SyntaxKind::COMPILER_DIRECTIVE {
-                Some(Annotation(node))
+        let mut anns = Vec::new();
+        let mut prev = self.0.prev_sibling();
+        while let Some(node) = prev {
+            if let Some(ann) = Annotation::cast(node.clone()) {
+                anns.push(ann);
+                prev = node.prev_sibling();
+            } else if matches!(
+                node.kind(),
+                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            ) {
+                prev = node.prev_sibling();
             } else {
-                None
+                break;
             }
-        })
+        }
+        anns.into_iter().rev()
     }
 
     pub fn body(&self) -> Option<StmtList> {
@@ -735,8 +753,6 @@ impl AstNode for Annotation {
 impl Annotation {
     /// Get the annotation kind token (e.g., &НаКлиенте, &AtServer).
     pub fn kind_token(&self) -> Option<SyntaxToken> {
-        // For COMPILER_DIRECTIVE, the annotation token is a direct child
-        // For ANNOTATION, the first IDENT token after '&' is the annotation kind
         self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|token| {
             matches!(
                 token.kind(),
@@ -745,6 +761,11 @@ impl Annotation {
                     | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
                     | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
                     | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+                    | SyntaxKind::ANN_BEFORE
+                    | SyntaxKind::ANN_AFTER
+                    | SyntaxKind::ANN_AROUND
+                    | SyntaxKind::ANN_CHANGE_AND_VALIDATE
+                    | SyntaxKind::ANN_CUSTOM
                     | SyntaxKind::IDENT
             )
         })
