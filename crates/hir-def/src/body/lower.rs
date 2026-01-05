@@ -1705,6 +1705,53 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
     // Check if this is actually a method call (has ARG_LIST)
     if node.children().any(|n| n.kind() == SyntaxKind::ARG_LIST) {
+        // Emit MissingCommonModuleMethod diagnostic for potential CommonModule calls.
+        // This is a lightweight check - we emit for all qualified calls (Module.Method()),
+        // and from_hir() filters based on metadata (is it actually a CommonModule?).
+        // This is efficient because:
+        // 1. We don't traverse or calculate exact ranges here (O(1) per call)
+        // 2. Filtering happens in from_hir() using cached metadata
+        // 3. False positives are filtered early, minimizing diagnostic count
+        //
+        // We only emit if base is a simple identifier (not a nested expression),
+        // and the identifier is NOT a local variable (to avoid false positives from shadowing).
+        if let Some(first_child) = node.children().next() {
+            // Extract module name - simple check, O(1)
+            let module_name = if first_child.kind() == SyntaxKind::IDENT {
+                Some(first_child.text().to_string())
+            } else if first_child.kind() == SyntaxKind::EXPR {
+                // Unwrap EXPR if it contains a single IDENT
+                let idents: Vec<_> =
+                    first_child.children().filter(|n| n.kind() == SyntaxKind::IDENT).collect();
+                if idents.len() == 1 {
+                    Some(idents[0].text().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(module) = module_name {
+                let method = field_name.to_string();
+
+                // Check if module name is a local variable (simple O(1) check)
+                let is_local = {
+                    let key = module.to_lowercase();
+                    ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key)
+                };
+
+                if !is_local {
+                    // Emit diagnostic - from_hir() will validate if it's really a CommonModule
+                    ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
+                        module,
+                        method,
+                        range: node.text_range(),
+                    });
+                }
+            }
+        }
+
         let args = node
             .children()
             .find(|n| n.kind() == SyntaxKind::ARG_LIST)

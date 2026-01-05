@@ -248,6 +248,11 @@ pub enum BodyDiagnostic {
 
     /// Function should have return.
     FunctionShouldHaveReturn { range: TextRange },
+
+    /// Missing CommonModule method or non-export method call.
+    /// Emitted during lowering for potential CommonModule calls.
+    /// Module name and method name are stored for validation in from_hir().
+    MissingCommonModuleMethod { module: String, method: String, range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -262,6 +267,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::UnusedVariable { range, .. } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
+            BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
         }
     }
 }

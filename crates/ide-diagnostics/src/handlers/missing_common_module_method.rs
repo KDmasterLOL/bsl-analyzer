@@ -60,9 +60,71 @@ use ide_db::hir_def::{ModuleId, Name};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
-/// Main entry point for MissingCommonModuleMethod diagnostic.
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::MissingCommonModuleMethod` is encountered.
+///
+/// This function validates a qualified call against metadata:
+/// 1. Checks if module_name refers to a CommonModule in metadata
+/// 2. If not found, returns None (might be a regular variable)
+/// 3. If found, checks if method exists and is exported
+/// 4. Returns diagnostic if method is missing or non-exported
+pub fn from_hir(
+    module: &str,
+    method: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::MissingCommonModuleMethod) {
+        return None;
+    }
+
+    // Load metadata via ctx.load_configuration() for Salsa caching
+    let configuration = ctx.load_configuration()?;
+
+    // Find CommonModule in metadata (case-insensitive)
+    let common_module = configuration.find_common_module(module)?;
+
+    // Resolve CommonModule file via VFS
+    let module_file_id = find_common_module_file(ctx, common_module)?;
+
+    // Build SymbolTree for CommonModule
+    let module_id = ModuleId::new(module_file_id);
+    let module_symbol_tree = ctx.db.symbol_tree(module_id);
+
+    // Lookup method
+    let method_name_obj = Name::new(method);
+    let method_sym = module_symbol_tree.find_method(&method_name_obj);
+
+    tracing::trace!(
+        module_name = module,
+        method_name = method,
+        found = method_sym.is_some(),
+        is_export = method_sym.as_ref().map(|m| m.is_export).unwrap_or(false),
+        "Method lookup result in HIR diagnostic"
+    );
+
+    // Create diagnostic based on result
+    match method_sym {
+        None => {
+            // Method does not exist
+            Some(create_diagnostic_from_hir(range, ErrorType::MethodNotFound, method, module))
+        }
+        Some(m) if !m.is_export => {
+            // Method exists but not exported
+            Some(create_diagnostic_from_hir(range, ErrorType::NonExportMethod, method, module))
+        }
+        Some(_) => {
+            // Valid exported method
+            None
+        }
+    }
+}
+
+/// Main entry point for MissingCommonModuleMethod diagnostic (AST-based fallback).
 ///
 /// Detects missing or non-export methods in CommonModule calls.
+/// This is kept for backward compatibility but uses HIR-based collection via lowering.
 ///
 /// ## Algorithm
 ///
@@ -449,6 +511,37 @@ fn create_diagnostic(
     }
 }
 
+/// Create a diagnostic for HIR-based collection.
+///
+/// Similar to create_diagnostic but works with a range directly from HIR.
+fn create_diagnostic_from_hir(
+    range: TextRange,
+    error_type: ErrorType,
+    method_name: &str,
+    module_name: &str,
+) -> Diagnostic {
+    let message = match error_type {
+        ErrorType::MethodNotFound => {
+            format!("Метод {} общего модуля {} не существует", method_name, module_name)
+        }
+        ErrorType::NonExportMethod => {
+            format!(
+                "Исправьте обращение к закрытому, неэкспортному методу {} общего модуля {}",
+                method_name, module_name
+            )
+        }
+    };
+
+    Diagnostic {
+        code: DiagnosticCode::MissingCommonModuleMethod,
+        message,
+        severity: Severity::Blocker,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    }
+}
+
 /// Calculate the range for the diagnostic.
 ///
 /// Points to the method name in the qualified call.
@@ -498,6 +591,7 @@ fn calculate_method_name_range(call_node: &SyntaxNode) -> TextRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::assert_diagnostic_range;
     use crate::DiagnosticsConfig;
     use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
@@ -576,9 +670,28 @@ mod tests {
         // Expected: 10 diagnostics (5 non-existent + 5 non-export)
         assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics");
 
-        // TODO: Verify exact positions once column calculation is perfected
-        // For now, just verify we have the right number of diagnostics
-        // The column calculation logic needs further refinement to match exact expectations
+        // Verify exact diagnostic positions.
+        // Diagnostic range starts at method name and extends through call expression.
+        // Positions are character-based (0-indexed).
+        //
+        // Note: Range currently includes the entire method call (Module.Method()),
+        // not just the method name. This is due to FIELD_EXPR node boundaries.
+        // Future optimization: refine extract_method_name_range() to return only
+        // the method name identifier range.
+
+        // Non-existent methods (5 diagnostics)
+        assert_diagnostic_range(code, &diagnostics[0], 1, 22, 47); // МетодНесуществующий(1, 2)
+        assert_diagnostic_range(code, &diagnostics[1], 2, 26, 53); // ДругойМетодНесуществующий()
+        assert_diagnostic_range(code, &diagnostics[2], 3, 22, 46); // ЕщеМетодНесуществующий()
+        assert_diagnostic_range(code, &diagnostics[3], 4, 22, 50); // ЕщеОдинМетодНесуществующий()
+        assert_diagnostic_range(code, &diagnostics[4], 5, 26, 56); // ЕщеДругойМетодНесуществующий()
+
+        // Non-export methods (5 diagnostics)
+        assert_diagnostic_range(code, &diagnostics[5], 11, 22, 73); // РегистрацияИзмененийПередУдалением(...)
+        assert_diagnostic_range(code, &diagnostics[6], 12, 26, 32); // Тест()
+        assert_diagnostic_range(code, &diagnostics[7], 13, 22, 28); // Тест()
+        assert_diagnostic_range(code, &diagnostics[8], 14, 22, 28); // Тест()
+        assert_diagnostic_range(code, &diagnostics[9], 15, 26, 32); // Тест()
     }
 
     #[test]

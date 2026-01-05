@@ -495,7 +495,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::duplicated_insertion_into_collection::check,
     ));
-    result.extend(run_diagnostic("EmptyCodeBlock", ctx, handlers::empty_code_block::check));
+    // NOTE: EmptyCodeBlock migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::EmptyCodeBlock
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("EmptyCodeBlock", ctx, handlers::empty_code_block::check));
     result.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
     result.extend(run_diagnostic("EmptyStatement", ctx, handlers::empty_statement::check));
     result.extend(run_diagnostic("ExtraCommas", ctx, handlers::extra_commas::check));
@@ -542,7 +545,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     result.extend(run_diagnostic("LineLength", ctx, handlers::line_length::check));
     result.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
-    result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
+    // NOTE: MagicNumber migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::MagicNumber
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
     result.extend(run_diagnostic("MissingSpace", ctx, handlers::missing_space::check));
     result.extend(run_diagnostic(
         "MultilingualStringHasAllDeclaredLanguages",
@@ -791,11 +797,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::metadata_object_name_length::check,
     ));
-    result.extend(run_diagnostic(
-        "MissingCommonModuleMethod",
-        ctx,
-        handlers::missing_common_module_method::check,
-    ));
+    // NOTE: MissingCommonModuleMethod migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::MissingCommonModuleMethod
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "MissingCommonModuleMethod",
+    //     ctx,
+    //     handlers::missing_common_module_method::check,
+    // ));
     result.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
@@ -914,6 +923,9 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::MissingReturn { range } => handlers::missing_return::from_hir(*range, ctx),
         BodyDiagnostic::DeprecatedMethod { name, range } => {
             handlers::deprecated_method::from_hir(name, *range, ctx)
+        }
+        BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
+            handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }
     }
 }
