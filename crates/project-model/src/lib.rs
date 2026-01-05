@@ -21,7 +21,7 @@ impl Project {
     }
 }
 
-/// Project configuration (from .bslls.json or .bsl-language-server.json).
+/// Project configuration (from .bsl-analyzer.json or .bsl-language-server.json).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -42,10 +42,10 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
-    /// Loads configuration from .bslls.json or .bsl-language-server.json in the project root.
+    /// Loads configuration from .bsl-analyzer.json (priority) or .bsl-language-server.json (fallback for compatibility).
     pub fn load(root: &Path) -> Option<Self> {
-        Self::try_load(root, ".bsl-language-server.json")
-            .or_else(|| Self::try_load(root, ".bslls.json"))
+        Self::try_load(root, ".bsl-analyzer.json")
+            .or_else(|| Self::try_load(root, ".bsl-language-server.json"))
     }
 
     fn try_load(root: &Path, filename: &str) -> Option<Self> {

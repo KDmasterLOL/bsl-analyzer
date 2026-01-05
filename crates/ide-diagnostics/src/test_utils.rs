@@ -178,16 +178,25 @@ pub fn assert_diagnostic_range_multiline(
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     use crate::DiagnosticsConfig;
     use hir::ModuleId;
-    use ide_db::base_db::SourceDatabase;
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::{RootDatabase, RootDatabaseImpl};
     use std::sync::Arc;
     use test_fixture::Fixture;
+    use vfs::VfsPath;
 
     let fixture_text = format!("//- /test.bsl\n{}", code);
     let fixture = Fixture::parse(&fixture_text);
     let file_id = fixture.first_file().expect("fixture should have at least one file");
 
     let mut db = RootDatabaseImpl::new();
+
+    // Set up source root for module_bodies to work
+    let mut file_set = vfs::FileSet::default();
+    file_set.insert(file_id, VfsPath::new("/test.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
     for (fid, file) in &fixture.files {
         db.set_file_text(*fid, &file.content);
     }

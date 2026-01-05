@@ -7,8 +7,8 @@
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::ReturnValueReuse;
+use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
-use regex::Regex;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CommonModuleNameCached) {
@@ -29,8 +29,48 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let regex = Regex::new(r"(?i)повторноеиспользование|повтисп|cached").unwrap();
-    if regex.is_match(module.name()) {
+    let name_lower = module.name().to_lowercase();
+    if name_lower.contains("повторноеиспользование")
+        || name_lower.contains("повтисп")
+        || name_lower.contains("cached")
+    {
+        return Vec::new();
+    }
+
+    vec![Diagnostic {
+        code: DiagnosticCode::CommonModuleNameCached,
+        message: "Имя кэшируемого общего модуля должно содержать 'ПовтИсп' или 'Cached'"
+            .to_string(),
+        severity: Severity::Warning,
+        range: TextRange::empty(0.into()),
+        tags: vec![],
+        fixes: vec![],
+    }]
+}
+
+/// Check metadata-based diagnostics using ModuleMetadata.
+pub fn from_metadata(
+    metadata: &ModuleMetadata,
+    _config: &crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
+        return Vec::new();
+    }
+
+    let module = match &metadata.common_module {
+        Some(m) => m.as_ref(),
+        None => return Vec::new(),
+    };
+
+    if module.return_values_reuse() == ReturnValueReuse::DontUse {
+        return Vec::new();
+    }
+
+    let name_lower = module.name().to_lowercase();
+    if name_lower.contains("повторноеиспользование")
+        || name_lower.contains("повтисп")
+        || name_lower.contains("cached")
+    {
         return Vec::new();
     }
 
@@ -69,8 +109,11 @@ mod tests {
             return Vec::new();
         }
 
-        let regex = regex::Regex::new(r"(?i)повторноеиспользование|повтисп|cached").unwrap();
-        if regex.is_match(module.name()) {
+        let name_lower = module.name().to_lowercase();
+        if name_lower.contains("повторноеиспользование")
+            || name_lower.contains("повтисп")
+            || name_lower.contains("cached")
+        {
             return Vec::new();
         }
 
@@ -118,6 +161,66 @@ mod tests {
             .build();
 
         let diagnostics = check_with_module(code, &module);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_from_metadata_cached_without_keyword() {
+        let module = bsl_metadata::CommonModule::builder()
+            .name("Something")
+            .return_values_reuse(ReturnValueReuse::DuringRequest)
+            .build();
+
+        let metadata = ide_db::hir_def::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::CommonModule,
+            execution_context: None,
+            common_module: Some(std::sync::Arc::new(module)),
+            mdo: None,
+        };
+
+        let config = DiagnosticsConfig::default();
+        let diagnostics = from_metadata(&metadata, &config);
+
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn test_from_metadata_cached_with_keyword() {
+        let module = bsl_metadata::CommonModule::builder()
+            .name("SomethingCached")
+            .return_values_reuse(ReturnValueReuse::DuringSession)
+            .build();
+
+        let metadata = ide_db::hir_def::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::CommonModule,
+            execution_context: None,
+            common_module: Some(std::sync::Arc::new(module)),
+            mdo: None,
+        };
+
+        let config = DiagnosticsConfig::default();
+        let diagnostics = from_metadata(&metadata, &config);
+
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_from_metadata_not_cached() {
+        let module = bsl_metadata::CommonModule::builder()
+            .name("Something")
+            .return_values_reuse(ReturnValueReuse::DontUse)
+            .build();
+
+        let metadata = ide_db::hir_def::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::CommonModule,
+            execution_context: None,
+            common_module: Some(std::sync::Arc::new(module)),
+            mdo: None,
+        };
+
+        let config = DiagnosticsConfig::default();
+        let diagnostics = from_metadata(&metadata, &config);
+
         assert_eq!(diagnostics.len(), 0);
     }
 }
