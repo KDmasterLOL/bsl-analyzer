@@ -285,6 +285,10 @@ impl RootDatabase for RootDatabaseImpl {
             }
         }
 
+        // Sort by position in file (bsl_literal_range start)
+        // This ensures diagnostics are returned in source order, which tests expect
+        result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
+
         tracing::debug!(count = result.len(), "Collected SDBL from HIR");
         Arc::new(result)
     }
