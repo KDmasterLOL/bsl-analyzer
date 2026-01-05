@@ -48,6 +48,9 @@ pub struct LoweringCtx {
     /// Parameter names (lowercase).
     /// Parameters should not trigger "unused variable" even if only assigned.
     param_names: FxHashSet<String>,
+
+    /// Pending SDBL queries (before ExprId allocation).
+    pending_sdbl: Vec<(String, syntax::SdblQueryInfo)>,
 }
 
 impl LoweringCtx {
@@ -67,6 +70,7 @@ impl LoweringCtx {
             used_vars: FxHashSet::default(),
             known_externals,
             param_names: FxHashSet::default(),
+            pending_sdbl: Vec::new(),
         }
     }
 
@@ -1419,7 +1423,21 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
         }
     };
 
-    ctx.alloc_expr(expr, range)
+    let expr_id = ctx.alloc_expr(expr, range);
+
+    // Associate SDBL with ExprId
+    if let Some(idx) = ctx.pending_sdbl.iter().position(|(query_text, _)| {
+        if let Expr::Literal(Literal::String(ref expr_string)) = ctx.body.exprs[expr_id] {
+            query_text == expr_string
+        } else {
+            false
+        }
+    }) {
+        let (_query_text, query_info) = ctx.pending_sdbl.remove(idx);
+        ctx.body.sdbl_exprs.push((expr_id, query_info));
+    }
+
+    expr_id
 }
 
 /// Lower a literal expression.
@@ -1460,9 +1478,24 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             Literal::Number(value)
         }
         SyntaxKind::STRING | SyntaxKind::STRING_START => {
-            let text = token.text();
-            // Remove quotes
-            let value = text.trim_start_matches('"').trim_end_matches('"').to_string();
+            // Extract full string content (handles multiline with |)
+            let value = extract_string_content(node).unwrap_or_default();
+
+            // Check if this is SDBL query
+            if looks_like_sdbl(&value) {
+                let sdbl_ast = parser::parse_sdbl(&value);
+
+                if !sdbl_ast.has_errors() {
+                    let query_info = syntax::SdblQueryInfo::new(
+                        node.text_range(),
+                        value.clone(),
+                        Some(sdbl_ast),
+                    );
+
+                    ctx.pending_sdbl.push((value.clone(), query_info));
+                }
+            }
+
             Literal::String(value)
         }
         SyntaxKind::DATE => {
@@ -1737,6 +1770,72 @@ fn is_deprecated_method(name: &str) -> bool {
     )
 }
 
+/// Check if string looks like SDBL query.
+fn looks_like_sdbl(s: &str) -> bool {
+    if s.len() < 15 {
+        return false;
+    }
+    let upper = s.to_uppercase();
+    upper.contains("SELECT") || upper.contains("ВЫБРАТЬ")
+}
+
+/// Extract string content from LITERAL node.
+///
+/// Handles both simple strings ("text") and multiline strings with | prefixes.
+fn extract_string_content(node: &SyntaxNode) -> Option<String> {
+    let mut result = String::new();
+    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
+
+    let first_token = tokens.next()?;
+
+    match first_token.kind() {
+        SyntaxKind::STRING => {
+            let text = first_token.text();
+            if text.len() < 2 {
+                return None;
+            }
+            let inner = &text[1..text.len() - 1];
+            result = inner.replace("\"\"", "\"");
+        }
+        SyntaxKind::STRING_START => {
+            let text = first_token.text();
+            if text.is_empty() {
+                return None;
+            }
+            result.push_str(&text[1..]);
+
+            for token in tokens {
+                match token.kind() {
+                    SyntaxKind::NEWLINE => {
+                        result.push('\n');
+                    }
+                    SyntaxKind::STRING_PART => {
+                        let text = token.text();
+                        if let Some(content) = text.strip_prefix('|') {
+                            result.push_str(content);
+                        }
+                    }
+                    SyntaxKind::STRING_TAIL => {
+                        let text = token.text();
+                        if let Some(content) = text.strip_prefix('|') {
+                            if let Some(content) = content.strip_suffix('"') {
+                                result.push_str(content);
+                            }
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            result = result.replace("\"\"", "\"");
+        }
+        _ => return None,
+    }
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1862,5 +1961,91 @@ mod tests {
         assert_eq!(result.body.body_stmts.len(), 1);
         let stmt = result.body.stmt(result.body.body_stmts[0]);
         assert!(matches!(stmt, Stmt::If { .. }));
+    }
+
+    #[test]
+    fn test_sdbl_collected_in_hir() {
+        let method = parse_method(
+            r#"
+Процедура Тест()
+    Запрос = "SELECT Ссылка FROM Справочник.Валюты";
+    Результат = Запрос.Выполнить();
+КонецПроцедуры
+"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should have collected 1 SDBL query
+        assert_eq!(result.body.sdbl_exprs.len(), 1);
+
+        let (expr_id, query_info) = &result.body.sdbl_exprs[0];
+        assert!(query_info.is_valid());
+        assert!(query_info.query_text.contains("SELECT"));
+
+        // Verify ExprId points to a string literal
+        match result.body.expr(*expr_id) {
+            Expr::Literal(Literal::String(_)) => {}
+            _ => panic!("Expected string literal"),
+        }
+    }
+
+    #[test]
+    fn test_sdbl_multiline_query() {
+        let method = parse_method(
+            r#"
+Функция ПолучитьДанные()
+    Запрос = "SELECT
+             |    Ссылка,
+             |    Наименование
+             |FROM Справочник.Валюты";
+    Возврат Запрос.Выполнить();
+КонецФункции
+"#,
+        );
+        let result = lower_method(&method, true);
+
+        assert_eq!(result.body.sdbl_exprs.len(), 1);
+
+        let (_expr_id, query_info) = &result.body.sdbl_exprs[0];
+        assert!(query_info.is_valid());
+        // Multiline string should be parsed correctly
+        assert!(query_info.query_text.contains("Наименование"));
+    }
+
+    #[test]
+    fn test_short_strings_ignored() {
+        let method = parse_method(
+            r#"
+Процедура Тест()
+    Х = "SELECT";
+    Y = "Test";
+КонецПроцедуры
+"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should not collect short strings (< 15 chars)
+        assert_eq!(result.body.sdbl_exprs.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_queries_in_method() {
+        let method = parse_method(
+            r#"
+Процедура МножественныеЗапросы()
+    Запрос1 = "SELECT Ссылка FROM Справочник.Валюты";
+    Запрос2 = "ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура";
+    Результат1 = Запрос1.Выполнить();
+    Результат2 = Запрос2.Выполнить();
+КонецПроцедуры
+"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should collect both queries
+        assert_eq!(result.body.sdbl_exprs.len(), 2);
+
+        assert!(result.body.sdbl_exprs[0].1.query_text.contains("SELECT"));
+        assert!(result.body.sdbl_exprs[1].1.query_text.contains("ВЫБРАТЬ"));
     }
 }

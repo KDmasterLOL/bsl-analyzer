@@ -42,7 +42,15 @@ pub struct SymbolInfo {
 ///
 /// This database extends SourceDatabase, RootQueryDb, DefDatabase, and MetadataDb,
 /// providing full HIR functionality and metadata support with caching.
-pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::MetadataDb {}
+pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::MetadataDb {
+    /// Get all SDBL queries in a file with their ExprId in BSL HIR.
+    ///
+    /// Reuses BSL HIR lowering - no separate AST traversal!
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>;
+}
 
 /// Default implementation of RootDatabase with Salsa integration.
 ///
@@ -151,11 +159,6 @@ impl RootQueryDb for RootDatabaseImpl {
         base_db::parse_query(self, input)
     }
 
-    fn sdbl_queries(&self, file_id: FileId) -> std::sync::Arc<Vec<syntax::SdblQueryInfo>> {
-        let input = self.file_text_input(file_id);
-        base_db::sdbl_queries_in_file(self, input)
-    }
-
     fn method_regions(
         &self,
         file_id: FileId,
@@ -257,7 +260,35 @@ impl DefDatabase for RootDatabaseImpl {
 #[salsa::db]
 impl metadata::MetadataDb for RootDatabaseImpl {}
 
-impl RootDatabase for RootDatabaseImpl {}
+impl RootDatabase for RootDatabaseImpl {
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+        let _span = tracing::info_span!("all_sdbl_in_file", ?file_id).entered();
+
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.module_bodies(module_id);
+        let mut result = Vec::new();
+
+        // Collect from all method bodies (procedures and functions)
+        for (_local_id, body) in module_bodies.iter_bodies() {
+            for (expr_id, query_info) in body.sdbl_exprs() {
+                result.push((*expr_id, query_info.clone()));
+            }
+        }
+
+        // Collect from module-level code (statements outside methods)
+        if let Some(module_code) = module_bodies.module_code() {
+            for (expr_id, query_info) in module_code.sdbl_exprs() {
+                result.push((*expr_id, query_info.clone()));
+            }
+        }
+
+        tracing::debug!(count = result.len(), "Collected SDBL from HIR");
+        Arc::new(result)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -679,5 +710,191 @@ mod tests {
 
         // Should have WorkspaceScope and ModuleScope
         assert_eq!(resolver.scopes.len(), 2);
+    }
+
+    // ========== SDBL Integration Tests (migrated from base-db) ==========
+
+    #[test]
+    fn test_all_sdbl_in_file_caching() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        // First call computes
+        let queries1 = db.all_sdbl_in_file(file_id);
+        assert_eq!(queries1.len(), 1, "Should extract 1 SDBL query");
+        assert!(queries1[0].1.is_valid(), "SDBL should parse successfully");
+
+        // Second call should return same Arc (cache hit)
+        let queries2 = db.all_sdbl_in_file(file_id);
+        assert!(Arc::ptr_eq(&queries1, &queries2), "Should cache SDBL queries");
+
+        // Change file
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос1 = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+    Запрос2 = "ВЫБРАТЬ Наименование ИЗ Справочник.Категории";
+КонецПроцедуры"#,
+        );
+
+        // Should recompute
+        let queries3 = db.all_sdbl_in_file(file_id);
+        assert_eq!(queries3.len(), 2, "Should extract 2 SDBL queries");
+        assert!(!Arc::ptr_eq(&queries1, &queries3), "Should invalidate on file change");
+    }
+
+    #[test]
+    fn test_all_sdbl_in_file_keyword_filter() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Strings without SELECT/ВЫБРАТЬ keywords should be skipped
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Строка = "Это просто строка без ключевых слов";
+    Запрос = "ВЫБРАТЬ * ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.all_sdbl_in_file(file_id);
+        // Should only extract strings with SELECT/ВЫБРАТЬ
+        assert_eq!(queries.len(), 1, "Should filter by SELECT/ВЫБРАТЬ keyword");
+        assert!(queries[0].1.query_text.contains("ВЫБРАТЬ"));
+    }
+
+    #[test]
+    fn test_all_sdbl_in_file_multiline() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Test multiline SDBL query with | prefix
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Ссылка,
+             |    Наименование
+             |ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.all_sdbl_in_file(file_id);
+        assert_eq!(queries.len(), 1, "Should extract multiline SDBL query");
+        assert!(queries[0].1.is_valid(), "Multiline query should parse successfully");
+
+        // Verify content contains all parts
+        let query_text = &queries[0].1.query_text;
+        assert!(query_text.contains("Ссылка"));
+        assert!(query_text.contains("Наименование"));
+        assert!(query_text.contains("Справочник.Товары"));
+    }
+
+    #[test]
+    fn test_all_sdbl_in_file_assignment_patterns() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Test various assignment patterns
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    // Direct assignment
+    Запрос1 = "ВЫБРАТЬ * ИЗ Справочник.Товары";
+
+    // Assignment in method call
+    Результат = ВыполнитьЗапрос("ВЫБРАТЬ * ИЗ Документ.Продажа");
+
+    // Assignment in array
+    Массив = Новый Массив();
+    Массив.Добавить("ВЫБРАТЬ * ИЗ Регистр.Остатки");
+КонецПроцедуры"#,
+        );
+
+        let queries = db.all_sdbl_in_file(file_id);
+        // Should extract all SDBL strings regardless of assignment pattern
+        assert_eq!(queries.len(), 3, "Should extract queries from various contexts");
+
+        // Verify all queries are valid
+        for (_, query_info) in queries.iter() {
+            assert!(query_info.is_valid(), "All queries should parse successfully");
+        }
+    }
+
+    #[test]
+    fn test_all_sdbl_in_file_with_parameters() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Test SDBL query with parameters (&Parameter syntax)
+        db.set_file_text(
+            file_id,
+            r#"Процедура ПолучитьДанные()
+    Запрос = "ВЫБРАТЬ
+             |    Ссылка,
+             |    Наименование
+             |ИЗ Справочник.Товары
+             |ГДЕ
+             |    Код = &Значение1
+             |    И Наименование ПОДОБНО &Значение2
+             |    И Родитель = &Значение3";
+КонецПроцедуры"#,
+        );
+
+        let queries = db.all_sdbl_in_file(file_id);
+
+        // Should extract query with parameters
+        assert_eq!(queries.len(), 1, "Should extract query with parameters");
+
+        // Verify query is valid (parses successfully)
+        assert!(queries[0].1.is_valid(), "Query with parameters should parse successfully");
+
+        // Verify query text contains parameters
+        assert!(queries[0].1.query_text.contains("&Значение1"));
+        assert!(queries[0].1.query_text.contains("&Значение2"));
+        assert!(queries[0].1.query_text.contains("&Значение3"));
     }
 }

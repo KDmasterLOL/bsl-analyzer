@@ -38,7 +38,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
@@ -47,7 +47,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    for query_info in sdbl_queries.iter() {
+    for (_expr_id, query_info) in sdbl_queries.iter() {
         if !query_info.is_valid() {
             continue;
         }

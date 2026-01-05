@@ -74,9 +74,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // ✅ Get cached SDBL queries (no tree walking!)
+    // ✅ Get cached SDBL queries from HIR (no separate tree walking!)
     let cache_start = Instant::now();
-    let sdbl_queries = ctx.db.sdbl_queries(ctx.file_id);
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
     let time_cache_fetch_us = cache_start.elapsed().as_micros();
 
     // Get BSL source text for position mapping
@@ -98,7 +98,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut queries_analyzed = 0;
 
     // Process each cached SDBL query
-    for query_info in sdbl_queries.iter() {
+    for (_expr_id, query_info) in sdbl_queries.iter() {
         // Skip if not valid SDBL
         if !query_info.is_valid() {
             continue;

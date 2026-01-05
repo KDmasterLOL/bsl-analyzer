@@ -260,6 +260,16 @@ impl ModuleBodies {
     pub fn is_empty(&self) -> bool {
         self.bodies.is_empty()
     }
+
+    /// Iterate over all bodies with their local_ids.
+    pub fn iter_bodies(&self) -> impl Iterator<Item = (u32, &Body)> {
+        self.bodies.iter().map(|(local_id, lower_result)| (*local_id, &lower_result.body))
+    }
+
+    /// Get module-level code body (statements outside procedures/functions).
+    pub fn module_code(&self) -> Option<&Body> {
+        self.module_code.as_ref().map(|r| &r.body)
+    }
 }
 
 impl Default for ModuleBodies {
