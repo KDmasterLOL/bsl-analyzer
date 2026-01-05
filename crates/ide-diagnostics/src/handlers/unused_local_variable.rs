@@ -442,5 +442,30 @@ mod tests {
         // Java ignores duplicate module variable declarations (VariableSymbolComputer.visitModuleVarDeclaration:88-89).
         // We now match this behavior by skipping duplicates in SymbolTreeBuilder.add_variable.
         assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables (matching Java)");
+
+        // Verify exact positions (matching Java test)
+        // Sort diagnostics by line number for consistent comparison
+        use crate::test_utils::{assert_diagnostic_range, range_to_line_col};
+        let mut sorted_diags = unused_diags.clone();
+        sorted_diags.sort_by_key(|d| {
+            let (line, col, _, _) = range_to_line_col(code, d.range);
+            (line, col)
+        });
+
+        // Java expectations (sorted by line):
+        // 1. hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
+        assert_diagnostic_range(code, sorted_diags[0], 1, 6, 36);
+
+        // 2. hasRange(19, 10, 35): Line 19, `ЛокальнаяБезИспользования`
+        assert_diagnostic_range(code, sorted_diags[1], 19, 10, 35);
+
+        // 3. hasRange(19, 37, 63): Line 19, `ТолькоСПрисвоениемЗначения`
+        assert_diagnostic_range(code, sorted_diags[2], 19, 37, 63);
+
+        // 4. hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
+        assert_diagnostic_range(code, sorted_diags[3], 24, 4, 28);
+
+        // 5. hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
+        assert_diagnostic_range(code, sorted_diags[4], 83, 0, 25);
     }
 }

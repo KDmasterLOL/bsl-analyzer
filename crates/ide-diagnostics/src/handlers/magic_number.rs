@@ -457,11 +457,17 @@ mod tests {
         // - Line 51 `Метод(Индексы[21])` is now excluded (parser fixed to create INDEX_EXPR)
         assert_eq!(diagnostics.len(), 10, "Must match Java (10 diagnostics)");
 
-        // Verify exact positions (0-indexed)
+        // Verify exact positions (0-indexed) - all 10 diagnostics
         assert_diagnostic_range(&file_content, &diagnostics[0], 3, 18, 20); // 60
         assert_diagnostic_range(&file_content, &diagnostics[1], 3, 23, 25); // 60
         assert_diagnostic_range(&file_content, &diagnostics[2], 7, 31, 33); // 11
-                                                                            // Skipping detailed assertions for remaining diagnostics - test count is sufficient
+        assert_diagnostic_range(&file_content, &diagnostics[3], 11, 20, 21); // 4
+        assert_diagnostic_range(&file_content, &diagnostics[4], 20, 21, 23); // 11
+        assert_diagnostic_range(&file_content, &diagnostics[5], 23, 24, 26); // 14
+        assert_diagnostic_range(&file_content, &diagnostics[6], 27, 34, 35); // 7
+        assert_diagnostic_range(&file_content, &diagnostics[7], 33, 37, 38); // 2
+        assert_diagnostic_range(&file_content, &diagnostics[8], 34, 37, 38); // 3
+        assert_diagnostic_range(&file_content, &diagnostics[9], 44, 12, 14); // 12
     }
 
     #[test]

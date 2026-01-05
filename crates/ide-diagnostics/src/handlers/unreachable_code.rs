@@ -333,5 +333,59 @@ mod tests {
             17,
             "Expected 17 unreachable code diagnostics to match Java"
         );
+
+        // Verify exact positions (matching actual HIR output)
+        use crate::test_utils::{assert_diagnostic_range, assert_diagnostic_range_multiline};
+
+        // 1. line 12, col 12-19 - after Продолжить
+        assert_diagnostic_range(code, unreachable_diags[0], 12, 12, 19);
+
+        // 2. line 21, col 12-19 - after Возврат
+        assert_diagnostic_range(code, unreachable_diags[1], 21, 12, 19);
+
+        // 3. line 30, col 12-19 - after Прервать
+        assert_diagnostic_range(code, unreachable_diags[2], 30, 12, 19);
+
+        // 4. line 37-41, col 4-15 - after Возврат
+        assert_diagnostic_range_multiline(code, unreachable_diags[3], 37, 4, 41, 15);
+
+        // 5. line 46-51, col 4-15 - after Возврат
+        assert_diagnostic_range_multiline(code, unreachable_diags[4], 46, 4, 51, 15);
+
+        // 6. line 58, col 12-19 - after ВызватьИсключение
+        assert_diagnostic_range(code, unreachable_diags[5], 58, 12, 19);
+
+        // 7. line 67-69, col 12-20 - after ВызватьИсключение
+        assert_diagnostic_range_multiline(code, unreachable_diags[6], 67, 12, 69, 20);
+
+        // 8. line 82-84, col 16-24 - after ВызватьИсключение (in preprocessor)
+        assert_diagnostic_range_multiline(code, unreachable_diags[7], 82, 16, 84, 24);
+
+        // 9. line 93, col 8-15 - after Возврат (in preprocessor)
+        assert_diagnostic_range(code, unreachable_diags[8], 93, 8, 15);
+
+        // 10. line 102, col 8-16 - after Возврат (in preprocessor)
+        assert_diagnostic_range(code, unreachable_diags[9], 102, 8, 16);
+
+        // 11. line 108-112, col 16-26 - after ВызватьИсключение (preprocessor)
+        assert_diagnostic_range_multiline(code, unreachable_diags[10], 108, 16, 112, 26);
+
+        // 12. line 125, col 4-12 - after if-else (all branches return)
+        assert_diagnostic_range(code, unreachable_diags[11], 125, 4, 12);
+
+        // 13. line 138, col 4-15 - after return (in region)
+        assert_diagnostic_range(code, unreachable_diags[12], 138, 4, 15);
+
+        // 14. line 163, col 4-22 - after if-else (all branches return)
+        assert_diagnostic_range(code, unreachable_diags[13], 163, 4, 22);
+
+        // 15. line 171, col 4-12 - after Возврат (in preprocessor)
+        assert_diagnostic_range(code, unreachable_diags[14], 171, 4, 12);
+
+        // 16. line 176-178, col 4-12 - after ВызватьИсключение
+        assert_diagnostic_range_multiline(code, unreachable_diags[15], 176, 4, 178, 12);
+
+        // 17. line 182, col 0-8 - after Возврат (module-level)
+        assert_diagnostic_range(code, unreachable_diags[16], 182, 0, 8);
     }
 }
