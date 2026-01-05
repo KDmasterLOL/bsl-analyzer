@@ -577,37 +577,12 @@ fn build_join_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
 
     /// Helper to run diagnostic on BSL code
     fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        // Create fixture with test file
-        let fixture_content = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_content);
+        use crate::test_utils::check_sdbl_diagnostic;
 
-        let file_id = fixture.first_file().expect("No file in fixture");
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
+        check_sdbl_diagnostic(code, check)
     }
 
     #[test]

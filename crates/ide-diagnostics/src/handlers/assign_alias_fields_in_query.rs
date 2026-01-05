@@ -444,7 +444,6 @@ mod tests {
         DiagnosticsConfig,
     };
     use parser::parse_sdbl;
-    use std::sync::Arc;
 
     /// Check a single SDBL query for fields without AS keyword (test version).
     ///
@@ -573,48 +572,14 @@ mod tests {
         diagnostics
     }
 
-    /// Helper to run diagnostic on BSL code (like all_function_path_must_have_return)
+    /// Helper to run diagnostic on BSL code
     fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::SourceDatabase;
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
+        use crate::test_utils::check_sdbl_diagnostic_with_config;
 
-        // Create fixture with test file
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        // Create database
-        let mut db = RootDatabaseImpl::new();
-
-        // Set file content in database from fixture
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        // Create diagnostics context
-        use ide_db::RootDatabase;
-        // RootDatabase trait object is not Send/Sync (Salsa is single-threaded).
-        // Arc is used for trait object lifetime management in tests, not thread-safety.
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        // Run diagnostic
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
+        let diagnostics = check_sdbl_diagnostic_with_config(code, config, check);
+        // Extract content from the code
+        let content = code.strip_prefix("//- /test.bsl\n").unwrap_or(code).to_string();
+        (diagnostics, content)
     }
 
     #[test]

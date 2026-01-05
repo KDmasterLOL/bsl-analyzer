@@ -131,34 +131,12 @@ fn check_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
+    use crate::test_utils::check_sdbl_diagnostic;
 
     fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_content = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_content);
-        let file_id = fixture.first_file().expect("No file in fixture");
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(crate::DiagnosticsConfig::default());
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        let content = fixture.files.get(&file_id).unwrap().content.to_string();
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        // Extract content from the code (remove fixture header if present)
+        let content = code.strip_prefix("//- /test.bsl\n").unwrap_or(code).to_string();
         (diagnostics, content)
     }
 
