@@ -360,6 +360,14 @@ impl ModuleBodies {
         self.bodies.iter().map(|(local_id, lower_result)| (*local_id, &lower_result.body))
     }
 
+    /// Iterate over all method bodies with their Body and SourceMap.
+    /// This is useful for post-HIR analysis diagnostics that need source locations.
+    pub fn method_bodies(&self) -> impl Iterator<Item = (u32, &Body, &BodySourceMap)> {
+        self.bodies.iter().map(|(local_id, lower_result)| {
+            (*local_id, &lower_result.body, &lower_result.source_map)
+        })
+    }
+
     /// Get module-level code body (statements outside procedures/functions).
     pub fn module_code(&self) -> Option<&Body> {
         self.module_code.as_ref().map(|r| &r.body)
