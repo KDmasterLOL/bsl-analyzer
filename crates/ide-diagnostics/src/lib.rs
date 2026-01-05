@@ -847,6 +847,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // These are cached by Salsa via module_bodies() query
     result.extend(collect_hir_diagnostics(ctx));
 
+    // Metadata-based diagnostics (Phase 2: using module_metadata from HIR)
+    result.extend(collect_metadata_diagnostics(ctx));
+
     // TODO: Add all 181 diagnostics
     // See DIAGNOSTICS_MIGRATION.md for full list
 
@@ -903,4 +906,40 @@ fn dispatch_hir_diagnostic(
             handlers::deprecated_method::from_hir(name, *range, ctx)
         }
     }
+}
+
+/// Collect metadata-based diagnostics using module_metadata from HIR.
+///
+/// Phase 2 diagnostics that have been migrated to use ModuleMetadata directly
+/// instead of loading Configuration for each file. These are part of module_bodies()
+/// and are cached by Salsa for performance.
+fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use hir::ModuleId;
+
+    if ctx.config.is_disabled(DiagnosticCode::CommonModuleInvalidType) {
+        return Vec::new();
+    }
+
+    let module_id = ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
+
+    let mut diagnostics = Vec::new();
+
+    // Get metadata attached to module_bodies
+    if let Some(metadata) = module_bodies.metadata() {
+        // Check CommonModuleInvalidType
+        diagnostics
+            .extend(handlers::common_module_invalid_type::from_metadata(metadata, ctx.config));
+
+        // Phase 2.2: Add more metadata-based diagnostics here as they are migrated
+        // Examples:
+        // - common_module_missing_api
+        // - common_module_name_* (server, client, cached, etc.)
+        // - missing_common_module_method
+        // - execute_external_code_in_common_module
+        // - common_module_assign
+        // - missing_event_subscription_handler
+    }
+
+    diagnostics
 }

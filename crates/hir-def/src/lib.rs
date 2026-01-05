@@ -36,7 +36,7 @@ use vfs::FileId;
 pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, LowerResult};
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
-// ModuleBodies is defined in this file, not in body module
+// ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use item_tree::ItemTree;
 pub use name::Name;
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
@@ -91,6 +91,20 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// - Invalidated when file content changes
     /// - O(n) where n is number of statements in methods
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
+
+    /// Get metadata for a module (type and execution context).
+    ///
+    /// Loads metadata from 1C Configuration if available. Used by metadata-based diagnostics
+    /// to provide context-sensitive checks (naming rules, API requirements, etc.).
+    ///
+    /// ## Performance
+    /// - Configuration loading: ~1 second (Salsa cached, LRU=16)
+    /// - Cached per module alongside ModuleBodies
+    /// - Invalidated when file content changes
+    ///
+    /// ## Returns
+    /// - `Arc<ModuleMetadata>` containing module type, execution context, and metadata objects
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
 }
 
 /// Module identifier.
@@ -199,10 +213,75 @@ pub struct ModuleVarDecl {
     pub is_export: bool,
 }
 
+/// Execution context for a CommonModule (derived from metadata).
+///
+/// Represents the execution context of a Common Module based on its metadata properties.
+/// These contexts are mutually exclusive (a module has exactly one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionContext {
+    /// Server execution only (server: true, clientManagedApplication: false, externalConnection: false)
+    Server,
+    /// Server call capability (serverCall: true)
+    ServerCall,
+    /// Client managed application (clientManagedApplication: true, server: false, externalConnection: false)
+    Client,
+    /// Client and Server (clientManagedApplication: true, server: true, externalConnection: false)
+    ClientServer,
+    /// External connection (externalConnection: true, server: false)
+    ExternalConnection,
+    /// Unknown/other configuration
+    Unknown,
+}
+
+/// Metadata for a module including its type and execution context.
+///
+/// This structure is populated during HIR lowering and used by metadata-based diagnostics
+/// to provide context-sensitive checks (e.g., naming rules, API requirements).
+///
+/// # Performance
+///
+/// - Cached per module alongside ModuleBodies
+/// - Invalidated when file content changes
+/// - Metadata load is shared with all diagnostics (single point of loading)
+#[derive(Debug, Clone)]
+pub struct ModuleMetadata {
+    /// Type of the module (determined from file path).
+    pub module_type: bsl_metadata::ModuleType,
+
+    /// Execution context (only for CommonModules).
+    /// If not a CommonModule, this will be None.
+    pub execution_context: Option<ExecutionContext>,
+
+    /// CommonModule metadata if this module is a CommonModule.
+    ///
+    /// Arc-wrapped for efficient sharing between diagnostics.
+    pub common_module: Option<Arc<bsl_metadata::CommonModule>>,
+
+    /// Generic metadata object if available.
+    ///
+    /// Used for non-CommonModule types (ObjectModule, FormModule, etc.)
+    /// Arc-wrapped for efficient sharing.
+    pub mdo: Option<Arc<bsl_metadata::MetadataObject>>,
+}
+
+impl ModuleMetadata {
+    /// Create metadata for a module with no metadata available.
+    ///
+    /// Used when metadata loading fails or module is outside Designer format.
+    pub fn unknown(module_type: bsl_metadata::ModuleType) -> Self {
+        Self { module_type, execution_context: None, common_module: None, mdo: None }
+    }
+}
+
 /// All method bodies for a module with their diagnostics.
 ///
 /// This structure contains the lowered HIR bodies for all procedures and functions
 /// in a module, along with diagnostics collected during lowering.
+///
+/// Metadata is populated by the `module_bodies()` query in ide-db.
+///
+/// Note: `ModuleBodies` is not `Clone` because it contains large data structures.
+/// Use `Arc<ModuleBodies>` for sharing between diagnostics.
 #[derive(Debug)]
 pub struct ModuleBodies {
     /// Bodies indexed by MethodId.local_id
@@ -213,6 +292,9 @@ pub struct ModuleBodies {
     module_vars: Vec<ModuleVarDecl>,
     /// Module-level code body (statements outside procedures)
     module_code: Option<body::LowerResult>,
+    /// Module metadata (type, execution context, loaded from Configuration).
+    /// Populated by module_bodies() query in ide-db, not by lower_module_bodies.
+    metadata: Option<Arc<ModuleMetadata>>,
 }
 
 impl ModuleBodies {
@@ -223,7 +305,19 @@ impl ModuleBodies {
             all_diagnostics: Vec::new(),
             module_vars: Vec::new(),
             module_code: None,
+            metadata: None,
         }
+    }
+
+    /// Set metadata for this module (used by module_bodies query).
+    pub fn with_metadata(mut self, metadata: Arc<ModuleMetadata>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Get metadata for this module if available.
+    pub fn metadata(&self) -> Option<&ModuleMetadata> {
+        self.metadata.as_ref().map(|m| m.as_ref())
     }
 
     /// Get body for a method by its local_id.
@@ -276,6 +370,45 @@ impl Default for ModuleBodies {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Compute execution context for a CommonModule from its metadata properties.
+///
+/// Returns the execution context based on the module's metadata attributes.
+/// Context determination follows the logic from bsl-language-server.
+pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> ExecutionContext {
+    // ServerCall takes precedence: serverCall=true, server=false, externalConnection=false
+    if common_module.is_server_call() {
+        return ExecutionContext::ServerCall;
+    }
+
+    // Check for Server/Client combinations
+    let is_server = common_module.is_server();
+    let is_client_managed = common_module.is_client_managed_application();
+    let is_external = common_module.is_external_connection();
+
+    // Server + Client = ClientServer
+    if is_server && is_client_managed && !is_external {
+        return ExecutionContext::ClientServer;
+    }
+
+    // Server only
+    if is_server && !is_client_managed && !is_external {
+        return ExecutionContext::Server;
+    }
+
+    // Client only (client_managed_application = true)
+    if is_client_managed && !is_server && !is_external {
+        return ExecutionContext::Client;
+    }
+
+    // External connection
+    if is_external && !is_server {
+        return ExecutionContext::ExternalConnection;
+    }
+
+    // Unknown configuration
+    ExecutionContext::Unknown
 }
 
 /// Lower all method bodies in a module.

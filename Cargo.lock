@@ -572,6 +572,7 @@ name = "hir-def"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "bsl-metadata",
  "cfg",
  "expect-test",
  "ide-db",

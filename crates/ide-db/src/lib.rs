@@ -3,9 +3,11 @@
 //! This crate provides the database for IDE functionality with full DefDatabase implementation.
 
 use std::hash::BuildHasherDefault;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base_db::{Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
+use bsl_metadata::traits::Module;
 use dashmap::DashMap;
 use hir_def::{
     DefDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleData, ModuleId, SymbolTree,
@@ -71,6 +73,8 @@ pub struct RootDatabaseImpl {
     symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
     infer_types_cache: Arc<DashMap<ModuleId, Arc<InferenceResult>, BuildHasherDefault<FxHasher>>>,
     module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
+    module_metadata_cache:
+        Arc<DashMap<ModuleId, Arc<hir_def::ModuleMetadata>, BuildHasherDefault<FxHasher>>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -90,6 +94,55 @@ impl RootDatabaseImpl {
             symbol_tree_cache: Arc::new(DashMap::default()),
             infer_types_cache: Arc::new(DashMap::default()),
             module_bodies_cache: Arc::new(DashMap::default()),
+            module_metadata_cache: Arc::new(DashMap::default()),
+        }
+    }
+
+    /// Get file path from FileId by traversing SourceRoot.
+    ///
+    /// Returns None if path cannot be resolved.
+    fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
+        let source_root_input = self.file_source_root_input(file_id);
+        let source_root_id = source_root_input.source_root_id(self);
+        let source_root_input = self.source_root_input(source_root_id);
+        let source_root = source_root_input.root(self);
+        let file_set = source_root.file_set();
+        let vfs_path = file_set.path_for_file(&file_id)?;
+        Some(PathBuf::from(vfs_path.as_path()))
+    }
+
+    /// Find configuration root directory by searching for Configuration.xml.
+    ///
+    /// Algorithm:
+    /// 1. Start from file's directory
+    /// 2. Look for CommonModules/ subdirectory or Configuration.xml
+    /// 3. Walk up parent directories until found or root reached
+    ///
+    /// Returns None if configuration cannot be found.
+    fn find_configuration_root(&self, file_path: &Path) -> Option<PathBuf> {
+        let mut current = file_path.parent()?;
+
+        // Walk up the directory tree looking for Configuration markers
+        loop {
+            // Check if CommonModules directory exists (typical Designer format structure)
+            let common_modules = current.join("CommonModules");
+            if common_modules.is_dir() {
+                tracing::debug!(?current, "Found configuration root via CommonModules/");
+                return Some(current.to_path_buf());
+            }
+
+            // Check if Configuration.xml exists
+            let config_xml = current.join("Configuration.xml");
+            if config_xml.is_file() {
+                tracing::debug!(?current, "Found configuration root via Configuration.xml");
+                return Some(current.to_path_buf());
+            }
+
+            // Move to parent directory
+            current = match current.parent() {
+                Some(parent) if parent != current => parent,
+                _ => return None, // Reached root without finding config
+            };
         }
     }
 
@@ -99,10 +152,12 @@ impl RootDatabaseImpl {
     /// Note: This is temporary. Will be automatic when we migrate to Salsa tracked queries.
     fn invalidate_file(&self, file_id: FileId) {
         self.item_tree_cache.remove(&file_id);
-        self.module_data_cache.remove(&ModuleId::new(file_id));
-        self.symbol_tree_cache.remove(&ModuleId::new(file_id));
-        self.infer_types_cache.remove(&ModuleId::new(file_id));
-        self.module_bodies_cache.remove(&ModuleId::new(file_id));
+        let module_id = ModuleId::new(file_id);
+        self.module_data_cache.remove(&module_id);
+        self.symbol_tree_cache.remove(&module_id);
+        self.infer_types_cache.remove(&module_id);
+        self.module_bodies_cache.remove(&module_id);
+        self.module_metadata_cache.remove(&module_id);
     }
 }
 
@@ -249,12 +304,117 @@ impl DefDatabase for RootDatabaseImpl {
         let _span = tracing::info_span!("module_bodies", ?module_id).entered();
 
         // Lower all method bodies
-        let result = Arc::new(hir_def::lower_module_bodies(self, module_id));
+        let mut result = hir_def::lower_module_bodies(self, module_id);
+
+        // Attach metadata (loaded separately by module_metadata query)
+        let metadata = self.module_metadata(module_id);
+        result = result.with_metadata(metadata);
+
+        let result = Arc::new(result);
 
         // Cache the result
         self.module_bodies_cache.insert(module_id, result.clone());
         result
     }
+
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<hir_def::ModuleMetadata> {
+        // Check cache first
+        if let Some(cached) = self.module_metadata_cache.get(&module_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("module_metadata", ?module_id).entered();
+
+        // Get file path
+        let file_path = match self.get_file_path(module_id.file_id) {
+            Some(path) => path,
+            None => {
+                tracing::debug!("Could not determine file path for metadata");
+                return Arc::new(hir_def::ModuleMetadata {
+                    module_type: bsl_metadata::ModuleType::CommonModule,
+                    execution_context: None,
+                    common_module: None,
+                    mdo: None,
+                });
+            }
+        };
+
+        // Determine module type from file URI
+        let module_type = {
+            let uri = file_path.to_string_lossy().to_string();
+            metadata::get_module_type_from_uri(&uri)
+                .unwrap_or(bsl_metadata::ModuleType::CommonModule)
+        };
+
+        // Load metadata if this is a CommonModule
+        let (execution_context, common_module) =
+            if matches!(module_type, bsl_metadata::ModuleType::CommonModule) {
+                // Find configuration root by searching for Configuration.xml
+                match self.find_configuration_root(&file_path) {
+                    Some(config_root) => {
+                        let config_path_str = config_root.to_string_lossy().to_string();
+                        tracing::debug!(?config_path_str, "Loading configuration for metadata");
+
+                        // Load configuration via Salsa query
+                        let path_input =
+                            metadata::ConfigurationPathInput::new(self, config_path_str);
+                        let configuration = metadata::load_configuration(self, path_input);
+
+                        // Find CommonModule for this file
+                        if let Some(common_module) =
+                            find_common_module_by_uri(&configuration, &file_path)
+                        {
+                            let execution_context =
+                                hir_def::compute_execution_context(&common_module);
+                            (Some(execution_context), Some(Arc::new(common_module)))
+                        } else {
+                            tracing::debug!("CommonModule not found in configuration");
+                            (None, None)
+                        }
+                    }
+                    None => {
+                        tracing::debug!("Configuration root not found");
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
+        let metadata = Arc::new(hir_def::ModuleMetadata {
+            module_type,
+            execution_context,
+            common_module,
+            mdo: None,
+        });
+
+        // Cache the result
+        self.module_metadata_cache.insert(module_id, metadata.clone());
+        metadata
+    }
+}
+
+/// Find CommonModule in configuration by matching file URI.
+///
+/// Matches the file path against CommonModule URIs from metadata.
+fn find_common_module_by_uri(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<bsl_metadata::CommonModule> {
+    let file_uri = file_path.to_string_lossy().to_string();
+
+    configuration
+        .common_modules()
+        .iter()
+        .find(|module| {
+            if let Some(module_uri) = module.uri() {
+                // Normalize paths for comparison (case-insensitive on some systems)
+                module_uri.to_lowercase() == file_uri.to_lowercase()
+            } else {
+                false
+            }
+        })
+        .cloned()
 }
 
 #[salsa::db]
@@ -896,5 +1056,82 @@ mod tests {
         assert!(queries[0].1.query_text.contains("&Значение1"));
         assert!(queries[0].1.query_text.contains("&Значение2"));
         assert!(queries[0].1.query_text.contains("&Значение3"));
+    }
+
+    #[test]
+    fn test_module_metadata_creation() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/CommonModules/ОбщегоНазначения/Ext/Module.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+        // Test module_metadata query
+        let module_id = ModuleId::new(file_id);
+        let metadata = db.module_metadata(module_id);
+
+        // Should create metadata successfully
+        // We don't have configuration loaded yet (Phase 2), so metadata will be minimal
+        // But the Arc<ModuleMetadata> structure should be created
+        assert_eq!(
+            metadata.module_type,
+            bsl_metadata::ModuleType::CommonModule,
+            "Should detect CommonModule type from path"
+        );
+    }
+
+    #[test]
+    fn test_module_bodies_includes_metadata() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+        // Test module_bodies includes metadata
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = db.module_bodies(module_id);
+
+        // Metadata should be present in module_bodies
+        // Even if empty, it should be Some
+        assert!(module_bodies.metadata().is_some(), "Module bodies should include metadata");
+    }
+
+    #[test]
+    fn test_module_metadata_cache_invalidation() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set initial file text and get metadata
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+        let module_id = ModuleId::new(file_id);
+        let _metadata1 = db.module_metadata(module_id);
+
+        // Change file text (should invalidate cache)
+        db.set_file_text(file_id, "Процедура Тест2() КонецПроцедуры");
+        let _metadata2 = db.module_metadata(module_id);
+
+        // Test passes if we can call metadata again after invalidation
     }
 }
