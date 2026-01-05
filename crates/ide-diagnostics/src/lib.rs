@@ -470,12 +470,43 @@ where
     result
 }
 
+/// Collect text-based diagnostics in a single AST pass.
+///
+/// This function performs ONE traversal of the syntax tree and calls all text-based
+/// diagnostics on each node. This is much faster than calling each diagnostic separately.
+///
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/lib.rs:336-352
+fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let parse = ctx.db.parse(ctx.file_id);
+    let root = parse.syntax_node();
+
+    let mut diagnostics = Vec::new();
+
+    // Single traversal for all text-based diagnostics
+    // FIXME: This iterates the entire file which is expensive.
+    // Salsa caching + incremental re-parse would be better (rust-analyzer TODO)
+    for node in root.descendants() {
+        // Text-based diagnostic handlers (node API)
+        handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
+        // TODO: Add more text-based diagnostics here:
+        // handlers::commented_code::check_node(&node, &mut diagnostics, ctx);
+        // handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
+        // handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
+        // ...
+    }
+
+    diagnostics
+}
+
 /// Runs all diagnostics on a file.
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
-    // Tier 1: Syntax diagnostics
-    result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));
+    // Text-based diagnostics (single AST pass)
+    result.extend(collect_text_diagnostics(ctx));
+
+    // Tier 1: Syntax diagnostics (TODO: migrate to collect_text_diagnostics)
+    // result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));
     result.extend(run_diagnostic(
         "CanonicalSpellingKeywords",
         ctx,
@@ -887,6 +918,7 @@ fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
+    // Collect method-level HIR diagnostics (from module_bodies)
     for (_method_id, body_diag) in module_bodies.all_diagnostics() {
         if let Some(diag) = dispatch_hir_diagnostic(body_diag, ctx) {
             diagnostics.push(diag);

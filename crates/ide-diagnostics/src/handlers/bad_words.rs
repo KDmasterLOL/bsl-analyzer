@@ -33,6 +33,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
 use regex::RegexBuilder;
+use syntax::SyntaxNode;
 
 /// Configuration for BadWords diagnostic
 #[derive(Debug, Clone)]
@@ -50,6 +51,55 @@ impl Config {
             ctx.config.get_bool(DiagnosticCode::BadWords, "findInComments").unwrap_or(true);
 
         Self { bad_words_pattern, find_in_comments }
+    }
+}
+
+/// Check a single syntax node for bad words (node-based API).
+///
+/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    // Check if disabled
+    if ctx.config.is_disabled(DiagnosticCode::BadWords) {
+        return;
+    }
+
+    // Load configuration
+    let config = Config::from_context(ctx);
+
+    // If pattern is empty, diagnostic is disabled
+    if config.bad_words_pattern.is_empty() {
+        return;
+    }
+
+    // Build case-insensitive regex
+    let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
+        Ok(regex) => regex,
+        Err(_) => return, // Invalid pattern, skip
+    };
+
+    // Get node text
+    let text = node.text().to_string();
+
+    // Skip comments if findInComments is false
+    if !config.find_in_comments && text.trim_start().starts_with("//") {
+        return;
+    }
+
+    // Find all matches in the node text
+    for mat in re.find_iter(&text) {
+        let start: u32 = node.text_range().start().into();
+        let match_start = start + mat.start() as u32;
+        let match_end = start + mat.end() as u32;
+
+        acc.push(Diagnostic {
+            code: DiagnosticCode::BadWords,
+            message: format!("Использование запрещённого слова '{}'", mat.as_str()),
+            severity: Severity::Warning,
+            range: TextRange::new(match_start.into(), match_end.into()),
+            tags: vec![],
+            fixes: vec![],
+        });
     }
 }
 
