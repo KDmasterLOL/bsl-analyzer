@@ -1033,6 +1033,8 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
+        use crate::test_utils::assert_diagnostic_range;
+
         let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
         let diagnostics = check_diagnostic(code);
 
@@ -1042,26 +1044,46 @@ mod tests {
         // We find Line 197 which Java doesn't report (complex Тип() call).
         assert_eq!(diagnostics.len(), 18, "Expected 18 diagnostics");
 
-        // Verify we have all expected lines
-        let found_lines: Vec<_> =
-            diagnostics.iter().map(|d| code[..d.range.start().into()].lines().count()).collect();
+        // Sort diagnostics by position for consistent ordering
+        let mut sorted_diagnostics = diagnostics.clone();
+        sorted_diagnostics.sort_by_key(|d| d.range.start());
 
-        // Expected lines (excluding line 59 which is inside preprocessor):
-        // Lines 5,9,13,23,28,100,103,120,134,137,148,152,158,162,172,197,266,269 (1-indexed)
-        let expected =
-            vec![5, 9, 13, 23, 28, 100, 103, 120, 134, 137, 148, 152, 158, 162, 172, 197, 266, 269];
-        for expected_line in expected {
-            assert!(
-                found_lines.contains(&expected_line),
-                "Missing expected line {}",
-                expected_line
-            );
-        }
-
-        // Line 260 should NOT be detected (break in nested if correctly prevents duplicate)
-        assert!(
-            !found_lines.contains(&260),
-            "Line 260 should NOT be detected (break may prevent execution)"
-        );
+        // Verify each diagnostic with precise line and column positions (0-indexed)
+        // Line 5: Массив.Добавить(СтрокаТаблицы)
+        assert_diagnostic_range(code, &sorted_diagnostics[0], 4, 4, 34);
+        // Line 9: Коллекция.Вставить("Ключ1", 1)
+        assert_diagnostic_range(code, &sorted_diagnostics[1], 8, 4, 34);
+        // Line 13: Коллекция2.Вставить("Ключ1", 2)
+        assert_diagnostic_range(code, &sorted_diagnostics[2], 12, 4, 35);
+        // Line 23: Коллекция.Вставить("Ключ1", 3)
+        assert_diagnostic_range(code, &sorted_diagnostics[3], 22, 8, 38);
+        // Line 28: Итог.Коллекция.Индексы.Добавить("Пользователь")
+        assert_diagnostic_range(code, &sorted_diagnostics[4], 27, 8, 55);
+        // Line 100: Данные.Метод().ПовторнаяСоздаваемаяКоллекция.Добавить("Пользователь")
+        assert_diagnostic_range(code, &sorted_diagnostics[5], 99, 8, 77);
+        // Line 103: Данные.Метод().ОбщаяКоллекция.Добавить(Данные.Метод().ПовторнаяСоздаваемаяКоллекция)
+        assert_diagnostic_range(code, &sorted_diagnostics[6], 102, 8, 92);
+        // Line 120: ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Истина)
+        assert_diagnostic_range(code, &sorted_diagnostics[7], 119, 4, 65);
+        // Line 134: ПовторнаяСоздаваемаяКоллекция.Добавить("Пользователь")
+        assert_diagnostic_range(code, &sorted_diagnostics[8], 133, 4, 58);
+        // Line 137: ОбщаяКоллекция.Добавить(ПовторнаяСоздаваемаяКоллекция)
+        assert_diagnostic_range(code, &sorted_diagnostics[9], 136, 4, 58);
+        // Line 148: Данные2.ОбщаяКоллекция2.Вставить(Данные2.Реквизит2.ПовторнаяСоздаваемаяКоллекция2)
+        assert_diagnostic_range(code, &sorted_diagnostics[10], 147, 8, 90);
+        // Line 152: Данные3.ОбщаяКоллекция3.Вставить(Данные3.Реквизит3.ПовторнаяСоздаваемаяКоллекция3)
+        assert_diagnostic_range(code, &sorted_diagnostics[11], 151, 8, 90);
+        // Line 158: Описания.Добавить(Ключ)
+        assert_diagnostic_range(code, &sorted_diagnostics[12], 157, 4, 27);
+        // Line 162: Описания2.Добавить(Часть1.Часть2)
+        assert_diagnostic_range(code, &sorted_diagnostics[13], 161, 4, 37);
+        // Line 172: Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 9, Истина)
+        assert_diagnostic_range(code, &sorted_diagnostics[14], 171, 4, 65);
+        // Line 197: Текст.Добавить(, Тип("ПереводСтрокиФорматированногоДокумента"))
+        assert_diagnostic_range(code, &sorted_diagnostics[15], 196, 4, 67);
+        // Line 266: Коллекция().Добавить(СтрокаТаблицы)
+        assert_diagnostic_range(code, &sorted_diagnostics[16], 265, 4, 39);
+        // Line 269: Коллекция2().Реквизит.Добавить(СтрокаТаблицы2)
+        assert_diagnostic_range(code, &sorted_diagnostics[17], 268, 4, 50);
     }
 }
