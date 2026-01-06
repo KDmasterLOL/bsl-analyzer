@@ -22,14 +22,17 @@
 //! ```
 //!
 //! ## Implementation
-//! Ported from:
-//! - MultilineStringInQueryDiagnostic.java (bsl-language-server)
+//!
+//! Migrated to HIR-based approach for consistency with other SDBL diagnostics.
+//! Diagnostics are collected during HIR lowering when processing string literals.
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::SyntaxKind;
 use tracing::debug;
 
+/// Runs the MultilineStringInQuery diagnostic.
+///
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
@@ -38,94 +41,71 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
+
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
+    // Get SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index (optimization)
     use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        if !query_info.is_valid() {
-            continue;
-        }
-        let Some(ref query_ast) = query_info.query_ast else {
-            continue;
-        };
+    // Helper function to recursively extract diagnostics from HIR and UNION subqueries
+    fn extract_diagnostics(
+        hir: &sdbl_hir::SdblHir,
+        mapper: &SdblPositionMapper,
+        query_text: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Extract diagnostics from current query
+        for hir_diag in &hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::MultilineString { range } = hir_diag {
+                let bsl_range = mapper.map_range(*range, query_text);
 
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::MultilineStringInQuery,
+                    message: "Check if multiline literal is correct".to_string(),
+                    severity: Severity::Critical,
+                    range: bsl_range,
+                    tags: vec![],
+                    fixes: vec![],
+                });
+            }
+        }
+
+        // Recursively extract diagnostics from UNION subqueries
+        for union in &hir.unions {
+            extract_diagnostics(&union.query, mapper, query_text, diagnostics);
+        }
+    }
+
+    // Process HIR diagnostics
+    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+        sdbl_hirs.iter().zip(sdbl_queries.iter())
+    {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
             query_info.bsl_literal_range,
             &bsl_source,
             &line_starts,
         );
 
-        check_query(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
+        // Extract diagnostics recursively (including UNION subqueries)
+        extract_diagnostics(sdbl_hir, &mapper, &query_info.query_text, &mut diagnostics);
     }
 
     debug!(
         time_ms = start.elapsed().as_millis(),
         diagnostics_found = diagnostics.len(),
-        "MultilineStringInQuery completed"
+        "MultilineStringInQuery completed (HIR-based)"
     );
 
     diagnostics
-}
-
-fn check_query(
-    query_ast: &syntax::Parse<syntax::SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let root = query_ast.syntax_node();
-
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::SDBL_MULTI_STRING => {
-                let string_count = node
-                    .children_with_tokens()
-                    .filter(|child| child.kind() == SyntaxKind::STRING)
-                    .count();
-
-                if string_count > 2 {
-                    // Map SDBL range to BSL coordinates
-                    let sdbl_range = node.text_range();
-                    let bsl_range = mapper.map_range(sdbl_range, query_text);
-
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::MultilineStringInQuery,
-                        message: "Check if multiline literal is correct".to_string(),
-                        severity: Severity::Critical,
-                        range: bsl_range,
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
-            SyntaxKind::SDBL_LITERAL => {
-                for child in node.children_with_tokens() {
-                    if let Some(token) = child.as_token() {
-                        if token.kind() == SyntaxKind::STRING && token.text().contains('\n') {
-                            let sdbl_range = token.text_range();
-                            let bsl_range = mapper.map_range(sdbl_range, query_text);
-                            diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::MultilineStringInQuery,
-                                message: "Check if multiline literal is correct".to_string(),
-                                severity: Severity::Critical,
-                                range: bsl_range,
-                                tags: vec![],
-                                fixes: vec![],
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]

@@ -166,6 +166,17 @@ pub enum SdblDiagnostic {
         /// Unprotected field references (for future LSP RelatedInformation).
         unprotected_fields: Vec<UnprotectedFieldRef>,
     },
+
+    /// Multiline string literal in query (likely incorrect quoting).
+    ///
+    /// BSL-LS diagnostic code: MultilineStringInQuery
+    ///
+    /// In SDBL, empty string is """" (4 quotes), not "" (2 quotes).
+    /// Two quotes create a multiline string which is usually unintended.
+    MultilineString {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -278,6 +289,9 @@ impl SdblDiagnostic {
                     join_str
                 )
             }
+            Self::MultilineString { .. } => {
+                "Check if multiline literal is correct".to_string()
+            }
         }
     }
 
@@ -300,6 +314,7 @@ impl SdblDiagnostic {
             Self::LogicalOrInWhere { range } => *range,
             Self::LogicalOrInJoin { range } => *range,
             Self::FieldsFromJoinWithoutNullCheck { range, .. } => *range,
+            Self::MultilineString { range } => *range,
         }
     }
 
@@ -325,6 +340,7 @@ impl SdblDiagnostic {
             Self::LogicalOrInWhere { .. } => false,
             Self::LogicalOrInJoin { .. } => false,
             Self::FieldsFromJoinWithoutNullCheck { .. } => false, // Warning/Critical, not an error
+            Self::MultilineString { .. } => false, // Warning - likely incorrect quoting
         }
     }
 }

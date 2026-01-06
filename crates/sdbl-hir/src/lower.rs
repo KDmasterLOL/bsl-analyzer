@@ -522,11 +522,14 @@ impl LoweringContext<'_> {
         // Get type from expression
         let ty = expr.ty().clone();
 
-        // Check for AliasWithoutAsKeyword diagnostic (only in subqueries)
-        let in_subquery =
-            field.syntax().ancestors().any(|node| node.kind() == syntax::SyntaxKind::SDBL_SUBQUERY);
+        // Check for AliasWithoutAsKeyword diagnostic
+        // Important: UNION queries should NOT be checked (only main/first query in UNION)
+        let is_in_union_query = field
+            .syntax()
+            .ancestors()
+            .any(|node| node.kind() == syntax::SyntaxKind::SDBL_UNION_CLAUSE);
 
-        if in_subquery {
+        if !is_in_union_query {
             // Skip fields with parse errors
             let has_error = field
                 .syntax()
@@ -609,6 +612,7 @@ impl LoweringContext<'_> {
                     | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
                     | syntax::SyntaxKind::SDBL_COLUMN_REF
                     | syntax::SyntaxKind::SDBL_LITERAL
+                    | syntax::SyntaxKind::SDBL_MULTI_STRING
                     | syntax::SyntaxKind::SDBL_FUNCTION_CALL
                     | syntax::SyntaxKind::SDBL_PAREN_EXPR
             )
@@ -628,6 +632,7 @@ impl LoweringContext<'_> {
         match node.kind() {
             SyntaxKind::SDBL_COLUMN_REF => self.lower_column_ref(node),
             SyntaxKind::SDBL_LITERAL => self.lower_literal(node),
+            SyntaxKind::SDBL_MULTI_STRING => self.lower_multi_string(node),
             SyntaxKind::SDBL_FUNCTION_CALL => self.lower_function_call(node),
             SyntaxKind::SDBL_PAREN_EXPR => {
                 // Unwrap parentheses
@@ -697,6 +702,18 @@ impl LoweringContext<'_> {
 
         let text = node.text().to_string().trim().to_string();
 
+        // Check for multiline string in SDBL_LITERAL (single String token with \n)
+        // Parser creates SDBL_LITERAL even for strings with newlines inside
+        for child in node.children_with_tokens() {
+            if let Some(token) = child.as_token() {
+                if token.kind() == syntax::SyntaxKind::STRING && token.text().contains('\n') {
+                    self.diagnostics
+                        .push(SdblDiagnostic::MultilineString { range: token.text_range() });
+                    break;
+                }
+            }
+        }
+
         // Determine literal type
         let (value, ty) = if text.starts_with('"') || text.starts_with('\'') {
             (
@@ -722,6 +739,35 @@ impl LoweringContext<'_> {
         };
 
         ExprHir::Literal { value, ty, range: node.text_range() }
+    }
+
+    /// Lower multiline string (SDBL_MULTI_STRING node with multiple String tokens).
+    ///
+    /// Parser creates SDBL_MULTI_STRING when it sees multiple consecutive String tokens.
+    fn lower_multi_string(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
+        use crate::hir::LiteralValue;
+
+        // Count STRING tokens
+        let string_count = node
+            .children_with_tokens()
+            .filter(|child| {
+                child.as_token().map(|t| t.kind() == syntax::SyntaxKind::STRING).unwrap_or(false)
+            })
+            .count();
+
+        // If more than 2 STRING tokens, this is a multiline literal (likely error)
+        // Two strings is OK (e.g., "" + "" in some contexts), but 3+ is suspicious
+        if string_count > 2 {
+            self.diagnostics.push(SdblDiagnostic::MultilineString { range: node.text_range() });
+        }
+
+        // Return string literal HIR
+        let text = node.text().to_string();
+        ExprHir::Literal {
+            value: LiteralValue::String(text),
+            ty: SdblType::String,
+            range: node.text_range(),
+        }
     }
 
     /// Lower function call.
@@ -763,6 +809,7 @@ impl LoweringContext<'_> {
                     c.kind(),
                     syntax::SyntaxKind::SDBL_COLUMN_REF
                         | syntax::SyntaxKind::SDBL_LITERAL
+                        | syntax::SyntaxKind::SDBL_MULTI_STRING
                         | syntax::SyntaxKind::SDBL_FUNCTION_CALL
                         | syntax::SyntaxKind::SDBL_PAREN_EXPR
                         | syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
