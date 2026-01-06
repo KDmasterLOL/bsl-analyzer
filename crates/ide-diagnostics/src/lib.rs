@@ -731,11 +731,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::global_context_method_collision8312::check,
     ));
     result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
-    result.extend(run_diagnostic(
-        "CodeAfterAsyncCall",
-        ctx,
-        handlers::code_after_async_call::check,
-    ));
+    // NOTE: CodeAfterAsyncCall migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::CodeAfterAsyncCall
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "CodeAfterAsyncCall",
+    //     ctx,
+    //     handlers::code_after_async_call::check,
+    // ));
     // NOTE: CodeBlockBeforeSub migrated to text-based collection (collect_text_diagnostics - file-level)
     // result.extend(run_diagnostic(
     //     "CodeBlockBeforeSub",
@@ -1016,6 +1019,9 @@ fn dispatch_hir_diagnostic(
         ),
         BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
             handlers::if_else_duplicated_code_block::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
+            handlers::code_after_async_call::from_hir(method_name, *range, ctx)
         }
     }
 }

@@ -364,6 +364,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
             handlers::if_else_duplicated_code_block::from_hir(*range, ctx)
         }
+        BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
+            handlers::code_after_async_call::from_hir(method_name, *range, ctx)
+        }
     }
 }
 

@@ -289,6 +289,11 @@ pub enum BodyDiagnostic {
     /// Duplicated code block in if/elsif/else branches.
     /// Detected when two or more branches contain structurally identical code.
     IfElseDuplicatedCodeBlock { range: TextRange },
+
+    /// Code after asynchronous method call.
+    /// Detects code that executes immediately after async calls - a common logic error
+    /// because async methods return immediately without waiting for completion.
+    CodeAfterAsyncCall { method_name: String, range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -307,6 +312,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,
+            BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
         }
     }
 }
