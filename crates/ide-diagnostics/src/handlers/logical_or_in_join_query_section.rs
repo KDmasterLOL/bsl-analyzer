@@ -43,114 +43,52 @@
 //!
 //! Source: `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/LogicalOrInJoinQuerySectionDiagnostic.bsl`
 
-use crate::sdbl_utils::{build_line_index_shared, SdblPositionMapper};
+use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use std::collections::HashSet;
-use syntax::ast::{AstNode, SdblQueryPackage};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use sdbl_hir;
+use tracing::debug;
 
 /// Runs the LogicalOrInJoinQuerySection diagnostic.
 ///
-/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use std::time::Instant;
+    let start = Instant::now();
+
     if ctx.config.is_disabled(DiagnosticCode::LogicalOrInJoinQuerySection) {
         return Vec::new();
     }
 
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
+
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
+    // Get cached SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index
+    use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        if !query_info.is_valid() {
-            continue;
-        }
-        let Some(ref query_ast) = query_info.query_ast else {
-            continue;
-        };
-
+    // Iterate SDBL HIRs and corresponding query infos in parallel
+    // Both are sorted by position in file, so we can zip them
+    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+        sdbl_hirs.iter().zip(sdbl_queries.iter())
+    {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
             query_info.bsl_literal_range,
             &bsl_source,
             &line_starts,
         );
 
-        check_sdbl_query(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
-    }
-
-    diagnostics
-}
-
-/// Check a single SDBL query for OR operators in JOIN conditions.
-///
-/// Matching Java: find JOIN clauses, then OR tokens, extract field names,
-/// report if multiple distinct fields are involved.
-fn check_sdbl_query(
-    query_ast: &syntax::Parse<syntax::SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let root = query_ast.syntax_node();
-
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-
-    let join_clauses: Vec<SyntaxNode> = package
-        .syntax()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::SDBL_JOIN_CLAUSE)
-        .collect();
-
-    for join_clause in join_clauses {
-        check_join_clause(&join_clause, query_text, mapper, diagnostics);
-    }
-}
-
-/// Check a single JOIN clause for OR operators with multiple fields.
-fn check_join_clause(
-    join_clause: &SyntaxNode,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let or_tokens: Vec<SyntaxToken> = join_clause
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .filter(|token| {
-            if token.kind() != SyntaxKind::KW_OR {
-                return false;
-            }
-
-            let mut current = token.parent();
-            while let Some(node) = current {
-                if node == *join_clause {
-                    return true;
-                }
-                if node.kind() == SyntaxKind::SDBL_JOIN_CLAUSE && node != *join_clause {
-                    return false;
-                }
-                current = node.parent();
-            }
-
-            false
-        })
-        .collect();
-
-    for or_token in or_tokens {
-        let containing_expr = find_containing_logical_expression(&or_token);
-
-        if let Some(expr) = containing_expr {
-            let field_names = extract_field_names(&expr);
-
-            if field_names.len() > 1 {
-                let sdbl_range = or_token.text_range();
-                let bsl_range = mapper.map_range(sdbl_range, query_text);
+        // Emit diagnostics from HIR
+        for hir_diag in &sdbl_hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::LogicalOrInJoin { range } = hir_diag {
+                let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::LogicalOrInJoinQuerySection,
@@ -164,102 +102,14 @@ fn check_join_clause(
             }
         }
     }
-}
 
-/// Find the smallest logical expression node that contains the given OR token.
-fn find_containing_logical_expression(or_token: &SyntaxToken) -> Option<SyntaxNode> {
-    let mut current = or_token.parent()?;
+    debug!(
+        time_ms = start.elapsed().as_millis(),
+        diagnostics_found = diagnostics.len(),
+        "LogicalOrInJoinQuerySection completed"
+    );
 
-    loop {
-        match current.kind() {
-            SyntaxKind::SDBL_LOGICAL_OR_EXPR
-            | SyntaxKind::SDBL_LOGICAL_AND_EXPR
-            | SyntaxKind::SDBL_PAREN_EXPR => {
-                return Some(current);
-            }
-            SyntaxKind::SDBL_JOIN_CLAUSE => {
-                return Some(current);
-            }
-            _ => {
-                current = current.parent()?;
-            }
-        }
-    }
-}
-
-/// Extract all unique field names from a logical expression.
-///
-/// Matches Java's isMultipleFieldsExpression() which extracts column nodes.
-/// Handles qualified (Table.Field) and unqualified fields, filters SQL keywords.
-fn extract_field_names(expr: &SyntaxNode) -> HashSet<String> {
-    let mut fields = HashSet::new();
-
-    let tokens: Vec<SyntaxToken> =
-        expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut i = 0;
-    while i < tokens.len() {
-        let token = &tokens[i];
-
-        if token.kind() == SyntaxKind::IDENT {
-            if i + 2 < tokens.len()
-                && tokens[i + 1].kind() == SyntaxKind::DOT
-                && tokens[i + 2].kind() == SyntaxKind::IDENT
-            {
-                let table = token.text();
-                let field = tokens[i + 2].text();
-                let qualified = format!("{}.{}", table, field);
-
-                if !is_sql_keyword(table) && !is_sql_keyword(field) {
-                    fields.insert(qualified);
-                }
-
-                i += 3;
-                continue;
-            }
-
-            let text = token.text();
-            if !is_sql_keyword(text) {
-                fields.insert(text.to_string());
-            }
-        }
-
-        i += 1;
-    }
-
-    fields
-}
-
-/// Check if text is a SQL keyword (bilingual support).
-///
-/// Returns true for common SQL keywords that should not be treated as field names.
-fn is_sql_keyword(text: &str) -> bool {
-    matches!(
-        text.to_uppercase().as_str(),
-        "AND"
-            | "OR"
-            | "NOT"
-            | "IS"
-            | "NULL"
-            | "TRUE"
-            | "FALSE"
-            | "И"
-            | "ИЛИ"
-            | "НЕ"
-            | "ЕСТЬ"
-            | "ИСТИНА"
-            | "ЛОЖЬ"
-            | "SELECT"
-            | "FROM"
-            | "WHERE"
-            | "JOIN"
-            | "ON"
-            | "ВЫБРАТЬ"
-            | "ИЗ"
-            | "ГДЕ"
-            | "СОЕДИНЕНИЕ"
-            | "ПО"
-    )
+    diagnostics
 }
 
 #[cfg(test)]

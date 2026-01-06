@@ -146,6 +146,14 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// OR operator in JOIN condition with multiple fields (performance issue).
+    ///
+    /// BSL-LS diagnostic code: LogicalOrInJoinQuerySection
+    LogicalOrInJoin {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 impl SdblDiagnostic {
@@ -229,6 +237,10 @@ impl SdblDiagnostic {
                  Рассмотрите возможность переписать с использованием UNION или изменить структуру условий"
                     .to_string()
             }
+            Self::LogicalOrInJoin { .. } => {
+                "Использование ИЛИ (OR) в условии соединения приводит к низкой производительности запроса"
+                    .to_string()
+            }
         }
     }
 
@@ -249,6 +261,7 @@ impl SdblDiagnostic {
             Self::JoinWithSubQuery { range, .. } => *range,
             Self::AliasWithoutAsKeyword { range, .. } => *range,
             Self::LogicalOrInWhere { range } => *range,
+            Self::LogicalOrInJoin { range } => *range,
         }
     }
 
@@ -272,6 +285,7 @@ impl SdblDiagnostic {
             Self::JoinWithSubQuery { .. } => false,
             Self::AliasWithoutAsKeyword { .. } => false,
             Self::LogicalOrInWhere { .. } => false,
+            Self::LogicalOrInJoin { .. } => false,
         }
     }
 }
