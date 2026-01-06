@@ -9,6 +9,7 @@
 //! AST (syntax) → HIR (hir-def) → Diagnostics + Type inference
 //!                    │
 //!                    ├── ItemTree (signatures only, invalidation barrier)
+//!                    ├── RegionTree (preprocessor regions hierarchy)
 //!                    ├── Body (method bodies, expressions/statements)
 //!                    └── SourceMap (HIR ↔ AST mapping for diagnostics)
 //! ```
@@ -16,6 +17,7 @@
 //! ## Key components
 //!
 //! - **ItemTree**: Module-level definitions (procedures, functions, variables)
+//! - **RegionTree**: Hierarchical structure of preprocessor regions
 //! - **Body**: HIR representation of method bodies
 //! - **hir**: Expression and statement types (Expr, Stmt, Literal)
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
@@ -24,6 +26,7 @@ pub mod body;
 pub mod hir;
 pub mod item_tree;
 pub mod name;
+pub mod region_tree;
 pub mod resolver;
 pub mod scope;
 pub mod symbol_tree;
@@ -39,6 +42,7 @@ pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId,
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use item_tree::ItemTree;
 pub use name::Name;
+pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::infer::{FunctionSignature, InferenceContext, InferenceResult};
 pub use ty::Ty;
@@ -52,6 +56,17 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// ItemTree is the "invalidation barrier" - it only changes when signatures change,
     /// not when procedure bodies are edited.
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
+
+    /// Get RegionTree for a file.
+    ///
+    /// RegionTree provides hierarchical structure of preprocessor regions (#Область/#Region).
+    /// Used for diagnostics (code_out_of_region, non_standard_region, etc.) and IDE features.
+    ///
+    /// ## Performance
+    /// - Cached per file
+    /// - Invalidated when file content changes
+    /// - O(n) construction where n is number of region directives
+    fn region_tree(&self, file_id: FileId) -> Arc<RegionTree>;
 
     /// Get module data for a module (derived query).
     ///

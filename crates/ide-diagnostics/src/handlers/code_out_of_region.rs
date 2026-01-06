@@ -38,9 +38,10 @@
 //! - CodeOutOfRegionDiagnostic.java (bsl-language-server) - PRIMARY
 //! - code_out_of_region.rs (bsl-language-server-rust) - REFERENCE
 //!
-//! Adapted to use Rowan SyntaxNode traversal.
+//! Uses RegionTree from HIR for efficient region lookup.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::hir_def::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -51,8 +52,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
 
+    // Get RegionTree from HIR (cached via Salsa)
+    let region_tree = ctx.db.region_tree(ctx.file_id);
+
     let mut diagnostics = Vec::new();
-    check_node(&root, &mut diagnostics);
+    check_node(&root, &region_tree, &mut diagnostics);
     diagnostics
 }
 
@@ -77,19 +81,19 @@ fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
     }
 }
 
-fn check_node(node: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
+fn check_node(node: &SyntaxNode, region_tree: &RegionTree, diagnostics: &mut Vec<Diagnostic>) {
     for child in node.children() {
         if matches!(
             child.kind(),
             SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_ELSE_CLAUSE | SyntaxKind::PRE_ELSIF_CLAUSE
         ) {
-            check_node(&child, diagnostics);
+            check_node(&child, region_tree, diagnostics);
             continue;
         }
 
         if is_module_level_element(&child)
             && is_significant_element(&child)
-            && !is_inside_region(&child)
+            && !region_tree.is_range_inside_region(child.text_range())
         {
             let (element_type, range) = match child.kind() {
                 SyntaxKind::FUNCTION_DEF => {
@@ -221,26 +225,6 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
         | SyntaxKind::CONTINUE_STMT => true,
         SyntaxKind::RAISE_STMT => false,
         _ => false,
-    })
-}
-
-fn is_inside_region(node: &SyntaxNode) -> bool {
-    node.ancestors().any(|ancestor| {
-        if ancestor.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region_parent) = ancestor.parent() {
-                matches!(
-                    region_parent.kind(),
-                    SyntaxKind::SOURCE_FILE
-                        | SyntaxKind::PRE_IF_DIR
-                        | SyntaxKind::PRE_ELSE_CLAUSE
-                        | SyntaxKind::PRE_ELSIF_CLAUSE
-                )
-            } else {
-                false
-            }
-        } else {
-            false
-        }
     })
 }
 
