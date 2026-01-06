@@ -41,7 +41,7 @@ use hir::{Body, BodySourceMap};
 use hir_def::hir::{Expr, ExprId, Literal, Stmt, StmtId};
 use hir_def::Name;
 use ide_db::TextRange;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
 
@@ -82,60 +82,23 @@ pub fn check_body(
     diagnostics
 }
 
-/// Normalized expression for structural comparison.
-///
-/// This replaces the regex-based text normalization with proper structural comparison.
-/// Expressions are normalized by incorporating variable generations into Path references.
-/// Uses SmolStr for efficient storage (inline for ≤22 bytes, Arc for longer strings).
-/// Names are stored in lowercase for case-insensitive comparison.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum NormalizedExpr {
-    /// Literal value (string, number, etc.)
-    Literal(NormalizedLiteral),
-    /// Variable reference with generation number (name stored lowercase)
-    Path { name: SmolStr, generation: usize },
-    /// Field access: base.field (field stored lowercase)
-    Field { base: Box<NormalizedExpr>, field: SmolStr },
-    /// Method call: receiver.method(args) (method stored lowercase)
-    MethodCall { receiver: Box<NormalizedExpr>, method: SmolStr, args: Vec<NormalizedExpr> },
-    /// Function call: func(args)
-    Call { callee: Box<NormalizedExpr>, args: Vec<NormalizedExpr> },
-    /// Index access: base[index]
-    Index { base: Box<NormalizedExpr>, index: Box<NormalizedExpr> },
-    /// Binary operation: lhs op rhs
-    BinaryOp { lhs: Box<NormalizedExpr>, rhs: Box<NormalizedExpr>, op: SmolStr },
-    /// New expression: Новый Type(args) (type_name stored lowercase)
-    New { type_name: Option<SmolStr>, args: Vec<NormalizedExpr> },
-    /// Missing or unknown expression
-    Missing,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum NormalizedLiteral {
-    Number(OrderedF64),
-    String(String),
-    Date(String),
-    Bool(bool),
-    Undefined,
-    Null,
-}
-
-/// Wrapper for f64 that implements Eq and Hash for use in HashMap keys.
-#[derive(Debug, Clone, Copy)]
-struct OrderedF64(f64);
-
-impl PartialEq for OrderedF64 {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
-    }
-}
-
-impl Eq for OrderedF64 {}
-
-impl Hash for OrderedF64 {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
+/// Discriminant tags for expression types in hash computation.
+/// These ensure different expression types produce different hashes.
+mod expr_tag {
+    pub const MISSING: u8 = 0;
+    pub const LITERAL_NUMBER: u8 = 1;
+    pub const LITERAL_STRING: u8 = 2;
+    pub const LITERAL_DATE: u8 = 3;
+    pub const LITERAL_BOOL: u8 = 4;
+    pub const LITERAL_UNDEFINED: u8 = 5;
+    pub const LITERAL_NULL: u8 = 6;
+    pub const PATH: u8 = 7;
+    pub const FIELD: u8 = 8;
+    pub const METHOD_CALL: u8 = 9;
+    pub const CALL: u8 = 10;
+    pub const INDEX: u8 = 11;
+    pub const BINARY_OP: u8 = 12;
+    pub const NEW: u8 = 13;
 }
 
 /// Special values that should be allowed to duplicate.
@@ -193,12 +156,15 @@ struct Insertion {
 }
 
 /// Key for grouping insertions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Uses precomputed hashes instead of full expression trees for efficiency.
+/// Hash collisions are extremely unlikely with 64-bit hashes (1 in 2^64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct InsertionKey {
-    /// Normalized collection expression
-    collection: NormalizedExpr,
-    /// Normalized first argument (key for Insert/Вставить)
-    first_arg: NormalizedExpr,
+    /// Hash of the collection expression (with variable generations)
+    collection_hash: u64,
+    /// Hash of the first argument expression (with variable generations)
+    first_arg_hash: u64,
 }
 
 /// Variable generation tracker.
@@ -274,84 +240,152 @@ impl<'a> InsertionTracker<'a> {
         }
     }
 
-    /// Normalize an expression for comparison.
-    /// Names are converted to lowercase for case-insensitive comparison.
-    fn normalize_expr(&self, expr_id: ExprId) -> NormalizedExpr {
-        match self.body.expr(expr_id) {
-            Expr::Missing => NormalizedExpr::Missing,
+    /// Compute hash of an expression for comparison.
+    ///
+    /// This computes a structural hash directly without building intermediate tree structures.
+    /// Names are lowercased for case-insensitive comparison.
+    /// Variable generations are incorporated to distinguish different versions.
+    fn hash_expr(&self, expr_id: ExprId) -> u64 {
+        let mut hasher = FxHasher::default();
+        self.hash_expr_into(expr_id, &mut hasher);
+        hasher.finish()
+    }
 
-            Expr::Literal(lit) => {
-                let normalized = match lit {
-                    Literal::Number(n) => NormalizedLiteral::Number(OrderedF64(*n)),
-                    Literal::String(s) => NormalizedLiteral::String(s.clone()),
-                    Literal::Date(d) => NormalizedLiteral::Date(d.clone()),
-                    Literal::Bool(b) => NormalizedLiteral::Bool(*b),
-                    Literal::Undefined => NormalizedLiteral::Undefined,
-                    Literal::Null => NormalizedLiteral::Null,
-                };
-                NormalizedExpr::Literal(normalized)
+    /// Hash an expression into the given hasher.
+    fn hash_expr_into(&self, expr_id: ExprId, hasher: &mut FxHasher) {
+        match self.body.expr(expr_id) {
+            Expr::Missing => {
+                hasher.write_u8(expr_tag::MISSING);
             }
 
+            Expr::Literal(lit) => match lit {
+                Literal::Number(n) => {
+                    hasher.write_u8(expr_tag::LITERAL_NUMBER);
+                    hasher.write_u64(n.to_bits());
+                }
+                Literal::String(s) => {
+                    hasher.write_u8(expr_tag::LITERAL_STRING);
+                    hasher.write(s.as_bytes());
+                }
+                Literal::Date(d) => {
+                    hasher.write_u8(expr_tag::LITERAL_DATE);
+                    hasher.write(d.as_bytes());
+                }
+                Literal::Bool(b) => {
+                    hasher.write_u8(expr_tag::LITERAL_BOOL);
+                    hasher.write_u8(*b as u8);
+                }
+                Literal::Undefined => {
+                    hasher.write_u8(expr_tag::LITERAL_UNDEFINED);
+                }
+                Literal::Null => {
+                    hasher.write_u8(expr_tag::LITERAL_NULL);
+                }
+            },
+
             Expr::Path(name) => {
+                hasher.write_u8(expr_tag::PATH);
                 let name_str = name.as_str();
-                let name_lower: SmolStr = name_str.to_lowercase().into();
-                // Check if it's a BSL keyword/literal that doesn't need generation tracking
-                if is_bsl_keyword_or_literal(name_str) {
-                    NormalizedExpr::Path { name: name_lower, generation: 0 }
+                // Hash lowercase name for case-insensitive comparison
+                for c in name_str.chars() {
+                    for lc in c.to_lowercase() {
+                        hasher.write_u32(lc as u32);
+                    }
+                }
+                // Include generation for non-keywords
+                let generation = if is_bsl_keyword_or_literal(name_str) {
+                    0
                 } else {
-                    NormalizedExpr::Path {
-                        name: name_lower,
-                        generation: self.generations.get(name_str),
+                    self.generations.get(name_str)
+                };
+                hasher.write_usize(generation);
+            }
+
+            Expr::Field { base, field } => {
+                hasher.write_u8(expr_tag::FIELD);
+                self.hash_expr_into(*base, hasher);
+                // Hash lowercase field name
+                for c in field.as_str().chars() {
+                    for lc in c.to_lowercase() {
+                        hasher.write_u32(lc as u32);
                     }
                 }
             }
 
-            Expr::Field { base, field } => NormalizedExpr::Field {
-                base: Box::new(self.normalize_expr(*base)),
-                field: field.as_str().to_lowercase().into(),
-            },
-
-            Expr::MethodCall { receiver, method, args } => NormalizedExpr::MethodCall {
-                receiver: Box::new(self.normalize_expr(*receiver)),
-                method: method.as_str().to_lowercase().into(),
-                args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
-            },
+            Expr::MethodCall { receiver, method, args } => {
+                hasher.write_u8(expr_tag::METHOD_CALL);
+                self.hash_expr_into(*receiver, hasher);
+                // Hash lowercase method name
+                for c in method.as_str().chars() {
+                    for lc in c.to_lowercase() {
+                        hasher.write_u32(lc as u32);
+                    }
+                }
+                hasher.write_usize(args.len());
+                for arg in args.iter() {
+                    self.hash_expr_into(*arg, hasher);
+                }
+            }
 
             Expr::Call { callee, args } => {
                 // Check if this is actually a method call (Call with Field as callee)
                 if let Expr::Field { base, field } = self.body.expr(*callee) {
-                    NormalizedExpr::MethodCall {
-                        receiver: Box::new(self.normalize_expr(*base)),
-                        method: field.as_str().to_lowercase().into(),
-                        args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
+                    hasher.write_u8(expr_tag::METHOD_CALL);
+                    self.hash_expr_into(*base, hasher);
+                    for c in field.as_str().chars() {
+                        for lc in c.to_lowercase() {
+                            hasher.write_u32(lc as u32);
+                        }
+                    }
+                    hasher.write_usize(args.len());
+                    for arg in args.iter() {
+                        self.hash_expr_into(*arg, hasher);
                     }
                 } else {
-                    NormalizedExpr::Call {
-                        callee: Box::new(self.normalize_expr(*callee)),
-                        args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
+                    hasher.write_u8(expr_tag::CALL);
+                    self.hash_expr_into(*callee, hasher);
+                    hasher.write_usize(args.len());
+                    for arg in args.iter() {
+                        self.hash_expr_into(*arg, hasher);
                     }
                 }
             }
 
-            Expr::Index { base, index } => NormalizedExpr::Index {
-                base: Box::new(self.normalize_expr(*base)),
-                index: Box::new(self.normalize_expr(*index)),
-            },
+            Expr::Index { base, index } => {
+                hasher.write_u8(expr_tag::INDEX);
+                self.hash_expr_into(*base, hasher);
+                self.hash_expr_into(*index, hasher);
+            }
 
-            Expr::BinaryOp { lhs, rhs, op } => NormalizedExpr::BinaryOp {
-                lhs: Box::new(self.normalize_expr(*lhs)),
-                rhs: Box::new(self.normalize_expr(*rhs)),
-                op: format!("{:?}", op).into(),
-            },
+            Expr::BinaryOp { lhs, rhs, op } => {
+                hasher.write_u8(expr_tag::BINARY_OP);
+                self.hash_expr_into(*lhs, hasher);
+                self.hash_expr_into(*rhs, hasher);
+                // Hash discriminant of op
+                std::mem::discriminant(op).hash(hasher);
+            }
 
-            Expr::New { type_name, args } => NormalizedExpr::New {
-                type_name: type_name.as_ref().map(|n| n.as_str().to_lowercase().into()),
-                args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
-            },
+            Expr::New { type_name, args } => {
+                hasher.write_u8(expr_tag::NEW);
+                if let Some(name) = type_name {
+                    hasher.write_u8(1);
+                    for c in name.as_str().chars() {
+                        for lc in c.to_lowercase() {
+                            hasher.write_u32(lc as u32);
+                        }
+                    }
+                } else {
+                    hasher.write_u8(0);
+                }
+                hasher.write_usize(args.len());
+                for arg in args.iter() {
+                    self.hash_expr_into(*arg, hasher);
+                }
+            }
 
             Expr::UnaryOp { .. } | Expr::Ternary { .. } | Expr::Array(_) | Expr::Await { .. } => {
-                // For complex expressions, use Missing to avoid false positives
-                NormalizedExpr::Missing
+                // For complex expressions, use Missing tag to avoid false positives
+                hasher.write_u8(expr_tag::MISSING);
             }
         }
     }
@@ -410,10 +444,10 @@ impl<'a> InsertionTracker<'a> {
             return;
         }
 
-        let collection = self.normalize_expr(receiver);
-        let first_arg = self.normalize_expr(args[0]);
+        let collection_hash = self.hash_expr(receiver);
+        let first_arg_hash = self.hash_expr(args[0]);
 
-        let key = InsertionKey { collection, first_arg };
+        let key = InsertionKey { collection_hash, first_arg_hash };
 
         let breaker_context = self.last_breaker.map(|(offset, _)| offset);
         let local_breaker_context = self.last_local_breaker.map(|(offset, _)| offset);
