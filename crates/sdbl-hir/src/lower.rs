@@ -439,6 +439,17 @@ impl LoweringContext<'_> {
 
     /// Lower WHERE clause.
     fn lower_where_clause(&mut self, where_clause: &syntax::ast::SdblWhereClause) -> ExprHir {
+        // Collect LogicalOrInWhere diagnostics
+        // Use descendants_with_tokens() to find ALL OR tokens recursively
+        for element in where_clause.syntax().descendants_with_tokens() {
+            if let Some(token) = element.as_token() {
+                if token.kind() == syntax::SyntaxKind::KW_OR {
+                    self.diagnostics
+                        .push(SdblDiagnostic::LogicalOrInWhere { range: token.text_range() });
+                }
+            }
+        }
+
         // WHERE clause contains an expression as its child
         let expr_node = where_clause.syntax().children().find(|n| {
             matches!(

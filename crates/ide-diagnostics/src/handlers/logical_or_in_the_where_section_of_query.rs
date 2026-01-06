@@ -36,13 +36,12 @@
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::ast::{AstNode, SdblQueryPackage};
-use syntax::SyntaxKind;
+use sdbl_hir;
 use tracing::debug;
 
 /// Runs the LogicalOrInTheWhereSectionOfQuery diagnostic.
 ///
-/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
@@ -51,90 +50,36 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
 
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
+    // Get cached SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index
     use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        if !query_info.is_valid() {
-            continue;
-        }
-        let Some(ref query_ast) = query_info.query_ast else {
-            continue;
-        };
-
+    // Iterate SDBL HIRs and corresponding query infos in parallel
+    // Both are sorted by position in file, so we can zip them
+    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+        sdbl_hirs.iter().zip(sdbl_queries.iter())
+    {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
             query_info.bsl_literal_range,
             &bsl_source,
             &line_starts,
         );
 
-        check_query(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
-    }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "LogicalOrInTheWhereSectionOfQuery completed"
-    );
-
-    diagnostics
-}
-
-/// Check a single SDBL query for OR operators in WHERE clauses.
-fn check_query(
-    query_ast: &syntax::Parse<syntax::SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use syntax::ast::AstNode;
-
-    let root = query_ast.syntax_node();
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-
-    for select_query in package.queries() {
-        let Some(subquery) = select_query.subquery() else {
-            continue;
-        };
-        let Some(main_query) = subquery.main_query() else {
-            continue;
-        };
-
-        check_query_where_clause(&main_query, query_text, mapper, diagnostics);
-        check_subqueries_in_from(&main_query, query_text, mapper, diagnostics);
-        check_subqueries_in_where(&main_query, query_text, mapper, diagnostics);
-    }
-}
-
-/// Check WHERE clause for OR operators.
-///
-/// Uses `descendants_with_tokens()` to find ALL OR tokens recursively,
-/// including those nested inside parentheses. This matches Java's
-/// `Trees.findAllTokenNodes(ctx.where, SDBLParser.OR)` behavior.
-fn check_query_where_clause(
-    query: &syntax::ast::SdblQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(where_clause) = query.where_clause() else {
-        return;
-    };
-
-    for element in where_clause.syntax().descendants_with_tokens() {
-        if let Some(token) = element.as_token() {
-            if token.kind() == SyntaxKind::KW_OR {
-                let sdbl_range = token.text_range();
-                let bsl_range = mapper.map_range(sdbl_range, query_text);
+        // Emit diagnostics from HIR
+        for hir_diag in &sdbl_hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } = hir_diag {
+                let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
@@ -147,69 +92,14 @@ fn check_query_where_clause(
             }
         }
     }
-}
 
-/// Recursively check subqueries in WHERE clause.
-///
-/// Example: `WHERE ID IN (SELECT ID FROM T2 WHERE A = 1 OR B = 2)`
-///                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-///                        Nested subquery with WHERE in WHERE expression
-///
-/// Note: We don't call check_query_where_clause here because descendants_with_tokens()
-/// in the parent call already traverses all nested subqueries.
-fn check_subqueries_in_where(
-    query: &syntax::ast::SdblQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use syntax::ast::SdblSubquery;
+    debug!(
+        time_ms = start.elapsed().as_millis(),
+        diagnostics_found = diagnostics.len(),
+        "LogicalOrInTheWhereSectionOfQuery completed"
+    );
 
-    let Some(where_clause) = query.where_clause() else {
-        return;
-    };
-
-    for node in where_clause.syntax().descendants() {
-        if node.kind() == SyntaxKind::SDBL_SUBQUERY {
-            if let Some(subquery) = SdblSubquery::cast(node) {
-                if let Some(nested_query) = subquery.main_query() {
-                    check_subqueries_in_from(&nested_query, query_text, mapper, diagnostics);
-                }
-            }
-        }
-    }
-}
-
-/// Recursively check subqueries in FROM clause.
-///
-/// Example: `SELECT * FROM (SELECT ID FROM T2 WHERE A = 1 OR B = 2)`
-///                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-///                         Nested subquery with WHERE
-///
-/// Note: We need to check WHERE clauses of subqueries in FROM because they are
-/// in a different subtree from the main query's WHERE clause.
-fn check_subqueries_in_from(
-    query: &syntax::ast::SdblQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use syntax::ast::SdblSubquery;
-
-    let Some(from_clause) = query.from_clause() else {
-        return;
-    };
-
-    for node in from_clause.syntax().descendants() {
-        if node.kind() == SyntaxKind::SDBL_SUBQUERY {
-            if let Some(subquery) = SdblSubquery::cast(node) {
-                if let Some(nested_query) = subquery.main_query() {
-                    check_query_where_clause(&nested_query, query_text, mapper, diagnostics);
-                    check_subqueries_in_from(&nested_query, query_text, mapper, diagnostics);
-                }
-            }
-        }
-    }
+    diagnostics
 }
 
 #[cfg(test)]

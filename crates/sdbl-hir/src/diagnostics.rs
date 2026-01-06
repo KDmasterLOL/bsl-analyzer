@@ -138,6 +138,14 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// OR operator in WHERE clause (performance issue).
+    ///
+    /// BSL-LS diagnostic code: LogicalOrInTheWhereSectionOfQuery
+    LogicalOrInWhere {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 impl SdblDiagnostic {
@@ -216,6 +224,11 @@ impl SdblDiagnostic {
                     "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string()
                 }
             }
+            Self::LogicalOrInWhere { .. } => {
+                "Использование оператора ИЛИ (OR) в условии WHERE существенно снижает производительность запроса. \
+                 Рассмотрите возможность переписать с использованием UNION или изменить структуру условий"
+                    .to_string()
+            }
         }
     }
 
@@ -235,6 +248,7 @@ impl SdblDiagnostic {
             Self::FullOuterJoin { range, .. } => *range,
             Self::JoinWithSubQuery { range, .. } => *range,
             Self::AliasWithoutAsKeyword { range, .. } => *range,
+            Self::LogicalOrInWhere { range } => *range,
         }
     }
 
@@ -257,6 +271,7 @@ impl SdblDiagnostic {
             Self::FullOuterJoin { .. } => false,
             Self::JoinWithSubQuery { .. } => false,
             Self::AliasWithoutAsKeyword { .. } => false,
+            Self::LogicalOrInWhere { .. } => false,
         }
     }
 }

@@ -64,15 +64,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Iterate SDBL HIRs and emit diagnostics
-    for (expr_id, sdbl_hir) in sdbl_hirs.iter() {
-        // Find corresponding query info for position mapping
-        let query_info = sdbl_queries.iter().find(|(id, _)| id == expr_id).map(|(_, info)| info);
-
-        let Some(query_info) = query_info else {
-            continue;
-        };
-
+    // Iterate SDBL HIRs and corresponding query infos in parallel
+    // Both are sorted by position in file, so we can zip them
+    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+        sdbl_hirs.iter().zip(sdbl_queries.iter())
+    {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
             query_info.bsl_literal_range,
             &bsl_source,
