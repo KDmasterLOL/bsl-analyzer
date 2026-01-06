@@ -35,12 +35,12 @@
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::ast::{JoinType, SdblQueryPackage};
+use sdbl_hir;
 use tracing::debug;
 
 /// Runs the FullOuterJoinQuery diagnostic.
 ///
-/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
@@ -49,23 +49,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get cached SDBL queries from HIR
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
 
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
-    // Build shared line index once (performance optimization)
+    // Get cached SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index
     use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        if !query_info.is_valid() {
-            continue;
-        }
-        let Some(ref query_ast) = query_info.query_ast else {
+    // Iterate SDBL HIRs and emit diagnostics
+    for (expr_id, sdbl_hir) in sdbl_hirs.iter() {
+        // Find corresponding query info for position mapping
+        let query_info = sdbl_queries.iter().find(|(id, _)| id == expr_id).map(|(_, info)| info);
+
+        let Some(query_info) = query_info else {
             continue;
         };
 
@@ -75,7 +79,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &line_starts,
         );
 
-        check_query(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
+        // Emit diagnostics from HIR
+        for hir_diag in &sdbl_hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::FullOuterJoin { range } = hir_diag {
+                let bsl_range = mapper.map_range(*range, &query_info.query_text);
+
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::FullOuterJoinQuery,
+                    message: "Using FULL OUTER JOIN significantly reduces query performance. \
+                              Consider rewriting using UNION with LEFT JOIN"
+                        .to_string(),
+                    severity: Severity::Warning,
+                    range: bsl_range,
+                    tags: vec![],
+                    fixes: vec![],
+                });
+            }
+        }
     }
 
     debug!(
@@ -85,74 +105,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     );
 
     diagnostics
-}
-
-/// Check a single SDBL query for FULL OUTER JOINs.
-fn check_query(
-    query_ast: &syntax::Parse<syntax::SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use syntax::ast::AstNode;
-
-    let root = query_ast.syntax_node();
-
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-
-    for select_query in package.queries() {
-        let Some(subquery) = select_query.subquery() else {
-            continue;
-        };
-        let Some(main_query) = subquery.main_query() else {
-            continue;
-        };
-        let Some(from_clause) = main_query.from_clause() else {
-            continue;
-        };
-
-        // Recursively check data sources for FULL JOINs
-        fn check_data_source(
-            data_source: syntax::ast::SdblDataSource,
-            mapper: &SdblPositionMapper,
-            query_text: &str,
-            diagnostics: &mut Vec<Diagnostic>,
-        ) {
-            // Check all join clauses in this data source
-            for join in data_source.join_clauses() {
-                let join_type = join.join_type();
-
-                if join_type == JoinType::Full {
-                    // Found FULL [OUTER] JOIN - create diagnostic
-                    let sdbl_range = join.syntax().text_range();
-                    let bsl_range = mapper.map_range(sdbl_range, query_text);
-
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::FullOuterJoinQuery,
-                        message: "Using FULL OUTER JOIN significantly reduces query performance. \
-                                  Consider rewriting using UNION with LEFT JOIN"
-                            .to_string(),
-                        severity: Severity::Warning,
-                        range: bsl_range,
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-
-                // Recursively check nested data sources in this join
-                if let Some(nested_source) = join.data_source() {
-                    check_data_source(nested_source, mapper, query_text, diagnostics);
-                }
-            }
-        }
-
-        // Check all top-level data sources
-        for data_source in from_clause.data_sources() {
-            check_data_source(data_source, mapper, query_text, diagnostics);
-        }
-    }
 }
 
 #[cfg(test)]

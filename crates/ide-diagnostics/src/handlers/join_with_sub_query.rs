@@ -33,12 +33,12 @@
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::ast::{AstNode, SdblQueryPackage};
+use sdbl_hir;
 use tracing::debug;
 
 /// Runs the JoinWithSubQuery diagnostic.
 ///
-/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
@@ -47,23 +47,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get cached SDBL queries from HIR
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
 
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
 
-    // Build shared line index once (performance optimization)
+    // Get cached SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index
     use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        if !query_info.is_valid() {
-            continue;
-        }
-        let Some(ref query_ast) = query_info.query_ast else {
+    // Iterate SDBL HIRs and emit diagnostics
+    for (expr_id, sdbl_hir) in sdbl_hirs.iter() {
+        // Find corresponding query info for position mapping
+        let query_info = sdbl_queries.iter().find(|(id, _)| id == expr_id).map(|(_, info)| info);
+
+        let Some(query_info) = query_info else {
             continue;
         };
 
@@ -73,89 +77,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &line_starts,
         );
 
-        check_query(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
-    }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "JoinWithSubQuery completed"
-    );
-
-    diagnostics
-}
-
-/// Check a single SDBL query for subqueries in JOINs.
-fn check_query(
-    query_ast: &syntax::Parse<syntax::SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let root = query_ast.syntax_node();
-
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-
-    for select_query in package.queries() {
-        let Some(subquery) = select_query.subquery() else {
-            continue;
-        };
-
-        // Check all queries (main query + UNION queries)
-        for query in subquery.queries() {
-            let Some(from_clause) = query.from_clause() else {
-                continue;
-            };
-
-            // Check all top-level data sources
-            for data_source in from_clause.data_sources() {
-                check_data_source(data_source, mapper, query_text, diagnostics);
-            }
-        }
-    }
-}
-
-/// Recursively check a data source for subqueries in JOIN contexts.
-fn check_data_source(
-    data_source: syntax::ast::SdblDataSource,
-    mapper: &SdblPositionMapper,
-    query_text: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    // Case 1: Data source is a subquery that has JOINs
-    // Java: visitDataSources() - checks !joinPart().isEmpty() && subquery() != null
-    let has_joins = data_source.join_clauses().next().is_some();
-
-    if has_joins {
-        if let Some(subquery) = data_source.subquery() {
-            // Report diagnostic on the subquery
-            let sdbl_range = subquery.syntax().text_range();
-            let bsl_range = mapper.map_range(sdbl_range, query_text);
-
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::JoinWithSubQuery,
-                message: "Don't use a join with sub queries. \
-                          Joins with subqueries cause severe performance issues."
-                    .to_string(),
-                severity: Severity::Major,
-                range: bsl_range,
-                tags: vec![],
-                fixes: vec![],
-            });
-        }
-    }
-
-    // Case 2: Check each JOIN clause for subqueries
-    // Java: visitJoinPart() - checks dataSource().subquery() != null
-    for join in data_source.join_clauses() {
-        if let Some(join_data_source) = join.data_source() {
-            // Check if the JOIN's data source is a subquery
-            if let Some(subquery) = join_data_source.subquery() {
-                // Report diagnostic on the subquery
-                let sdbl_range = subquery.syntax().text_range();
-                let bsl_range = mapper.map_range(sdbl_range, query_text);
+        // Emit diagnostics from HIR
+        for hir_diag in &sdbl_hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::JoinWithSubQuery { range } = hir_diag {
+                let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::JoinWithSubQuery,
@@ -168,25 +93,16 @@ fn check_data_source(
                     fixes: vec![],
                 });
             }
-
-            // Recursively check nested data sources in the join
-            check_data_source(join_data_source, mapper, query_text, diagnostics);
         }
     }
 
-    // Case 3: If this data source is a subquery, recursively check its inner queries
-    // This handles nested subqueries like: SELECT * FROM (SELECT ... FROM (SELECT ...) JOIN ...)
-    if let Some(subquery) = data_source.subquery() {
-        // Check all queries within this subquery (main query + UNION queries)
-        for inner_query in subquery.queries() {
-            if let Some(from_clause) = inner_query.from_clause() {
-                // Recursively check all data sources in the inner query
-                for inner_data_source in from_clause.data_sources() {
-                    check_data_source(inner_data_source, mapper, query_text, diagnostics);
-                }
-            }
-        }
-    }
+    debug!(
+        time_ms = start.elapsed().as_millis(),
+        diagnostics_found = diagnostics.len(),
+        "JoinWithSubQuery completed"
+    );
+
+    diagnostics
 }
 
 #[cfg(test)]

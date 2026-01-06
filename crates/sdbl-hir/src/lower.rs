@@ -59,13 +59,23 @@ pub fn lower_sdbl_to_hir(
     // Create lowering context
     let mut ctx = LoweringContext::new(metadata);
 
-    // Lower first SELECT query (main query)
-    let Some(select_query) = package.queries().next() else {
+    // Lower ALL SELECT queries in the package
+    let mut queries = package.queries();
+    let Some(first_query) = queries.next() else {
         tracing::debug!("No queries in package");
         return SdblHir::empty();
     };
 
-    ctx.lower_select_query(&select_query)
+    // Lower first query
+    let mut result = ctx.lower_select_query(&first_query);
+
+    // Lower remaining queries and merge diagnostics
+    for select_query in queries {
+        let additional = ctx.lower_select_query(&select_query);
+        result.diagnostics.extend(additional.diagnostics);
+    }
+
+    result
 }
 
 impl LoweringContext<'_> {
@@ -133,7 +143,32 @@ impl LoweringContext<'_> {
     /// Lower a data source (table or subquery).
     fn lower_data_source(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
         // Check for subquery
-        if let Some(_subquery) = ds.subquery() {
+        if let Some(subquery) = ds.subquery() {
+            // Check if this data source has JOINs (context: subquery with JOINs)
+            // This matches Java: visitDataSources() checks !joinPart().isEmpty() && subquery() != null
+            if ds.join_clauses().next().is_some() {
+                self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
+                    range: subquery.syntax().text_range(),
+                });
+            }
+
+            // Recursively process nested queries in the subquery
+            for inner_query in subquery.queries() {
+                // Process SELECT fields in nested subquery (for diagnostics)
+                if let Some(field_list) = inner_query.field_list() {
+                    for field in field_list.fields() {
+                        let _ = self.lower_selected_field(&field);
+                    }
+                }
+
+                // Process FROM clause data sources
+                if let Some(from_clause) = inner_query.from_clause() {
+                    for inner_ds in from_clause.data_sources() {
+                        let _ = self.lower_data_source(&inner_ds);
+                    }
+                }
+            }
+
             // TODO: Handle subqueries properly
             return TableRef::missing(ds.syntax().text_range());
         }
@@ -244,8 +279,25 @@ impl LoweringContext<'_> {
             syntax::ast::JoinType::Inner => crate::hir::JoinType::Inner,
         };
 
+        // Check for FULL OUTER JOIN
+        if matches!(join_type, crate::hir::JoinType::Full) {
+            self.diagnostics
+                .push(SdblDiagnostic::FullOuterJoin { range: join.syntax().text_range() });
+        }
+
         // Lower joined table
         let table = if let Some(ds) = join.data_source() {
+            // Check if JOIN's data source is a subquery
+            // This matches Java: visitJoinPart() checks dataSource().subquery() != null
+            if ds.subquery().is_some() {
+                self.diagnostics
+                    .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
+            }
+
+            // Process nested JOINs recursively
+            for nested_join in ds.join_clauses() {
+                let _ = self.lower_join_clause(&nested_join);
+            }
             self.lower_data_source(&ds)
         } else {
             TableRef::missing(join.syntax().text_range())
@@ -320,6 +372,67 @@ impl LoweringContext<'_> {
 
         // Get type from expression
         let ty = expr.ty().clone();
+
+        // Check for AliasWithoutAsKeyword diagnostic (only in subqueries)
+        let in_subquery =
+            field.syntax().ancestors().any(|node| node.kind() == syntax::SyntaxKind::SDBL_SUBQUERY);
+
+        if in_subquery {
+            // Skip fields with parse errors
+            let has_error = field
+                .syntax()
+                .descendants_with_tokens()
+                .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
+
+            if !has_error {
+                // Get trimmed range (expression only, without trailing trivia)
+                let range = if let Some(expr) = field.expression() {
+                    // Trim trailing whitespace/comments/newlines from expression
+                    let last_token = expr.last_token();
+                    let last_non_trivia = last_token.and_then(|t| {
+                        let mut token = t;
+                        while matches!(
+                            token.kind(),
+                            syntax::SyntaxKind::WHITESPACE
+                                | syntax::SyntaxKind::COMMENT
+                                | syntax::SyntaxKind::NEWLINE
+                        ) {
+                            token = token.prev_token()?;
+                        }
+                        Some(token)
+                    });
+
+                    if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
+                        syntax::TextRange::new(first.text_range().start(), last.text_range().end())
+                    } else {
+                        expr.text_range()
+                    }
+                } else {
+                    field.syntax().text_range()
+                };
+
+                if let Some(alias_node) = field.alias() {
+                    // Has alias but check for AS keyword
+                    if !alias_node.has_as_keyword() {
+                        // Include alias in range for implicit alias case
+                        let range_with_alias = if let Some(alias_ident) = alias_node.identifier() {
+                            syntax::TextRange::new(range.start(), alias_ident.text_range().end())
+                        } else {
+                            range
+                        };
+
+                        self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
+                            field_name: alias_node.name(),
+                            range: range_with_alias,
+                        });
+                    }
+                } else {
+                    // No alias at all - use expression range
+                    self.diagnostics
+                        .push(SdblDiagnostic::AliasWithoutAsKeyword { field_name: None, range });
+                }
+            }
+        }
 
         FieldHir { expr, alias, ty, is_asterisk: false, range: field.syntax().text_range() }
     }

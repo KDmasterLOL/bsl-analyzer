@@ -37,402 +37,85 @@
 //! - AssignAliasFieldsInQueryDiagnostic.java (bsl-language-server)
 //! - assign_alias_fields_in_query.rs (bsl-language-server-rust)
 //!
-//! Adapted to use full SDBL parser with AST instead of token-based approach.
+//! Now uses SDBL HIR with diagnostics collected during lowering.
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{
-    ast::{AstNode, SdblAlias, SdblQuery, SdblQueryPackage, SdblSelectQuery, SdblSelectedField},
-    Parse, SyntaxKind, SyntaxNode, TextRange,
-};
+use sdbl_hir;
+use tracing::debug;
 
 /// Runs the AssignAliasFieldsInQuery diagnostic.
 ///
-/// Uses cached SDBL queries from Salsa to avoid redundant tree walking and parsing.
-/// Checks for fields without AS keyword and reports diagnostics at correct BSL positions.
+/// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
-
     let start = Instant::now();
 
-    // Check if diagnostic is disabled
     if ctx.config.is_disabled(DiagnosticCode::AssignAliasFieldsInQuery) {
         return Vec::new();
     }
 
-    // ✅ NEW: Get cached SDBL queries from HIR (no separate tree walking!)
-    let cache_start = Instant::now();
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
-    let cache_ms = cache_start.elapsed().as_micros();
+    // Get SDBL HIR with collected diagnostics
+    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
 
-    // Get BSL source text for position mapping
-    let source_start = Instant::now();
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
-    let source_ms = source_start.elapsed().as_micros();
+
+    // Get cached SDBL queries for position mapping
+    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+
+    // Build shared line index
+    use crate::sdbl_utils::build_line_index_shared;
+    let line_starts = build_line_index_shared(&bsl_source);
 
     let mut diagnostics = Vec::new();
 
-    // Time measurements
-    let mut time_mapper_creation_us = 0u128;
-    let mut time_analyzing_ast_us = 0u128;
-    let mut queries_analyzed = 0;
+    // Iterate SDBL HIRs and emit diagnostics
+    for (expr_id, sdbl_hir) in sdbl_hirs.iter() {
+        // Find corresponding query info for position mapping
+        let query_info = sdbl_queries.iter().find(|(id, _)| id == expr_id).map(|(_, info)| info);
 
-    // OPTIMIZATION: Build line index ONCE for the entire file
-    // Instead of rebuilding it for each of the 102 mappers (was 241ms overhead!)
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_index_start = Instant::now();
-    let line_starts = build_line_index_shared(&bsl_source);
-    let time_line_index_us = line_index_start.elapsed().as_micros();
-
-    // Process each cached SDBL query
-    for (_expr_id, query_info) in sdbl_queries.iter() {
-        // Skip if not valid SDBL
-        if !query_info.is_valid() {
-            continue;
-        }
-
-        let Some(ref query_ast) = query_info.query_ast else {
+        let Some(query_info) = query_info else {
             continue;
         };
 
-        tracing::debug!(query_len = query_info.query_text.len(), "Analyzing SDBL query from cache");
-
-        // Create position mapper (reuses shared line_starts from above)
-        let mapper_start = Instant::now();
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
             query_info.bsl_literal_range,
             &bsl_source,
             &line_starts,
         );
-        time_mapper_creation_us += mapper_start.elapsed().as_micros();
 
-        // Check SDBL query AST (already parsed!)
-        let analyze_start = Instant::now();
-        check_sdbl_query_optimized(query_ast, &query_info.query_text, &mapper, &mut diagnostics);
-        time_analyzing_ast_us += analyze_start.elapsed().as_micros();
-        queries_analyzed += 1;
+        // Emit diagnostics from HIR
+        for hir_diag in &sdbl_hir.diagnostics {
+            if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = hir_diag
+            {
+                let bsl_range = mapper.map_range(*range, &query_info.query_text);
+
+                let message = if let Some(name) = field_name {
+                    format!("Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК", name)
+                } else {
+                    "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string()
+                };
+
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::AssignAliasFieldsInQuery,
+                    message,
+                    severity: Severity::Warning,
+                    range: bsl_range,
+                    tags: vec![],
+                    fixes: vec![],
+                });
+            }
+        }
     }
 
-    let total_elapsed = start.elapsed().as_millis();
-
-    tracing::debug!(
-        total_ms = total_elapsed,
-        cache_fetch_us = cache_ms,
-        source_fetch_us = source_ms,
-        line_index_us = time_line_index_us,
-        mapper_creation_us = time_mapper_creation_us,
-        analyzing_ast_us = time_analyzing_ast_us,
-        queries_from_cache = sdbl_queries.len(),
-        queries_analyzed,
+    debug!(
+        time_ms = start.elapsed().as_millis(),
         diagnostics_found = diagnostics.len(),
-        "[PROFILE] AssignAliasFieldsInQuery"
+        "AssignAliasFieldsInQuery completed"
     );
 
     diagnostics
-}
-
-/// Check a single SDBL query for fields without AS keyword (optimized).
-///
-/// OPTIMIZATION: Uses cached query_text directly instead of root.text().to_string()
-/// This eliminates string allocation for each query.
-fn check_sdbl_query_optimized(
-    parse: &Parse<SyntaxNode>,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let root = parse.syntax_node();
-
-    // Get query package
-    let Some(package) = SdblQueryPackage::cast(root) else {
-        return;
-    };
-
-    // Check each SELECT query
-    // OPTIMIZATION: Use query_text from cache instead of root.text().to_string()
-    for select_query in package.queries() {
-        check_select_query_with_mapper(&select_query, query_text, mapper, diagnostics);
-    }
-}
-
-/// Check a SELECT query for fields without AS keyword (with position mapping).
-fn check_select_query_with_mapper(
-    select_query: &SdblSelectQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-
-    let Some(subquery) = select_query.subquery() else {
-        return;
-    };
-
-    // Check main query fields (parent is subquery ✓)
-    let check_start = Instant::now();
-    let diag_count_before = diagnostics.len();
-
-    if let Some(main_query) = subquery.main_query() {
-        check_query_fields_and_subqueries_with_mapper(&main_query, query_text, mapper, diagnostics);
-    }
-
-    let check_us = check_start.elapsed().as_micros();
-    let diag_count = diagnostics.len() - diag_count_before;
-
-    if check_us > 10000 {
-        tracing::debug!(check_us, diag_count, "[PROFILE] check_select_query_with_mapper (>10ms)");
-    }
-
-    // Note: UNION queries are NOT checked (parent is union node, not subquery)
-}
-
-/// Check query fields AND recursively check subqueries in FROM clause (with mapper).
-fn check_query_fields_and_subqueries_with_mapper(
-    query: &SdblQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-
-    // Check fields in this query
-    let fields_start = Instant::now();
-    check_query_fields_with_mapper(query, query_text, mapper, diagnostics);
-    let fields_us = fields_start.elapsed().as_micros();
-
-    // Recursively check subqueries in FROM clause
-    let from_start = Instant::now();
-    if let Some(from_clause) = query.from_clause() {
-        check_from_clause_for_subqueries_with_mapper(&from_clause, query_text, mapper, diagnostics);
-    }
-    let from_us = from_start.elapsed().as_micros();
-
-    if fields_us > 5000 || from_us > 5000 {
-        tracing::debug!(fields_us, from_us, "[PROFILE] check_query_fields_and_subqueries");
-    }
-}
-
-/// Check fields in a query for missing AS keyword (with mapper).
-fn check_query_fields_with_mapper(
-    query: &SdblQuery,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(field_list) = query.field_list() else {
-        return;
-    };
-
-    for field in field_list.fields() {
-        check_field_with_mapper(&field, query_text, mapper, diagnostics);
-    }
-}
-
-/// Recursively check subqueries in FROM clause (with mapper).
-fn check_from_clause_for_subqueries_with_mapper(
-    from_clause: &syntax::ast::SdblFromClause,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-    use syntax::ast::{AstNode, SdblSubquery};
-    use syntax::SyntaxKind;
-
-    // Walk descendants looking for SDBL_SUBQUERY nodes
-    // These are subqueries in FROM clause like: FROM (SELECT ... ) AS Sub
-    let desc_start = Instant::now();
-    let mut subquery_count = 0;
-
-    for node in from_clause.syntax().descendants() {
-        if node.kind() == SyntaxKind::SDBL_SUBQUERY {
-            if let Some(subquery) = SdblSubquery::cast(node) {
-                subquery_count += 1;
-                // Check the main query in this subquery (parent is subquery ✓)
-                if let Some(main_query) = subquery.main_query() {
-                    check_query_fields_and_subqueries_with_mapper(
-                        &main_query,
-                        query_text,
-                        mapper,
-                        diagnostics,
-                    );
-                }
-            }
-        }
-    }
-
-    let desc_us = desc_start.elapsed().as_micros();
-    if desc_us > 5000 {
-        tracing::debug!(desc_us, subquery_count, "[PROFILE] check_from_clause descendants()");
-    }
-}
-
-/// Check a single field for missing AS keyword (with mapper).
-fn check_field_with_mapper(
-    field: &SdblSelectedField,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    // Skip asterisk fields (they don't need aliases)
-    if field.is_asterisk() {
-        return;
-    }
-
-    // Skip fields with parse errors
-    // Parser creates ERROR nodes for invalid syntax (e.g., "Table." without property name)
-    // These are parse error recovery artifacts that should not generate diagnostics
-    if field.syntax().descendants_with_tokens().any(|el| el.kind() == SyntaxKind::ERROR) {
-        return;
-    }
-
-    // Check if field has alias
-    if let Some(alias) = field.alias() {
-        // Alias exists, check if it has AS keyword
-        if !alias.has_as_keyword() {
-            // ERROR: Alias without AS keyword (implicit alias)
-            // Report diagnostic on the whole field expression (not just alias)
-            add_diagnostic_for_alias_with_mapper(field, &alias, query_text, mapper, diagnostics);
-        }
-    } else {
-        // ERROR: Field without alias at all
-        add_diagnostic_for_field_with_mapper(field, query_text, mapper, diagnostics);
-    }
-}
-
-/// Add diagnostic for alias without AS keyword (with position mapping).
-/// Reports the diagnostic on the whole field expression (column ref + alias).
-fn add_diagnostic_for_alias_with_mapper(
-    field: &SdblSelectedField,
-    alias: &SdblAlias,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-
-    let alias_name = alias.name().unwrap_or_else(|| "<unknown>".to_string());
-
-    // Use the whole field's range (expression + alias)
-    // Get first token from expression and last token from alias
-    let token_start = Instant::now();
-    let sdbl_range = match (field.expression(), alias.identifier()) {
-        (Some(expr), Some(alias_ident)) => {
-            // Get first non-whitespace token from expression
-            let first_token = expr.first_token();
-            let first_non_ws = first_token.and_then(|t| {
-                if t.kind() == SyntaxKind::WHITESPACE {
-                    t.next_token()
-                } else {
-                    Some(t)
-                }
-            });
-
-            // Use alias identifier as last token (it's already trimmed)
-            if let Some(first) = first_non_ws {
-                TextRange::new(first.text_range().start(), alias_ident.text_range().end())
-            } else {
-                field.syntax().text_range()
-            }
-        }
-        _ => field.syntax().text_range(),
-    };
-    let token_us = token_start.elapsed().as_micros();
-
-    let map_start = Instant::now();
-    let bsl_range = mapper.map_range(sdbl_range, query_text);
-    let map_us = map_start.elapsed().as_micros();
-
-    if token_us > 100 || map_us > 100 {
-        tracing::trace!(token_us, map_us, "[PROFILE] add_diagnostic_for_alias");
-    }
-
-    diagnostics.push(Diagnostic {
-        code: DiagnosticCode::AssignAliasFieldsInQuery,
-        message: format!(
-            "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",
-            alias_name
-        ),
-        severity: Severity::Warning,
-        range: bsl_range, // Now BSL-relative!
-        tags: vec![],
-        fixes: vec![],
-    });
-}
-
-/// Add diagnostic for field without alias (with position mapping).
-fn add_diagnostic_for_field_with_mapper(
-    field: &SdblSelectedField,
-    query_text: &str,
-    mapper: &SdblPositionMapper,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    use std::time::Instant;
-
-    // Get SDBL range - trim leading/trailing whitespace from expression
-    let token_start = Instant::now();
-    let sdbl_range = if let Some(expr) = field.expression() {
-        let full_range = expr.text_range();
-
-        // Get first and last non-whitespace tokens to exclude leading/trailing whitespace
-        let first_token = expr.first_token();
-        let last_token = expr.last_token();
-
-        match (first_token, last_token) {
-            (Some(_first), Some(_last)) => {
-                // Skip leading whitespace tokens
-                let first_non_ws = expr.first_token().and_then(|t| {
-                    if t.kind() == SyntaxKind::WHITESPACE {
-                        t.next_token()
-                    } else {
-                        Some(t)
-                    }
-                });
-
-                // Skip trailing whitespace/comment tokens
-                let last_non_trivia = expr.last_token().and_then(|t| {
-                    let mut token = t;
-                    while matches!(
-                        token.kind(),
-                        SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::NEWLINE
-                    ) {
-                        token = token.prev_token()?;
-                    }
-                    Some(token)
-                });
-
-                match (first_non_ws, last_non_trivia) {
-                    (Some(first_real), Some(last_real)) => TextRange::new(
-                        first_real.text_range().start(),
-                        last_real.text_range().end(),
-                    ),
-                    _ => full_range,
-                }
-            }
-            _ => full_range,
-        }
-    } else {
-        field.syntax().text_range()
-    };
-    let token_us = token_start.elapsed().as_micros();
-
-    let map_start = Instant::now();
-    let bsl_range = mapper.map_range(sdbl_range, query_text);
-    let map_us = map_start.elapsed().as_micros();
-
-    if token_us > 100 || map_us > 100 {
-        tracing::trace!(token_us, map_us, "[PROFILE] add_diagnostic_for_field");
-    }
-
-    diagnostics.push(Diagnostic {
-        code: DiagnosticCode::AssignAliasFieldsInQuery,
-        message: "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string(),
-        severity: Severity::Warning,
-        range: bsl_range, // Now BSL-relative!
-        tags: vec![],
-        fixes: vec![],
-    });
 }
 
 #[cfg(test)]
@@ -444,6 +127,8 @@ mod tests {
         DiagnosticsConfig,
     };
     use parser::parse_sdbl;
+    use syntax::ast::SdblQueryPackage;
+    use syntax::SyntaxKind;
 
     /// Check a single SDBL query for fields without AS keyword (test version).
     ///

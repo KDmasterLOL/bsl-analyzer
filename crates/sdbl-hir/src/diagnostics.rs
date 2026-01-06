@@ -112,6 +112,32 @@ pub enum SdblDiagnostic {
         /// Source range of duplicate.
         range: TextRange,
     },
+
+    /// FULL OUTER JOIN detected (performance issue).
+    ///
+    /// BSL-LS diagnostic code: FullOuterJoinQuery
+    FullOuterJoin {
+        /// Source range.
+        range: TextRange,
+    },
+
+    /// JOIN with subquery (severe performance issue).
+    ///
+    /// BSL-LS diagnostic code: JoinWithSubQuery
+    JoinWithSubQuery {
+        /// Source range.
+        range: TextRange,
+    },
+
+    /// Field alias without AS keyword (or no alias).
+    ///
+    /// BSL-LS diagnostic code: AssignAliasFieldsInQuery
+    AliasWithoutAsKeyword {
+        /// Field name (for message).
+        field_name: Option<String>,
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 impl SdblDiagnostic {
@@ -175,6 +201,21 @@ impl SdblDiagnostic {
             Self::DuplicateAlias { alias, .. } => {
                 format!("Дублирующийся псевдоним '{}' в SELECT", alias)
             }
+            Self::FullOuterJoin { .. } => {
+                "Использование FULL OUTER JOIN значительно снижает производительность запроса. \
+                 Рассмотрите возможность переписать с использованием UNION и LEFT JOIN"
+                    .to_string()
+            }
+            Self::JoinWithSubQuery { .. } => "Не используйте соединение с подзапросами. \
+                 Соединения с подзапросами вызывают серьезные проблемы с производительностью"
+                .to_string(),
+            Self::AliasWithoutAsKeyword { field_name, .. } => {
+                if let Some(name) = field_name {
+                    format!("Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК", name)
+                } else {
+                    "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string()
+                }
+            }
         }
     }
 
@@ -191,6 +232,9 @@ impl SdblDiagnostic {
             Self::InvalidArgumentCount { range, .. } => *range,
             Self::AliasRequired { range, .. } => *range,
             Self::DuplicateAlias { range, .. } => *range,
+            Self::FullOuterJoin { range, .. } => *range,
+            Self::JoinWithSubQuery { range, .. } => *range,
+            Self::AliasWithoutAsKeyword { range, .. } => *range,
         }
     }
 
@@ -210,6 +254,9 @@ impl SdblDiagnostic {
             Self::VirtualTableCallWithoutParameters { .. } => false,
             Self::AliasRequired { .. } => false,
             Self::DuplicateAlias { .. } => false,
+            Self::FullOuterJoin { .. } => false,
+            Self::JoinWithSubQuery { .. } => false,
+            Self::AliasWithoutAsKeyword { .. } => false,
         }
     }
 }

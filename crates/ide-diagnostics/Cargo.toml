@@ -12,6 +12,7 @@ hir.workspace = true
 hir-def.workspace = true
 parser.workspace = true
 syntax.workspace = true
+sdbl-hir.workspace = true
 rustc-hash.workspace = true
 vfs.workspace = true
 stdx.workspace = true
