@@ -713,6 +713,7 @@ dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
  "salsa",
+ "sdbl-hir",
  "syntax",
  "tracing",
  "vfs",
@@ -1358,6 +1359,20 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sdbl-hir"
+version = "0.1.0"
+dependencies = [
+ "bsl-metadata",
+ "expect-test",
+ "parser",
+ "rustc-hash 2.1.1",
+ "smol_str",
+ "syntax",
+ "text-size",
+ "tracing",
+]
 
 [[package]]
 name = "serde"

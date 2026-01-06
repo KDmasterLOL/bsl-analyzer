@@ -22,6 +22,11 @@ pub use hir_def;
 pub use syntax::TextRange;
 pub use vfs;
 
+/// Type alias for SDBL HIR entries in a file.
+///
+/// Maps ExprId (from BSL HIR) to the corresponding SDBL HIR.
+pub type SdblHirEntries = Arc<Vec<(hir_def::ExprId, Arc<sdbl_hir::SdblHir>)>>;
+
 pub mod metadata;
 
 /// Symbol kind (procedure, function, variable, etc).
@@ -53,6 +58,29 @@ pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::M
         &self,
         file_id: FileId,
     ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>;
+
+    /// Get SDBL HIR for all queries in a file.
+    ///
+    /// Performs semantic analysis:
+    /// - Type inference from metadata
+    /// - Name resolution (tables, fields, aliases)
+    /// - Semantic diagnostics collection
+    ///
+    /// ## Usage
+    /// ```ignore
+    /// let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+    /// for (expr_id, sdbl_hir) in sdbl_hirs.iter() {
+    ///     // Check semantic diagnostics
+    ///     for diag in &sdbl_hir.diagnostics {
+    ///         println!("{}", diag.message());
+    ///     }
+    ///     // Access typed fields
+    ///     for field in &sdbl_hir.select.fields {
+    ///         println!("Field type: {:?}", field.ty);
+    ///     }
+    /// }
+    /// ```
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries;
 }
 
 /// Default implementation of RootDatabase with Salsa integration.
@@ -77,6 +105,7 @@ pub struct RootDatabaseImpl {
     module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
     module_metadata_cache:
         Arc<DashMap<ModuleId, Arc<hir_def::ModuleMetadata>, BuildHasherDefault<FxHasher>>>,
+    sdbl_hir_cache: Arc<DashMap<FileId, SdblHirEntries, BuildHasherDefault<FxHasher>>>,
 }
 
 impl Default for RootDatabaseImpl {
@@ -98,6 +127,7 @@ impl RootDatabaseImpl {
             infer_types_cache: Arc::new(DashMap::default()),
             module_bodies_cache: Arc::new(DashMap::default()),
             module_metadata_cache: Arc::new(DashMap::default()),
+            sdbl_hir_cache: Arc::new(DashMap::default()),
         }
     }
 
@@ -155,6 +185,8 @@ impl RootDatabaseImpl {
     /// Note: This is temporary. Will be automatic when we migrate to Salsa tracked queries.
     fn invalidate_file(&self, file_id: FileId) {
         self.item_tree_cache.remove(&file_id);
+        self.region_tree_cache.remove(&file_id);
+        self.sdbl_hir_cache.remove(&file_id);
         let module_id = ModuleId::new(file_id);
         self.module_data_cache.remove(&module_id);
         self.symbol_tree_cache.remove(&module_id);
@@ -471,6 +503,45 @@ impl RootDatabase for RootDatabaseImpl {
 
         tracing::debug!(count = result.len(), "Collected SDBL from HIR");
         Arc::new(result)
+    }
+
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries {
+        // Check cache first
+        if let Some(cached) = self.sdbl_hir_cache.get(&file_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("sdbl_hir_in_file", ?file_id).entered();
+
+        // Get SDBL queries from BSL HIR
+        let sdbl_queries = self.all_sdbl_in_file(file_id);
+
+        // Try to load configuration for metadata-based type inference
+        let configuration = self.get_file_path(file_id).and_then(|file_path| {
+            self.find_configuration_root(&file_path).map(|config_root| {
+                let config_path_str = config_root.to_string_lossy().to_string();
+                let path_input = metadata::ConfigurationPathInput::new(self, config_path_str);
+                metadata::load_configuration(self, path_input)
+            })
+        });
+
+        // Lower each SDBL query to HIR
+        let config_ref = configuration.as_deref();
+        let mut result = Vec::with_capacity(sdbl_queries.len());
+        for (expr_id, query_info) in sdbl_queries.iter() {
+            // Only lower if we have a parsed AST
+            if let Some(ref sdbl_ast) = query_info.query_ast {
+                let sdbl_hir = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+                result.push((*expr_id, Arc::new(sdbl_hir)));
+            }
+        }
+
+        tracing::debug!(count = result.len(), "Lowered SDBL to HIR");
+        let result = Arc::new(result);
+
+        // Cache the result
+        self.sdbl_hir_cache.insert(file_id, result.clone());
+        result
     }
 }
 
@@ -1153,5 +1224,137 @@ mod tests {
         let _metadata2 = db.module_metadata(module_id);
 
         // Test passes if we can call metadata again after invalidation
+    }
+
+    // ========== SDBL HIR Tests ==========
+
+    #[test]
+    fn test_sdbl_hir_in_file_basic() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        // Should extract and lower query to HIR
+        let hirs = db.sdbl_hir_in_file(file_id);
+        assert_eq!(hirs.len(), 1, "Should have 1 SDBL HIR");
+
+        // Verify HIR structure
+        let (_, sdbl_hir) = &hirs[0];
+        assert!(!sdbl_hir.from.is_empty(), "Should have FROM clause");
+        assert_eq!(sdbl_hir.from[0].full_name, "Справочник.Товары");
+    }
+
+    #[test]
+    fn test_sdbl_hir_in_file_multiple_queries() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with multiple SDBL queries
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос1 = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+    Запрос2 = "ВЫБРАТЬ Номер ИЗ Документ.РасходнаяНакладная";
+КонецПроцедуры"#,
+        );
+
+        // Should extract and lower both queries
+        let hirs = db.sdbl_hir_in_file(file_id);
+        assert_eq!(hirs.len(), 2, "Should have 2 SDBL HIRs");
+
+        // Verify first query
+        assert_eq!(hirs[0].1.from[0].full_name, "Справочник.Товары");
+
+        // Verify second query
+        assert_eq!(hirs[1].1.from[0].full_name, "Документ.РасходнаяНакладная");
+    }
+
+    #[test]
+    fn test_sdbl_hir_in_file_caching() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        // First call
+        let hirs1 = db.sdbl_hir_in_file(file_id);
+
+        // Second call should return cached result
+        let hirs2 = db.sdbl_hir_in_file(file_id);
+
+        // Verify same Arc (cached)
+        assert!(Arc::ptr_eq(&hirs1, &hirs2), "Should return cached result");
+    }
+
+    #[test]
+    fn test_sdbl_hir_in_file_invalidation() {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Initial query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+        let hirs1 = db.sdbl_hir_in_file(file_id);
+        assert_eq!(hirs1[0].1.from[0].full_name, "Справочник.Товары");
+
+        // Change query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Номер ИЗ Документ.Продажа";
+КонецПроцедуры"#,
+        );
+        let hirs2 = db.sdbl_hir_in_file(file_id);
+
+        // Should NOT be same Arc (invalidated)
+        assert!(!Arc::ptr_eq(&hirs1, &hirs2), "Should invalidate cache on file change");
+
+        // Should have new content
+        assert_eq!(hirs2[0].1.from[0].full_name, "Документ.Продажа");
     }
 }
