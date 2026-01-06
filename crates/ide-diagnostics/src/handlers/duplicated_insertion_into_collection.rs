@@ -42,8 +42,8 @@ use hir_def::hir::{Expr, ExprId, Literal, Stmt, StmtId};
 use hir_def::Name;
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
+use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
-use unicase::UniCase;
 
 /// Check a HIR body for duplicated insertions.
 ///
@@ -86,24 +86,26 @@ pub fn check_body(
 ///
 /// This replaces the regex-based text normalization with proper structural comparison.
 /// Expressions are normalized by incorporating variable generations into Path references.
+/// Uses SmolStr for efficient storage (inline for ≤22 bytes, Arc for longer strings).
+/// Names are stored in lowercase for case-insensitive comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum NormalizedExpr {
     /// Literal value (string, number, etc.)
     Literal(NormalizedLiteral),
-    /// Variable reference with generation number
-    Path { name: UniCase<String>, generation: usize },
-    /// Field access: base.field
-    Field { base: Box<NormalizedExpr>, field: UniCase<String> },
-    /// Method call: receiver.method(args)
-    MethodCall { receiver: Box<NormalizedExpr>, method: UniCase<String>, args: Vec<NormalizedExpr> },
+    /// Variable reference with generation number (name stored lowercase)
+    Path { name: SmolStr, generation: usize },
+    /// Field access: base.field (field stored lowercase)
+    Field { base: Box<NormalizedExpr>, field: SmolStr },
+    /// Method call: receiver.method(args) (method stored lowercase)
+    MethodCall { receiver: Box<NormalizedExpr>, method: SmolStr, args: Vec<NormalizedExpr> },
     /// Function call: func(args)
     Call { callee: Box<NormalizedExpr>, args: Vec<NormalizedExpr> },
     /// Index access: base[index]
     Index { base: Box<NormalizedExpr>, index: Box<NormalizedExpr> },
     /// Binary operation: lhs op rhs
-    BinaryOp { lhs: Box<NormalizedExpr>, rhs: Box<NormalizedExpr>, op: String },
-    /// New expression: Новый Type(args)
-    New { type_name: Option<UniCase<String>>, args: Vec<NormalizedExpr> },
+    BinaryOp { lhs: Box<NormalizedExpr>, rhs: Box<NormalizedExpr>, op: SmolStr },
+    /// New expression: Новый Type(args) (type_name stored lowercase)
+    New { type_name: Option<SmolStr>, args: Vec<NormalizedExpr> },
     /// Missing or unknown expression
     Missing,
 }
@@ -178,10 +180,10 @@ fn is_insertion_method(name: &Name, allow_add: bool) -> bool {
 struct Insertion {
     /// Range of the insertion call in source code
     range: TextRange,
-    /// Display string for collection
-    collection_display: String,
-    /// Display string for arguments
-    args_display: String,
+    /// Receiver expression ID (for lazy display string generation)
+    receiver: ExprId,
+    /// Argument expression IDs (for lazy display string generation)
+    args: Vec<ExprId>,
     /// Scope depth where insertion occurred
     scope_depth: usize,
     /// Breaker context (return/raise offset) before this insertion
@@ -203,9 +205,10 @@ struct InsertionKey {
 ///
 /// Tracks how many times each variable has been assigned.
 /// Used to distinguish between different "versions" of a variable.
+/// Uses SmolStr with lowercase keys for case-insensitive matching.
 struct VariableGenerations {
-    /// Variable name (lowercase) → generation count
-    generations: FxHashMap<UniCase<String>, usize>,
+    /// Variable name (lowercase SmolStr) → generation count
+    generations: FxHashMap<SmolStr, usize>,
 }
 
 impl VariableGenerations {
@@ -215,7 +218,7 @@ impl VariableGenerations {
 
     /// Get generation for a variable (0 if never assigned).
     fn get(&self, name: &str) -> usize {
-        let key = UniCase::new(name.to_string());
+        let key: SmolStr = name.to_lowercase().into();
 
         // Get direct generation
         let direct_gen = self.generations.get(&key).copied().unwrap_or(0);
@@ -226,8 +229,8 @@ impl VariableGenerations {
         let mut max_gen = direct_gen;
 
         for i in 1..parts.len() {
-            let prefix = parts[..i].join(".");
-            if let Some(&gen) = self.generations.get(&UniCase::new(prefix)) {
+            let prefix: SmolStr = parts[..i].join(".").to_lowercase().into();
+            if let Some(&gen) = self.generations.get(&prefix) {
                 max_gen = max_gen.max(gen);
             }
         }
@@ -237,14 +240,14 @@ impl VariableGenerations {
 
     /// Increment generation for a variable after assignment.
     fn increment(&mut self, name: &str) {
-        let key = UniCase::new(name.to_string());
+        let key: SmolStr = name.to_lowercase().into();
         *self.generations.entry(key).or_insert(0) += 1;
 
         // Partial reassignment: X.Y.Z changes invalidate X.Y and X
         let parts: Vec<&str> = name.split('.').collect();
         for i in (1..parts.len()).rev() {
-            let prefix = parts[..i].join(".");
-            *self.generations.entry(UniCase::new(prefix)).or_insert(0) += 1;
+            let prefix: SmolStr = parts[..i].join(".").to_lowercase().into();
+            *self.generations.entry(prefix).or_insert(0) += 1;
         }
     }
 }
@@ -272,6 +275,7 @@ impl<'a> InsertionTracker<'a> {
     }
 
     /// Normalize an expression for comparison.
+    /// Names are converted to lowercase for case-insensitive comparison.
     fn normalize_expr(&self, expr_id: ExprId) -> NormalizedExpr {
         match self.body.expr(expr_id) {
             Expr::Missing => NormalizedExpr::Missing,
@@ -290,12 +294,13 @@ impl<'a> InsertionTracker<'a> {
 
             Expr::Path(name) => {
                 let name_str = name.as_str();
+                let name_lower: SmolStr = name_str.to_lowercase().into();
                 // Check if it's a BSL keyword/literal that doesn't need generation tracking
                 if is_bsl_keyword_or_literal(name_str) {
-                    NormalizedExpr::Path { name: UniCase::new(name_str.to_string()), generation: 0 }
+                    NormalizedExpr::Path { name: name_lower, generation: 0 }
                 } else {
                     NormalizedExpr::Path {
-                        name: UniCase::new(name_str.to_string()),
+                        name: name_lower,
                         generation: self.generations.get(name_str),
                     }
                 }
@@ -303,12 +308,12 @@ impl<'a> InsertionTracker<'a> {
 
             Expr::Field { base, field } => NormalizedExpr::Field {
                 base: Box::new(self.normalize_expr(*base)),
-                field: UniCase::new(field.to_string()),
+                field: field.as_str().to_lowercase().into(),
             },
 
             Expr::MethodCall { receiver, method, args } => NormalizedExpr::MethodCall {
                 receiver: Box::new(self.normalize_expr(*receiver)),
-                method: UniCase::new(method.to_string()),
+                method: method.as_str().to_lowercase().into(),
                 args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
             },
 
@@ -317,7 +322,7 @@ impl<'a> InsertionTracker<'a> {
                 if let Expr::Field { base, field } = self.body.expr(*callee) {
                     NormalizedExpr::MethodCall {
                         receiver: Box::new(self.normalize_expr(*base)),
-                        method: UniCase::new(field.to_string()),
+                        method: field.as_str().to_lowercase().into(),
                         args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
                     }
                 } else {
@@ -336,11 +341,11 @@ impl<'a> InsertionTracker<'a> {
             Expr::BinaryOp { lhs, rhs, op } => NormalizedExpr::BinaryOp {
                 lhs: Box::new(self.normalize_expr(*lhs)),
                 rhs: Box::new(self.normalize_expr(*rhs)),
-                op: format!("{:?}", op),
+                op: format!("{:?}", op).into(),
             },
 
             Expr::New { type_name, args } => NormalizedExpr::New {
-                type_name: type_name.as_ref().map(|n| UniCase::new(n.to_string())),
+                type_name: type_name.as_ref().map(|n| n.as_str().to_lowercase().into()),
                 args: args.iter().map(|a| self.normalize_expr(*a)).collect(),
             },
 
@@ -391,7 +396,6 @@ impl<'a> InsertionTracker<'a> {
     /// Record an insertion into a collection.
     fn record_insertion(
         &mut self,
-        _source_map: &BodySourceMap,
         receiver: ExprId,
         args: &[ExprId],
         call_range: TextRange,
@@ -411,17 +415,13 @@ impl<'a> InsertionTracker<'a> {
 
         let key = InsertionKey { collection, first_arg };
 
-        let collection_display = self.expr_to_display_string(receiver);
-        let args_display =
-            args.iter().map(|a| self.expr_to_display_string(*a)).collect::<Vec<_>>().join(", ");
-
         let breaker_context = self.last_breaker.map(|(offset, _)| offset);
         let local_breaker_context = self.last_local_breaker.map(|(offset, _)| offset);
 
         let insertion = Insertion {
             range: call_range,
-            collection_display,
-            args_display,
+            receiver,
+            args: args.to_vec(),
             scope_depth,
             breaker_context,
             local_breaker_context,
@@ -493,12 +493,21 @@ impl<'a> InsertionTracker<'a> {
                     if group.len() > 1 {
                         // Report only SECOND insertion (Java compatibility)
                         if let Some(second_insertion) = group.get(1) {
+                            // Generate display strings only when actually reporting
+                            let collection_display =
+                                self.expr_to_display_string(second_insertion.receiver);
+                            let args_display = second_insertion
+                                .args
+                                .iter()
+                                .map(|a| self.expr_to_display_string(*a))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+
                             diagnostics.push(Diagnostic {
                                 code: DiagnosticCode::DuplicatedInsertionIntoCollection,
                                 message: format!(
                                     "Проверьте повторную вставку {} в коллекцию {}",
-                                    second_insertion.args_display,
-                                    second_insertion.collection_display
+                                    args_display, collection_display
                                 ),
                                 severity: Severity::Warning,
                                 range: second_insertion.range,
@@ -752,7 +761,7 @@ fn check_expr_for_insertion(
         Expr::MethodCall { receiver, method, args } => {
             if is_insertion_method(method, allow_add) && !args.is_empty() {
                 if let Some(range) = source_map.expr_range(expr_id) {
-                    tracker.record_insertion(source_map, *receiver, args, range, scope_depth);
+                    tracker.record_insertion(*receiver, args, range, scope_depth);
                 }
             }
         }
@@ -761,7 +770,7 @@ fn check_expr_for_insertion(
             if let Expr::Field { base, field } = body.expr(*callee) {
                 if is_insertion_method(field, allow_add) && !args.is_empty() {
                     if let Some(range) = source_map.expr_range(expr_id) {
-                        tracker.record_insertion(source_map, *base, args, range, scope_depth);
+                        tracker.record_insertion(*base, args, range, scope_depth);
                     }
                 }
             }
