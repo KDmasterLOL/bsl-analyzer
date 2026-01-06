@@ -78,14 +78,13 @@
 //! - **Minutes to fix:** 15
 //!
 //! ## Implementation
-//! Ported from:
-//! - cognitive_complexity.rs (bsl-language-server-rust) - PRIMARY REFERENCE
-//! - CognitiveComplexityComputer.java (bsl-language-server) - COMPATIBILITY TARGET
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
+//! Uses HIR-based complexity calculation for:
+//! - Better performance (Salsa caching)
+//! - Cleaner code (structured HIR vs raw AST)
+//! - Reusability (same calculation for code lens)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use ide_db::hir_def::{self, item_tree::ModItem, ModuleId};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -107,50 +106,77 @@ impl Config {
 ///
 /// Detects functions and procedures with cognitive complexity exceeding the threshold.
 /// Default threshold is 15 (configurable via complexityThreshold parameter).
+///
+/// Uses HIR-based complexity calculation for better performance and reusability.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CognitiveComplexity) {
         return Vec::new();
     }
 
     let config = Config::from_context(ctx);
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
+    let module_id = ModuleId::new(ctx.file_id);
+
+    // Get ItemTree for method metadata (names, ranges)
+    let item_tree = ctx.db.item_tree(ctx.file_id);
+
+    // Get ModuleBodies for HIR-based complexity calculation
+    let module_bodies = ctx.db.module_bodies(module_id);
 
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
-        if matches!(node.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF) {
-            if let Some(body) = node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
-                let complexity = calculate_complexity(&body);
+    // Iterate over all methods in the module
+    for (idx, item) in item_tree.top_level_items().iter().enumerate() {
+        let local_id = idx as u32;
 
-                if complexity > config.complexity_threshold {
-                    let name_token = get_method_name(&node);
-                    let name_range = name_token
-                        .as_ref()
-                        .map(|t| t.text_range())
-                        .unwrap_or_else(|| node.text_range());
+        match item {
+            ModItem::Procedure(proc_idx) => {
+                let proc = item_tree.procedure(*proc_idx);
 
-                    let kind_name = if node.kind() == SyntaxKind::FUNCTION_DEF {
-                        "Функция"
-                    } else {
-                        "Процедура"
-                    };
+                // Get HIR body and calculate complexity
+                if let Some(body) = module_bodies.body(local_id) {
+                    let complexity = hir_def::cognitive_complexity::calculate_complexity(body);
 
-                    let name = name_token.as_ref().map(|t| t.text()).unwrap_or("Unknown");
-
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CognitiveComplexity,
-                        message: format!(
-                            "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
-                             Упростите логику или уменьшите вложенность",
-                            kind_name, name, complexity, config.complexity_threshold
-                        ),
-                        severity: Severity::Warning,
-                        range: name_range,
-                        tags: vec![],
-                        fixes: vec![],
-                    });
+                    if complexity > config.complexity_threshold {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::CognitiveComplexity,
+                            message: format!(
+                                "Процедура '{}' имеет когнитивную сложность {} (максимум: {}). \
+                                 Упростите логику или уменьшите вложенность",
+                                proc.name, complexity, config.complexity_threshold
+                            ),
+                            severity: Severity::Warning,
+                            range: proc.name_range,
+                            tags: vec![],
+                            fixes: vec![],
+                        });
+                    }
                 }
+            }
+            ModItem::Function(func_idx) => {
+                let func = item_tree.function(*func_idx);
+
+                // Get HIR body and calculate complexity
+                if let Some(body) = module_bodies.body(local_id) {
+                    let complexity = hir_def::cognitive_complexity::calculate_complexity(body);
+
+                    if complexity > config.complexity_threshold {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::CognitiveComplexity,
+                            message: format!(
+                                "Функция '{}' имеет когнитивную сложность {} (максимум: {}). \
+                                 Упростите логику или уменьшите вложенность",
+                                func.name, complexity, config.complexity_threshold
+                            ),
+                            severity: Severity::Warning,
+                            range: func.name_range,
+                            tags: vec![],
+                            fixes: vec![],
+                        });
+                    }
+                }
+            }
+            ModItem::Variable(_) => {
+                // Variables don't have cognitive complexity
             }
         }
     }
@@ -158,99 +184,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Calculate cognitive complexity for a syntax node (function/procedure body).
+/// Calculate cognitive complexity for a method body (HIR-based).
 ///
 /// This is a PUBLIC function that can be reused for:
 /// - Code lenses (showing complexity in editor)
 /// - Metrics collection
 /// - Other diagnostics
 ///
-/// # Algorithm (SonarSource Cognitive Complexity v1.4)
-/// - Structural increment: +1 + nesting (if, while, for, foreach, except, ternary)
-/// - Hybrid increment: +1 and increase nesting (elsif, else)
-/// - Fundamental increment: +1 only (AND/OR, goto, recursion)
-pub fn calculate_complexity(body: &SyntaxNode) -> u32 {
-    let mut complexity = 0;
-    count_complexity_recursive(body, &mut complexity, 0);
-    complexity
-}
-
-fn count_complexity_recursive(node: &SyntaxNode, complexity: &mut u32, nesting_level: u32) {
-    let mut local_nesting = nesting_level;
-    let mut adds_nesting = false;
-
-    match node.kind() {
-        // Structural increment: +1 + nesting
-        SyntaxKind::IF_STMT => {
-            *complexity += 1 + nesting_level;
-            adds_nesting = true;
-        }
-        SyntaxKind::WHILE_STMT | SyntaxKind::FOR_STMT | SyntaxKind::FOR_EACH_STMT => {
-            *complexity += 1 + nesting_level;
-            adds_nesting = true;
-        }
-        SyntaxKind::EXCEPT_CLAUSE => {
-            *complexity += 1 + nesting_level;
-            adds_nesting = true;
-        }
-        SyntaxKind::TERNARY_EXPR => {
-            *complexity += 1 + nesting_level;
-            adds_nesting = true;
-        }
-
-        // Hybrid increment: +1 and increase nesting
-        SyntaxKind::ELSIF_CLAUSE | SyntaxKind::ELSE_CLAUSE => {
-            *complexity += 1;
-            adds_nesting = true;
-        }
-
-        // Fundamental increment: +1 only
-        SyntaxKind::GOTO_STMT => {
-            *complexity += 1;
-        }
-
-        // Binary expressions: AND/OR operators
-        SyntaxKind::BINARY_EXPR => {
-            if is_logical_binary_expr(node) {
-                *complexity += 1;
-            }
-        }
-
-        _ => {}
-    }
-
-    // Increase nesting for children
-    if adds_nesting {
-        local_nesting += 1;
-    }
-
-    // Recursively traverse children with updated nesting
-    for child in node.children() {
-        count_complexity_recursive(&child, complexity, local_nesting);
-    }
-}
-
-/// Check if binary expression is logical AND/OR (not comparison operators).
-///
-/// Returns true only for:
-/// - `И` / `AND` (SyntaxKind::KW_AND)
-/// - `ИЛИ` / `OR` (SyntaxKind::KW_OR)
-///
-/// Returns false for comparison operators like `=`, `<>`, `<`, `>`, etc.
-fn is_logical_binary_expr(node: &SyntaxNode) -> bool {
-    node.children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .any(|tok| matches!(tok.kind(), SyntaxKind::KW_AND | SyntaxKind::KW_OR))
-}
-
-/// Extract the method name token from a FUNCTION_DEF or PROCEDURE_DEF node.
-///
-/// Returns the first IDENT token (before PARAM_LIST), which is the method name.
-fn get_method_name(node: &SyntaxNode) -> Option<SyntaxToken> {
-    node.children_with_tokens()
-        .take_while(|el| el.as_node().map(|n| n.kind() != SyntaxKind::PARAM_LIST).unwrap_or(true))
-        .filter_map(|el| el.into_token())
-        .find(|tok| tok.kind() == SyntaxKind::IDENT)
+/// Uses the HIR-based implementation from `hir_def::cognitive_complexity`.
+pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
+    hir_def::cognitive_complexity::calculate_complexity(body)
 }
 
 #[cfg(test)]
@@ -258,7 +201,8 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::vfs::{FileSet, VfsPath};
     use ide_db::{RootDatabase, RootDatabaseImpl};
     use std::rc::Rc;
     use test_fixture::Fixture;
@@ -269,6 +213,14 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for module_bodies to work
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
         let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
@@ -277,6 +229,7 @@ mod tests {
             }
         }
 
+        #[allow(clippy::arc_with_non_send_sync)]
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let config = DiagnosticsConfig::default();
         let ctx = DiagnosticsContext {
@@ -378,10 +331,19 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for module_bodies to work
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
         }
 
+        #[allow(clippy::arc_with_non_send_sync)]
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let mut config = DiagnosticsConfig::default();
         let mut params = serde_json::Map::new();
@@ -435,33 +397,33 @@ mod tests {
 
     #[test]
     fn test_calculate_complexity_directly() {
-        // Test direct complexity calculation for verification
+        // Test direct complexity calculation using HIR
         let code = include_str!("../../test_data/CognitiveComplexityDiagnostic.bsl");
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for module_bodies to work
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
         }
 
+        #[allow(clippy::arc_with_non_send_sync)]
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let parse = db.parse(file_id);
-        let root = parse.syntax_node();
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = db.module_bodies(module_id);
 
-        // Find the first function (СерверныйМодульМенеджера)
-        let function = root
-            .descendants()
-            .find(|n| n.kind() == SyntaxKind::FUNCTION_DEF)
-            .expect("Should find function");
-
-        let body = function
-            .children()
-            .find(|n| n.kind() == SyntaxKind::STMT_LIST)
-            .expect("Function should have body");
-
-        let complexity = calculate_complexity(&body);
+        // Get the first method body (СерверныйМодульМенеджера)
+        let body = module_bodies.body(0).expect("Should have first method body");
+        let complexity = calculate_complexity(body);
 
         // The function СерверныйМодульМенеджера has 82 cognitive complexity
         // This matches the Java implementation and Rust reference

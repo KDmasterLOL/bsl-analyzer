@@ -122,6 +122,8 @@ pub struct Procedure {
     pub annotations: Box<[Annotation]>,
     /// Source location for mapping back to AST.
     pub source_range: TextRange,
+    /// Source location of the procedure name (for diagnostics).
+    pub name_range: TextRange,
 }
 
 /// Function definition.
@@ -136,6 +138,8 @@ pub struct Function {
     pub annotations: Box<[Annotation]>,
     /// Source location for mapping back to AST.
     pub source_range: TextRange,
+    /// Source location of the function name (for diagnostics).
+    pub name_range: TextRange,
 }
 
 /// Module-level variable.
@@ -200,6 +204,7 @@ mod tests {
             params: Box::new([]),
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
+            name_range: TextRange::new(0.into(), 10.into()),
         };
 
         assert_eq!(proc.name.as_str(), "ТестоваяПроцедура");
@@ -218,6 +223,7 @@ mod tests {
             ]),
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
+            name_range: TextRange::new(0.into(), 10.into()),
         };
 
         assert_eq!(func.params.len(), 2);
@@ -245,6 +251,7 @@ mod tests {
             params: Box::new([]),
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
+            name_range: TextRange::new(0.into(), 10.into()),
         });
 
         tree.top_level.push(ModItem::Procedure(proc_idx));

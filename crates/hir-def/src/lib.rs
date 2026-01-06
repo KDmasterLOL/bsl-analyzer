@@ -23,6 +23,7 @@
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
+pub mod cognitive_complexity;
 pub mod hir;
 pub mod item_tree;
 pub mod name;

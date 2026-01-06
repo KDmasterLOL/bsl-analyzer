@@ -84,7 +84,12 @@ impl Ctx {
 
     /// Lower a procedure definition.
     fn lower_procedure(&mut self, proc: &ast::ProcedureDef) {
-        let name = proc.name().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_token = proc.name();
+        let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_range = name_token
+            .as_ref()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| proc.syntax().text_range());
 
         let is_export = proc.export_keyword().is_some();
         let params = self.lower_params(proc.param_list());
@@ -99,6 +104,7 @@ impl Ctx {
             params,
             annotations,
             source_range,
+            name_range,
         });
 
         self.tree.top_level.push(ModItem::Procedure(idx));
@@ -106,7 +112,12 @@ impl Ctx {
 
     /// Lower a function definition.
     fn lower_function(&mut self, func: &ast::FunctionDef) {
-        let name = func.name().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_token = func.name();
+        let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_range = name_token
+            .as_ref()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| func.syntax().text_range());
 
         let is_export = func.export_keyword().is_some();
         let params = self.lower_params(func.param_list());
@@ -121,6 +132,7 @@ impl Ctx {
             params,
             annotations,
             source_range,
+            name_range,
         });
 
         self.tree.top_level.push(ModItem::Function(idx));
