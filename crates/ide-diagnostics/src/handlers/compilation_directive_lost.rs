@@ -31,6 +31,7 @@
 //!
 //! ## Implementation
 //!
+//! Uses HIR ItemTree for efficient cached access to method annotations.
 //! Ported from:
 //! - CompilationDirectiveLostDiagnostic.java (bsl-language-server) - PRIMARY
 //! - compilation_directive_lost.rs (bsl-language-server-rust) - REFERENCE
@@ -38,98 +39,137 @@
 //! Only applies to FormModule and CommandModule (not CommonModule).
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::ast::{AstNode, FunctionDef, ProcedureDef};
-use syntax::SyntaxNode;
+use hir_def::ModuleId;
+use syntax::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CompilationDirectiveLost) {
         return Vec::new();
     }
 
-    if !is_form_or_command_module(ctx) {
+    // Get module metadata via HIR (cached by Salsa)
+    let module_id = ModuleId::new(ctx.file_id);
+    let metadata = ctx.db.module_metadata(module_id);
+
+    // Only check FormModule and CommandModule
+    if !matches!(
+        metadata.module_type,
+        bsl_metadata::ModuleType::FormModule | bsl_metadata::ModuleType::CommandModule
+    ) {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    find_methods_without_directives(&root)
-}
-
-fn is_form_or_command_module(ctx: &DiagnosticsContext) -> bool {
-    let file_path = match ctx.file_path() {
-        Some(path) => path,
-        None => return false,
-    };
-
-    matches!(
-        ide_db::metadata::get_module_type_from_uri(&file_path),
-        Some(bsl_metadata::ModuleType::FormModule) | Some(bsl_metadata::ModuleType::CommandModule)
-    )
-}
-
-fn find_methods_without_directives(root: &SyntaxNode) -> Vec<Diagnostic> {
+    // Get ItemTree (cached by Salsa)
+    let item_tree = ctx.db.item_tree(ctx.file_id);
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
-        if let Some(procedure) = ProcedureDef::cast(node.clone()) {
-            if procedure.annotations().next().is_none() {
-                if let Some(name_token) = procedure.name() {
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CompilationDirectiveLost,
-                        message: format!(
-                            "Пропущена директива компиляции для '{}'. \
-                             В модулях форм и команд требуется указывать \
-                             &НаСервере, &НаКлиенте и т.д.",
-                            name_token.text()
-                        ),
-                        severity: Severity::Warning,
-                        range: name_token.text_range(),
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
+    // Check procedures without compilation directives
+    for (_, proc) in item_tree.procedures() {
+        if proc.annotations.is_empty() {
+            diagnostics.push(make_diagnostic(&proc.name, proc.name_range));
         }
+    }
 
-        if let Some(function) = FunctionDef::cast(node.clone()) {
-            if function.annotations().next().is_none() {
-                if let Some(name_token) = function.name() {
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CompilationDirectiveLost,
-                        message: format!(
-                            "Пропущена директива компиляции для '{}'. \
-                             В модулях форм и команд требуется указывать \
-                             &НаСервере, &НаКлиенте и т.д.",
-                            name_token.text()
-                        ),
-                        severity: Severity::Warning,
-                        range: name_token.text_range(),
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
+    // Check functions without compilation directives
+    for (_, func) in item_tree.functions() {
+        if func.annotations.is_empty() {
+            diagnostics.push(make_diagnostic(&func.name, func.name_range));
         }
     }
 
     diagnostics
 }
 
+fn make_diagnostic(name: &hir_def::Name, range: TextRange) -> Diagnostic {
+    Diagnostic {
+        code: DiagnosticCode::CompilationDirectiveLost,
+        message: format!(
+            "Пропущена директива компиляции для '{}'. \
+             В модулях форм и команд требуется указывать \
+             &НаСервере, &НаКлиенте и т.д.",
+            name
+        ),
+        severity: Severity::Warning,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::assert_diagnostic_range;
+    use crate::DiagnosticsConfig;
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use std::rc::Rc;
+    use vfs::{FileId, FileSet, VfsPath};
 
-    fn check_without_module_type(code: &str) -> Vec<Diagnostic> {
-        let parse = parser::parse(code);
-        let root = parse.syntax_node();
-        find_methods_without_directives(&root)
+    /// Helper to check diagnostics for code in a FormModule context.
+    fn check_as_form_module(code: &str) -> Vec<Diagnostic> {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId::from_raw(1);
+
+        // Set up file with FormModule path pattern
+        // Pattern: <TypePlural>/<Name>/Forms/<Form>/Ext/Form/Module.bsl
+        let mut file_set = FileSet::default();
+        file_set.insert(
+            file_id,
+            VfsPath::new("Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl"),
+        );
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, code);
+
+        let config = Rc::new(DiagnosticsConfig::default());
+        let ctx = crate::DiagnosticsContext {
+            db: &db,
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        check(&ctx)
+    }
+
+    /// Helper to check that regular modules don't trigger diagnostics.
+    fn check_as_regular_module(code: &str) -> Vec<Diagnostic> {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId::from_raw(1);
+
+        // Set up file with regular path (not FormModule or CommandModule)
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, code);
+
+        let config = Rc::new(DiagnosticsConfig::default());
+        let ctx = crate::DiagnosticsContext {
+            db: &db,
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        check(&ctx)
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CompilationDirectiveLostDiagnostic.bsl");
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
 
         assert_eq!(diagnostics.len(), 1, "Should find exactly 1 diagnostic");
 
@@ -141,14 +181,14 @@ mod tests {
     #[test]
     fn test_with_directive() {
         let code = "&НаСервере\nПроцедура А()\nКонецПроцедуры";
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
         assert_eq!(diagnostics.len(), 0, "Should not report methods with directives");
     }
 
     #[test]
     fn test_without_directive() {
         let code = "Процедура БезДирективы()\nКонецПроцедуры";
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
         assert_eq!(diagnostics.len(), 1, "Should report methods without directives");
     }
 
@@ -166,7 +206,7 @@ mod tests {
 Функция СОшибкой()
 КонецФункции
 "#;
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
         assert_eq!(diagnostics.len(), 1, "Should report only methods without directives");
     }
 
@@ -180,7 +220,7 @@ EndProcedure
 Function MissingDirective()
 EndFunction
 "#;
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
         assert_eq!(diagnostics.len(), 1, "Should work with English keywords");
     }
 
@@ -200,7 +240,15 @@ EndFunction
 Процедура Четвёртая()
 КонецПроцедуры
 "#;
-        let diagnostics = check_without_module_type(code);
+        let diagnostics = check_as_form_module(code);
         assert_eq!(diagnostics.len(), 3, "Should report all methods without directives");
+    }
+
+    #[test]
+    fn test_regular_module_not_checked() {
+        // Methods without directives in regular module should NOT trigger this diagnostic
+        let code = "Процедура БезДирективы()\nКонецПроцедуры";
+        let diagnostics = check_as_regular_module(code);
+        assert_eq!(diagnostics.len(), 0, "Regular modules should not be checked");
     }
 }
