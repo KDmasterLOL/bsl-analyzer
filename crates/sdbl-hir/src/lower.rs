@@ -114,6 +114,12 @@ impl LoweringContext<'_> {
         // 6. Lower UNION queries
         let unions = self.lower_union_clauses(&subquery);
 
+        // Collect diagnostics from UNION queries before moving them
+        let mut union_diagnostics = Vec::new();
+        for union_hir in &unions {
+            union_diagnostics.extend(union_hir.query.diagnostics.clone());
+        }
+
         let range = query.syntax().text_range();
 
         // Build HIR
@@ -130,7 +136,10 @@ impl LoweringContext<'_> {
             range,
         };
 
-        // 7. Check JOINs for unprotected fields (after complete HIR built)
+        // 7. Merge diagnostics from UNION queries
+        hir.diagnostics.extend(union_diagnostics);
+
+        // 8. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);
 
         // Merge diagnostics collected during JOIN checking

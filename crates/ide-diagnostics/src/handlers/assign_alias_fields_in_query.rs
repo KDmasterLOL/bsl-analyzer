@@ -399,6 +399,283 @@ Query = "ВЫБРАТЬ
         assert_eq!(diagnostics.len(), 1);
     }
 
+    #[test]
+    fn test_query_with_comments() {
+        // Test exact query from SDBL String Literal 0
+        let query = r#"ВЫБРАТЬ
+	Валюты.Ссылка, // Неправильно
+	Валюты.Ссылка КАК ПсевдонимПоляСсылка, // Правильно
+	Валюты.Код Код // Неправильно
+ИЗ
+	Справочник.Валюты КАК Валюты // Игнорируется
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Ссылка, // Игнорируется
+	Валюты.Ссылка, // Игнорируется
+	Валюты.Код // Игнорируется
+ИЗ
+	Справочник.Валюты КАК Валюты"#;
+
+        use sdbl_hir::lower_sdbl_to_hir;
+        use syntax::ast::{AstNode, SdblQueryPackage};
+
+        let parse = parser::parse_sdbl(query);
+        eprintln!("Parse has errors: {}", parse.has_errors());
+
+        // Print AST to see how comments are handled
+        let root = parse.syntax_node();
+        eprintln!("\n=== Checking first field ===");
+        if let Some(package) = SdblQueryPackage::cast(root.clone()) {
+            if let Some(select_query) = package.queries().next() {
+                if let Some(subquery) = select_query.subquery() {
+                    if let Some(main_query) = subquery.main_query() {
+                        if let Some(field_list) = main_query.field_list() {
+                            for (i, field) in field_list.fields().enumerate() {
+                                eprintln!("\nField {}:", i);
+                                eprintln!("  Text: {:?}", field.syntax().text());
+                                eprintln!("  Is asterisk: {}", field.is_asterisk());
+                                if let Some(expr) = field.expression() {
+                                    eprintln!("  Expression: {:?}", expr.text());
+                                } else {
+                                    eprintln!("  Expression: None");
+                                }
+                                if let Some(alias) = field.alias() {
+                                    eprintln!("  Alias: {:?}", alias.name());
+                                    eprintln!("  Has AS: {}", alias.has_as_keyword());
+                                } else {
+                                    eprintln!("  Alias: None");
+                                }
+                                // Check for errors
+                                let has_error = field
+                                    .syntax()
+                                    .descendants_with_tokens()
+                                    .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
+                                eprintln!("  Has error: {}", has_error);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let hir = lower_sdbl_to_hir(&parse, None);
+        eprintln!("\nHIR diagnostics: {}", hir.diagnostics.len());
+        for diag in &hir.diagnostics {
+            eprintln!("  - {} at {:?}", diag.message(), diag.range());
+        }
+
+        // Count only AliasWithoutAsKeyword diagnostics
+        let alias_diagnostics: Vec<_> = hir
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
+            .collect();
+
+        eprintln!("AliasWithoutAsKeyword diagnostics: {}", alias_diagnostics.len());
+
+        // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
+        // - Валюты.Ссылка without alias
+        // - Валюты.Код Код without AS keyword
+        assert_eq!(
+            alias_diagnostics.len(),
+            2,
+            "Expected 2 AliasWithoutAsKeyword diagnostics from first SELECT"
+        );
+    }
+
+    #[test]
+    fn test_simple_query_with_hir() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::{RootDatabase, RootDatabaseImpl};
+        use test_fixture::Fixture;
+        use vfs::VfsPath;
+
+        // Test simple query without comments using HIR
+        let code = r#"Процедура Тест()
+Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";
+КонецПроцедуры"#;
+
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        eprintln!("Simple query: {} HIRs", sdbl_hirs.len());
+        for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
+            eprintln!("HIR {}: {} diagnostics", i, hir.diagnostics.len());
+            for diag in &hir.diagnostics {
+                eprintln!("  - {} at {:?}", diag.message(), diag.range());
+            }
+        }
+
+        assert_eq!(sdbl_hirs.len(), 1);
+        // Should have at least 1 diagnostic (field without alias)
+        assert!(
+            !sdbl_hirs[0].1.diagnostics.is_empty(),
+            "Expected diagnostics for fields without AS keyword"
+        );
+    }
+
+    #[test]
+    fn test_wrapped_vs_unwrapped_code() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::{RootDatabase, RootDatabaseImpl};
+        use test_fixture::Fixture;
+        use vfs::VfsPath;
+
+        // Test 1: Code wrapped in procedure
+        let code_wrapped = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";
+КонецПроцедуры"#;
+
+        let fixture_text = format!("//- /test.bsl\n{}", code_wrapped);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        let sdbl_hirs_wrapped = db.sdbl_hir_in_file(file_id);
+        eprintln!(
+            "Wrapped in procedure: {} HIRs, {} total diagnostics",
+            sdbl_hirs_wrapped.len(),
+            sdbl_hirs_wrapped.iter().map(|(_, h)| h.diagnostics.len()).sum::<usize>()
+        );
+
+        // Test 2: Code at module level (no procedure)
+        let code_unwrapped =
+            r#"Запрос = "ВЫБРАТЬ Валюты.Ссылка, Валюты.Код Код ИЗ Справочник.Валюты КАК Валюты";"#;
+
+        let fixture_text = format!("//- /test.bsl\n{}", code_unwrapped);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        let sdbl_hirs_unwrapped = db.sdbl_hir_in_file(file_id);
+        eprintln!(
+            "Module-level code: {} HIRs, {} total diagnostics",
+            sdbl_hirs_unwrapped.len(),
+            sdbl_hirs_unwrapped.iter().map(|(_, h)| h.diagnostics.len()).sum::<usize>()
+        );
+
+        // Both should work
+        assert!(!sdbl_hirs_wrapped.is_empty() || !sdbl_hirs_unwrapped.is_empty());
+    }
+
+    #[test]
+    fn test_debug_first_query() {
+        // Debug first query from Java test
+        let query = r#"ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	Валюты.Код Код
+ИЗ
+	Справочник.Валюты КАК Валюты
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	Валюты.Ссылка,
+	Валюты.Ссылка,
+	Валюты.Код
+ИЗ
+	Справочник.Валюты КАК Валюты"#;
+
+        // Parse and check AST structure
+        use syntax::ast::AstNode;
+
+        let parse = parser::parse_sdbl(query);
+        eprintln!("Parse has errors: {}", parse.has_errors());
+
+        // Print tree structure to understand UNION layout
+        let root = parse.syntax_node();
+        eprintln!("\n=== AST Structure ===");
+        fn print_tree(node: &syntax::SyntaxNode, indent: usize) {
+            let indent_str = "  ".repeat(indent);
+            eprintln!("{}{:?}", indent_str, node.kind());
+            for child in node.children() {
+                print_tree(&child, indent + 1);
+            }
+        }
+        print_tree(&root, 0);
+
+        // Check field ancestors
+        use syntax::ast::SdblQueryPackage;
+        let Some(package) = SdblQueryPackage::cast(root.clone()) else {
+            panic!("Failed to cast as package");
+        };
+
+        for (q_idx, select_query) in package.queries().enumerate() {
+            eprintln!("\n=== Query {} ===", q_idx);
+            if let Some(subquery) = select_query.subquery() {
+                if let Some(main_query) = subquery.main_query() {
+                    if let Some(field_list) = main_query.field_list() {
+                        for (f_idx, field) in field_list.fields().enumerate() {
+                            eprintln!("Field {}: {:?}", f_idx, field.syntax().text());
+                            eprintln!("  Ancestors:");
+                            for ancestor in field.syntax().ancestors() {
+                                eprintln!("    - {:?}", ancestor.kind());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse and check using SDBL HIR
+        use sdbl_hir::lower_sdbl_to_hir;
+
+        let hir = lower_sdbl_to_hir(&parse, None);
+        eprintln!("\nHIR diagnostics: {}", hir.diagnostics.len());
+        for diag in &hir.diagnostics {
+            eprintln!("  - {} at {:?}", diag.message(), diag.range());
+        }
+
+        // Count only AliasWithoutAsKeyword diagnostics
+        let alias_diagnostics: Vec<_> = hir
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
+            .collect();
+
+        // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
+        // - Валюты.Ссылка without alias
+        // - Валюты.Код Код without AS keyword
+        assert_eq!(
+            alias_diagnostics.len(),
+            2,
+            "Expected 2 AliasWithoutAsKeyword diagnostics from first SELECT"
+        );
+    }
+
     /// Test from Java: AssignAliasFieldsInQueryDiagnosticTest.java
     ///
     /// Expected 5 diagnostics:
@@ -413,6 +690,56 @@ Query = "ВЫБРАТЬ
         let code = include_str!("../../test_data/AssignAliasFieldsInQueryDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
 
+        // Run diagnostic check with debug output
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::{RootDatabase, RootDatabaseImpl};
+        use test_fixture::Fixture;
+        use vfs::VfsPath;
+
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for file_text_input to work (required for SDBL diagnostics)
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        // Debug: check how many SDBL queries are extracted
+        let sdbl_queries = db.all_sdbl_in_file(file_id);
+        eprintln!("Total SDBL string literals found: {}", sdbl_queries.len());
+
+        for (i, (_expr_id, query_info)) in sdbl_queries.iter().enumerate() {
+            eprintln!("\nSDdBL String Literal {}:", i);
+            eprintln!(
+                "  Query text (first 200 chars): {:?}",
+                query_info.query_text.chars().take(200).collect::<String>()
+            );
+            eprintln!("  Has AST: {}", query_info.query_ast.is_some());
+            if let Some(ref ast) = query_info.query_ast {
+                eprintln!("  Parse errors: {}", ast.has_errors());
+            }
+        }
+
+        // Debug: check HIR for each SDBL
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        eprintln!("\nTotal SDBL HIRs generated: {}", sdbl_hirs.len());
+
+        for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
+            eprintln!("HIR {}: {} diagnostics", i, hir.diagnostics.len());
+            for diag in &hir.diagnostics {
+                eprintln!("  - {}", diag.message());
+            }
+        }
+
         // Run diagnostic check
         let (diagnostics, file_content) = check_diagnostic(code, config);
 
@@ -424,6 +751,7 @@ Query = "ВЫБРАТЬ
         // - Line 42, cols 4-17 (Валюты.Ссылка in subquery without alias)
 
         // Debug: print all diagnostics
+        eprintln!("\nFinal diagnostics returned:");
         for (i, diag) in diagnostics.iter().enumerate() {
             let (start_line, start_col, _end_line, end_col) =
                 range_to_line_col(&file_content, diag.range);
