@@ -18,82 +18,124 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::ast::{AstNode, FunctionDef, ProcedureDef};
-use syntax::SyntaxNode;
+use hir_def::ModuleId;
+use syntax::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CommandModuleExportMethods) {
         return Vec::new();
     }
 
-    if !is_command_module(ctx) {
+    // Get module metadata via HIR (cached by Salsa)
+    let module_id = ModuleId::new(ctx.file_id);
+    let metadata = ctx.db.module_metadata(module_id);
+
+    if metadata.module_type != bsl_metadata::ModuleType::CommandModule {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    find_exported_methods(&root)
-}
-
-fn is_command_module(ctx: &DiagnosticsContext) -> bool {
-    let file_path = match ctx.file_path() {
-        Some(path) => path,
-        None => return false,
-    };
-
-    matches!(
-        ide_db::metadata::get_module_type_from_uri(&file_path),
-        Some(bsl_metadata::ModuleType::CommandModule)
-    )
-}
-
-fn find_exported_methods(root: &SyntaxNode) -> Vec<Diagnostic> {
+    // Get ItemTree (cached by Salsa)
+    let item_tree = ctx.db.item_tree(ctx.file_id);
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
-        if let Some(procedure) = ProcedureDef::cast(node.clone()) {
-            if procedure.export_keyword().is_some() {
-                if let Some(name_token) = procedure.name() {
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CommandModuleExportMethods,
-                        message: "Экспортные методы в модулях команд не имеют смысла".to_string(),
-                        severity: Severity::Information,
-                        range: name_token.text_range(),
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
+    // Check exported procedures
+    for (_, proc) in item_tree.procedures() {
+        if proc.is_export {
+            diagnostics.push(make_diagnostic(proc.name_range));
         }
+    }
 
-        if let Some(function) = FunctionDef::cast(node.clone()) {
-            if function.export_keyword().is_some() {
-                if let Some(name_token) = function.name() {
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CommandModuleExportMethods,
-                        message: "Экспортные методы в модулях команд не имеют смысла".to_string(),
-                        severity: Severity::Information,
-                        range: name_token.text_range(),
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
+    // Check exported functions
+    for (_, func) in item_tree.functions() {
+        if func.is_export {
+            diagnostics.push(make_diagnostic(func.name_range));
         }
     }
 
     diagnostics
 }
 
+fn make_diagnostic(range: TextRange) -> Diagnostic {
+    Diagnostic {
+        code: DiagnosticCode::CommandModuleExportMethods,
+        message: "Экспортные методы в модулях команд не имеют смысла".to_string(),
+        severity: Severity::Information,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::assert_diagnostic_range_multiline;
+    use crate::DiagnosticsConfig;
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use std::rc::Rc;
+    use vfs::{FileId, FileSet, VfsPath};
 
+    /// Helper to check diagnostics for code in a CommandModule context.
     fn check_as_command_module(code: &str) -> Vec<Diagnostic> {
-        let parse = parser::parse(code);
-        let root = parse.syntax_node();
-        find_exported_methods(&root)
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId::from_raw(1);
+
+        // Set up file with CommandModule path pattern
+        // Pattern: <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl
+        // Note: path should be relative (no leading /) for get_module_type_from_uri to work
+        let mut file_set = FileSet::default();
+        file_set.insert(
+            file_id,
+            VfsPath::new("Catalogs/Справочник1/Commands/Команда1/Ext/CommandModule.bsl"),
+        );
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file content
+        db.set_file_text(file_id, code);
+
+        let config = Rc::new(DiagnosticsConfig::default());
+        let ctx = crate::DiagnosticsContext {
+            db: &db,
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        check(&ctx)
+    }
+
+    /// Helper to check that non-CommandModule files don't trigger diagnostics.
+    fn check_as_regular_module(code: &str) -> Vec<Diagnostic> {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId::from_raw(1);
+
+        // Set up file with regular path (not CommandModule)
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        db.set_file_text(file_id, code);
+
+        let config = Rc::new(DiagnosticsConfig::default());
+        let ctx = crate::DiagnosticsContext {
+            db: &db,
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        check(&ctx)
     }
 
     #[test]
@@ -136,5 +178,13 @@ mod tests {
         let code = "Функция Тест3() Экспорт\n    Возврат 0;\nКонецФункции";
         let diagnostics = check_as_command_module(code);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for exported function");
+    }
+
+    #[test]
+    fn test_regular_module_not_checked() {
+        // Export in regular module should NOT trigger this diagnostic
+        let code = "Процедура Тест() Экспорт\nКонецПроцедуры";
+        let diagnostics = check_as_regular_module(code);
+        assert_eq!(diagnostics.len(), 0, "Regular modules should not be checked");
     }
 }
