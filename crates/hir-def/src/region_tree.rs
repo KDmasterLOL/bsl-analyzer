@@ -182,6 +182,42 @@ impl RegionTree {
     pub fn root_region_names(&self) -> Vec<&str> {
         self.root_regions.iter().map(|&idx| self.regions[idx].name.as_str()).collect()
     }
+
+    /// Get the root ancestor of a region (depth=0).
+    ///
+    /// Follows parent chain until reaching a top-level region.
+    /// If the region is already at depth 0, returns the same index.
+    pub fn root_ancestor(&self, idx: RegionIdx) -> RegionIdx {
+        let mut current = idx;
+        while let Some(parent) = self.regions[current].parent {
+            current = parent;
+        }
+        current
+    }
+
+    /// Check if a region name is an API region.
+    ///
+    /// API regions are: ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal.
+    pub fn is_api_region_name(name: &str) -> bool {
+        const API_REGIONS: &[&str] =
+            &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
+        API_REGIONS.contains(&name.to_lowercase().as_str())
+    }
+
+    /// Find the root API region containing a text range, if any.
+    ///
+    /// Returns the root region (depth=0) name if the range is inside an API region.
+    pub fn root_api_region_for_range(&self, range: TextRange) -> Option<&str> {
+        let region_idx = self.region_containing(range)?;
+        let root_idx = self.root_ancestor(region_idx);
+        let root_region = &self.regions[root_idx];
+
+        if Self::is_api_region_name(root_region.name.as_str()) {
+            Some(root_region.name.as_str())
+        } else {
+            None
+        }
+    }
 }
 
 /// Builder for constructing RegionTree from AST.
@@ -507,5 +543,100 @@ EndProcedure
 
         let region = tree.region(region_idx.unwrap());
         assert_eq!(region.name.as_str(), "Внутренняя");
+    }
+
+    #[test]
+    fn test_root_ancestor() {
+        let code = r#"
+#Область Внешняя
+    #Область Внутренняя
+        #Область ГлубокоВнутри
+        Процедура Тест()
+        КонецПроцедуры
+        #КонецОбласти
+    #КонецОбласти
+#КонецОбласти
+"#;
+        let tree = parse_and_lower(code);
+
+        assert_eq!(tree.len(), 3);
+
+        // Find deepest region
+        let deep_regions = tree.regions_by_name("ГлубокоВнутри");
+        assert_eq!(deep_regions.len(), 1);
+        let deep_idx = deep_regions[0];
+
+        // root_ancestor should return the top-level region
+        let root_idx = tree.root_ancestor(deep_idx);
+        let root_region = tree.region(root_idx);
+        assert_eq!(root_region.name.as_str(), "Внешняя");
+        assert_eq!(root_region.depth, 0);
+
+        // root_ancestor of root is itself
+        let outer_idx = tree.root_regions()[0];
+        assert_eq!(tree.root_ancestor(outer_idx), outer_idx);
+    }
+
+    #[test]
+    fn test_is_api_region_name() {
+        // Russian API regions
+        assert!(RegionTree::is_api_region_name("ПрограммныйИнтерфейс"));
+        assert!(RegionTree::is_api_region_name("программныйинтерфейс"));
+        assert!(RegionTree::is_api_region_name("ПРОГРАММНЫЙИНТЕРФЕЙС"));
+        assert!(RegionTree::is_api_region_name("СлужебныйПрограммныйИнтерфейс"));
+
+        // English API regions
+        assert!(RegionTree::is_api_region_name("Public"));
+        assert!(RegionTree::is_api_region_name("public"));
+        assert!(RegionTree::is_api_region_name("PUBLIC"));
+        assert!(RegionTree::is_api_region_name("Internal"));
+        assert!(RegionTree::is_api_region_name("internal"));
+
+        // Non-API regions
+        assert!(!RegionTree::is_api_region_name("СлужебныеПроцедурыИФункции"));
+        assert!(!RegionTree::is_api_region_name("Private"));
+        assert!(!RegionTree::is_api_region_name("Инициализация"));
+        assert!(!RegionTree::is_api_region_name("ОбработчикиСобытий"));
+    }
+
+    #[test]
+    fn test_root_api_region_for_range_api() {
+        let code = r#"
+#Область ПрограммныйИнтерфейс
+    #Область Вложенная
+    Процедура ВложеннаяПроцедура()
+    КонецПроцедуры
+    #КонецОбласти
+#КонецОбласти
+"#;
+        let tree = parse_and_lower(code);
+
+        // Find position of "ВложеннаяПроцедура" in the code
+        let proc_start = code.find("Процедура Вложенная").unwrap() as u32;
+        let proc_end = code.find("КонецПроцедуры").unwrap() as u32;
+        let api_range = TextRange::new(proc_start.into(), proc_end.into());
+
+        let api_region = tree.root_api_region_for_range(api_range);
+        assert!(api_region.is_some());
+        assert_eq!(api_region.unwrap(), "ПрограммныйИнтерфейс");
+    }
+
+    #[test]
+    fn test_root_api_region_for_range_non_api() {
+        let code = r#"
+#Область СлужебныеПроцедурыИФункции
+Процедура Служебная()
+КонецПроцедуры
+#КонецОбласти
+"#;
+        let tree = parse_and_lower(code);
+
+        // Find position of "Служебная" procedure
+        let proc_start = code.find("Процедура Служебная").unwrap() as u32;
+        let proc_end = code.find("КонецПроцедуры").unwrap() as u32;
+        let non_api_range = TextRange::new(proc_start.into(), proc_end.into());
+
+        let non_api_region = tree.root_api_region_for_range(non_api_range);
+        assert!(non_api_region.is_none(), "Non-API region should return None");
     }
 }

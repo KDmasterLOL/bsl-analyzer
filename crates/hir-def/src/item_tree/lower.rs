@@ -196,6 +196,15 @@ impl Ctx {
                     | "AtClientAtServerNoContext"
                     | "&НаКлиентеНаСервереБезКонтекста"
                     | "&AtClientAtServerNoContext" => AnnotationKind::AtClientAtServerNoContext,
+                    "НаСервереБезКонтекста"
+                    | "AtServerNoContext"
+                    | "&НаСервереБезКонтекста"
+                    | "&AtServerNoContext" => AnnotationKind::AtServerNoContext,
+                    "До" | "Before" | "&До" | "&Before" => AnnotationKind::Before,
+                    "После" | "After" | "&После" | "&After" => AnnotationKind::After,
+                    "Вместо" | "Instead" | "&Вместо" | "&Instead" => {
+                        AnnotationKind::Instead
+                    }
                     _ => {
                         debug!(text = %text, "unknown annotation kind, skipping");
                         return None;

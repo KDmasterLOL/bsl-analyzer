@@ -184,6 +184,14 @@ pub enum AnnotationKind {
     AtClientAtServer,
     /// `&НаКлиентеНаСервереБезКонтекста` or `&AtClientAtServerNoContext`
     AtClientAtServerNoContext,
+    /// `&НаСервереБезКонтекста` or `&AtServerNoContext`
+    AtServerNoContext,
+    /// `&До` or `&Before` - extension method (before original)
+    Before,
+    /// `&После` or `&After` - extension method (after original)
+    After,
+    /// `&Вместо` or `&Instead` - extension method (instead of original)
+    Instead,
 }
 
 #[cfg(test)]

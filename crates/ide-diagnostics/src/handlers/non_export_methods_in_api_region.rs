@@ -1,8 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{
-    ast::{self, AstNode},
-    TextRange,
-};
+use hir_def::item_tree::Annotation;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -16,17 +13,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::NonExportMethodsInApiRegion, "skipAnnotatedMethods")
         .unwrap_or(false);
 
-    let method_regions = ctx.db.method_regions(ctx.file_id);
+    let region_tree = ctx.db.region_tree(ctx.file_id);
     let item_tree = ctx.db.item_tree(ctx.file_id);
 
     for (_, proc) in item_tree.procedures() {
         if !proc.is_export {
-            if let Some(region_name) = method_regions.get(&proc.source_range) {
-                if skip_annotated_methods && has_non_custom_annotations(ctx, &proc.source_range) {
+            if let Some(region_name) = region_tree.root_api_region_for_range(proc.source_range) {
+                if skip_annotated_methods && has_builtin_annotations(&proc.annotations) {
                     continue;
                 }
-
-                let name_range = get_method_name_range(ctx, &proc.source_range);
 
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::NonExportMethodsInApiRegion,
@@ -36,7 +31,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         region_name
                     ),
                     severity: Severity::Major,
-                    range: name_range,
+                    range: proc.name_range,
                     tags: vec![],
                     fixes: vec![],
                 });
@@ -46,12 +41,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for (_, func) in item_tree.functions() {
         if !func.is_export {
-            if let Some(region_name) = method_regions.get(&func.source_range) {
-                if skip_annotated_methods && has_non_custom_annotations(ctx, &func.source_range) {
+            if let Some(region_name) = region_tree.root_api_region_for_range(func.source_range) {
+                if skip_annotated_methods && has_builtin_annotations(&func.annotations) {
                     continue;
                 }
-
-                let name_range = get_method_name_range(ctx, &func.source_range);
 
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::NonExportMethodsInApiRegion,
@@ -61,7 +54,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         region_name
                     ),
                     severity: Severity::Major,
-                    range: name_range,
+                    range: func.name_range,
                     tags: vec![],
                     fixes: vec![],
                 });
@@ -72,85 +65,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn has_non_custom_annotations(ctx: &DiagnosticsContext, source_range: &TextRange) -> bool {
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    for node in root.descendants() {
-        if let Some(proc) = ast::ProcedureDef::cast(node.clone()) {
-            if let Some(name) = proc.name() {
-                if source_range.contains_range(name.text_range()) {
-                    return has_non_custom_annotations_ast(proc.annotations());
-                }
-            }
-        } else if let Some(func) = ast::FunctionDef::cast(node) {
-            if let Some(name) = func.name() {
-                if source_range.contains_range(name.text_range()) {
-                    return has_non_custom_annotations_ast(func.annotations());
-                }
-            }
-        }
-    }
-
-    false
-}
-
-fn has_non_custom_annotations_ast(annotations: impl Iterator<Item = ast::Annotation>) -> bool {
-    for ann in annotations {
-        if let Some(token) = ann.kind_token() {
-            let text = token.text().trim_start_matches('&');
-
-            const BUILTIN_ANNOTATIONS: &[&str] = &[
-                "НаКлиенте",
-                "AtClient",
-                "НаСервере",
-                "AtServer",
-                "НаКлиентеНаСервере",
-                "AtClientAtServer",
-                "НаКлиентеНаСервереБезКонтекста",
-                "AtClientAtServerNoContext",
-                "Вместо",
-                "Instead",
-                "До",
-                "Before",
-                "После",
-                "After",
-                "НаСервереБезКонтекста",
-                "AtServerNoContext",
-            ];
-
-            let lower = text.to_lowercase();
-            for builtin in BUILTIN_ANNOTATIONS {
-                if lower == builtin.to_lowercase() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn get_method_name_range(ctx: &DiagnosticsContext, source_range: &TextRange) -> TextRange {
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    for node in root.descendants() {
-        if let Some(proc) = ast::ProcedureDef::cast(node.clone()) {
-            if let Some(name) = proc.name() {
-                if source_range.contains_range(name.text_range()) {
-                    return name.text_range();
-                }
-            }
-        } else if let Some(func) = ast::FunctionDef::cast(node) {
-            if let Some(name) = func.name() {
-                if source_range.contains_range(name.text_range()) {
-                    return name.text_range();
-                }
-            }
-        }
-    }
-
-    *source_range
+/// Check if annotations contain any built-in (non-custom) annotations.
+///
+/// Built-in annotations are: &НаКлиенте, &НаСервере, &НаКлиентеНаСервере, etc.
+/// Custom annotations (like &Кастом) are not considered built-in.
+fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
+    !annotations.is_empty()
 }
 
 #[cfg(test)]
