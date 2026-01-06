@@ -236,6 +236,10 @@ pub enum BodyDiagnostic {
     /// Deprecated method call.
     DeprecatedMethod { name: String, range: TextRange },
 
+    /// Deprecated ТекущаяДата() / CurrentDate() method call.
+    /// Separate from DeprecatedMethod because it has different severity (Error vs Info).
+    DeprecatedCurrentDate { name: String, range: TextRange },
+
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
     MagicNumber { value: String, range: TextRange },
@@ -358,6 +362,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UnreachableCode { range } => *range,
             BodyDiagnostic::EmptyCodeBlock { range } => *range,
             BodyDiagnostic::DeprecatedMethod { range, .. } => *range,
+            BodyDiagnostic::DeprecatedCurrentDate { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::UnusedVariable { range, .. } => *range,

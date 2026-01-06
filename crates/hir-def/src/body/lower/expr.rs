@@ -313,6 +313,17 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        use super::diagnostics::is_deprecated_current_date;
+
+        if is_deprecated_current_date(&name) {
+            // Emit DeprecatedCurrentDate diagnostic
+            // Range covers just the method name (IDENT token)
+            ctx.diagnostics.push(BodyDiagnostic::DeprecatedCurrentDate {
+                name: name.clone(),
+                range: actual_callee.text_range(),
+            });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
