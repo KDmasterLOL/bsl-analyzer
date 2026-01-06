@@ -24,6 +24,7 @@
 
 pub mod body;
 pub mod cognitive_complexity;
+pub mod cyclomatic_complexity;
 pub mod hir;
 pub mod item_tree;
 pub mod name;
@@ -387,6 +388,11 @@ impl ModuleBodies {
     /// Get module-level code body (statements outside procedures/functions).
     pub fn module_code(&self) -> Option<&Body> {
         self.module_code.as_ref().map(|r| &r.body)
+    }
+
+    /// Get module-level code with source map (for diagnostics).
+    pub fn module_code_result(&self) -> Option<&body::LowerResult> {
+        self.module_code.as_ref()
     }
 }
 
