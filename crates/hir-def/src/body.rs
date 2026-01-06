@@ -260,6 +260,31 @@ pub enum BodyDiagnostic {
     /// 2. BeginTransaction inside Try block
     /// 3. BeginTransaction without subsequent Try
     BeginTransactionBeforeTryCatch { range: TextRange },
+
+    /// Method call that may have missing required parameters.
+    /// Emitted during lowering for all calls - validation happens in from_hir().
+    ///
+    /// Fields:
+    /// - `callee`: Name of the method being called
+    /// - `module`: Optional module name for qualified calls (Module.Method)
+    /// - `mdo_type`: Optional MDO type keyword for three-level calls (Документы.ПКО.Method)
+    /// - `mdo_name`: Optional MDO name for three-level calls
+    /// - `args`: Boolean array - true if argument has value, false if empty/missing
+    /// - `range`: Source range for the diagnostic
+    ///
+    /// Call patterns:
+    /// - Local: `Method()` → module=None, mdo_type=None, mdo_name=None
+    /// - Two-level: `Module.Method()` → module=Some, mdo_type=None, mdo_name=None
+    /// - Three-level: `Документы.ПКО.Method()` → module=None, mdo_type=Some, mdo_name=Some
+    /// - ThisObject: `ЭтотОбъект.Method()` → module=Some("ЭтотОбъект"), mdo_type=None
+    MissedRequiredParameter {
+        callee: String,
+        module: Option<String>,
+        mdo_type: Option<String>,
+        mdo_name: Option<String>,
+        args: Vec<bool>,
+        range: TextRange,
+    },
 }
 
 impl BodyDiagnostic {
@@ -276,6 +301,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
             BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
+            BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
         }
     }
 }

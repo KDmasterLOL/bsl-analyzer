@@ -345,6 +345,22 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }
+        BodyDiagnostic::MissedRequiredParameter {
+            callee,
+            module,
+            mdo_type,
+            mdo_name,
+            args,
+            range,
+        } => handlers::missed_required_parameter::from_hir(
+            callee,
+            module.as_deref(),
+            mdo_type.as_deref(),
+            mdo_name.as_deref(),
+            args,
+            *range,
+            ctx,
+        ),
     }
 }
 

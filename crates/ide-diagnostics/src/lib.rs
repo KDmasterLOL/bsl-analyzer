@@ -758,11 +758,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     result.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
     result.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
-    result.extend(run_diagnostic(
-        "MissedRequiredParameter",
-        ctx,
-        handlers::missed_required_parameter::check,
-    ));
+    // NOTE: MissedRequiredParameter migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::MissedRequiredParameter
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "MissedRequiredParameter",
+    //     ctx,
+    //     handlers::missed_required_parameter::check,
+    // ));
     result.extend(run_diagnostic(
         "MissingCodeTryCatchEx",
         ctx,
@@ -997,6 +1000,22 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }
+        BodyDiagnostic::MissedRequiredParameter {
+            callee,
+            module,
+            mdo_type,
+            mdo_name,
+            args,
+            range,
+        } => handlers::missed_required_parameter::from_hir(
+            callee,
+            module.as_deref(),
+            mdo_type.as_deref(),
+            mdo_name.as_deref(),
+            args,
+            *range,
+            ctx,
+        ),
     }
 }
 

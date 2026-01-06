@@ -40,12 +40,193 @@
 //! Ported from:
 //! - MissedRequiredParameterDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - Adapted to use Rowan SyntaxNode and SymbolTree
+//!
+//! ## HIR-based implementation
+//!
+//! This diagnostic is now collected during HIR lowering (AST→HIR conversion).
+//! The `from_hir()` function validates the call and creates the final diagnostic.
+//! This approach is faster because:
+//! 1. No separate AST traversal for this diagnostic
+//! 2. SymbolTree lookups are Salsa-cached
+//! 3. Method resolution happens once during lowering
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::hir_def::{symbol_tree::MethodSymbol, ModuleId, Name};
+use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 use vfs::{FileId, VfsPath};
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::MissedRequiredParameter` is encountered.
+///
+/// This function validates a method call against its definition:
+/// 1. Resolves the method using SymbolTree (local, CommonModule, or ManagerModule)
+/// 2. Checks which required parameters are missing
+/// 3. Returns diagnostic if any required parameters are not provided
+///
+/// ## Parameters
+/// - `callee`: Method name being called
+/// - `module`: Optional module name for two-level calls (Module.Method)
+/// - `mdo_type`: Optional MDO type keyword for three-level calls (Документы, Справочники)
+/// - `mdo_name`: Optional MDO name for three-level calls (ПКО, Товары)
+/// - `args`: Boolean array indicating which arguments have values
+/// - `range`: Source range for the diagnostic
+/// - `ctx`: Diagnostics context with database access
+///
+/// ## Call patterns
+/// - Local: `Method()` → module=None, mdo_type=None
+/// - Two-level: `CommonModule.Method()` → module=Some, mdo_type=None
+/// - Three-level: `Документы.ПКО.Method()` → module=None, mdo_type=Some, mdo_name=Some
+/// - ThisObject: `ЭтотОбъект.Method()` → module=Some("ЭтотОбъект")
+pub fn from_hir(
+    callee: &str,
+    module: Option<&str>,
+    mdo_type: Option<&str>,
+    mdo_name: Option<&str>,
+    args: &[bool],
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::MissedRequiredParameter) {
+        return None;
+    }
+
+    // Resolve and check missing parameters based on call type
+    let missing = if let (Some(mdo_type_kw), Some(mdo_obj_name)) = (mdo_type, mdo_name) {
+        // Three-level call: Документы.ПКО.Method()
+        check_manager_module_call(ctx, mdo_type_kw, mdo_obj_name, callee, args)?
+    } else if let Some(module_name) = module {
+        // Two-level call: Module.Method() or ЭтотОбъект.Method()
+        check_qualified_call(ctx, module_name, callee, args)?
+    } else {
+        // Local call: Method()
+        check_local_call(ctx, callee, args)?
+    };
+
+    if missing.is_empty() {
+        return None;
+    }
+
+    // Create diagnostic message
+    let param_list =
+        missing.iter().map(|name| format!("'{}'", name)).collect::<Vec<_>>().join(", ");
+    let message = format!("Specify a required parameter {}", param_list);
+
+    Some(Diagnostic {
+        code: DiagnosticCode::MissedRequiredParameter,
+        message,
+        severity: Severity::Error,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
+}
+
+/// Check local method call for missing required parameters.
+///
+/// Returns Some(missing_params) if method is found, None if method doesn't exist.
+fn check_local_call(
+    ctx: &DiagnosticsContext,
+    method_name: &str,
+    args: &[bool],
+) -> Option<Vec<String>> {
+    let module_id = ModuleId::new(ctx.file_id);
+    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let name = Name::new(method_name);
+
+    let method = symbol_tree.find_method(&name)?;
+    Some(check_missing_params(method, args))
+}
+
+/// Check qualified method call (Module.Method) for missing required parameters.
+///
+/// Returns Some(missing_params) if method is found and exported, None otherwise.
+fn check_qualified_call(
+    ctx: &DiagnosticsContext,
+    module_name: &str,
+    method_name: &str,
+    args: &[bool],
+) -> Option<Vec<String>> {
+    // Load metadata
+    let configuration = ctx.load_configuration()?;
+
+    // Find CommonModule in metadata (case-insensitive)
+    let common_module = configuration.find_common_module(module_name)?;
+
+    // Resolve CommonModule file
+    let module_file_id = find_common_module_file(ctx, common_module)?;
+
+    // Build SymbolTree
+    let module_id = ModuleId::new(module_file_id);
+    let symbol_tree = ctx.db.symbol_tree(module_id);
+
+    // Lookup method
+    let name = Name::new(method_name);
+    let method = symbol_tree.find_method(&name)?;
+
+    // Only check exported methods for qualified calls
+    if !method.is_export {
+        return None;
+    }
+
+    Some(check_missing_params(method, args))
+}
+
+/// Check three-level method call (MdoType.MdoName.Method) for missing required parameters.
+///
+/// Handles calls like `Документы.ПКО.Method()` or `Catalogs.Товары.Method()`.
+///
+/// Returns Some(missing_params) if method is found and exported, None otherwise.
+fn check_manager_module_call(
+    ctx: &DiagnosticsContext,
+    mdo_type_keyword: &str,
+    mdo_name: &str,
+    method_name: &str,
+    args: &[bool],
+) -> Option<Vec<String>> {
+    let _span =
+        tracing::debug_span!("check_manager_module_call", mdo_type_keyword, mdo_name, method_name)
+            .entered();
+
+    // Load metadata
+    let configuration = ctx.load_configuration()?;
+
+    // Parse MDO type from plural form (Документы → Document, Справочники → Catalog)
+    let mdo_type = bsl_metadata::MdoType::from_plural(mdo_type_keyword)?;
+
+    tracing::debug!(
+        mdo_type = ?mdo_type,
+        mdo_name,
+        method_name,
+        "Checking manager module method call"
+    );
+
+    // Find Manager Module file
+    let manager_file_id = find_manager_module_file(ctx, &configuration, mdo_type, mdo_name)?;
+
+    // Build SymbolTree for Manager Module
+    let module_id = ModuleId::new(manager_file_id);
+    let manager_symbol_tree = ctx.db.symbol_tree(module_id);
+
+    // Look up method in Manager Module
+    let method_name_obj = Name::new(method_name);
+    let method = manager_symbol_tree.find_method(&method_name_obj)?;
+
+    // Only check exported methods for qualified calls
+    if !method.is_export {
+        tracing::debug!(
+            mdo_type = ?mdo_type,
+            mdo_name,
+            method_name,
+            "Method is not exported, skipping manager module call validation"
+        );
+        return None;
+    }
+
+    Some(check_missing_params(method, args))
+}
 
 /// Main entry point for MissedRequiredParameter diagnostic.
 ///

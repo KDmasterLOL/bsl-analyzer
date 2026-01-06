@@ -1711,11 +1711,37 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
     let callee = lower_expr_node(ctx, &callee_node);
 
+    // Find ARG_LIST for both lowering and diagnostics
+    let arg_list_node = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST);
+
     // Arguments
-    let args = children
-        .find(|n| n.kind() == SyntaxKind::ARG_LIST)
-        .map(|arg_list| lower_arg_list(ctx, &arg_list))
-        .unwrap_or_default();
+    let args =
+        arg_list_node.as_ref().map(|arg_list| lower_arg_list(ctx, arg_list)).unwrap_or_default();
+
+    // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
+    // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
+    if actual_callee.kind() == SyntaxKind::IDENT {
+        let callee_name = actual_callee.text().to_string();
+
+        // Skip if callee is a local variable (object with call operator)
+        let is_local = {
+            let key = callee_name.to_lowercase();
+            ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key)
+        };
+
+        if !is_local {
+            let arg_presence = arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
+
+            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                callee: callee_name,
+                module: None,
+                mdo_type: None,
+                mdo_name: None,
+                args: arg_presence,
+                range: node.text_range(),
+            });
+        }
+    }
 
     Expr::Call { callee, args: args.into_boxed_slice() }
 }
@@ -1723,6 +1749,51 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 /// Lower argument list.
 fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprId> {
     node.children().map(|n| lower_expr_node(ctx, &n)).collect()
+}
+
+/// Extract which arguments have values from an ARG_LIST node.
+///
+/// Returns a Boolean vector where:
+/// - `true` = argument has an expression
+/// - `false` = argument is empty (between commas with no value)
+///
+/// ## Examples
+/// - `Method()` → `[]`
+/// - `Method(5)` → `[true]`
+/// - `Method(, 2)` → `[false, true]`
+/// - `Method(5, 2)` → `[true, true]`
+/// - `Method(5,)` → `[true, false]`
+/// - `Method(,)` → `[false, false]`
+fn extract_arg_presence(arg_list: &SyntaxNode) -> Vec<bool> {
+    let mut args = Vec::new();
+    let mut has_expr = false;
+
+    for child in arg_list.children_with_tokens() {
+        match child.kind() {
+            SyntaxKind::COMMA => {
+                args.push(has_expr);
+                has_expr = false;
+            }
+            SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => {
+                // Skip parentheses
+            }
+            kind if kind.is_trivia() => {
+                // Skip whitespace and comments
+            }
+            _ => {
+                // Any other node indicates an expression is present
+                has_expr = true;
+            }
+        }
+    }
+
+    // Handle last argument (after last comma or only argument)
+    // Only push if we're inside the argument list (has children)
+    if arg_list.children().count() > 0 || has_expr {
+        args.push(has_expr);
+    }
+
+    args
 }
 
 /// Lower index expression.
@@ -1739,6 +1810,11 @@ fn lower_index_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 }
 
 /// Lower field expression.
+///
+/// Handles:
+/// - Two-level calls: `Module.Method()` - emits MissedRequiredParameter with module
+/// - Three-level calls: `Документы.ПКО.Method()` - emits MissedRequiredParameter with mdo_type/mdo_name
+/// - Field access: `obj.field` - no diagnostics
 fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let mut children = node.children();
 
@@ -1755,64 +1831,133 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         .unwrap_or_else(Name::missing);
 
     // Check if this is actually a method call (has ARG_LIST)
-    if node.children().any(|n| n.kind() == SyntaxKind::ARG_LIST) {
-        // Emit MissingCommonModuleMethod diagnostic for potential CommonModule calls.
-        // This is a lightweight check - we emit for all qualified calls (Module.Method()),
-        // and from_hir() filters based on metadata (is it actually a CommonModule?).
-        // This is efficient because:
-        // 1. We don't traverse or calculate exact ranges here (O(1) per call)
-        // 2. Filtering happens in from_hir() using cached metadata
-        // 3. False positives are filtered early, minimizing diagnostic count
-        //
-        // We only emit if base is a simple identifier (not a nested expression),
-        // and the identifier is NOT a local variable (to avoid false positives from shadowing).
-        if let Some(first_child) = node.children().next() {
-            // Extract module name - simple check, O(1)
-            let module_name = if first_child.kind() == SyntaxKind::IDENT {
-                Some(first_child.text().to_string())
-            } else if first_child.kind() == SyntaxKind::EXPR {
-                // Unwrap EXPR if it contains a single IDENT
-                let idents: Vec<_> =
-                    first_child.children().filter(|n| n.kind() == SyntaxKind::IDENT).collect();
-                if idents.len() == 1 {
-                    Some(idents[0].text().to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+    let arg_list_node = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST);
 
-            if let Some(module) = module_name {
-                let method = field_name.to_string();
+    if arg_list_node.is_some() {
+        let method = field_name.to_string();
 
-                // Check if module name is a local variable (simple O(1) check)
-                let is_local = {
-                    let key = module.to_lowercase();
-                    ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key)
-                };
+        // Analyze call structure to determine call type
+        let call_info = analyze_qualified_call(node, ctx);
 
-                if !is_local {
-                    // Emit diagnostic - from_hir() will validate if it's really a CommonModule
+        if let Some(info) = call_info {
+            match info {
+                QualifiedCallInfo::TwoLevel { module } => {
+                    // Emit MissingCommonModuleMethod diagnostic for potential CommonModule calls.
                     ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
-                        module,
-                        method,
+                        module: module.clone(),
+                        method: method.clone(),
+                        range: node.text_range(),
+                    });
+
+                    // Emit MissedRequiredParameter diagnostic for qualified calls.
+                    let arg_presence =
+                        arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
+
+                    ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                        callee: method,
+                        module: Some(module),
+                        mdo_type: None,
+                        mdo_name: None,
+                        args: arg_presence,
+                        range: node.text_range(),
+                    });
+                }
+                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
+                    // Three-level call: Документы.ПКО.Method()
+                    let arg_presence =
+                        arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
+
+                    ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                        callee: method,
+                        module: None,
+                        mdo_type: Some(mdo_type),
+                        mdo_name: Some(mdo_name),
+                        args: arg_presence,
                         range: node.text_range(),
                     });
                 }
             }
         }
 
-        let args = node
-            .children()
-            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
-            .map(|arg_list| lower_arg_list(ctx, &arg_list))
+        let args = arg_list_node
+            .as_ref()
+            .map(|arg_list| lower_arg_list(ctx, arg_list))
             .unwrap_or_default();
 
         Expr::MethodCall { receiver: base, method: field_name, args: args.into_boxed_slice() }
     } else {
         Expr::Field { base, field: field_name }
     }
+}
+
+/// Information about a qualified call structure.
+enum QualifiedCallInfo {
+    /// Two-level call: `Module.Method()`
+    TwoLevel { module: String },
+    /// Three-level call: `Документы.ПКО.Method()`
+    ThreeLevel { mdo_type: String, mdo_name: String },
+}
+
+/// Analyze a FIELD_EXPR node to determine the qualified call type.
+///
+/// Returns:
+/// - `Some(TwoLevel)` for `Module.Method()` where Module is not a local variable
+/// - `Some(ThreeLevel)` for `MdoType.MdoName.Method()` (e.g., Документы.ПКО.Method)
+/// - `None` for local variable calls or field access
+fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<QualifiedCallInfo> {
+    let first_child = node.children().next()?;
+
+    // Check for three-level call: first child is FIELD_EXPR
+    // Structure: FIELD_EXPR > FIELD_EXPR > [IDENT, DOT, IDENT]
+    if first_child.kind() == SyntaxKind::FIELD_EXPR {
+        // Extract mdo_type and mdo_name from nested FIELD_EXPR
+        let idents: Vec<String> = first_child
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .map(|tok| tok.text().to_string())
+            .collect();
+
+        if idents.len() == 2 {
+            let mdo_type = idents[0].clone();
+            let mdo_name = idents[1].clone();
+
+            // Check if mdo_type is a local variable
+            let key = mdo_type.to_lowercase();
+            if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
+                return None;
+            }
+
+            return Some(QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name });
+        }
+        return None;
+    }
+
+    // Check for two-level call: first child is IDENT or EXPR containing IDENT
+    let module_name = if first_child.kind() == SyntaxKind::IDENT {
+        Some(first_child.text().to_string())
+    } else if first_child.kind() == SyntaxKind::EXPR {
+        // Unwrap EXPR if it contains a single IDENT
+        let idents: Vec<_> =
+            first_child.children().filter(|n| n.kind() == SyntaxKind::IDENT).collect();
+        if idents.len() == 1 {
+            Some(idents[0].text().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let module = module_name?;
+
+    // Check if module name is a local variable
+    let key = module.to_lowercase();
+    if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
+        return None;
+    }
+
+    Some(QualifiedCallInfo::TwoLevel { module })
 }
 
 /// Lower new expression.
