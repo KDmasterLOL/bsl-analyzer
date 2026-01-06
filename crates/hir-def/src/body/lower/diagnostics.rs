@@ -208,6 +208,123 @@ pub(crate) fn is_inside_try_body(node: &SyntaxNode) -> bool {
     false
 }
 
+/// Check if a statement is a global CommitTransaction/ЗафиксироватьТранзакцию call.
+///
+/// Returns true if the statement is a non-qualified call to CommitTransaction/ЗафиксироватьТранзакцию.
+/// Filters out:
+/// - Non-CALL_STMT nodes
+/// - Qualified calls like `Connector.CommitTransaction()`
+pub(crate) fn is_global_commit_transaction_call(node: &SyntaxNode) -> bool {
+    // Must be CALL_STMT
+    if node.kind() != SyntaxKind::CALL_STMT {
+        return false;
+    }
+
+    // Skip if contains FIELD_EXPR (qualified call like Object.Method())
+    if node.descendants().any(|n| n.kind() == SyntaxKind::FIELD_EXPR) {
+        return false;
+    }
+
+    // Get first identifier token (method name)
+    let ident = node
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT);
+
+    let Some(ident) = ident else {
+        return false;
+    };
+
+    let name = ident.text().to_lowercase();
+    name == "зафиксироватьтранзакцию" || name == "committransaction"
+}
+
+/// Check CommitTransaction calls within a TRY_STMT body for proper placement.
+///
+/// Returns a list of CommitTransaction nodes that are NOT properly protected:
+/// 1. Inside exception handler (should be in try body)
+/// 2. Not the last statement in try body (code after commit)
+/// 3. Try without except clause
+///
+/// Note: CommitTransaction calls OUTSIDE try-catch are detected in lower_stmt_list
+/// similar to BeginTransactionBeforeTryCatch.
+pub(crate) fn check_commit_transaction_in_try(
+    try_stmt: &SyntaxNode,
+) -> Vec<(SyntaxNode, CommitViolation)> {
+    let mut violations = Vec::new();
+
+    // Check if try has except clause
+    let has_except = try_stmt.children().any(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE);
+
+    // Find try body (first STMT_LIST)
+    let try_body = try_stmt.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+
+    // Find except clause body
+    let except_clause = try_stmt.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE);
+
+    // Check commits in try body
+    if let Some(body) = &try_body {
+        let stmts: Vec<_> = body.children().filter(is_executable_stmt).collect();
+
+        for (i, stmt) in stmts.iter().enumerate() {
+            if is_global_commit_transaction_call(stmt) {
+                if !has_except {
+                    violations.push((stmt.clone(), CommitViolation::TryWithoutExcept));
+                } else if i < stmts.len() - 1 {
+                    // Not last statement - check if there's code after
+                    violations.push((stmt.clone(), CommitViolation::CodeAfterCommit));
+                }
+                // Otherwise: properly protected (last in try, has except)
+            }
+        }
+    }
+
+    // Check commits in except clause (always error)
+    if let Some(except) = &except_clause {
+        for node in except.descendants() {
+            if is_global_commit_transaction_call(&node) {
+                violations.push((node, CommitViolation::InsideExceptHandler));
+            }
+        }
+    }
+
+    violations
+}
+
+/// Reason for CommitTransaction violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitViolation {
+    /// CommitTransaction is inside exception handler (should be in try body)
+    InsideExceptHandler,
+    /// Try block has no except clause
+    TryWithoutExcept,
+    /// Code exists after CommitTransaction in try body
+    CodeAfterCommit,
+    /// CommitTransaction is outside try-catch entirely (detected separately in lower_stmt_list)
+    #[allow(dead_code)]
+    OutsideTryCatch,
+}
+
+/// Check if a node is an executable statement (for counting purposes).
+fn is_executable_stmt(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::CALL_STMT
+            | SyntaxKind::ASSIGN_STMT
+            | SyntaxKind::RETURN_STMT
+            | SyntaxKind::IF_STMT
+            | SyntaxKind::FOR_STMT
+            | SyntaxKind::WHILE_STMT
+            | SyntaxKind::FOR_EACH_STMT
+            | SyntaxKind::TRY_STMT
+            | SyntaxKind::BREAK_STMT
+            | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::RAISE_STMT
+            | SyntaxKind::GOTO_STMT
+            | SyntaxKind::EXECUTE_STMT
+    )
+}
+
 // =============================================================================
 // CodeAfterAsyncCall diagnostic support
 // =============================================================================

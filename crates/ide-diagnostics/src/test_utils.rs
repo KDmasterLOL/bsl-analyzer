@@ -367,6 +367,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
             handlers::code_after_async_call::from_hir(method_name, *range, ctx)
         }
+        BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
+            handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
+        }
     }
 }
 

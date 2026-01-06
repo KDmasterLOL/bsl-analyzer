@@ -294,6 +294,14 @@ pub enum BodyDiagnostic {
     /// Detects code that executes immediately after async calls - a common logic error
     /// because async methods return immediately without waiting for completion.
     CodeAfterAsyncCall { method_name: String, range: TextRange },
+
+    /// CommitTransaction/ЗафиксироватьТранзакцию call not properly protected by try-catch.
+    /// Detects four violation patterns:
+    /// 1. Outside try-catch entirely
+    /// 2. Inside exception handler (should be in try body)
+    /// 3. Try without except clause
+    /// 4. Code after commit in try body (commit must be last)
+    CommitTransactionOutsideTryCatch { range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -313,6 +321,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
+            BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
         }
     }
 }
@@ -422,6 +431,7 @@ mod tests {
             BodyDiagnostic::UnusedVariable { name: "x".to_string(), range },
             BodyDiagnostic::FunctionShouldHaveReturn { range },
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
+            BodyDiagnostic::CommitTransactionOutsideTryCatch { range },
         ];
 
         for diag in diagnostics {

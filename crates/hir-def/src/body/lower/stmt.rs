@@ -14,8 +14,8 @@ use super::control_flow::{
     is_statement_node,
 };
 use super::diagnostics::{
-    check_duplicated_code_blocks, extend_range_with_semicolon, is_global_begin_transaction_call,
-    is_inside_try_body,
+    check_commit_transaction_in_try, check_duplicated_code_blocks, extend_range_with_semicolon,
+    is_global_begin_transaction_call, is_global_commit_transaction_call, is_inside_try_body,
 };
 use super::expr::{exprs_are_equal, lower_expr_node};
 use super::preproc::{
@@ -80,6 +80,10 @@ pub(super) fn lower_stmt_list_with_unreachable(
 
     // Track pending BeginTransaction node for BeginTransactionBeforeTryCatch diagnostic
     let mut pending_begin_transaction: Option<SyntaxNode> = None;
+
+    // Track nesting level for CommitTransactionOutsideTryCatch diagnostic
+    // We only check at top level of method body (not inside nested try-catch)
+    let is_top_level = !is_inside_try_body(stmt_list);
 
     for child in stmt_list.children() {
         // Handle preprocessor directives - process content recursively
@@ -163,6 +167,14 @@ pub(super) fn lower_stmt_list_with_unreachable(
                         range: extended_range,
                     });
                 }
+            }
+
+            // CommitTransactionOutsideTryCatch: Check for CommitTransaction outside try-catch
+            if is_top_level && is_global_commit_transaction_call(&child) {
+                let extended_range = extend_range_with_semicolon(&child, child.text_range());
+                ctx.emit(BodyDiagnostic::CommitTransactionOutsideTryCatch {
+                    range: extended_range,
+                });
             }
         }
 
@@ -516,6 +528,13 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
 
 /// Lower try statement.
 fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // Check CommitTransaction placement within this try-catch
+    let violations = check_commit_transaction_in_try(node);
+    for (commit_node, _violation) in violations {
+        let extended_range = extend_range_with_semicolon(&commit_node, commit_node.text_range());
+        ctx.emit(BodyDiagnostic::CommitTransactionOutsideTryCatch { range: extended_range });
+    }
+
     let body = node
         .children()
         .find(|n| n.kind() == SyntaxKind::STMT_LIST)

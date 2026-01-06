@@ -657,11 +657,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::begin_transaction_before_try_catch::check,
     // ));
-    result.extend(run_diagnostic(
-        "CommitTransactionOutsideTryCatch",
-        ctx,
-        handlers::commit_transaction_outside_try_catch::check,
-    ));
+    // NOTE: CommitTransactionOutsideTryCatch migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::CommitTransactionOutsideTryCatch
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "CommitTransactionOutsideTryCatch",
+    //     ctx,
+    //     handlers::commit_transaction_outside_try_catch::check,
+    // ));
     // TODO: Fix source root setup for full diagnostics
     // result.extend(run_diagnostic("CompilationDirectiveLost", ctx, handlers::compilation_directive_lost::check));
     result.extend(run_diagnostic(
@@ -1022,6 +1025,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
             handlers::code_after_async_call::from_hir(method_name, *range, ctx)
+        }
+        BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
+            handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
         }
     }
 }
