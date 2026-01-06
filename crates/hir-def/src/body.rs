@@ -302,6 +302,11 @@ pub enum BodyDiagnostic {
     /// 3. Try without except clause
     /// 4. Code after commit in try body (commit must be last)
     CommitTransactionOutsideTryCatch { range: TextRange },
+
+    /// Assignment to a potential CommonModule name.
+    /// Emitted during lowering for simple identifier assignments.
+    /// Validation against metadata happens in from_hir().
+    CommonModuleAssign { variable_name: String, range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -322,6 +327,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
+            BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
         }
     }
 }
@@ -432,6 +438,7 @@ mod tests {
             BodyDiagnostic::FunctionShouldHaveReturn { range },
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range },
+            BodyDiagnostic::CommonModuleAssign { variable_name: "Test".to_string(), range },
         ];
 
         for diag in diagnostics {

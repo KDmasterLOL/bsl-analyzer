@@ -277,6 +277,14 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         }
         // Unmark from used - assignment is a write, not a read
         ctx.unmark_var_used(name.as_str());
+
+        // Emit potential CommonModuleAssign for later validation in from_hir().
+        // This will be filtered by metadata check - only names matching CommonModule names
+        // will produce actual diagnostics.
+        ctx.emit(BodyDiagnostic::CommonModuleAssign {
+            variable_name: name.as_str().to_string(),
+            range,
+        });
     }
 
     // Second child should be value expression (or EXPR wrapper)

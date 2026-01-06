@@ -804,7 +804,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::command_module_export_methods::check,
     ));
-    result.extend(run_diagnostic("CommonModuleAssign", ctx, handlers::common_module_assign::check));
+    // NOTE: CommonModuleAssign migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::CommonModuleAssign
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("CommonModuleAssign", ctx, handlers::common_module_assign::check));
     result.extend(run_diagnostic(
         "CommonModuleInvalidType",
         ctx,
@@ -1028,6 +1031,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
             handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
+            handlers::common_module_assign::from_hir(variable_name, *range, ctx)
         }
     }
 }

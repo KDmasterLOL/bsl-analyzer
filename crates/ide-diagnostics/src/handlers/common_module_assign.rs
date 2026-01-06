@@ -6,127 +6,106 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::MdObject;
-use syntax::ast::{AssignStmt, AstNode, FieldExpr, IndexExpr};
-use syntax::SyntaxKind;
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::CommonModuleAssign` is encountered.
+///
+/// This function validates the assignment target against metadata:
+/// 1. Loads Configuration metadata
+/// 2. Checks if variable_name matches a CommonModule name (case-insensitive)
+/// 3. Returns diagnostic if it's an attempt to assign to a CommonModule
+pub fn from_hir(
+    variable_name: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CommonModuleAssign) {
-        return Vec::new();
-    }
-
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
-
-    // Build HashSet of common module names (lowercase) for O(1) lookup
-    // This avoids O(N) iteration for each assignment statement
-    let common_module_names: std::collections::HashSet<String> =
-        configuration.common_modules().iter().map(|m| m.name().to_lowercase()).collect();
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if let Some(assign_stmt) = AssignStmt::cast(node) {
-            if let Some(identifier) = extract_simple_identifier(&assign_stmt) {
-                // O(1) lookup instead of O(N) iteration
-                if common_module_names.contains(&identifier.to_lowercase()) {
-                    let lvalue_node = assign_stmt
-                        .syntax()
-                        .children()
-                        .find(|n| n.kind() != SyntaxKind::EQ && !n.kind().is_trivia())
-                        .unwrap_or_else(|| assign_stmt.syntax().clone());
-
-                    diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::CommonModuleAssign,
-                        message: format!(
-                            "Недопустимо присваивание значения общему модулю '{}'",
-                            identifier
-                        ),
-                        severity: Severity::Error,
-                        range: lvalue_node.text_range(),
-                        tags: vec![],
-                        fixes: vec![],
-                    });
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-fn extract_simple_identifier(assign_stmt: &AssignStmt) -> Option<String> {
-    let lvalue = assign_stmt.syntax().children().next()?;
-
-    if FieldExpr::can_cast(lvalue.kind()) || IndexExpr::can_cast(lvalue.kind()) {
         return None;
     }
 
-    if lvalue.kind() == SyntaxKind::IDENT {
-        return Some(lvalue.text().to_string());
-    }
+    // Load metadata via ctx.load_configuration() for Salsa caching
+    let configuration = ctx.load_configuration()?;
 
-    lvalue.first_token().and_then(|t| {
-        if t.kind() == SyntaxKind::IDENT {
-            Some(t.text().to_string())
-        } else {
-            None
-        }
+    // Check if variable_name matches a CommonModule name (case-insensitive)
+    let common_module = configuration.find_common_module(variable_name)?;
+
+    // Found matching CommonModule - this is an error
+    Some(Diagnostic {
+        code: DiagnosticCode::CommonModuleAssign,
+        message: format!(
+            "Недопустимо присваивание значения общему модулю '{}'",
+            common_module.name()
+        ),
+        severity: Severity::Error,
+        range,
+        tags: vec![],
+        fixes: vec![],
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
+    use crate::test_utils::check_hir_diagnostic;
+    use crate::DiagnosticCode;
 
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
+    #[test]
+    fn test_no_metadata() {
+        // Without metadata, no CommonModuleAssign diagnostics should be emitted
+        let code = r#"Процедура Тест()
+    СвойМодуль = 1;
+КонецПроцедуры"#;
 
-        let mut db = RootDatabaseImpl::new();
-        db.set_file_text(file_id, code);
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+        let diagnostics = check_hir_diagnostic(code);
+        let common_module_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
 
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
+        // No metadata available, so no diagnostics
+        assert_eq!(common_module_diags.len(), 0);
     }
 
     #[test]
-    fn test_no_workspace() {
-        let code = r#"
-Перем СвойМодуль;
-СвойМодуль = 1;
-"#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+    fn test_property_access_no_diagnostic() {
+        // Property access (field expression) should NOT trigger diagnostic
+        let code = r#"Процедура Тест()
+    СвойМодуль.Свойство = 1;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let common_module_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+
+        // Field access is not a simple identifier assignment
+        assert_eq!(common_module_diags.len(), 0);
     }
 
     #[test]
-    fn test_property_access() {
-        let code = r#"
-СвойМодуль.Свойство = 1;
-"#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+    fn test_index_access_no_diagnostic() {
+        // Index access should NOT trigger diagnostic
+        let code = r#"Процедура Тест()
+    Массив[0] = 1;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let common_module_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+
+        // Index access is not a simple identifier assignment
+        assert_eq!(common_module_diags.len(), 0);
+    }
+
+    #[test]
+    fn test_simple_variable_emits_candidate() {
+        // Simple variable assignment should emit a candidate (filtered by metadata later)
+        let code = r#"Процедура Тест()
+    А = 1;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        // Without metadata, candidates are filtered out
+        let common_module_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CommonModuleAssign).collect();
+        assert_eq!(common_module_diags.len(), 0);
     }
 }

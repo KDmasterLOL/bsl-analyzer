@@ -370,6 +370,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
             handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
         }
+        BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
+            handlers::common_module_assign::from_hir(variable_name, *range, ctx)
+        }
     }
 }
 
