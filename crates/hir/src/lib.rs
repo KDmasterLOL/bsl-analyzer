@@ -217,9 +217,6 @@ impl<'db, DB: DefDatabase> Variable<'db, DB> {
         false
     }
 
-    /// Get the source range of this variable.
-    ///
-    /// Returns the text range where this variable is defined.
     pub fn source_range(&self) -> Option<TextRange> {
         let tree = self.db.item_tree(self.id.module.file_id);
 
@@ -250,15 +247,11 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         Self { db }
     }
 
-    /// Get the Module for a file.
     pub fn module_from_file(&self, file_id: vfs::FileId) -> Module<'db, DB> {
         let module_id = ModuleId::new(file_id);
         Module::new(self.db, module_id)
     }
 
-    /// Find a method by name in a file.
-    ///
-    /// This is case-insensitive search (BSL is case-insensitive).
     pub fn find_method(&self, file_id: vfs::FileId, name: &str) -> Option<Method<'db, DB>> {
         let module = self.module_from_file(file_id);
         let search_name = Name::new(name);

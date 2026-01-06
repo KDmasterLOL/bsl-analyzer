@@ -483,6 +483,7 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // File-level text-based diagnostics (called once per file)
+    diagnostics.extend(handlers::consecutive_empty_lines::check(ctx));
     diagnostics.extend(handlers::line_length::check(ctx));
     diagnostics.extend(handlers::missing_space::check(ctx));
     diagnostics.extend(handlers::incorrect_line_break::check(ctx));
@@ -540,16 +541,6 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // NOTE: CommentedCode migrated to text-based collection (collect_text_diagnostics)
     // result.extend(run_diagnostic("CommentedCode", ctx, handlers::commented_code::check));
     result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
-    // NOTE: DuplicateStringLiteral migrated to text-based collection (collect_text_diagnostics - file-level)
-    // result.extend(run_diagnostic(
-    //     "DuplicateStringLiteral",
-    //     ctx,
-    //     handlers::duplicate_string_literal::check,
-    // ));
-    // NOTE: DuplicateRegion migrated to text-based collection (collect_text_diagnostics - file-level)
-    // result.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
-    // NOTE: NonStandardRegion migrated to text-based collection (collect_text_diagnostics - file-level)
-    // result.extend(run_diagnostic("NonStandardRegion", ctx, handlers::non_standard_region::check));
     result.extend(run_diagnostic(
         "DuplicatedInsertionIntoCollection",
         ctx,
@@ -808,56 +799,65 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // The HIR version is collected during lowering via BodyDiagnostic::CommonModuleAssign
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("CommonModuleAssign", ctx, handlers::common_module_assign::check));
-    result.extend(run_diagnostic(
-        "CommonModuleInvalidType",
-        ctx,
-        handlers::common_module_invalid_type::check,
-    ));
+    // NOTE: CommonModuleInvalidType migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleInvalidType",
+    //     ctx,
+    //     handlers::common_module_invalid_type::check,
+    // ));
     result.extend(run_diagnostic(
         "CommonModuleMissingAPI",
         ctx,
         handlers::common_module_missing_api::check,
     ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameCached",
-        ctx,
-        handlers::common_module_name_cached::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameClient",
-        ctx,
-        handlers::common_module_name_client::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameClientServer",
-        ctx,
-        handlers::common_module_name_client_server::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameFullAccess",
-        ctx,
-        handlers::common_module_name_full_access::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameGlobal",
-        ctx,
-        handlers::common_module_name_global::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameGlobalClient",
-        ctx,
-        handlers::common_module_name_global_client::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameServerCall",
-        ctx,
-        handlers::common_module_name_server_call::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleNameWords",
-        ctx,
-        handlers::common_module_name_words::check,
-    ));
+    // NOTE: CommonModuleNameCached migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameCached",
+    //     ctx,
+    //     handlers::common_module_name_cached::check,
+    // ));
+    // NOTE: CommonModuleNameClient migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameClient",
+    //     ctx,
+    //     handlers::common_module_name_client::check,
+    // ));
+    // NOTE: CommonModuleNameClientServer migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameClientServer",
+    //     ctx,
+    //     handlers::common_module_name_client_server::check,
+    // ));
+    // NOTE: CommonModuleNameFullAccess migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameFullAccess",
+    //     ctx,
+    //     handlers::common_module_name_full_access::check,
+    // ));
+    // NOTE: CommonModuleNameGlobal migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameGlobal",
+    //     ctx,
+    //     handlers::common_module_name_global::check,
+    // ));
+    // NOTE: CommonModuleNameGlobalClient migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameGlobalClient",
+    //     ctx,
+    //     handlers::common_module_name_global_client::check,
+    // ));
+    // NOTE: CommonModuleNameServerCall migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameServerCall",
+    //     ctx,
+    //     handlers::common_module_name_server_call::check,
+    // ));
+    // NOTE: CommonModuleNameWords migrated to metadata-based collection (collect_metadata_diagnostics)
+    // result.extend(run_diagnostic(
+    //     "CommonModuleNameWords",
+    //     ctx,
+    //     handlers::common_module_name_words::check,
+    // ));
     result.extend(run_diagnostic(
         "DenyIncompleteValues",
         ctx,
