@@ -285,6 +285,10 @@ pub enum BodyDiagnostic {
         args: Vec<bool>,
         range: TextRange,
     },
+
+    /// Duplicated code block in if/elsif/else branches.
+    /// Detected when two or more branches contain structurally identical code.
+    IfElseDuplicatedCodeBlock { range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -302,6 +306,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
+            BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,
         }
     }
 }
@@ -410,6 +415,7 @@ mod tests {
             BodyDiagnostic::SelfAssign { range },
             BodyDiagnostic::UnusedVariable { name: "x".to_string(), range },
             BodyDiagnostic::FunctionShouldHaveReturn { range },
+            BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
         ];
 
         for diag in diagnostics {

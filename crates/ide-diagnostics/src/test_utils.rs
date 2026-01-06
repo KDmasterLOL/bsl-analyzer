@@ -361,6 +361,9 @@ fn convert_hir_diagnostic(
             *range,
             ctx,
         ),
+        BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
+            handlers::if_else_duplicated_code_block::from_hir(*range, ctx)
+        }
     }
 }
 

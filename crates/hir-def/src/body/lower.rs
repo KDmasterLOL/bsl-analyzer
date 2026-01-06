@@ -1101,18 +1101,23 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let condition_node = children.next()?;
     let condition = lower_expr_node(ctx, &condition_node);
 
+    // Collect all branch STMT_LIST nodes for duplicate detection
+    let mut branch_nodes: Vec<SyntaxNode> = Vec::new();
+
     // Then branch (STMT_LIST)
-    let then_branch = children
-        .next()
-        .filter(|n| n.kind() == SyntaxKind::STMT_LIST)
-        .map(|n| lower_stmt_list(ctx, &n))
-        .unwrap_or_default();
+    let then_stmt_list = children.next().filter(|n| n.kind() == SyntaxKind::STMT_LIST);
+    let then_branch = then_stmt_list.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
     // Check for empty then branch
     if then_branch.is_empty() {
-        if let Some(stmt_list) = node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
+        if let Some(ref stmt_list) = then_stmt_list {
             ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
         }
+    }
+
+    // Add then branch to branch_nodes for duplicate detection
+    if let Some(stmt_list) = then_stmt_list {
+        branch_nodes.push(stmt_list);
     }
 
     // Elsif branches
@@ -1121,18 +1126,19 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         let mut elsif_children = elsif.children();
         if let Some(cond_node) = elsif_children.next() {
             let cond = lower_expr_node(ctx, &cond_node);
-            let body = elsif_children
-                .find(|n| n.kind() == SyntaxKind::STMT_LIST)
-                .map(|n| lower_stmt_list(ctx, &n))
-                .unwrap_or_default();
+            let stmt_list_node = elsif_children.find(|n| n.kind() == SyntaxKind::STMT_LIST);
+            let body = stmt_list_node.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
             // Check for empty elsif branch
             if body.is_empty() {
-                if let Some(stmt_list) =
-                    elsif.children().find(|n| n.kind() == SyntaxKind::STMT_LIST)
-                {
+                if let Some(ref stmt_list) = stmt_list_node {
                     ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
                 }
+            }
+
+            // Add elsif branch to branch_nodes for duplicate detection
+            if let Some(stmt_list) = stmt_list_node {
+                branch_nodes.push(stmt_list);
             }
 
             elsif_branches.push((cond, body.into_boxed_slice()));
@@ -1150,9 +1156,15 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
                     ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
                 }
 
+                // Add else branch to branch_nodes for duplicate detection
+                branch_nodes.push(n.clone());
+
                 stmts.into_boxed_slice()
             })
         });
+
+    // Check for duplicated code blocks
+    check_duplicated_code_blocks(ctx, &branch_nodes);
 
     Some(Stmt::If {
         condition,
@@ -1160,6 +1172,110 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         elsif_branches: elsif_branches.into_boxed_slice(),
         else_branch,
     })
+}
+
+/// Check for duplicated code blocks in if/elsif/else branches.
+///
+/// Compares all pairs of branches and emits diagnostics for identical blocks.
+fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: &[SyntaxNode]) {
+    use std::collections::HashSet;
+
+    if branch_nodes.len() < 2 {
+        return;
+    }
+
+    // Track which blocks we've already reported as duplicates
+    let mut reported: HashSet<usize> = HashSet::new();
+
+    // Compare all pairs of code blocks
+    for i in 0..branch_nodes.len() - 1 {
+        if reported.contains(&i) {
+            continue;
+        }
+
+        let current_block = &branch_nodes[i];
+
+        // Find all identical blocks after current one
+        let mut has_duplicate = false;
+        for (j, other_block) in branch_nodes.iter().enumerate().skip(i + 1) {
+            // Skip empty blocks (both must be non-empty for comparison)
+            if is_empty_block(current_block) && is_empty_block(other_block) {
+                continue;
+            }
+
+            // Compare blocks structurally
+            if are_blocks_identical(current_block, other_block) {
+                has_duplicate = true;
+                reported.insert(j);
+            }
+        }
+
+        if has_duplicate {
+            // Report diagnostic on the first block with duplicates
+            ctx.emit(BodyDiagnostic::IfElseDuplicatedCodeBlock {
+                range: current_block.text_range(),
+            });
+        }
+    }
+}
+
+/// Check if a code block is empty (no children or only whitespace).
+fn is_empty_block(block: &SyntaxNode) -> bool {
+    block.children().next().is_none()
+}
+
+/// Compare two code blocks for structural equality.
+///
+/// Uses normalized text comparison (case-insensitive, whitespace-normalized).
+fn are_blocks_identical(block1: &SyntaxNode, block2: &SyntaxNode) -> bool {
+    // Normalize and compare text content
+    let text1 = normalize_code_block(block1);
+    let text2 = normalize_code_block(block2);
+
+    if text1 != text2 {
+        return false;
+    }
+
+    // Additional structural check: same number of statements
+    let stmt_count1 = count_statements(block1);
+    let stmt_count2 = count_statements(block2);
+
+    stmt_count1 == stmt_count2 && stmt_count1 > 0
+}
+
+/// Normalize code block for comparison.
+///
+/// Removes whitespace and converts to lowercase (bilingual support).
+fn normalize_code_block(block: &SyntaxNode) -> String {
+    block
+        .text()
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Count the number of statement nodes in a code block.
+fn count_statements(block: &SyntaxNode) -> usize {
+    block
+        .descendants()
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                SyntaxKind::CALL_STMT
+                    | SyntaxKind::ASSIGN_STMT
+                    | SyntaxKind::RETURN_STMT
+                    | SyntaxKind::IF_STMT
+                    | SyntaxKind::WHILE_STMT
+                    | SyntaxKind::FOR_STMT
+                    | SyntaxKind::BREAK_STMT
+                    | SyntaxKind::CONTINUE_STMT
+                    | SyntaxKind::RAISE_STMT
+                    | SyntaxKind::TRY_STMT
+            )
+        })
+        .count()
 }
 
 /// Lower while statement.
@@ -2362,5 +2478,120 @@ mod tests {
 
         assert!(result.body.sdbl_exprs[0].1.query_text.contains("SELECT"));
         assert!(result.body.sdbl_exprs[1].1.query_text.contains("ВЫБРАТЬ"));
+    }
+
+    #[test]
+    fn test_if_else_duplicated_code_block() {
+        let method = parse_method(
+            r#"Процедура Тест()
+    Если x = 1 Тогда
+        А = 1;
+        Б = 2;
+    Иначе
+        А = 1;
+        Б = 2;
+    КонецЕсли;
+КонецПроцедуры"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should detect duplicated code blocks
+        let diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, BodyDiagnostic::IfElseDuplicatedCodeBlock { .. }))
+            .collect();
+        assert_eq!(diags.len(), 1, "Should detect 1 duplicated code block");
+    }
+
+    #[test]
+    fn test_if_else_different_blocks() {
+        let method = parse_method(
+            r#"Процедура Тест()
+    Если x = 1 Тогда
+        А = 1;
+    Иначе
+        А = 2;
+    КонецЕсли;
+КонецПроцедуры"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should NOT detect duplicated code blocks (different values)
+        let diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, BodyDiagnostic::IfElseDuplicatedCodeBlock { .. }))
+            .collect();
+        assert_eq!(diags.len(), 0, "Different blocks should not trigger diagnostic");
+    }
+
+    #[test]
+    fn test_if_elsif_duplicated_code_block() {
+        let method = parse_method(
+            r#"Процедура Тест()
+    Если x = 1 Тогда
+        А = 1;
+    ИначеЕсли x = 2 Тогда
+        А = 1;
+    КонецЕсли;
+КонецПроцедуры"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Should detect duplicated code blocks in if/elsif
+        let diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, BodyDiagnostic::IfElseDuplicatedCodeBlock { .. }))
+            .collect();
+        assert_eq!(diags.len(), 1, "Should detect duplicated if/elsif blocks");
+    }
+
+    #[test]
+    fn test_if_else_empty_blocks_not_duplicated() {
+        let method = parse_method(
+            r#"Процедура Тест()
+    Если x = 1 Тогда
+    Иначе
+    КонецЕсли;
+КонецПроцедуры"#,
+        );
+        let result = lower_method(&method, false);
+
+        // Empty blocks should NOT be reported as duplicates
+        let diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, BodyDiagnostic::IfElseDuplicatedCodeBlock { .. }))
+            .collect();
+        assert_eq!(diags.len(), 0, "Empty blocks should not trigger duplicate diagnostic");
+    }
+
+    #[test]
+    fn test_if_else_duplicated_range_correct() {
+        let code = r#"Процедура Тест()
+    Если x = 1 Тогда
+        А = 1;
+    Иначе
+        А = 1;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let method = parse_method(code);
+        let result = lower_method(&method, false);
+
+        let diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, BodyDiagnostic::IfElseDuplicatedCodeBlock { .. }))
+            .collect();
+        assert_eq!(diags.len(), 1);
+
+        // Diagnostic should point to the FIRST block (then-branch)
+        if let BodyDiagnostic::IfElseDuplicatedCodeBlock { range } = diags[0] {
+            let text = &code[range.start().into()..range.end().into()];
+            // The range should cover the STMT_LIST content (А = 1;)
+            assert!(text.contains("А = 1"), "Range should cover the duplicated statement");
+        }
     }
 }

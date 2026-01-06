@@ -580,11 +580,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::if_condition_complexity::check,
     ));
-    result.extend(run_diagnostic(
-        "IfElseDuplicatedCodeBlock",
-        ctx,
-        handlers::if_else_duplicated_code_block::check,
-    ));
+    // NOTE: IfElseDuplicatedCodeBlock migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::IfElseDuplicatedCodeBlock
+    // and dispatched through collect_hir_diagnostics()
     result.extend(run_diagnostic(
         "IfElseDuplicatedCondition",
         ctx,
@@ -1016,6 +1014,9 @@ fn dispatch_hir_diagnostic(
             *range,
             ctx,
         ),
+        BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
+            handlers::if_else_duplicated_code_block::from_hir(*range, ctx)
+        }
     }
 }
 
