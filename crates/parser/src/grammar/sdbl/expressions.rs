@@ -152,6 +152,27 @@ fn predicate_expr(p: &mut Parser) {
         p.expect(TokenKind::RParen);
         m.complete(p, NodeKind::SdblInExpr);
     }
+    // Check for IS NULL predicate
+    else if p.at_keyword("IS") || p.at_keyword("ЕСТЬ") {
+        p.bump(); // IS / ЕСТЬ
+        p.skip_trivia();
+
+        // Optional NOT
+        if p.at(TokenKind::KwNot) {
+            p.bump(); // NOT / НЕ
+            p.skip_trivia();
+        }
+
+        // Expect NULL keyword
+        if !p.at_keyword("NULL") {
+            // Error recovery: expected NULL after IS [NOT]
+            m.abandon(p);
+            return;
+        }
+        p.bump(); // NULL
+
+        m.complete(p, NodeKind::SdblIsNullExpr);
+    }
     // Check for comparison operators
     else if matches!(
         p.current(),

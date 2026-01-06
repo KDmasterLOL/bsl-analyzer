@@ -240,6 +240,7 @@ pub enum SyntaxKind {
     SDBL_NOT_EXPR,            // NOT expression
     SDBL_COMPARISON_EXPR,     // Comparison operators (=, <>, <, >, etc.)
     SDBL_IN_EXPR,             // IN predicate (IN (values) or IN (subquery))
+    SDBL_IS_NULL_EXPR,        // IS NULL / IS NOT NULL predicate
     SDBL_ADDITIVE_EXPR,       // Additive operators (+, -)
     SDBL_MULTIPLICATIVE_EXPR, // Multiplicative operators (*, /, MOD)
     SDBL_UNARY_EXPR,          // Unary operators (+, -, NOT)

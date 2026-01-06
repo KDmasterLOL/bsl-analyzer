@@ -130,8 +130,16 @@ fn query(p: &mut Parser) {
     // Selected fields (mandatory)
     selected_fields(p);
 
-    // Phase 2: INTO clause for temporary tables
-    // if p.at_keyword("INTO") { into_clause(p); }
+    // INTO clause for temporary tables (minimal support - just skip it)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
+        eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
+        p.skip_trivia();
+        // Skip temporary table name (identifier)
+        if p.at(TokenKind::Ident) {
+            p.bump();
+        }
+    }
 
     // FROM clause (optional)
     p.skip_trivia(); // CRITICAL: Must skip trivia before checking for FROM

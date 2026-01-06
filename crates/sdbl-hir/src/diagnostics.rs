@@ -154,6 +154,31 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Fields from LEFT/RIGHT/FULL JOIN without NULL protection.
+    ///
+    /// BSL-LS diagnostic code: FieldsFromJoinsWithoutIsNull
+    FieldsFromJoinWithoutNullCheck {
+        /// JOIN type (for message generation).
+        join_type: crate::hir::JoinType,
+        /// Source range of the JOIN clause.
+        range: TextRange,
+        /// Unprotected field references (for future LSP RelatedInformation).
+        unprotected_fields: Vec<UnprotectedFieldRef>,
+    },
+}
+
+/// Reference to an unprotected field from JOIN.
+///
+/// Used for detailed error reporting and future LSP RelatedInformation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnprotectedFieldRef {
+    /// Table alias.
+    pub table_alias: String,
+    /// Field name (for debugging/messages).
+    pub field_name: String,
+    /// Source range in SDBL.
+    pub range: TextRange,
 }
 
 impl SdblDiagnostic {
@@ -241,6 +266,18 @@ impl SdblDiagnostic {
                 "Использование ИЛИ (OR) в условии соединения приводит к низкой производительности запроса"
                     .to_string()
             }
+            Self::FieldsFromJoinWithoutNullCheck { join_type, .. } => {
+                let join_str = match join_type {
+                    crate::hir::JoinType::Left => "LEFT JOIN",
+                    crate::hir::JoinType::Right => "RIGHT JOIN",
+                    crate::hir::JoinType::Full => "FULL JOIN",
+                    _ => "JOIN",
+                };
+                format!(
+                    "For fields from {} add field checks via IS NULL or use conversion via ISNULL or use INNER JOIN",
+                    join_str
+                )
+            }
         }
     }
 
@@ -262,6 +299,7 @@ impl SdblDiagnostic {
             Self::AliasWithoutAsKeyword { range, .. } => *range,
             Self::LogicalOrInWhere { range } => *range,
             Self::LogicalOrInJoin { range } => *range,
+            Self::FieldsFromJoinWithoutNullCheck { range, .. } => *range,
         }
     }
 
@@ -286,6 +324,7 @@ impl SdblDiagnostic {
             Self::AliasWithoutAsKeyword { .. } => false,
             Self::LogicalOrInWhere { .. } => false,
             Self::LogicalOrInJoin { .. } => false,
+            Self::FieldsFromJoinWithoutNullCheck { .. } => false, // Warning/Critical, not an error
         }
     }
 }
