@@ -1035,6 +1035,9 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
             handlers::common_module_assign::from_hir(variable_name, *range, ctx)
         }
+        BodyDiagnostic::CreateQueryInCycle { range } => {
+            handlers::create_query_in_cycle::from_hir(*range, ctx)
+        }
     }
 }
 

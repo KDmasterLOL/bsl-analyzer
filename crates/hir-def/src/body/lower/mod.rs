@@ -72,6 +72,23 @@ pub(crate) struct LoweringCtx {
 
     /// Pending SDBL queries (before ExprId allocation).
     pub(crate) pending_sdbl: Vec<(String, syntax::SdblQueryInfo)>,
+
+    /// Loop nesting depth (0 = not in loop, 1+ = inside loop).
+    /// Used for CreateQueryInCycle diagnostic.
+    pub(crate) loop_depth: usize,
+
+    /// Query-like variables: lowercase name -> VarType.
+    /// Tracks Query, QueryBuilder, ReportBuilder variables for CreateQueryInCycle diagnostic.
+    pub(crate) query_vars: FxHashMap<String, QueryVarType>,
+}
+
+/// Type of query-like variable for CreateQueryInCycle diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum QueryVarType {
+    Query,
+    QueryBuilder,
+    ReportBuilder,
+    Undefined,
 }
 
 impl LoweringCtx {
@@ -95,6 +112,8 @@ impl LoweringCtx {
             known_externals,
             param_names: FxHashSet::default(),
             pending_sdbl: Vec::new(),
+            loop_depth: 0,
+            query_vars: FxHashMap::default(),
         }
     }
 
@@ -171,6 +190,41 @@ impl LoweringCtx {
     /// Allocate a missing expression (for error recovery).
     pub(crate) fn missing_expr(&mut self) -> ExprId {
         self.body.exprs.alloc(Expr::Missing)
+    }
+
+    /// Enter a loop (increment loop depth).
+    pub(crate) fn enter_loop(&mut self) {
+        self.loop_depth += 1;
+    }
+
+    /// Leave a loop (decrement loop depth).
+    pub(crate) fn leave_loop(&mut self) {
+        if self.loop_depth > 0 {
+            self.loop_depth -= 1;
+        }
+    }
+
+    /// Check if currently inside a loop.
+    pub(crate) fn in_loop(&self) -> bool {
+        self.loop_depth > 0
+    }
+
+    /// Register a query-like variable (Query, QueryBuilder, ReportBuilder).
+    pub(crate) fn register_query_var(&mut self, name: String, var_type: QueryVarType) {
+        self.query_vars.insert(name.to_lowercase(), var_type);
+    }
+
+    /// Get query variable type by name (case-insensitive).
+    pub(crate) fn get_query_var_type(&self, name: &str) -> Option<QueryVarType> {
+        self.query_vars.get(&name.to_lowercase()).copied()
+    }
+
+    /// Check if a variable is a query-like type.
+    pub(crate) fn is_query_var(&self, name: &str) -> bool {
+        matches!(
+            self.get_query_var_type(name),
+            Some(QueryVarType::Query | QueryVarType::QueryBuilder | QueryVarType::ReportBuilder)
+        )
     }
 
     /// Emit a diagnostic.

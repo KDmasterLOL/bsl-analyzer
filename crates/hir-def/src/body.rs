@@ -307,6 +307,11 @@ pub enum BodyDiagnostic {
     /// Emitted during lowering for simple identifier assignments.
     /// Validation against metadata happens in from_hir().
     CommonModuleAssign { variable_name: String, range: TextRange },
+
+    /// Query/QueryBuilder/ReportBuilder Execute() call inside a loop.
+    /// Detects when Execute() is called on Query-like objects inside loops,
+    /// which causes severe performance degradation.
+    CreateQueryInCycle { range: TextRange },
 }
 
 impl BodyDiagnostic {
@@ -328,6 +333,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
+            BodyDiagnostic::CreateQueryInCycle { range } => *range,
         }
     }
 }

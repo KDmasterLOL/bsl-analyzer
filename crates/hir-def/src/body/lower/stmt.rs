@@ -265,7 +265,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     } else {
         None
     };
-    if let Some((name, range)) = target_name {
+    if let Some((ref name, range)) = target_name {
         let key = name.as_str().to_lowercase();
         // Register implicit variable if not already declared.
         // But don't register if it's a known external (module variable) or parameter.
@@ -294,6 +294,32 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Check for self-assignment (a = a, obj.field = obj.field)
     if exprs_are_equal(&ctx.body, target, value) {
         ctx.emit(BodyDiagnostic::SelfAssign { range: node.text_range() });
+    }
+
+    // Track Query/QueryBuilder/ReportBuilder assignments for CreateQueryInCycle diagnostic
+    if let Some((target_name, _)) = target_name {
+        use super::QueryVarType;
+
+        // Check if value is "New Query()" or similar
+        if let Expr::New { type_name: Some(type_name), .. } = ctx.body.expr(value) {
+            let type_str = type_name.as_str().to_lowercase();
+            let query_type = match type_str.as_str() {
+                "запрос" | "query" => QueryVarType::Query,
+                "построительзапроса" | "querybuilder" => {
+                    QueryVarType::QueryBuilder
+                }
+                "построительотчета" | "reportbuilder" => {
+                    QueryVarType::ReportBuilder
+                }
+                _ => QueryVarType::Undefined,
+            };
+            ctx.register_query_var(target_name.as_str().to_string(), query_type);
+        } else if let Expr::Path(source_name) = ctx.body.expr(value) {
+            // Handle: Запрос2 = Запрос (copy query reference)
+            if let Some(source_type) = ctx.get_query_var_type(source_name.as_str()) {
+                ctx.register_query_var(target_name.as_str().to_string(), source_type);
+            }
+        }
     }
 
     Some(Stmt::Assign { target, value })
@@ -417,6 +443,9 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let condition_node = children.next()?;
     let condition = lower_expr_node(ctx, &condition_node);
 
+    // Enter loop scope for CreateQueryInCycle diagnostic
+    ctx.enter_loop();
+
     let body = children
         .find(|n| n.kind() == SyntaxKind::STMT_LIST)
         .map(|n| {
@@ -430,6 +459,9 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             stmts.into_boxed_slice()
         })
         .unwrap_or_default();
+
+    // Leave loop scope
+    ctx.leave_loop();
 
     Some(Stmt::While { condition, body })
 }
@@ -467,6 +499,9 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let to =
         expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
 
+    // Enter loop scope for CreateQueryInCycle diagnostic
+    ctx.enter_loop();
+
     let body = node
         .children()
         .find(|n| n.kind() == SyntaxKind::STMT_LIST)
@@ -481,6 +516,9 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             stmts.into_boxed_slice()
         })
         .unwrap_or_default();
+
+    // Leave loop scope
+    ctx.leave_loop();
 
     Some(Stmt::For { var, from, to, body })
 }
@@ -516,6 +554,9 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
         .map(|n| lower_expr_node(ctx, &n))
         .unwrap_or_else(|| ctx.missing_expr());
 
+    // Enter loop scope for CreateQueryInCycle diagnostic
+    ctx.enter_loop();
+
     let body = node
         .children()
         .find(|n| n.kind() == SyntaxKind::STMT_LIST)
@@ -530,6 +571,9 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
             stmts.into_boxed_slice()
         })
         .unwrap_or_default();
+
+    // Leave loop scope
+    ctx.leave_loop();
 
     Some(Stmt::ForEach { var, collection, body })
 }

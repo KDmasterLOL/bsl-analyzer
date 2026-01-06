@@ -318,6 +318,37 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     let args =
         arg_list_node.as_ref().map(|arg_list| lower_arg_list(ctx, arg_list)).unwrap_or_default();
 
+    // Check for Query.Execute() call inside a loop for CreateQueryInCycle diagnostic
+    if ctx.in_loop() && actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        // Extract method name from FIELD_EXPR (last IDENT or KW_EXECUTE token)
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| matches!(tok.kind(), SyntaxKind::IDENT | SyntaxKind::KW_EXECUTE))
+            .last()
+        {
+            let method_name = method_token.text().to_lowercase();
+            if matches!(method_name.as_str(), "execute" | "выполнить") {
+                // Extract receiver from HIR (callee can be Field or MethodCall)
+                let receiver = match ctx.body.expr(callee) {
+                    Expr::Field { base, .. } => Some(*base),
+                    Expr::MethodCall { receiver, .. } => Some(*receiver),
+                    _ => None,
+                };
+
+                if let Some(receiver_id) = receiver {
+                    if let Some(var_name) = extract_receiver_name(ctx, receiver_id) {
+                        if ctx.is_query_var(&var_name) {
+                            ctx.emit(BodyDiagnostic::CreateQueryInCycle {
+                                range: node.text_range(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
     // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
     if actual_callee.kind() == SyntaxKind::IDENT {
@@ -487,6 +518,24 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         Expr::MethodCall { receiver: base, method: field_name, args: args.into_boxed_slice() }
     } else {
         Expr::Field { base, field: field_name }
+    }
+}
+
+/// Extract receiver variable name from an expression for CreateQueryInCycle diagnostic.
+///
+/// Extracts variable name from expressions like:
+/// - Запрос -> "Запрос"
+/// - Запрос2.info -> "Запрос2.info"
+fn extract_receiver_name(ctx: &LoweringCtx, expr_id: ExprId) -> Option<String> {
+    let expr = ctx.body.expr(expr_id);
+    match expr {
+        Expr::Path(name) => Some(name.as_str().to_string()),
+        Expr::Field { base, field } => {
+            // Build field path: base.field
+            let base_name = extract_receiver_name(ctx, *base)?;
+            Some(format!("{}.{}", base_name, field.as_str()))
+        }
+        _ => None,
     }
 }
 
