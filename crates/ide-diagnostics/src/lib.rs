@@ -1038,6 +1038,9 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::CreateQueryInCycle { range } => {
             handlers::create_query_in_cycle::from_hir(*range, ctx)
         }
+        BodyDiagnostic::DeletingCollectionItem { collection_text, range } => {
+            handlers::deleting_collection_item::from_hir(collection_text, *range, ctx)
+        }
     }
 }
 

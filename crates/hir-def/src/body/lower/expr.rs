@@ -349,6 +349,36 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // Check for Collection.Delete() call inside ForEach for DeletingCollectionItem diagnostic
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        // Extract method name from FIELD_EXPR (last IDENT token)
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last()
+        {
+            let method_name = method_token.text().to_lowercase();
+            if matches!(method_name.as_str(), "delete" | "удалить") {
+                // Extract receiver from HIR (callee can be Field or MethodCall)
+                let receiver = match ctx.body.expr(callee) {
+                    Expr::Field { base, .. } => Some(*base),
+                    Expr::MethodCall { receiver, .. } => Some(*receiver),
+                    _ => None,
+                };
+
+                if let Some(receiver_id) = receiver {
+                    if let Some(collection_text) = ctx.matches_foreach_collection(receiver_id) {
+                        ctx.emit(BodyDiagnostic::DeletingCollectionItem {
+                            collection_text: collection_text.to_string(),
+                            range: node.text_range(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
     // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
     if actual_callee.kind() == SyntaxKind::IDENT {
@@ -643,6 +673,9 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 /// Used for detecting self-assignment patterns like `a = a` or `obj.field = obj.field`.
 pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprId, rhs: ExprId) -> bool {
     match (body.expr(lhs), body.expr(rhs)) {
+        // Missing expressions are equal (used for global function calls like Mass())
+        (Expr::Missing, Expr::Missing) => true,
+
         // Simple variable: A = a (case-insensitive)
         (Expr::Path(name1), Expr::Path(name2)) => name1.eq_ignore_case(name2),
 
@@ -654,6 +687,19 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprId, rhs: ExprId) -> bool {
         // Index access: arr[i] = arr[i]
         (Expr::Index { base: b1, index: i1 }, Expr::Index { base: b2, index: i2 }) => {
             exprs_are_equal(body, *b1, *b2) && exprs_are_equal(body, *i1, *i2)
+        }
+
+        // Method call: obj.method() = obj.method()
+        // Arguments are ignored - obj.method(1) = obj.method(2) for our purposes
+        (
+            Expr::MethodCall { receiver: r1, method: m1, .. },
+            Expr::MethodCall { receiver: r2, method: m2, .. },
+        ) => m1.eq_ignore_case(m2) && exprs_are_equal(body, *r1, *r2),
+
+        // Function call: func() = func()
+        // Arguments are ignored - func(1) = func(2) for our purposes
+        (Expr::Call { callee: c1, .. }, Expr::Call { callee: c2, .. }) => {
+            exprs_are_equal(body, *c1, *c2)
         }
 
         // Different expression types or complex expressions - not equal

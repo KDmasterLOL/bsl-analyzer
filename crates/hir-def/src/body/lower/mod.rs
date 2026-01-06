@@ -80,6 +80,11 @@ pub(crate) struct LoweringCtx {
     /// Query-like variables: lowercase name -> VarType.
     /// Tracks Query, QueryBuilder, ReportBuilder variables for CreateQueryInCycle diagnostic.
     pub(crate) query_vars: FxHashMap<String, QueryVarType>,
+
+    /// ForEach collection stack: (collection_expr_id, collection_text) tuples.
+    /// Tracks the collection being iterated for DeletingCollectionItem diagnostic.
+    /// Stack handles nested ForEach loops.
+    pub(crate) foreach_collections: Vec<(ExprId, String)>,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -114,6 +119,7 @@ impl LoweringCtx {
             pending_sdbl: Vec::new(),
             loop_depth: 0,
             query_vars: FxHashMap::default(),
+            foreach_collections: Vec::new(),
         }
     }
 
@@ -225,6 +231,29 @@ impl LoweringCtx {
             self.get_query_var_type(name),
             Some(QueryVarType::Query | QueryVarType::QueryBuilder | QueryVarType::ReportBuilder)
         )
+    }
+
+    /// Enter a ForEach loop, tracking the collection being iterated.
+    pub(crate) fn enter_foreach(&mut self, collection_expr: ExprId, collection_text: String) {
+        self.foreach_collections.push((collection_expr, collection_text));
+    }
+
+    /// Leave a ForEach loop.
+    pub(crate) fn leave_foreach(&mut self) {
+        self.foreach_collections.pop();
+    }
+
+    /// Check if an expression matches any active ForEach collection (case-insensitive).
+    /// Returns collection text for diagnostic message if matched.
+    pub(crate) fn matches_foreach_collection(&self, expr: ExprId) -> Option<&str> {
+        use crate::body::lower::expr::exprs_are_equal;
+
+        for (collection_expr, collection_text) in self.foreach_collections.iter().rev() {
+            if exprs_are_equal(&self.body, *collection_expr, expr) {
+                return Some(collection_text.as_str());
+            }
+        }
+        None
     }
 
     /// Emit a diagnostic.

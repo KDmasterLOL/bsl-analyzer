@@ -540,22 +540,32 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
     let var = ctx.alloc_binding(Binding::var(name), range);
 
     // Collection is the first expression child
-    let collection = node
-        .children()
-        .find(|n| {
-            matches!(
-                n.kind(),
-                SyntaxKind::EXPR
-                    | SyntaxKind::CALL_EXPR
-                    | SyntaxKind::FIELD_EXPR
-                    | SyntaxKind::INDEX_EXPR
-            )
-        })
-        .map(|n| lower_expr_node(ctx, &n))
+    let collection_node = node.children().find(|n| {
+        matches!(
+            n.kind(),
+            SyntaxKind::EXPR
+                | SyntaxKind::CALL_EXPR
+                | SyntaxKind::FIELD_EXPR
+                | SyntaxKind::INDEX_EXPR
+        )
+    });
+
+    let collection = collection_node
+        .as_ref()
+        .map(|n| lower_expr_node(ctx, n))
         .unwrap_or_else(|| ctx.missing_expr());
+
+    // Extract collection text for diagnostic message (preserve original AST text)
+    let collection_text = collection_node
+        .as_ref()
+        .map(|n| n.text().to_string())
+        .unwrap_or_else(|| String::from("<unknown>"));
 
     // Enter loop scope for CreateQueryInCycle diagnostic
     ctx.enter_loop();
+
+    // Enter ForEach context for DeletingCollectionItem diagnostic
+    ctx.enter_foreach(collection, collection_text);
 
     let body = node
         .children()
@@ -571,6 +581,9 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
             stmts.into_boxed_slice()
         })
         .unwrap_or_default();
+
+    // Leave ForEach context
+    ctx.leave_foreach();
 
     // Leave loop scope
     ctx.leave_loop();

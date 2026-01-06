@@ -312,6 +312,13 @@ pub enum BodyDiagnostic {
     /// Detects when Execute() is called on Query-like objects inside loops,
     /// which causes severe performance degradation.
     CreateQueryInCycle { range: TextRange },
+
+    /// Deletion of collection item during ForEach iteration over that collection.
+    /// Detected when Delete/Удалить method is called on the same collection being iterated.
+    DeletingCollectionItem {
+        collection_text: String, // Human-readable collection name for error message
+        range: TextRange,        // Range of the Delete call
+    },
 }
 
 impl BodyDiagnostic {
@@ -334,6 +341,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
+            BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
         }
     }
 }
