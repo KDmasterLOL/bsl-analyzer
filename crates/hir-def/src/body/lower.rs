@@ -1918,6 +1918,12 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
             .map(|tok| tok.text().to_string())
             .collect();
 
+        tracing::trace!(
+            idents = ?idents,
+            first_child_kind = ?first_child.kind(),
+            "Analyzing potential three-level call"
+        );
+
         if idents.len() == 2 {
             let mdo_type = idents[0].clone();
             let mdo_name = idents[1].clone();
@@ -1928,6 +1934,11 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
                 return None;
             }
 
+            tracing::debug!(
+                mdo_type = %mdo_type,
+                mdo_name = %mdo_name,
+                "Detected three-level call"
+            );
             return Some(QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name });
         }
         return None;

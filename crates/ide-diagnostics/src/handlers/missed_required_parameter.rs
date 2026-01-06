@@ -96,6 +96,12 @@ pub fn from_hir(
     // Resolve and check missing parameters based on call type
     let missing = if let (Some(mdo_type_kw), Some(mdo_obj_name)) = (mdo_type, mdo_name) {
         // Three-level call: Документы.ПКО.Method()
+        tracing::debug!(
+            mdo_type = mdo_type_kw,
+            mdo_name = mdo_obj_name,
+            callee,
+            "Processing three-level call in from_hir"
+        );
         check_manager_module_call(ctx, mdo_type_kw, mdo_obj_name, callee, args)?
     } else if let Some(module_name) = module {
         // Two-level call: Module.Method() or ЭтотОбъект.Method()
@@ -191,10 +197,32 @@ fn check_manager_module_call(
             .entered();
 
     // Load metadata
-    let configuration = ctx.load_configuration()?;
+    let configuration = match ctx.load_configuration() {
+        Some(c) => c,
+        None => {
+            tracing::debug!(
+                mdo_type_keyword,
+                mdo_name,
+                method_name,
+                "No configuration available for manager module call check"
+            );
+            return None;
+        }
+    };
 
     // Parse MDO type from plural form (Документы → Document, Справочники → Catalog)
-    let mdo_type = bsl_metadata::MdoType::from_plural(mdo_type_keyword)?;
+    let mdo_type = match bsl_metadata::MdoType::from_plural(mdo_type_keyword) {
+        Some(t) => t,
+        None => {
+            tracing::debug!(
+                mdo_type_keyword,
+                mdo_name,
+                method_name,
+                "Unknown MDO type keyword, cannot check manager module call"
+            );
+            return None;
+        }
+    };
 
     tracing::debug!(
         mdo_type = ?mdo_type,
