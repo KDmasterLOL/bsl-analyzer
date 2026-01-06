@@ -62,9 +62,9 @@ pub trait SourceDatabase: salsa::Database {
 
 /// Salsa tracked query for parsing.
 ///
-/// This query automatically depends on the FileTextInput and is cached with LRU (128 entries).
+/// This query automatically depends on the FileTextInput and is cached with LRU (512 entries).
 /// When file text changes, Salsa automatically invalidates this query.
-#[salsa::tracked(lru = 128)]
+#[salsa::tracked(lru = 512)]
 pub fn parse_query(
     db: &dyn salsa::Database,
     input: FileTextInput,
