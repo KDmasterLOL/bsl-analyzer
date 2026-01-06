@@ -301,6 +301,18 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Only check for IDENT (global function call), not FIELD_EXPR (method call)
     if actual_callee.kind() == SyntaxKind::IDENT {
         let name = actual_callee.text().to_string();
+
+        // Check for deprecated global methods (8.3.12)
+        use super::diagnostics::is_deprecated_global_method_8312;
+
+        if is_deprecated_global_method_8312(&name) {
+            ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+                name: name.clone(),
+                kind: crate::body::DeprecatedKind8312::GlobalMethod,
+                range: actual_callee.text_range(),
+            });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
@@ -345,6 +357,52 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Check for deprecated Chart methods (8.3.12) - вызовы через field expression
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        // Extract object name (first child of FIELD_EXPR)
+        let object_name_opt = actual_callee.children().next().and_then(|base_node| {
+            // Try different approaches to extract IDENT text
+            if base_node.kind() == SyntaxKind::IDENT {
+                return Some(base_node.text().to_string());
+            }
+
+            if base_node.kind() == SyntaxKind::EXPR {
+                if let Some(ident_child) =
+                    base_node.children().find(|n| n.kind() == SyntaxKind::IDENT)
+                {
+                    return Some(ident_child.text().to_string());
+                }
+            }
+
+            base_node
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT)
+                .map(|tok| tok.text().to_string())
+        });
+
+        // Extract method name (last IDENT token)
+        let method_token_opt = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last();
+
+        if let (Some(object_name), Some(method_token)) = (object_name_opt, method_token_opt) {
+            use super::diagnostics::is_deprecated_attribute_8312;
+
+            if let Some(kind) =
+                is_deprecated_attribute_8312(&object_name, method_token.text(), true)
+            {
+                ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+                    name: method_token.text().to_string(), // Preserve original case
+                    kind,
+                    range: method_token.text_range(),
+                });
             }
         }
     }
@@ -483,16 +541,59 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         children.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
 
     // Find field name (IDENT token after DOT)
-    let field_name = node
+    let field_token = node
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|tok| tok.kind() == SyntaxKind::IDENT)
-        .last()
-        .map(|tok| Name::new(tok.text()))
-        .unwrap_or_else(Name::missing);
+        .last();
+
+    let field_name =
+        field_token.as_ref().map(|tok| Name::new(tok.text())).unwrap_or_else(Name::missing);
+
+    // === Detect deprecated attributes/methods (8.3.12) ===
+    // Extract object name from base expression (first child)
+    // For FIELD_EXPR like "Диаграмма.ПолучитьПалитру()", first child is the base (Диаграмма)
+    let object_name_opt = node.children().next().and_then(|base_node| {
+        // Try different approaches to extract IDENT text
+        // 1. Direct IDENT node
+        if base_node.kind() == SyntaxKind::IDENT {
+            return Some(base_node.text().to_string());
+        }
+
+        // 2. EXPR wrapper with IDENT child
+        if base_node.kind() == SyntaxKind::EXPR {
+            if let Some(ident_child) = base_node.children().find(|n| n.kind() == SyntaxKind::IDENT)
+            {
+                return Some(ident_child.text().to_string());
+            }
+        }
+
+        // 3. Find first IDENT token in descendants
+        base_node
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+            .map(|tok| tok.text().to_string())
+    });
 
     // Check if this is actually a method call (has ARG_LIST)
     let arg_list_node = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST);
+    let is_method_call = arg_list_node.is_some();
+
+    // Check for deprecated attributes/methods (8.3.12)
+    if let (Some(field_tok), Some(object_name)) = (&field_token, &object_name_opt) {
+        use super::diagnostics::is_deprecated_attribute_8312;
+
+        if let Some(kind) =
+            is_deprecated_attribute_8312(object_name, field_tok.text(), is_method_call)
+        {
+            ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+                name: field_tok.text().to_string(), // Preserve original case
+                kind,
+                range: field_tok.text_range(),
+            });
+        }
+    }
 
     if arg_list_node.is_some() {
         let method = field_name.to_string();

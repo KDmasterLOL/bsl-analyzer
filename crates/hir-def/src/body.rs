@@ -319,6 +319,35 @@ pub enum BodyDiagnostic {
         collection_text: String, // Human-readable collection name for error message
         range: TextRange,        // Range of the Delete call
     },
+
+    /// Deprecated attribute/method usage (8.3.12).
+    /// Detected when deprecated chart-related attributes, methods, or enums are used.
+    /// Categories:
+    /// - Chart/ChartPlotArea attributes (ОтображатьШкалу, ОтображатьЛегенду, etc.)
+    /// - Chart methods (ПолучитьПалитру, УстановитьПалитру)
+    /// - Global methods (ОчиститьЖурналРегистрации)
+    /// - Enum names (ОриентацияМетокДиаграммы)
+    /// - Enum values (ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная)
+    DeprecatedAttribute8312 {
+        name: String, // Original member name for error message
+        kind: DeprecatedKind8312,
+        range: TextRange,
+    },
+}
+
+/// Category of deprecated attribute (8.3.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeprecatedKind8312 {
+    /// Deprecated property/field
+    Attribute,
+    /// Deprecated method
+    Method,
+    /// Deprecated global method
+    GlobalMethod,
+    /// Deprecated enum type name
+    EnumName,
+    /// Deprecated enum value
+    EnumValue,
 }
 
 impl BodyDiagnostic {
@@ -342,6 +371,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
+            BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
         }
     }
 }

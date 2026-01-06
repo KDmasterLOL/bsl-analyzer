@@ -1,6 +1,8 @@
-//! DeprecatedAttributes8312 diagnostic.
+//! DeprecatedAttributes8312 diagnostic (HIR-based).
 //!
 //! Detects usage of deprecated attributes and methods introduced in 8.3.12.
+//!
+//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!
 //! ## Why?
 //! Since 1C:Enterprise 8.3.12, many chart-related attributes, methods, and enums
@@ -43,227 +45,46 @@
 //! Ported from:
 //! - DeprecatedAttributes8312Diagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
+//! Migrated from token-based to HIR-based approach.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir_def::body::DeprecatedKind8312;
+use ide_db::TextRange;
 use std::collections::HashMap;
-use syntax::{SyntaxKind, SyntaxToken};
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedAttribute8312` is encountered.
+pub fn from_hir(
+    name: &str,
+    kind: DeprecatedKind8312,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedAttributes8312) {
-        return Vec::new();
-    }
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
-
-    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    // Check dot patterns (Object.Property, Object.Method())
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::DOT {
-            if let Some(diagnostic) = check_dot_pattern(&tokens, i) {
-                if seen_ranges.insert(diagnostic.range) {
-                    diagnostics.push(diagnostic);
-                }
-            }
-        }
-    }
-
-    // Check global methods (IDENT + LPAREN without preceding DOT)
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    let method_name = token.text().to_string();
-                    if is_clear_event_log(&method_name) {
-                        let diagnostic =
-                            create_diagnostic(token, &method_name, DeprecatedKind::GlobalMethod);
-                        if seen_ranges.insert(diagnostic.range) {
-                            diagnostics.push(diagnostic);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-fn check_dot_pattern(tokens: &[SyntaxToken], dot_idx: usize) -> Option<Diagnostic> {
-    let before_dot = dot_idx.checked_sub(1).and_then(|idx| tokens.get(idx))?;
-    let after_dot = tokens.get(dot_idx + 1)?;
-
-    if before_dot.kind() != SyntaxKind::IDENT || after_dot.kind() != SyntaxKind::IDENT {
         return None;
     }
 
-    let object_name = before_dot.text();
-    let property_name = after_dot.text();
-
-    let is_method_call =
-        tokens.get(dot_idx + 2).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-    if is_method_call {
-        check_object_method(object_name, property_name, after_dot)
-    } else {
-        check_property_or_enum(object_name, property_name, after_dot)
-    }
-}
-
-fn check_property_or_enum(
-    object_name: &str,
-    property_name: &str,
-    token: &SyntaxToken,
-) -> Option<Diagnostic> {
-    if is_chart_plot_area(object_name) && is_chart_plot_area_deprecated_attr(property_name) {
-        return Some(create_diagnostic(token, property_name, DeprecatedKind::Attribute));
-    }
-
-    if is_chart(object_name) && is_chart_deprecated_attr(property_name) {
-        return Some(create_diagnostic(token, property_name, DeprecatedKind::Attribute));
-    }
-
-    if is_child_form_items_group(object_name)
-        && is_child_form_items_group_deprecated_attr(property_name)
-    {
-        return Some(create_diagnostic(token, property_name, DeprecatedKind::Attribute));
-    }
-
-    if is_chart_labels_orientation(object_name) {
-        return Some(create_diagnostic(token, object_name, DeprecatedKind::EnumName));
-    }
-
-    None
-}
-
-fn check_object_method(
-    object_name: &str,
-    method_name: &str,
-    token: &SyntaxToken,
-) -> Option<Diagnostic> {
-    if is_chart(object_name) && is_chart_deprecated_method(method_name) {
-        return Some(create_diagnostic(token, method_name, DeprecatedKind::Method));
-    }
-
-    None
-}
-
-fn is_chart_plot_area(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "областьпостроениядиаграммы" || lower == "chartplotarea"
-}
-
-fn is_chart(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "диаграмма" | "chart" | "диаграммаганта" | "ganttchart" | "своднаядиаграмма" | "pivotchart"
-    )
-}
-
-fn is_child_form_items_group(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "группировкаподчиненныхэлементовформы" || lower == "childformitemsgroup"
-}
-
-fn is_chart_labels_orientation(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "ориентацияметокдиаграммы"
-}
-
-fn is_chart_plot_area_deprecated_attr(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "отображатьшкалу"
-            | "showscale"
-            | "линиишкалы"
-            | "цветшкалы"
-            | "отображатьподписишкалысерий"
-            | "showseriesscalelabels"
-            | "отображатьподписишкалыточек"
-            | "showpointsscalelabels"
-            | "отображатьподписишкалызначений"
-            | "showvaluesscalelabels"
-            | "отображатьлиниизначенийшкалы"
-            | "showscalevaluelines"
-            | "форматшкалызначений"
-            | "valuescaleformat"
-            | "ориентацияметок"
-            | "labelsorientation"
-    )
-}
-
-fn is_chart_deprecated_attr(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "отображатьлегенду"
-            | "showlegend"
-            | "отображатьзаголовок"
-            | "showtitle"
-            | "палитрацветов"
-            | "colorpalette"
-            | "цветначалаградиентнойпалитры"
-            | "gradientpalettestartcolor"
-            | "цветконцаградиентнойпалитры"
-            | "gradientpaletteendcolor"
-            | "максимальноеколичествоцветовградиентнойпалитры"
-            | "gradientpalettemaxcolors"
-    )
-}
-
-fn is_child_form_items_group_deprecated_attr(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "горизонтальная" || lower == "horizontal"
-}
-
-fn is_chart_deprecated_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "получитьпалитру" | "getpalette" | "установитьпалитру" | "setpalette")
-}
-
-fn is_clear_event_log(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "очиститьжурналрегистрации" || lower == "cleareventlog"
-}
-
-enum DeprecatedKind {
-    Attribute,
-    Method,
-    GlobalMethod,
-    EnumName,
-}
-
-fn create_diagnostic(token: &SyntaxToken, name: &str, kind: DeprecatedKind) -> Diagnostic {
     let (message, replacement) = get_message_and_replacement(name, &kind);
-    let range = token.text_range();
 
-    Diagnostic {
+    Some(Diagnostic {
         code: DiagnosticCode::DeprecatedAttributes8312,
         message: format!("{} Используйте: {}", message, replacement),
         severity: Severity::Information,
         range,
         tags: vec![],
         fixes: vec![],
-    }
+    })
 }
 
-fn get_message_and_replacement(name: &str, kind: &DeprecatedKind) -> (String, String) {
+pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // All diagnostics are now collected during HIR lowering
+    // This function is kept for compatibility with existing diagnostic infrastructure
+    // Real diagnostics are emitted via from_hir() dispatch in lib.rs
+    Vec::new()
+}
+
+fn get_message_and_replacement(name: &str, kind: &DeprecatedKind8312) -> (String, String) {
     let lower = name.to_lowercase();
     let is_russian = lower.chars().any(|c| c as u32 > 127);
 
@@ -271,32 +92,39 @@ fn get_message_and_replacement(name: &str, kind: &DeprecatedKind) -> (String, St
     let replacement = replacements.get(&lower).unwrap_or(&"").to_string();
 
     let message = match kind {
-        DeprecatedKind::Attribute => {
+        DeprecatedKind8312::Attribute => {
             if is_russian {
                 format!("Атрибут \"{}\" устарел.", name)
             } else {
                 format!("Attribute \"{}\" is deprecated.", name)
             }
         }
-        DeprecatedKind::Method => {
+        DeprecatedKind8312::Method => {
             if is_russian {
                 format!("Метод \"{}\" устарел.", name)
             } else {
                 format!("Method \"{}\" is deprecated.", name)
             }
         }
-        DeprecatedKind::GlobalMethod => {
+        DeprecatedKind8312::GlobalMethod => {
             if is_russian {
                 format!("Глобальный метод \"{}\" устарел.", name)
             } else {
                 format!("Global method \"{}\" is deprecated.", name)
             }
         }
-        DeprecatedKind::EnumName => {
+        DeprecatedKind8312::EnumName => {
             if is_russian {
                 format!("Имя перечисления \"{}\" устарело.", name)
             } else {
                 format!("Enum name \"{}\" is deprecated.", name)
+            }
+        }
+        DeprecatedKind8312::EnumValue => {
+            if is_russian {
+                format!("Значение перечисления \"{}\" устарело.", name)
+            } else {
+                format!("Enum value \"{}\" is deprecated.", name)
             }
         }
     };
@@ -381,41 +209,7 @@ fn get_replacements() -> HashMap<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
 
     #[test]
     fn test_chart_plot_area_russian() {
@@ -425,9 +219,18 @@ mod tests {
     ОбластьПостроенияДиаграммы.ОриентацияМеток = Ложь;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedAttributes8312);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 2);
+
+        // Первая диагностика: "ОтображатьШкалу" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 31, 46);
+
+        // Вторая диагностика: "ОриентацияМеток" на строке 3
+        assert_diagnostic_range(code, diags[1], 3, 31, 46);
     }
 
     #[test]
@@ -438,9 +241,18 @@ Procedure Test()
     ChartPlotArea.ShowSeriesScaleLabels = True;
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedAttributes8312);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 2);
+
+        // Первая диагностика: "ShowScale" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 18, 27);
+
+        // Вторая диагностика: "ShowSeriesScaleLabels" на строке 3
+        assert_diagnostic_range(code, diags[1], 3, 18, 39);
     }
 
     #[test]
@@ -452,8 +264,21 @@ EndProcedure
     Диаграмма.ПалитраЦветов = Истина;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 3);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 3);
+
+        // "ОтображатьЛегенду" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 14, 31);
+
+        // "ОтображатьЗаголовок" на строке 3
+        assert_diagnostic_range(code, diags[1], 3, 19, 38);
+
+        // "ПалитраЦветов" на строке 4
+        assert_diagnostic_range(code, diags[2], 4, 14, 27);
     }
 
     #[test]
@@ -464,8 +289,18 @@ EndProcedure
     Диаграмма.УстановитьПалитру(Неопределено);
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 2);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 2);
+
+        // "ПолучитьПалитру" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 21, 36);
+
+        // "УстановитьПалитру" на строке 3
+        assert_diagnostic_range(code, diags[1], 3, 14, 31);
     }
 
     #[test]
@@ -475,8 +310,15 @@ EndProcedure
     ОчиститьЖурналРегистрации(Отбор);
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1);
+
+        // "ОчиститьЖурналРегистрации" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 4, 29);
     }
 
     #[test]
@@ -486,8 +328,15 @@ Procedure Test()
     ClearEventLog(Filter);
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1);
+
+        // "ClearEventLog" на строке 2
+        assert_diagnostic_range(code, diags[0], 2, 4, 17);
     }
 
     #[test]
@@ -497,8 +346,15 @@ EndProcedure
     Ориентация = ОриентацияМетокДиаграммы.Авто;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1);
+
+        // Диагностика подсвечивает поле "Авто" (а не весь enum ОриентацияМетокДиаграммы)
+        assert_diagnostic_range(code, diags[0], 2, 42, 46);
     }
 
     #[test]
@@ -508,15 +364,82 @@ EndProcedure
     Группировка = ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1);
+
+        // Диагностика подсвечивает значение "Горизонтальная"
+        assert_diagnostic_range(code, diags[0], 2, 55, 69);
     }
 
     #[test]
     fn test_from_java_fixture() {
         let input = include_str!("../../test_data/DeprecatedAttributes8312Diagnostic.bsl");
-        let (diagnostics, _file_content) = check_diagnostic(input);
+        let diagnostics = check_hir_diagnostic(input);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
 
-        assert_eq!(diagnostics.len(), 45, "Expected 45 diagnostics");
+        assert_eq!(diags.len(), 45, "Expected 45 diagnostics to match Java implementation");
+
+        // Проверяем несколько ключевых позиций для уверенности в правильности детекции
+
+        // Процедура Тест() - строка 1: ОтображатьШкалу (ChartPlotArea attribute)
+        assert_diagnostic_range(input, diags[0], 1, 38, 53);
+
+        // Процедура Тест() - строка 2: ЛинииШкалы
+        assert_diagnostic_range(input, diags[1], 2, 31, 41);
+
+        // Процедура Тест() - строка 3: ЦветШкалы
+        assert_diagnostic_range(input, diags[2], 3, 31, 40);
+
+        // Procedure Test() - строка 13: ShowScale
+        assert_diagnostic_range(input, diags[9], 13, 18, 27);
+
+        // Procedure Test() - строка 14: ShowSeriesScaleLabels
+        assert_diagnostic_range(input, diags[10], 14, 18, 39);
+
+        // Процедура Тест2() - строка 23: ОтображатьЛегенду (Chart.ShowLegend)
+        assert_diagnostic_range(input, diags[16], 23, 14, 31);
+
+        // Процедура Тест2() - строка 24: ОтображатьЗаголовок (Chart.ShowTitle)
+        assert_diagnostic_range(input, diags[17], 24, 14, 33);
+
+        // Процедура Тест2() - строка 30: ПалитраЦветов
+        assert_diagnostic_range(input, diags[22], 30, 14, 27);
+
+        // Процедура Тест2() - строка 35: ПолучитьПалитру (deprecated method)
+        assert_diagnostic_range(input, diags[26], 35, 21, 36);
+
+        // Процедура Тест2() - строка 36: УстановитьПалитру (deprecated method)
+        assert_diagnostic_range(input, diags[27], 36, 14, 31);
+
+        // Procedure Test2() - строка 40: ShowLegend (Chart)
+        assert_diagnostic_range(input, diags[28], 40, 10, 20);
+
+        // Procedure Test2() - строка 52: GetPalette (deprecated method)
+        assert_diagnostic_range(input, diags[38], 52, 10, 20);
+
+        // Procedure Test2() - строка 53: SetPalette (deprecated method)
+        assert_diagnostic_range(input, diags[39], 53, 10, 20);
+
+        // Процедура Тест3() - строка 58: Авто (enum value after deprecated enum name)
+        assert_diagnostic_range(input, diags[40], 58, 42, 46);
+
+        // Процедура Тест4() - строка 62: ОчиститьЖурналРегистрации (global method)
+        assert_diagnostic_range(input, diags[41], 62, 4, 29);
+
+        // Procedure Test4() - строка 66: ClearEventLog (global method)
+        assert_diagnostic_range(input, diags[42], 66, 4, 17);
+
+        // Процедура Тест5() - строка 70: Горизонтальная (enum value)
+        assert_diagnostic_range(input, diags[43], 70, 55, 69);
+
+        // Procedure Test5() - строка 74: Horizontal (enum value)
+        assert_diagnostic_range(input, diags[44], 74, 31, 41);
     }
 }

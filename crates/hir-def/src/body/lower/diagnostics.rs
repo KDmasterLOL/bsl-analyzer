@@ -160,6 +160,138 @@ pub(crate) fn is_deprecated_method(name: &str) -> bool {
 }
 
 // =============================================================================
+// Deprecated attributes 8.3.12 detection
+// =============================================================================
+
+use crate::body::DeprecatedKind8312;
+
+/// Check if object.member is a deprecated attribute/method (8.3.12).
+///
+/// Returns Some(kind) if deprecated, None otherwise.
+///
+/// # Arguments
+/// - `object`: Object/receiver name (e.g., "Диаграмма", "ChartPlotArea")
+/// - `member`: Member name (property, method, or enum value)
+/// - `is_call`: True if this is a method call, false for field access
+pub(crate) fn is_deprecated_attribute_8312(
+    object: &str,
+    member: &str,
+    is_call: bool,
+) -> Option<DeprecatedKind8312> {
+    let obj_lower = object.to_lowercase();
+    let member_lower = member.to_lowercase();
+
+    // Check ChartPlotArea attributes
+    if is_chart_plot_area(&obj_lower)
+        && !is_call
+        && is_chart_plot_area_deprecated_attr(&member_lower)
+    {
+        return Some(DeprecatedKind8312::Attribute);
+    }
+
+    // Check Chart/GanttChart/PivotChart attributes and methods
+    if is_chart(&obj_lower) {
+        if is_call {
+            if is_chart_deprecated_method(&member_lower) {
+                return Some(DeprecatedKind8312::Method);
+            }
+        } else if is_chart_deprecated_attr(&member_lower) {
+            return Some(DeprecatedKind8312::Attribute);
+        }
+    }
+
+    // Check ChildFormItemsGroup enum values
+    if is_child_form_items_group(&obj_lower)
+        && !is_call
+        && is_child_form_items_group_deprecated_attr(&member_lower)
+    {
+        return Some(DeprecatedKind8312::EnumValue);
+    }
+
+    // Check deprecated enum type names
+    if is_chart_labels_orientation(&obj_lower) {
+        return Some(DeprecatedKind8312::EnumName);
+    }
+
+    None
+}
+
+/// Check if a global method name is deprecated (8.3.12).
+pub(crate) fn is_deprecated_global_method_8312(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "очиститьжурналрегистрации" || lower == "cleareventlog"
+}
+
+// Helper functions (private)
+
+fn is_chart_plot_area(name: &str) -> bool {
+    name == "областьпостроениядиаграммы" || name == "chartplotarea"
+}
+
+fn is_chart(name: &str) -> bool {
+    matches!(
+        name,
+        "диаграмма" | "chart" | "диаграммаганта" | "ganttchart" | "своднаядиаграмма" | "pivotchart"
+    )
+}
+
+fn is_child_form_items_group(name: &str) -> bool {
+    name == "группировкаподчиненныхэлементовформы" || name == "childformitemsgroup"
+}
+
+fn is_chart_labels_orientation(name: &str) -> bool {
+    name == "ориентацияметокдиаграммы"
+}
+
+fn is_chart_plot_area_deprecated_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "отображатьшкалу"
+            | "showscale"
+            | "линиишкалы"
+            | "цветшкалы"
+            | "отображатьподписишкалысерий"
+            | "showseriesscalelabels"
+            | "отображатьподписишкалыточек"
+            | "showpointsscalelabels"
+            | "отображатьподписишкалызначений"
+            | "showvaluesscalelabels"
+            | "отображатьлиниизначенийшкалы"
+            | "showscalevaluelines"
+            | "форматшкалызначений"
+            | "valuescaleformat"
+            | "ориентацияметок"
+            | "labelsorientation"
+    )
+}
+
+fn is_chart_deprecated_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "отображатьлегенду"
+            | "showlegend"
+            | "отображатьзаголовок"
+            | "showtitle"
+            | "палитрацветов"
+            | "colorpalette"
+            | "цветначалаградиентнойпалитры"
+            | "gradientpalettestartcolor"
+            | "цветконцаградиентнойпалитры"
+            | "gradientpaletteendcolor"
+            | "максимальноеколичествоцветовградиентнойпалитры"
+            | "gradientpalettemaxcolors"
+    )
+}
+
+fn is_child_form_items_group_deprecated_attr(name: &str) -> bool {
+    name == "горизонтальная" || name == "horizontal"
+}
+
+fn is_chart_deprecated_method(name: &str) -> bool {
+    matches!(name, "получитьпалитру" | "getpalette" | "установитьпалитру" | "setpalette")
+}
+
+// =============================================================================
 // Transaction checking
 // =============================================================================
 
