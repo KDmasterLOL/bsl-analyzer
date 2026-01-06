@@ -1,0 +1,641 @@
+//! Statement lowering.
+//!
+//! This module handles lowering of BSL statements from AST to HIR.
+
+use syntax::{SyntaxKind, SyntaxNode};
+use text_size::TextRange;
+
+use crate::body::BodyDiagnostic;
+use crate::hir::{Binding, BindingId, Expr, Stmt, StmtId};
+use crate::Name;
+
+use super::control_flow::{
+    find_first_unreachable_stmt, if_all_branches_terminate, is_control_flow_terminator,
+    is_statement_node,
+};
+use super::diagnostics::{
+    check_duplicated_code_blocks, extend_range_with_semicolon, is_global_begin_transaction_call,
+    is_inside_try_body,
+};
+use super::expr::{exprs_are_equal, lower_expr_node};
+use super::preproc::{
+    preproc_if_all_branches_terminate, preproc_region_terminates, process_preproc_if,
+    process_preproc_region,
+};
+use super::LoweringCtx;
+
+/// Lower parameter list.
+pub(crate) fn lower_params(ctx: &mut LoweringCtx, param_list: &SyntaxNode) -> Vec<BindingId> {
+    let mut params = Vec::new();
+
+    for param in param_list.children().filter(|n| n.kind() == SyntaxKind::PARAM) {
+        if let Some(binding_id) = lower_param(ctx, &param) {
+            params.push(binding_id);
+        }
+    }
+
+    params
+}
+
+/// Lower a single parameter.
+fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
+    let name_token = param
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    let is_val = param
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|tok| tok.kind() == SyntaxKind::KW_VAL);
+
+    // Register parameter name so it's not flagged as unused
+    ctx.register_param(name_token.text());
+
+    let binding = Binding::new(Name::new(name_token.text()), is_val);
+    Some(ctx.alloc_binding(binding, name_token.text_range()))
+}
+
+/// Lower a statement list.
+///
+/// Also detects unreachable code after control flow statements (return, raise, break, continue)
+/// and after if-else where all branches terminate.
+pub(crate) fn lower_stmt_list(ctx: &mut LoweringCtx, stmt_list: &SyntaxNode) -> Vec<StmtId> {
+    lower_stmt_list_with_unreachable(ctx, stmt_list, true)
+}
+
+/// Lower a statement list with optional unreachable code detection.
+///
+/// The `emit_diagnostics` parameter controls whether to emit unreachable code diagnostics.
+/// This is useful for recursive processing where we want to collect statements but not
+/// emit duplicate diagnostics.
+pub(super) fn lower_stmt_list_with_unreachable(
+    ctx: &mut LoweringCtx,
+    stmt_list: &SyntaxNode,
+    emit_diagnostics: bool,
+) -> Vec<StmtId> {
+    let mut stmts = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
+    // Track pending BeginTransaction node for BeginTransactionBeforeTryCatch diagnostic
+    let mut pending_begin_transaction: Option<SyntaxNode> = None;
+
+    for child in stmt_list.children() {
+        // Handle preprocessor directives - process content recursively
+        if child.kind() == SyntaxKind::PRE_IF_DIR {
+            // Check if this directive is unreachable
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            } else {
+                process_preproc_if(ctx, &child);
+                // Check if all branches terminate - subsequent code is unreachable
+                if preproc_if_all_branches_terminate(&child) {
+                    unreachable_start = Some(child.text_range());
+                }
+            }
+            continue;
+        }
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            // Check if this region is unreachable
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            } else {
+                process_preproc_region(ctx, &child);
+                // Check if region terminates - propagate unreachable state
+                if preproc_region_terminates(&child) {
+                    unreachable_start = Some(child.text_range());
+                }
+            }
+            continue;
+        }
+
+        // Skip non-statement nodes
+        if !is_statement_node(&child) {
+            continue;
+        }
+
+        // BeginTransactionBeforeTryCatch: Check for Try statement (consumes pending BeginTransaction)
+        if emit_diagnostics && child.kind() == SyntaxKind::TRY_STMT {
+            pending_begin_transaction = None;
+        }
+
+        // If we're in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(child.text_range());
+            // Still lower the statement (for completeness), but we've marked it unreachable
+            if let Some(stmt_id) = lower_stmt(ctx, &child) {
+                stmts.push(stmt_id);
+            }
+            continue;
+        }
+
+        // BeginTransactionBeforeTryCatch: Check for BeginTransaction call
+        if emit_diagnostics {
+            let is_begin_trans = is_global_begin_transaction_call(&child);
+
+            if is_begin_trans {
+                // If we have pending BeginTransaction, emit diagnostic for it
+                if let Some(pending_node) = pending_begin_transaction.take() {
+                    let extended_range =
+                        extend_range_with_semicolon(&pending_node, pending_node.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                }
+
+                // Check if BeginTransaction is inside Try body
+                if is_inside_try_body(&child) {
+                    let extended_range = extend_range_with_semicolon(&child, child.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                } else {
+                    // Store as pending (will be consumed by Try or reported as error)
+                    pending_begin_transaction = Some(child.clone());
+                }
+            } else if child.kind() != SyntaxKind::TRY_STMT {
+                // Any other statement (not Try, not BeginTransaction) while pending → ERROR
+                if let Some(pending_node) = pending_begin_transaction.take() {
+                    let extended_range =
+                        extend_range_with_semicolon(&pending_node, pending_node.text_range());
+                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
+                        range: extended_range,
+                    });
+                }
+            }
+        }
+
+        // Lower the statement
+        if let Some(stmt_id) = lower_stmt(ctx, &child) {
+            stmts.push(stmt_id);
+
+            // Check if this statement is a control flow that makes subsequent code unreachable
+            if is_control_flow_terminator(&child) {
+                // Mark that subsequent statements are unreachable
+                // The range will start from the next statement
+                unreachable_start = Some(child.text_range());
+            }
+            // Check if if-statement has all branches terminating
+            else if child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child) {
+                unreachable_start = Some(child.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic if we found any
+    if emit_diagnostics {
+        if let (Some(_start), Some(end)) = (unreachable_start, unreachable_end) {
+            // Find the first unreachable statement's range
+            // We need to get the range from after the control flow statement to the end
+            if let Some(first_unreachable) = find_first_unreachable_stmt(stmt_list, _start) {
+                let range = TextRange::new(first_unreachable.start(), end.end());
+                ctx.emit(BodyDiagnostic::UnreachableCode { range });
+            }
+        }
+
+        // BeginTransactionBeforeTryCatch: If there's still pending at end of list → ERROR
+        if let Some(pending_node) = pending_begin_transaction {
+            let extended_range =
+                extend_range_with_semicolon(&pending_node, pending_node.text_range());
+            ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch { range: extended_range });
+        }
+    }
+
+    stmts
+}
+
+/// Lower a single statement.
+pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<StmtId> {
+    let range = node.text_range();
+
+    let stmt = match node.kind() {
+        SyntaxKind::ASSIGN_STMT => lower_assign_stmt(ctx, node),
+        SyntaxKind::CALL_STMT => lower_call_stmt(ctx, node),
+        SyntaxKind::RETURN_STMT => lower_return_stmt(ctx, node),
+        SyntaxKind::IF_STMT => lower_if_stmt(ctx, node),
+        SyntaxKind::WHILE_STMT => lower_while_stmt(ctx, node),
+        SyntaxKind::FOR_STMT => lower_for_stmt(ctx, node),
+        SyntaxKind::FOR_EACH_STMT => lower_for_each_stmt(ctx, node),
+        SyntaxKind::TRY_STMT => lower_try_stmt(ctx, node),
+        SyntaxKind::RAISE_STMT => lower_raise_stmt(ctx, node),
+        SyntaxKind::BREAK_STMT => Some(Stmt::Break),
+        SyntaxKind::CONTINUE_STMT => Some(Stmt::Continue),
+        SyntaxKind::GOTO_STMT => lower_goto_stmt(node),
+        SyntaxKind::LABEL_STMT => lower_label_stmt(node),
+        SyntaxKind::EXECUTE_STMT => lower_execute_stmt(ctx, node),
+        SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
+        SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
+        SyntaxKind::VAR_DEF => lower_var_decl(ctx, node),
+        SyntaxKind::EMPTY_STMT => return None,
+        _ => return None,
+    }?;
+
+    Some(ctx.alloc_stmt(stmt, range))
+}
+
+/// Lower assignment statement.
+fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut children = node.children().peekable();
+
+    // First child should be target expression (or EXPR wrapper)
+    let target_node = children.next()?;
+    let target = lower_expr_node(ctx, &target_node);
+
+    // For simple variable assignment (X = value), the target is WRITTEN, not read.
+    // We need to unmark it from used_vars since lower_expr incorrectly marked it.
+    // For field/index access (Obj.Field = value, Arr[i] = value), the base IS read.
+    //
+    // Also, if the target is a simple Path and not already in local_vars,
+    // this is an implicit variable declaration (BSL allows this).
+    let target_name = if let Expr::Path(name) = ctx.body.expr(target) {
+        Some((name.clone(), get_target_range(&target_node)))
+    } else {
+        None
+    };
+    if let Some((name, range)) = target_name {
+        let key = name.as_str().to_lowercase();
+        // Register implicit variable if not already declared.
+        // But don't register if it's a known external (module variable) or parameter.
+        if !ctx.local_vars.contains_key(&key)
+            && !ctx.is_known_external(name.as_str())
+            && !ctx.param_names.contains(&key)
+        {
+            ctx.register_local_var(name.clone(), range);
+        }
+        // Unmark from used - assignment is a write, not a read
+        ctx.unmark_var_used(name.as_str());
+    }
+
+    // Second child should be value expression (or EXPR wrapper)
+    let value_node = children.next()?;
+    let value = lower_expr_node(ctx, &value_node);
+
+    // Check for self-assignment (a = a, obj.field = obj.field)
+    if exprs_are_equal(&ctx.body, target, value) {
+        ctx.emit(BodyDiagnostic::SelfAssign { range: node.text_range() });
+    }
+
+    Some(Stmt::Assign { target, value })
+}
+
+/// Get the range of the target identifier in an assignment.
+/// Looks for the first IDENT token within the node.
+fn get_target_range(node: &SyntaxNode) -> TextRange {
+    // Find IDENT token in the target expression
+    fn find_ident(node: &SyntaxNode) -> Option<TextRange> {
+        for token in node.descendants_with_tokens() {
+            if token.kind() == SyntaxKind::IDENT {
+                return Some(token.text_range());
+            }
+        }
+        None
+    }
+
+    find_ident(node).unwrap_or_else(|| node.text_range())
+}
+
+/// Lower call statement.
+fn lower_call_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // CALL_STMT contains an expression (usually CALL_EXPR or FIELD_EXPR)
+    let expr_node = node.children().next()?;
+    let expr = lower_expr_node(ctx, &expr_node);
+    Some(Stmt::Expr(expr))
+}
+
+/// Lower return statement.
+fn lower_return_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let value = node.children().next().map(|n| lower_expr_node(ctx, &n));
+    Some(Stmt::Return { value })
+}
+
+/// Lower if statement.
+fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut children = node.children().peekable();
+
+    // Condition (first EXPR or expression node)
+    let condition_node = children.next()?;
+    let condition = lower_expr_node(ctx, &condition_node);
+
+    // Collect all branch STMT_LIST nodes for duplicate detection
+    let mut branch_nodes: Vec<SyntaxNode> = Vec::new();
+
+    // Then branch (STMT_LIST)
+    let then_stmt_list = children.next().filter(|n| n.kind() == SyntaxKind::STMT_LIST);
+    let then_branch = then_stmt_list.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
+
+    // Check for empty then branch
+    if then_branch.is_empty() {
+        if let Some(ref stmt_list) = then_stmt_list {
+            ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
+        }
+    }
+
+    // Add then branch to branch_nodes for duplicate detection
+    if let Some(stmt_list) = then_stmt_list {
+        branch_nodes.push(stmt_list);
+    }
+
+    // Elsif branches
+    let mut elsif_branches = Vec::new();
+    for elsif in node.children().filter(|n| n.kind() == SyntaxKind::ELSIF_CLAUSE) {
+        let mut elsif_children = elsif.children();
+        if let Some(cond_node) = elsif_children.next() {
+            let cond = lower_expr_node(ctx, &cond_node);
+            let stmt_list_node = elsif_children.find(|n| n.kind() == SyntaxKind::STMT_LIST);
+            let body = stmt_list_node.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
+
+            // Check for empty elsif branch
+            if body.is_empty() {
+                if let Some(ref stmt_list) = stmt_list_node {
+                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
+                }
+            }
+
+            // Add elsif branch to branch_nodes for duplicate detection
+            if let Some(stmt_list) = stmt_list_node {
+                branch_nodes.push(stmt_list);
+            }
+
+            elsif_branches.push((cond, body.into_boxed_slice()));
+        }
+    }
+
+    // Else branch
+    let else_branch =
+        node.children().find(|n| n.kind() == SyntaxKind::ELSE_CLAUSE).and_then(|else_clause| {
+            else_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| {
+                let stmts = lower_stmt_list(ctx, &n);
+
+                // Check for empty else branch
+                if stmts.is_empty() {
+                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                }
+
+                // Add else branch to branch_nodes for duplicate detection
+                branch_nodes.push(n.clone());
+
+                stmts.into_boxed_slice()
+            })
+        });
+
+    // Check for duplicated code blocks
+    check_duplicated_code_blocks(ctx, &branch_nodes);
+
+    Some(Stmt::If {
+        condition,
+        then_branch: then_branch.into_boxed_slice(),
+        elsif_branches: elsif_branches.into_boxed_slice(),
+        else_branch,
+    })
+}
+
+/// Lower while statement.
+fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut children = node.children();
+
+    let condition_node = children.next()?;
+    let condition = lower_expr_node(ctx, &condition_node);
+
+    let body = children
+        .find(|n| n.kind() == SyntaxKind::STMT_LIST)
+        .map(|n| {
+            let stmts = lower_stmt_list(ctx, &n);
+
+            // Check for empty while body
+            if stmts.is_empty() {
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+            }
+
+            stmts.into_boxed_slice()
+        })
+        .unwrap_or_default();
+
+    Some(Stmt::While { condition, body })
+}
+
+/// Lower for statement.
+fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // Find loop variable (IDENT token after FOR keyword)
+    let var_token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    let name = Name::new(var_token.text());
+    let range = var_token.text_range();
+
+    // Register loop variable for unused variable tracking
+    ctx.register_local_var(name.clone(), range);
+
+    let var = ctx.alloc_binding(Binding::var(name), range);
+
+    let mut expr_iter = node.children().filter(|n| {
+        matches!(
+            n.kind(),
+            SyntaxKind::EXPR
+                | SyntaxKind::LITERAL
+                | SyntaxKind::BINARY_EXPR
+                | SyntaxKind::UNARY_EXPR
+                | SyntaxKind::CALL_EXPR
+        )
+    });
+
+    let from =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    let to =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    let body = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::STMT_LIST)
+        .map(|n| {
+            let stmts = lower_stmt_list(ctx, &n);
+
+            // Check for empty for body
+            if stmts.is_empty() {
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+            }
+
+            stmts.into_boxed_slice()
+        })
+        .unwrap_or_default();
+
+    Some(Stmt::For { var, from, to, body })
+}
+
+/// Lower for-each statement.
+fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // Find loop variable (first IDENT token)
+    let var_token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    let name = Name::new(var_token.text());
+    let range = var_token.text_range();
+
+    // Register loop variable for unused variable tracking
+    ctx.register_local_var(name.clone(), range);
+
+    let var = ctx.alloc_binding(Binding::var(name), range);
+
+    // Collection is the first expression child
+    let collection = node
+        .children()
+        .find(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::EXPR
+                    | SyntaxKind::CALL_EXPR
+                    | SyntaxKind::FIELD_EXPR
+                    | SyntaxKind::INDEX_EXPR
+            )
+        })
+        .map(|n| lower_expr_node(ctx, &n))
+        .unwrap_or_else(|| ctx.missing_expr());
+
+    let body = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::STMT_LIST)
+        .map(|n| {
+            let stmts = lower_stmt_list(ctx, &n);
+
+            // Check for empty for-each body
+            if stmts.is_empty() {
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+            }
+
+            stmts.into_boxed_slice()
+        })
+        .unwrap_or_default();
+
+    Some(Stmt::ForEach { var, collection, body })
+}
+
+/// Lower try statement.
+fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let body = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::STMT_LIST)
+        .map(|n| {
+            let stmts = lower_stmt_list(ctx, &n);
+
+            // Check for empty try body
+            if stmts.is_empty() {
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+            }
+
+            stmts.into_boxed_slice()
+        })
+        .unwrap_or_default();
+
+    let except = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
+        .and_then(|except_clause| {
+            except_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| {
+                let stmts = lower_stmt_list(ctx, &n);
+
+                // Check for empty except body
+                if stmts.is_empty() {
+                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                }
+
+                stmts.into_boxed_slice()
+            })
+        })
+        .unwrap_or_default();
+
+    Some(Stmt::Try { body, except })
+}
+
+/// Lower raise statement.
+fn lower_raise_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let value = node.children().next().map(|n| lower_expr_node(ctx, &n));
+    Some(Stmt::Raise { value })
+}
+
+/// Lower goto statement.
+fn lower_goto_stmt(node: &SyntaxNode) -> Option<Stmt> {
+    let label_token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    Some(Stmt::Goto(Name::new(label_token.text())))
+}
+
+/// Lower label statement.
+fn lower_label_stmt(node: &SyntaxNode) -> Option<Stmt> {
+    let label_token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    Some(Stmt::Label(Name::new(label_token.text())))
+}
+
+/// Lower execute statement.
+fn lower_execute_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let expr = node
+        .children()
+        .next()
+        .map(|n| lower_expr_node(ctx, &n))
+        .unwrap_or_else(|| ctx.missing_expr());
+
+    Some(Stmt::Execute { expr })
+}
+
+/// Lower add handler statement.
+fn lower_add_handler_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut expr_iter = node.children();
+
+    let event =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    let handler =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    Some(Stmt::AddHandler { event, handler })
+}
+
+/// Lower remove handler statement.
+fn lower_remove_handler_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut expr_iter = node.children();
+
+    let event =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    let handler =
+        expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
+
+    Some(Stmt::RemoveHandler { event, handler })
+}
+
+/// Lower variable declaration.
+fn lower_var_decl(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    let mut bindings = Vec::new();
+
+    for ident in node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+    {
+        let name = Name::new(ident.text());
+        let range = ident.text_range();
+
+        // Register for unused variable tracking
+        ctx.register_local_var(name.clone(), range);
+
+        let binding_id = ctx.alloc_binding(Binding::var(name), range);
+        bindings.push(binding_id);
+    }
+
+    if bindings.is_empty() {
+        return None;
+    }
+
+    Some(Stmt::VarDecl { bindings: bindings.into_boxed_slice() })
+}
