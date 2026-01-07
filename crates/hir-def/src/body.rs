@@ -360,6 +360,11 @@ pub enum BodyDiagnostic {
     /// Only allowed in client-only context (&НаКлиенте annotation).
     ExecuteExternalCode { range: TextRange },
 
+    /// External application starting methods.
+    /// Detects calls to КомандаСистемы/System, ЗапуститьПриложение/RunApp, etc.
+    /// Security risk: allows arbitrary command execution.
+    ExternalAppStarting { range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -412,6 +417,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
             BodyDiagnostic::ExecuteExternalCode { range } => *range,
+            BodyDiagnostic::ExternalAppStarting { range } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

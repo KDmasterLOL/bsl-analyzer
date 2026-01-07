@@ -718,11 +718,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // The HIR version is collected during lowering via BodyDiagnostic::ExecuteExternalCode
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("ExecuteExternalCode", ctx, handlers::execute_external_code::check));
-    result.extend(run_diagnostic(
-        "ExternalAppStarting",
-        ctx,
-        handlers::external_app_starting::check,
-    ));
+    // NOTE: ExternalAppStarting migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::ExternalAppStarting
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "ExternalAppStarting",
+    //     ctx,
+    //     handlers::external_app_starting::check,
+    // ));
     result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
@@ -1069,6 +1072,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::ExecuteExternalCode { range } => {
             handlers::execute_external_code::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::ExternalAppStarting { range } => {
+            handlers::external_app_starting::from_hir(*range, ctx)
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)

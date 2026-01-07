@@ -45,6 +45,15 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
                 .map(|n| lower_expr_node(ctx, &n))
                 .unwrap_or_else(|| ctx.missing_expr());
         }
+        SyntaxKind::AWAIT_EXPR => {
+            // Unwrap await expression (Ждать <expr>)
+            // Just lower the inner expression - await semantic is not modeled in HIR yet
+            return node
+                .children()
+                .next()
+                .map(|n| lower_expr_node(ctx, &n))
+                .unwrap_or_else(|| ctx.missing_expr());
+        }
         SyntaxKind::IDENT => {
             // Identifier - variable reference
             let text = node.text().to_string();
@@ -397,11 +406,35 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
         }
 
+        // Check for external app starting methods
+        if is_external_app_method(&name) {
+            // Emit ExternalAppStarting diagnostic
+            // Range is just the method name (IDENT token), not the whole call
+            ctx.diagnostics
+                .push(BodyDiagnostic::ExternalAppStarting { range: actual_callee.text_range() });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
             ctx.diagnostics
                 .push(BodyDiagnostic::DeprecatedMethod { name, range: node.text_range() });
+        }
+    } else if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        // Check for external app methods in qualified calls (obj.method())
+        // Extract method name from FIELD_EXPR (last IDENT token after DOT)
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last()
+        {
+            let method_name = method_token.text();
+            if is_external_app_method(method_name) {
+                // Range is just the method name token, not the whole call
+                ctx.diagnostics
+                    .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
+            }
         }
     }
 
@@ -716,6 +749,9 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // NOTE: External app starting methods are now detected in lower_call_expr()
+    // for both global calls (IDENT) and method calls (FIELD_EXPR)
+
     if arg_list_node.is_some() {
         let method = field_name.to_string();
 
@@ -927,4 +963,35 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprId, rhs: ExprId) -> bool {
         // Different expression types or complex expressions - not equal
         _ => false,
     }
+}
+
+/// Check if method name is an external application starting method.
+///
+/// These methods allow starting external applications/executing system commands:
+/// - КомандаСистемы / System
+/// - ЗапуститьСистему / RunSystem
+/// - ЗапуститьПриложение / RunApp
+/// - НачатьЗапускПриложения / BeginRunningApplication
+/// - ЗапуститьПриложениеАсинх / RunAppAsync
+/// - ЗапуститьПрограмму
+/// - ОткрытьПроводник
+/// - ОткрытьФайл
+fn is_external_app_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "командасистемы"
+            | "system"
+            | "запуститьсистему"
+            | "runsystem"
+            | "запуститьприложение"
+            | "runapp"
+            | "начатьзапускприложения"
+            | "beginrunningapplication"
+            | "запуститьприложениеасинх"
+            | "runappasync"
+            | "запуститьпрограмму"
+            | "открытьпроводник"
+            | "открытьфайл"
+    )
 }

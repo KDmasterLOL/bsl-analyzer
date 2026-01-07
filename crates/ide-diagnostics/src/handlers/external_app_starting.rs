@@ -36,142 +36,63 @@
 //! - **Minutes to fix:** 5
 //!
 //! ## Implementation
+//! **This is a HIR-based diagnostic** - detects external app calls during HIR lowering.
+//!
 //! Ported from:
 //! - ExternalAppStartingDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - external_app_starting.rs (bsl-language-server-rust) - Rust reference
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter or regex.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
-use syntax::SyntaxKind;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when ExternalAppStarting diagnostic is emitted during lowering.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::ExternalAppStarting) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    // Optimized: single traversal O(n) instead of O(n²)
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() != SyntaxKind::IDENT {
-            continue;
-        }
-
-        // Check pattern: IDENT (
-        let next_is_lparen =
-            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-        if !next_is_lparen {
-            continue;
-        }
-
-        // Check if method name matches external app pattern
-        let method_name = token.text();
-        if is_external_app_method(method_name) {
-            diagnostics.push(create_diagnostic(token.text_range()));
-        }
-    }
-
-    diagnostics
-}
-
-fn create_diagnostic(range: TextRange) -> Diagnostic {
-    Diagnostic {
+    Some(Diagnostic {
         code: DiagnosticCode::ExternalAppStarting,
         message: "External application launch detected".to_string(),
         range,
         severity: Severity::Warning,
         tags: vec![],
         fixes: vec![],
-    }
-}
-
-/// Check if method name matches external app starting pattern.
-///
-/// Supports bilingual (RU/EN) case-insensitive detection.
-fn is_external_app_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        // Base methods (always checked)
-        "командасистемы"
-            | "system"
-            | "запуститьсистему"
-            | "runsystem"
-            | "запуститьприложение"
-            | "runapp"
-            | "начатьзапускприложения"
-            | "beginrunningapplication"
-            | "запуститьприложениеасинх"
-            | "runappasync"
-            | "запуститьпрограмму"
-            | "открытьпроводник"
-            | "открытьфайл"
-    )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/ExternalAppStartingDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
 
-        assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics");
+        assert_eq!(ext_diags.len(), 16, "Expected 16 diagnostics");
 
-        assert_diagnostic_range(code, &diagnostics[0], 8, 4, 18);
-        assert_diagnostic_range(code, &diagnostics[1], 9, 4, 23);
-        assert_diagnostic_range(code, &diagnostics[2], 10, 4, 23);
-        assert_diagnostic_range(code, &diagnostics[3], 12, 4, 26);
-        assert_diagnostic_range(code, &diagnostics[4], 18, 26, 44);
-        assert_diagnostic_range(code, &diagnostics[5], 19, 26, 44);
-        assert_diagnostic_range(code, &diagnostics[6], 20, 20, 38);
-        assert_diagnostic_range(code, &diagnostics[7], 21, 20, 38);
-        assert_diagnostic_range(code, &diagnostics[8], 23, 26, 42);
-        assert_diagnostic_range(code, &diagnostics[9], 24, 26, 37);
-        assert_diagnostic_range(code, &diagnostics[10], 25, 26, 37);
-        assert_diagnostic_range(code, &diagnostics[11], 35, 10, 34);
-        assert_diagnostic_range(code, &diagnostics[12], 53, 4, 20);
-        assert_diagnostic_range(code, &diagnostics[13], 54, 4, 20);
-        assert_diagnostic_range(code, &diagnostics[14], 55, 4, 20);
-        assert_diagnostic_range(code, &diagnostics[15], 56, 4, 20);
+        assert_diagnostic_range(code, ext_diags[0], 8, 4, 18);
+        assert_diagnostic_range(code, ext_diags[1], 9, 4, 23);
+        assert_diagnostic_range(code, ext_diags[2], 10, 4, 23);
+        assert_diagnostic_range(code, ext_diags[3], 12, 4, 26);
+        assert_diagnostic_range(code, ext_diags[4], 18, 26, 44);
+        assert_diagnostic_range(code, ext_diags[5], 19, 26, 44);
+        assert_diagnostic_range(code, ext_diags[6], 20, 20, 38);
+        assert_diagnostic_range(code, ext_diags[7], 21, 20, 38);
+        assert_diagnostic_range(code, ext_diags[8], 23, 26, 42);
+        assert_diagnostic_range(code, ext_diags[9], 24, 26, 37);
+        assert_diagnostic_range(code, ext_diags[10], 25, 26, 37);
+        assert_diagnostic_range(code, ext_diags[11], 35, 10, 34);
+        assert_diagnostic_range(code, ext_diags[12], 53, 4, 20);
+        assert_diagnostic_range(code, ext_diags[13], 54, 4, 20);
+        assert_diagnostic_range(code, ext_diags[14], 55, 4, 20);
+        assert_diagnostic_range(code, ext_diags[15], 56, 4, 20);
     }
 
     #[test]
@@ -181,8 +102,10 @@ mod tests {
     КомандаСистемы("cmd.exe");
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect global method call");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 1, "Should detect global method call");
     }
 
     #[test]
@@ -192,8 +115,10 @@ mod tests {
     ФайловаяСистемаКлиент.ЗапуститьПрограмму("calc.exe");
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect object method call");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 1, "Should detect object method call");
     }
 
     #[test]
@@ -203,8 +128,10 @@ mod tests {
     МойМодуль.ЗапуститьВнешнееПриложение("cmd");
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Similar method names should be ignored");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 0, "Similar method names should be ignored");
     }
 
     #[test]
@@ -216,8 +143,10 @@ Procedure Test()
     RunSystem();
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 3, "Should detect English method names");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 3, "Should detect English method names");
     }
 
     #[test]
@@ -228,8 +157,10 @@ Procedure Test()
     ЗАПУСТИТЬПриложение("app");
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 2, "Should be case-insensitive");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 2, "Should be case-insensitive");
     }
 
     #[test]
@@ -239,7 +170,9 @@ Procedure Test()
     Переменная = КомандаСистемы;
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Method references without calls should be ignored");
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 0, "Method references without calls should be ignored");
     }
 }
