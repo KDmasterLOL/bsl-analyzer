@@ -270,7 +270,7 @@ pub struct VariableData {
 }
 
 /// Module-level variable declaration for tracking usage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleVarDecl {
     /// Variable name (original case).
     pub name: String,
@@ -310,7 +310,7 @@ pub enum ExecutionContext {
 /// - Cached per module alongside ModuleBodies
 /// - Invalidated when file content changes
 /// - Metadata load is shared with all diagnostics (single point of loading)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleMetadata {
     /// Type of the module (determined from file path).
     pub module_type: bsl_metadata::ModuleType,
@@ -349,7 +349,7 @@ impl ModuleMetadata {
 ///
 /// Note: `ModuleBodies` is not `Clone` because it contains large data structures.
 /// Use `Arc<ModuleBodies>` for sharing between diagnostics.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ModuleBodies {
     /// Bodies indexed by MethodId.local_id
     bodies: rustc_hash::FxHashMap<u32, body::LowerResult>,

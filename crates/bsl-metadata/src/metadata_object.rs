@@ -222,7 +222,7 @@ impl MdoType {
 }
 
 /// Simple metadata object
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataObject {
     /// Object type
     pub mdo_type: MdoType,

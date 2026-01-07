@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Common module metadata object
 ///
 /// Java equivalent: `com.github._1c_syntax.bsl.mdo.CommonModule`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommonModule {
     /// Unique identifier
     #[serde(rename = "uuid")]
