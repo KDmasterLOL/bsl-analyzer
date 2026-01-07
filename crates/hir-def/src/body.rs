@@ -383,6 +383,11 @@ pub enum BodyDiagnostic {
     /// Bad practice: creates unnecessary form context dependency.
     FormDataToValue { range: TextRange },
 
+    /// Function name starts with "Получить" (Russian for "Get").
+    /// According to 1C coding standards, function names should not use "Получить" prefix.
+    /// Only applies to functions (FUNCTION_DEF), not procedures.
+    FunctionNameStartsWithGet { name: String, range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -439,6 +444,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::ExtraCommas { range } => *range,
             BodyDiagnostic::FileSystemAccess { range } => *range,
             BodyDiagnostic::FormDataToValue { range } => *range,
+            BodyDiagnostic::FunctionNameStartsWithGet { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

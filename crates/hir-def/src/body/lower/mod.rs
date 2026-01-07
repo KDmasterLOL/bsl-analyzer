@@ -344,6 +344,26 @@ pub fn lower_method_with_externals(
     // Check if method has "БезКонтекста" (NoContext) annotation
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
 
+    // Check for FunctionNameStartsWithGet diagnostic
+    if is_function {
+        // Get function name
+        if let Some(name_token) = method_node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        {
+            let name_text = name_token.text();
+            // Check if name starts with "Получить" (case-insensitive)
+            // Only Russian "Получить" is checked, not English "Get"
+            if name_text.to_lowercase().starts_with("получить") {
+                ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
+                    name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+        }
+    }
+
     // Lower parameters
     if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {
         let params = stmt::lower_params(&mut ctx, &param_list);

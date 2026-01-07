@@ -421,6 +421,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::FormDataToValue { range } => {
             handlers::form_data_to_value::from_hir(*range, ctx)
         }
+        BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
+            handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
+        }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

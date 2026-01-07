@@ -13,6 +13,9 @@
 //! **Note:** This diagnostic only checks Russian "Получить" prefix, not English "Get".
 //! This matches the behavior of bsl-language-server (Java implementation).
 //!
+//! ## Implementation
+//! **This is a HIR-based diagnostic** - detects function names during HIR lowering.
+//!
 //! ## Bad practice
 //! ```bsl
 //! Функция ПолучитьИмяПоКоду()  // Bad!
@@ -28,100 +31,48 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{ast::AstNode, SyntaxKind};
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when FunctionNameStartsWithGet diagnostic is emitted during lowering.
+pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::FunctionNameStartsWithGet) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    // Traverse all nodes looking for FUNCTION_DEF
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::FUNCTION_DEF {
-            // Cast to FunctionDef AST node
-            if let Some(func) = syntax::ast::FunctionDef::cast(node) {
-                // Get function name
-                if let Some(name_token) = func.name() {
-                    let name_text = name_token.text();
-
-                    // Check if name starts with "Получить" (case-insensitive)
-                    // Java uses: Pattern get = CaseInsensitivePattern.compile("^Получить.*$");
-                    if name_text.to_lowercase().starts_with("получить") {
-                        diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::FunctionNameStartsWithGet,
-                            message: format!(
-                                "Имя функции '{}' не должно начинаться с 'Получить'",
-                                name_text
-                            ),
-                            severity: Severity::Information,
-                            range: name_token.text_range(),
-                            tags: vec![],
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
+    Some(Diagnostic {
+        code: DiagnosticCode::FunctionNameStartsWithGet,
+        message: format!("Имя функции '{}' не должно начинаться с 'Получить'", name),
+        severity: Severity::Information,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use crate::test_utils::*;
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_function_name_starts_with_get() {
         let code = include_str!("../test_data/FunctionNameStartsWithGetDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
 
         // Java expects 1 diagnostic at line 0 (1-based line 1), cols 8-25
         // The diagnostic should be on "ПолучитьИмяПоКоду" (the function name)
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
 
         // Line 1 (0-indexed line 1, after source comment), cols 8-25
         // "Функция ПолучитьИмяПоКоду()" - the name starts at col 8
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 8, 25);
-        assert!(diagnostics[0].message.contains("ПолучитьИмяПоКоду"));
+        assert_diagnostic_range(code, func_diags[0], 1, 8, 25);
+        assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду"));
     }
 
     #[test]
@@ -131,8 +82,12 @@ mod tests {
     Возврат "Имя";
 КонецФункции
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Should not detect functions without 'Получить' prefix");
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
+        assert_eq!(func_diags.len(), 0, "Should not detect functions without 'Получить' prefix");
     }
 
     #[test]
@@ -146,8 +101,12 @@ mod tests {
     Возврат 42;
 КонецФункции
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 2, "Should detect case-insensitive 'Получить' variations");
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
+        assert_eq!(func_diags.len(), 2, "Should detect case-insensitive 'Получить' variations");
     }
 
     #[test]
@@ -157,8 +116,12 @@ mod tests {
     // Процедура не должна срабатывать
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Should NOT detect procedures");
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
+        assert_eq!(func_diags.len(), 0, "Should NOT detect procedures");
     }
 
     #[test]
@@ -168,9 +131,13 @@ Function GetNameByCode()
     Return "Name";
 EndFunction
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
         assert_eq!(
-            diagnostics.len(),
+            func_diags.len(),
             0,
             "Should NOT detect English 'Get' prefix (only Russian 'Получить')"
         );
@@ -183,11 +150,11 @@ EndFunction
     Возврат "Имя";
 КонецФункции
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Should NOT detect names that don't START with 'Получить'"
-        );
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
+            .collect();
+        assert_eq!(func_diags.len(), 0, "Should NOT detect names that don't START with 'Получить'");
     }
 }

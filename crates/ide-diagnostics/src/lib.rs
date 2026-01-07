@@ -794,11 +794,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::missing_temporary_file_deletion::check,
     ));
-    result.extend(run_diagnostic(
-        "FunctionNameStartsWithGet",
-        ctx,
-        handlers::function_name_starts_with_get::check,
-    ));
+    // MIGRATED TO HIR: FunctionNameStartsWithGet - now collected during lowering (lower_method_with_externals)
+    // result.extend(run_diagnostic(
+    //     "FunctionNameStartsWithGet",
+    //     ctx,
+    //     handlers::function_name_starts_with_get::check,
+    // ));
     result.extend(run_diagnostic(
         "FunctionReturnsSamePrimitive",
         ctx,
@@ -1086,6 +1087,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::FormDataToValue { range } => {
             handlers::form_data_to_value::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
+            handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
