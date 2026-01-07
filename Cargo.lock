@@ -198,6 +198,9 @@ name = "cfg"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "hir-def",
+ "la-arena",
+ "ordered-float",
  "petgraph",
  "rowan",
  "syntax",
@@ -593,7 +596,6 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
- "cfg",
  "expect-test",
  "ide-db",
  "intern",

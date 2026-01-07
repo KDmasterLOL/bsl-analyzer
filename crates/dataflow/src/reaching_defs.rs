@@ -244,7 +244,9 @@ impl ReachingDefsTransfer {
 ///
 /// Provides high-level API for querying definitions that reach program points.
 /// Does not store CFG to maintain Send+Sync bounds.
-#[derive(Debug, Clone)]
+///
+/// Phase 6.5: Added PartialEq, Eq for Salsa query compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachingDefsResult {
     /// IN sets for each block (definitions reaching block entry).
     block_in: rustc_hash::FxHashMap<petgraph::graph::NodeIndex, ReachingDefs>,

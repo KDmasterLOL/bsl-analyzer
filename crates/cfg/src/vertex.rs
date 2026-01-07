@@ -10,22 +10,27 @@
 //! - LabelVertex.java
 //! - ExitVertex.java
 //!
-//! ## Design Decision: Rowan SyntaxNode Storage
+//! ## Design Decision: HIR-based CFG
 //!
-//! Unlike bsl-language-server-rust which stores byte positions (NodePosition)
-//! to avoid tree-sitter lifetime issues, we store Rowan SyntaxNode directly.
+//! **Migrated from SyntaxNode to HIR indices (Phase 6.1)**
+//!
+//! Unlike the previous AST-based approach, we now store HIR indices (StmtId, ExprId, BindingId)
+//! from hir_def::Body arenas.
 //!
 //! **Rationale**:
-//! - Rowan SyntaxNode uses Arc internally - cheap to clone
-//! - No lifetime issues - can be stored safely in graph structures
-//! - Direct access to AST nodes without needing Tree + source
+//! - Enables dataflow analysis (needs HIR statement access)
+//! - More compact (8-byte indices vs Arc<SyntaxNode>)
+//! - Type-safe (StmtId can only reference statements)
+//! - No fragile AST parsing with find() + fallbacks
+//! - Direct integration with HIR-based diagnostics
 //!
 //! **Advantage**:
-//! - Simpler API - no position conversion needed
-//! - Type-safe access to AST information
+//! - Dataflow transfer functions can access Body arenas
+//! - Same Body used in CFG and diagnostics (single source of truth)
+//! - Structured access via pattern matching (no tree traversal)
 //! - Follows rust-analyzer patterns
 
-use syntax::SyntaxNode;
+use hir_def::{BindingId, ExprId, Name, StmtId};
 
 /// Vertex in the control flow graph
 ///
@@ -66,17 +71,16 @@ pub enum CfgVertex {
 }
 
 impl CfgVertex {
-    /// Get the AST node associated with this vertex, if any
-    pub fn node(&self) -> Option<&SyntaxNode> {
+    /// Get the first statement ID from a BasicBlock vertex, if this is a BasicBlock
+    ///
+    /// For other vertex types, use specific accessors:
+    /// - Conditional/WhileLoop: access `.condition` field directly
+    /// - ForLoop/ForEachLoop: access `.loop_var` field directly
+    /// - Label: access `.name` field directly
+    pub fn first_stmt_id(&self) -> Option<StmtId> {
         match self {
-            CfgVertex::BasicBlock(v) => v.first_statement(),
-            CfgVertex::Conditional(v) => Some(&v.condition),
-            CfgVertex::WhileLoop(v) => Some(&v.condition),
-            CfgVertex::ForLoop(v) => Some(&v.loop_var),
-            CfgVertex::ForEachLoop(v) => Some(&v.loop_var),
-            CfgVertex::TryExcept(v) => Some(&v.try_node),
-            CfgVertex::Label(v) => Some(&v.label),
-            CfgVertex::Exit => None,
+            CfgVertex::BasicBlock(v) => v.statements().first().copied(),
+            _ => None,
         }
     }
 
@@ -118,8 +122,8 @@ impl CfgVertex {
 #[derive(Debug, Clone)]
 pub struct BasicBlockVertex {
     /// Sequential statements in this basic block
-    /// Rowan SyntaxNode can be stored directly (Arc-based)
-    statements: Vec<SyntaxNode>,
+    /// Stores HIR statement indices from Body arena
+    statements: Vec<StmtId>,
 }
 
 impl BasicBlockVertex {
@@ -127,20 +131,20 @@ impl BasicBlockVertex {
         Self { statements: Vec::new() }
     }
 
-    pub fn add_statement(&mut self, stmt: SyntaxNode) {
+    pub fn add_statement(&mut self, stmt: StmtId) {
         self.statements.push(stmt);
     }
 
-    pub fn statements(&self) -> &[SyntaxNode] {
+    pub fn statements(&self) -> &[StmtId] {
         &self.statements
     }
 
-    pub fn first_statement(&self) -> Option<&SyntaxNode> {
-        self.statements.first()
+    pub fn first_statement(&self) -> Option<StmtId> {
+        self.statements.first().copied()
     }
 
-    pub fn last_statement(&self) -> Option<&SyntaxNode> {
-        self.statements.last()
+    pub fn last_statement(&self) -> Option<StmtId> {
+        self.statements.last().copied()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -163,12 +167,12 @@ impl Default for BasicBlockVertex {
 /// Maps to ConditionalVertex.java
 #[derive(Debug, Clone)]
 pub struct ConditionalVertex {
-    /// Condition expression (Rowan node)
-    pub condition: SyntaxNode,
+    /// Condition expression (HIR index from Body)
+    pub condition: ExprId,
 }
 
 impl ConditionalVertex {
-    pub fn new(condition: SyntaxNode) -> Self {
+    pub fn new(condition: ExprId) -> Self {
         Self { condition }
     }
 }
@@ -178,23 +182,22 @@ impl ConditionalVertex {
 /// Maps to WhileLoopVertex.java
 #[derive(Debug, Clone)]
 pub struct WhileLoopVertex {
-    /// Loop condition (Rowan node)
-    pub condition: SyntaxNode,
+    /// Loop condition (HIR index from Body)
+    pub condition: ExprId,
 }
 
 impl WhileLoopVertex {
-    pub fn new(condition: SyntaxNode) -> Self {
+    pub fn new(condition: ExprId) -> Self {
         Self { condition }
     }
 
-    /// Check if this is an endless loop (While True / Пока Истина)
-    pub fn is_endless(&self) -> bool {
-        use syntax::SyntaxKind;
-
-        // Check if condition contains a True keyword
-        // Need to check tokens, not just nodes
-        self.condition.descendants_with_tokens().any(|elem| elem.kind() == SyntaxKind::KW_TRUE)
-    }
+    // TODO(Phase 6.4): Re-add is_endless() method with Body parameter
+    // Check if this is an endless loop (While True / Пока Истина)
+    // Requires access to Body to check if condition is Literal::Bool(true)
+    //
+    // pub fn is_endless(&self, body: &hir_def::Body) -> bool {
+    //     matches!(body.expr(self.condition), hir_def::Expr::Literal(hir_def::Literal::Bool(true)))
+    // }
 }
 
 /// For loop vertex
@@ -202,12 +205,12 @@ impl WhileLoopVertex {
 /// Maps to ForLoopVertex.java
 #[derive(Debug, Clone)]
 pub struct ForLoopVertex {
-    /// Loop variable
-    pub loop_var: SyntaxNode,
+    /// Loop variable (HIR binding from Body)
+    pub loop_var: BindingId,
 }
 
 impl ForLoopVertex {
-    pub fn new(loop_var: SyntaxNode) -> Self {
+    pub fn new(loop_var: BindingId) -> Self {
         Self { loop_var }
     }
 }
@@ -217,12 +220,12 @@ impl ForLoopVertex {
 /// Maps to ForeachLoopVertex.java
 #[derive(Debug, Clone)]
 pub struct ForEachLoopVertex {
-    /// Loop variable
-    pub loop_var: SyntaxNode,
+    /// Loop variable (HIR binding from Body)
+    pub loop_var: BindingId,
 }
 
 impl ForEachLoopVertex {
-    pub fn new(loop_var: SyntaxNode) -> Self {
+    pub fn new(loop_var: BindingId) -> Self {
         Self { loop_var }
     }
 }
@@ -230,15 +233,22 @@ impl ForEachLoopVertex {
 /// Try-Except block vertex
 ///
 /// Maps to TryExceptVertex.java
+///
+/// Note: CFG doesn't need to store any data for Try-Except blocks,
+/// just mark their presence in the control flow. Body statements
+/// are tracked in BasicBlock vertices.
 #[derive(Debug, Clone)]
-pub struct TryExceptVertex {
-    /// Try block start node
-    pub try_node: SyntaxNode,
-}
+pub struct TryExceptVertex;
 
 impl TryExceptVertex {
-    pub fn new(try_node: SyntaxNode) -> Self {
-        Self { try_node }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for TryExceptVertex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -247,13 +257,13 @@ impl TryExceptVertex {
 /// Maps to LabelVertex.java
 #[derive(Debug, Clone)]
 pub struct LabelVertex {
-    /// Label name node
-    pub label: SyntaxNode,
+    /// Label name (HIR Name from Body)
+    pub name: Name,
 }
 
 impl LabelVertex {
-    pub fn new(label: SyntaxNode) -> Self {
-        Self { label }
+    pub fn new(name: Name) -> Self {
+        Self { name }
     }
 }
 

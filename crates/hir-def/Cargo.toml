@@ -17,7 +17,10 @@ ordered-float.workspace = true
 smol_str.workspace = true
 text-size.workspace = true
 tracing.workspace = true
-cfg.workspace = true
+# NOTE: cfg dependency creates circular dependency (hir-def → cfg → hir-def)
+# Solution: Use CFG directly in ide-diagnostics, not in hir-def lowering
+# check_missing_return_paths() remains stubbed (returns false)
+# cfg.workspace = true
 parser.workspace = true
 bsl-metadata.workspace = true
 once_cell.workspace = true

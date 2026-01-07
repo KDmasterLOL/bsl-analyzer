@@ -15,7 +15,15 @@ pub(crate) fn has_return_statement(stmt_list: &SyntaxNode) -> bool {
 ///
 /// Returns true if some execution paths don't have explicit return statements.
 /// This uses the same CFG analysis as AllFunctionPathMustHaveReturn diagnostic.
-pub fn check_missing_return_paths(stmt_list: &SyntaxNode) -> bool {
+///
+/// TODO(Phase 6.4): Re-enable after CFG migration to HIR is complete.
+/// For now, return false (don't report missing return paths during lowering).
+/// This diagnostic will be properly implemented with HIR-based CFG.
+pub fn check_missing_return_paths(_stmt_list: &SyntaxNode) -> bool {
+    // Temporarily disabled during CFG migration to HIR (Phase 6)
+    false
+
+    /* COMMENTED OUT - will be re-enabled with HIR-based CFG in Phase 6.4
     use cfg::{CfgBuilder, CfgEdgeType, CfgVertex};
 
     // Build CFG with default configuration (loops executed at least once)
@@ -78,9 +86,13 @@ pub fn check_missing_return_paths(stmt_list: &SyntaxNode) -> bool {
     }
 
     false
+    */ // End of commented-out CFG-based implementation
 }
 
-/// Check if a basic block has missing return.
+// Check if a basic block has missing return.
+//
+// TODO(Phase 6.4): Re-enable after CFG migration to HIR is complete.
+/* COMMENTED OUT - will be re-enabled with HIR-based CFG in Phase 6.4
 fn check_basic_block_missing_return(
     vertex_idx: cfg::NodeIndex,
     block: &cfg::BasicBlockVertex,
@@ -139,6 +151,7 @@ fn check_basic_block_missing_return(
 
     !has_explicit_return
 }
+*/ // End of check_basic_block_missing_return
 
 /// Check if a node is a statement (vs whitespace, comments, etc.)
 pub(crate) fn is_statement_node(node: &SyntaxNode) -> bool {

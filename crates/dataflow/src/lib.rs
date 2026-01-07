@@ -129,7 +129,6 @@ pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
     body: Body,
 
     /// Transfer function
-    #[allow(dead_code)] // TODO: Used when HIR CFG is implemented
     transfer: T,
 
     /// IN sets for each block
@@ -295,18 +294,14 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         };
 
         match vertex {
-            CfgVertex::BasicBlock(_block) => {
-                // TODO: Reimplement with HIR-based CFG
-                /* TEMPORARILY DISABLED - requires HIR-based CFG with hir_stmts() method
+            CfgVertex::BasicBlock(block) => {
                 // Apply transfer function to each statement in the block
+                // Phase 6.3: Re-enabled with HIR-based CFG (statements() returns &[StmtId])
                 let mut state = in_state.clone();
-                for &stmt_raw_idx in _block.hir_stmts() {
-                    state = self.transfer.transfer_stmt(stmt_raw_idx, &state, &self.body);
+                for &stmt_id in block.statements() {
+                    state = self.transfer.transfer_stmt(stmt_id.into_raw(), &state, &self.body);
                 }
                 state
-                */
-
-                in_state.clone()
             }
             // Other vertex types (Conditional, Loop, etc.) don't contain statements
             // They just represent control flow structure

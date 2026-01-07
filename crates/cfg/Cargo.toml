@@ -10,7 +10,10 @@ rust-version.workspace = true
 [dependencies]
 petgraph = "0.6"
 syntax = { path = "../syntax" }
+hir-def = { path = "../hir-def" }
 
 [dev-dependencies]
 expect-test = "1.4"
 rowan = "0.15"
+la-arena.workspace = true
+ordered-float.workspace = true

@@ -199,6 +199,16 @@ pub struct MethodId {
     pub local_id: u32,
 }
 
+/// Salsa-compatible wrapper for MethodId.
+///
+/// Phase 6.5: Used for Salsa queries that take MethodId as parameter.
+/// Salsa requires interned types to avoid cloning large structures.
+#[salsa::interned(debug)]
+pub struct MethodIdInput {
+    /// The raw MethodId value
+    pub method_id: MethodId,
+}
+
 /// Variable identifier (module-level variable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VariableId {
