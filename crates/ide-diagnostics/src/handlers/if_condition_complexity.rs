@@ -26,11 +26,13 @@
 //!
 //! ## Implementation
 //!
+//! Migrated to HIR-based collection (rust-analyzer pattern).
+//!
 //! Ported from:
 //! - IfConditionComplexityDiagnostic.java (bsl-language-server)
 //! - if_condition_complexity.rs (bsl-language-server-rust)
 //!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
+//! Adapted to use Rowan SyntaxNode during HIR lowering.
 //!
 //! ### Key algorithm:
 //! - Java: `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size() + 1`
@@ -43,198 +45,56 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode, TextSize};
 
 /// Default maximum if condition complexity
 const DEFAULT_MAX_IF_CONDITION_COMPLEXITY: usize = 3;
 
-/// Runs the IfConditionComplexity diagnostic.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Check if diagnostic is disabled
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when IfConditionComplexity diagnostic is emitted during lowering.
+pub fn from_hir(
+    complexity: usize,
+    max_complexity_default: usize,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::IfConditionComplexity) {
-        return Vec::new();
+        return None;
     }
 
-    // Get maxIfConditionComplexity parameter (default: 3)
+    // Get maxIfConditionComplexity parameter from config (default: 3)
     let max_complexity = ctx
         .config
         .get_int(DiagnosticCode::IfConditionComplexity, "maxIfConditionComplexity")
         .map(|v| v as usize)
         .unwrap_or(DEFAULT_MAX_IF_CONDITION_COMPLEXITY);
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    // Find all if statements and elsif clauses
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::IF_STMT => {
-                // Check if branch condition
-                if let Some(expr) = find_if_condition(&node) {
-                    if let Some(diag) = check_expression(&expr, max_complexity) {
-                        diagnostics.push(diag);
-                    }
-                }
-            }
-            SyntaxKind::ELSIF_CLAUSE => {
-                // Check elsif branch condition
-                if let Some(expr) = find_elsif_condition(&node) {
-                    if let Some(diag) = check_expression(&expr, max_complexity) {
-                        diagnostics.push(diag);
-                    }
-                }
-            }
-            _ => {}
-        }
+    // Re-check against user config (lowering used default threshold)
+    if complexity <= max_complexity {
+        return None;
     }
 
-    diagnostics
-}
+    // Update max_complexity in message to reflect actual config value
+    // (lowering emitted with default, we use user config)
+    let _ = max_complexity_default; // Silence unused warning
 
-/// Find condition expression in IF_STMT
-/// Structure: IF_STMT → EXPR → ...
-fn find_if_condition(if_stmt: &SyntaxNode) -> Option<SyntaxNode> {
-    // The first EXPR child is the condition
-    if_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)
-}
-
-/// Find condition expression in ELSIF_CLAUSE
-/// Structure: ELSIF_CLAUSE → EXPR → ...
-fn find_elsif_condition(elsif_clause: &SyntaxNode) -> Option<SyntaxNode> {
-    // The first EXPR child is the condition
-    elsif_clause.children().find(|n| n.kind() == SyntaxKind::EXPR)
-}
-
-/// Check expression complexity
-///
-/// Complexity = number of boolean operations (AND/OR) + 1
-/// This matches Java's `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size() + 1`
-fn check_expression(expr: &SyntaxNode, max_complexity: usize) -> Option<Diagnostic> {
-    let bool_op_count = count_bool_operations(expr);
-    let complexity = bool_op_count + 1;
-
-    if complexity > max_complexity {
-        // Trim trailing whitespace from expression range to match Java behavior
-        // Java ANTLR doesn't include trailing whitespace in expression nodes
-        let range = trim_trailing_whitespace(expr);
-
-        Some(Diagnostic {
-            code: DiagnosticCode::IfConditionComplexity,
-            message: format!(
-                "Условие имеет сложность {} (максимум {}). Упростите условие или вынесите части в переменные.",
-                complexity, max_complexity
-            ),
-            severity: Severity::Warning,
-            range,
-            tags: vec![],
-            fixes: vec![],
-        })
-    } else {
-        None
-    }
-}
-
-/// Trim trailing whitespace from a node's text range
-///
-/// Java ANTLR parser doesn't include trailing whitespace in expression nodes,
-/// but Rowan CST includes all tokens including whitespace.
-/// This function trims trailing whitespace to match Java behavior.
-fn trim_trailing_whitespace(node: &SyntaxNode) -> ide_db::TextRange {
-    let text = node.text().to_string();
-    let trimmed = text.trim_end();
-    let trimmed_len = trimmed.len();
-    let original_len = text.len();
-
-    if trimmed_len == original_len {
-        // No trailing whitespace
-        node.text_range()
-    } else {
-        // Trim trailing whitespace from range
-        let start = node.text_range().start();
-        let end = start + TextSize::from(trimmed_len as u32);
-        TextRange::new(start, end)
-    }
-}
-
-/// Count boolean operations (AND/OR) in expression
-///
-/// Counts all BINARY_EXPR nodes that have AND or OR operator
-fn count_bool_operations(expr: &SyntaxNode) -> usize {
-    let mut count = 0;
-
-    // Traverse all descendants looking for BINARY_EXPR with AND/OR
-    for node in expr.descendants() {
-        if node.kind() == SyntaxKind::BINARY_EXPR {
-            // Check if it has AND or OR operator
-            if has_bool_operator(&node) {
-                count += 1;
-            }
-        }
-    }
-
-    count
-}
-
-/// Check if BINARY_EXPR has a boolean operator (AND/OR)
-fn has_bool_operator(binary_expr: &SyntaxNode) -> bool {
-    // Look for KW_AND or KW_OR token in children
-    binary_expr.children_with_tokens().any(|child| {
-        child
-            .as_token()
-            .is_some_and(|tok| matches!(tok.kind(), SyntaxKind::KW_AND | SyntaxKind::KW_OR))
+    Some(Diagnostic {
+        code: DiagnosticCode::IfConditionComplexity,
+        message: format!(
+            "Условие имеет сложность {} (максимум {}). Упростите условие или вынесите части в переменные.",
+            complexity, max_complexity
+        ),
+        severity: Severity::Warning,
+        range,
+        tags: vec![],
+        fixes: vec![],
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range_multiline, DiagnosticsConfig};
-    use ide_db::RootDatabase;
-    use std::sync::Arc;
-
-    /// Helper to run diagnostic on test code
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::SourceDatabase;
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-
-        // Create fixture with test file
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        // Create database
-        let mut db = RootDatabaseImpl::new();
-
-        // Set file content in database from fixture
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        // Create diagnostics context
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        // Run diagnostic
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use crate::test_utils::*;
+    use crate::{DiagnosticCode, Severity};
 
     /// Test simple condition (should pass)
     #[test]
@@ -245,10 +105,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Should NOT detect - complexity = 2 (1 AND + 1 = 2)
-        assert_eq!(diagnostics.len(), 0);
+        assert_eq!(if_diags.len(), 0);
     }
 
     /// Test at threshold (should pass)
@@ -260,10 +124,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Should NOT detect - complexity = 3 (2 ops: AND + OR = 2, complexity = 2+1 = 3)
-        assert_eq!(diagnostics.len(), 0);
+        assert_eq!(if_diags.len(), 0);
     }
 
     /// Test complex condition (should fail)
@@ -275,14 +143,18 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let (diagnostics, _file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Should detect - complexity = 4 (3 ops: AND, OR, AND = 3, complexity = 3+1 = 4)
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::IfConditionComplexity);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
-        assert!(diagnostics[0].message.contains("сложность 4"));
-        assert!(diagnostics[0].message.contains("максимум 3"));
+        assert_eq!(if_diags.len(), 1);
+        assert_eq!(if_diags[0].code, DiagnosticCode::IfConditionComplexity);
+        assert_eq!(if_diags[0].severity, Severity::Warning);
+        assert!(if_diags[0].message.contains("сложность 4"));
+        assert!(if_diags[0].message.contains("максимум 3"));
     }
 
     /// Test elsif clause
@@ -296,11 +168,15 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Should detect in elseif - complexity = 4
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::IfConditionComplexity);
+        assert_eq!(if_diags.len(), 1);
+        assert_eq!(if_diags[0].code, DiagnosticCode::IfConditionComplexity);
     }
 
     /// Test English keywords
@@ -312,10 +188,14 @@ mod tests {
     EndIf;
 EndProcedure"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Should detect - complexity = 4
-        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(if_diags.len(), 1);
     }
 
     /// Integration test matching Java test structure
@@ -332,16 +212,20 @@ EndProcedure"#;
     fn test_if_condition_complexity() {
         let code = include_str!("../../tests/fixtures/IfConditionComplexityDiagnostic.bsl");
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let if_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+            .collect();
 
         // Java test expects: assertThat(diagnostics).hasSize(4);
-        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics");
+        assert_eq!(if_diags.len(), 4, "Expected 4 diagnostics");
 
         // Verify each diagnostic range matches Java implementation
         // Java uses 0-based line/column indexing
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 2, 5, 10, 51);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 27, 6, 30, 60);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 45, 5, 48, 36);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[3], 51, 10, 57, 37);
+        assert_diagnostic_range_multiline(code, if_diags[0], 2, 5, 10, 51);
+        assert_diagnostic_range_multiline(code, if_diags[1], 27, 6, 30, 60);
+        assert_diagnostic_range_multiline(code, if_diags[2], 45, 5, 48, 36);
+        assert_diagnostic_range_multiline(code, if_diags[3], 51, 10, 57, 37);
     }
 }

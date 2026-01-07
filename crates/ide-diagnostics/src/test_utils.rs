@@ -442,6 +442,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::EmptyStatement { range } => {
             handlers::empty_statement::from_hir(*range, ctx)
         }
+        BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
+            handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
+        }
     }
 }
 

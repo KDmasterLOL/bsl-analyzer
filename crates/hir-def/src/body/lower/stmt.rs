@@ -76,6 +76,73 @@ fn find_else_range(else_clause: &SyntaxNode) -> TextRange {
     else_clause.text_range()
 }
 
+/// Count boolean operations (AND/OR) in an expression.
+///
+/// This matches Java's `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size()`
+/// Complexity = number of boolean operations + 1
+fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
+    let mut count = 0;
+
+    // Traverse all descendants looking for BINARY_EXPR with AND/OR
+    for node in expr_node.descendants() {
+        if node.kind() == SyntaxKind::BINARY_EXPR {
+            // Check if it has AND or OR operator
+            let has_bool_op = node.children_with_tokens().any(|child| {
+                child
+                    .as_token()
+                    .is_some_and(|tok| matches!(tok.kind(), SyntaxKind::KW_AND | SyntaxKind::KW_OR))
+            });
+            if has_bool_op {
+                count += 1;
+            }
+        }
+    }
+
+    count
+}
+
+/// Get condition range, trimming trailing whitespace.
+///
+/// Java ANTLR parser doesn't include trailing whitespace in expression nodes,
+/// but Rowan CST includes all tokens. This trims trailing whitespace to match Java.
+fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
+    let text = expr_node.text().to_string();
+    let trimmed = text.trim_end();
+    let trimmed_len = trimmed.len();
+    let original_len = text.len();
+
+    if trimmed_len == original_len {
+        expr_node.text_range()
+    } else {
+        let start = expr_node.text_range().start();
+        let end = start + text_size::TextSize::from(trimmed_len as u32);
+        TextRange::new(start, end)
+    }
+}
+
+/// Check condition complexity and emit diagnostic if too complex.
+///
+/// Default max complexity is 3 (hardcoded here as we don't have config during lowering).
+/// The actual config check happens in from_hir().
+fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode) {
+    // Default max complexity (matches Java default)
+    const DEFAULT_MAX_COMPLEXITY: usize = 3;
+
+    let bool_op_count = count_bool_operations(condition_node);
+    let complexity = bool_op_count + 1;
+
+    // Always emit if complexity > default threshold
+    // from_hir() will check against user config and filter if needed
+    if complexity > DEFAULT_MAX_COMPLEXITY {
+        let range = get_condition_range(condition_node);
+        ctx.emit(BodyDiagnostic::IfConditionComplexity {
+            complexity,
+            max_complexity: DEFAULT_MAX_COMPLEXITY,
+            range,
+        });
+    }
+}
+
 /// Find the range for WHILE/DO header (from WHILE to DO keyword).
 fn find_while_do_range(while_stmt: &SyntaxNode) -> TextRange {
     let mut start = None;
@@ -504,6 +571,12 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
     // Condition (first EXPR or expression node)
     let condition_node = children.next()?;
+
+    // Check if condition complexity for IfConditionComplexity diagnostic
+    // Complexity = number of boolean operations + 1
+    // We emit with actual complexity and let from_hir() check against config
+    check_condition_complexity(ctx, &condition_node);
+
     let condition = lower_expr_node(ctx, &condition_node);
 
     // Collect all branch STMT_LIST nodes for duplicate detection
@@ -529,6 +602,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     for elsif in node.children().filter(|n| n.kind() == SyntaxKind::ELSIF_CLAUSE) {
         let mut elsif_children = elsif.children();
         if let Some(cond_node) = elsif_children.next() {
+            // Check elsif condition complexity
+            check_condition_complexity(ctx, &cond_node);
+
             let cond = lower_expr_node(ctx, &cond_node);
             let stmt_list_node = elsif_children.find(|n| n.kind() == SyntaxKind::STMT_LIST);
             let body = stmt_list_node.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();

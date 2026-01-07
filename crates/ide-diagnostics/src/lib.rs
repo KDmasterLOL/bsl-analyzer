@@ -566,11 +566,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::identical_expressions::check,
     ));
-    result.extend(run_diagnostic(
-        "IfConditionComplexity",
-        ctx,
-        handlers::if_condition_complexity::check,
-    ));
+    // NOTE: IfConditionComplexity migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::IfConditionComplexity
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "IfConditionComplexity",
+    //     ctx,
+    //     handlers::if_condition_complexity::check,
+    // ));
     // NOTE: IfElseDuplicatedCodeBlock migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::IfElseDuplicatedCodeBlock
     // and dispatched through collect_hir_diagnostics()
@@ -1114,6 +1117,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::EmptyStatement { range } => {
             handlers::empty_statement::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
+            handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
         }
     }
 }
