@@ -414,6 +414,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::ExternalAppStarting { range: actual_callee.text_range() });
         }
 
+        // Check for file system access methods
+        if is_file_system_method(&name) {
+            // Emit FileSystemAccess diagnostic
+            // Range is just the method name (IDENT token), not the whole call
+            ctx.diagnostics
+                .push(BodyDiagnostic::FileSystemAccess { range: actual_callee.text_range() });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
@@ -434,6 +442,13 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 // Range is just the method name token, not the whole call
                 ctx.diagnostics
                     .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
+            }
+
+            // Check for file system access methods in qualified calls
+            if is_file_system_method(method_name) {
+                // Range is just the method name token, not the whole call
+                ctx.diagnostics
+                    .push(BodyDiagnostic::FileSystemAccess { range: method_token.text_range() });
             }
         }
     }
@@ -956,6 +971,15 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         .find(|tok| tok.kind() == SyntaxKind::IDENT)
         .map(|tok| Name::new(tok.text()));
 
+    // Check for file system access (security diagnostic)
+    if let Some(ref name) = type_name {
+        if is_file_system_type(name.as_str()) {
+            // Emit FileSystemAccess diagnostic
+            // Range is the entire NEW_EXPR node (matches Java behavior)
+            ctx.diagnostics.push(BodyDiagnostic::FileSystemAccess { range: node.text_range() });
+        }
+    }
+
     // Arguments
     let args = node
         .children()
@@ -1032,5 +1056,147 @@ fn is_external_app_method(name: &str) -> bool {
             | "запуститьпрограмму"
             | "открытьпроводник"
             | "открытьфайл"
+    )
+}
+
+/// Check if type name indicates file system access (NEW expression).
+///
+/// Constructor types that indicate file system access:
+/// - File/Файл - file operations
+/// - xBase - database file access
+/// - HTMLWriter/ЗаписьHTML, HTMLReader/ЧтениеHTML - HTML file operations
+/// - FastInfosetWriter/Reader - Fast Infoset file operations
+/// - XSLTransform - XSLT file processing
+/// - ZipFileWriter/Reader - archive operations
+/// - TextWriter/Reader - text file operations
+/// - TextExtraction - text extraction from files
+/// - BinaryData - binary file operations
+/// - FileStream - file stream operations
+/// - FileStreamsManager - file stream management
+/// - DataWriter/Reader - data file operations
+fn is_file_system_type(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "file"
+            | "файл"
+            | "xbase"
+            | "htmlwriter"
+            | "записьhtml"
+            | "htmlreader"
+            | "чтениеhtml"
+            | "fastinfosetreader"
+            | "чтениеfastinfoset"
+            | "fastinfosetwriter"
+            | "записьfastinfoset"
+            | "xsltransform"
+            | "преобразованиеxsl"
+            | "zipfilewriter"
+            | "записьzipфайла"
+            | "zipfilereader"
+            | "чтениеzipфайла"
+            | "textreader"
+            | "чтениетекста"
+            | "textwriter"
+            | "записьтекста"
+            | "textextraction"
+            | "извлечениетекста"
+            | "binarydata"
+            | "двоичныеданные"
+            | "filestream"
+            | "файловыйпоток"
+            | "filestreamsmanager"
+            | "менеджерфайловыхпотоков"
+            | "datawriter"
+            | "записьданных"
+            | "datareader"
+            | "чтениеданных"
+    )
+}
+
+/// Check if method name indicates file system access (global method).
+///
+/// Global methods that indicate file system access:
+/// - File operations: ЗначениеВФайл, КопироватьФайл, ПереместитьФайл, etc.
+/// - Directory operations: СоздатьКаталог, КаталогВременныхФайлов, etc.
+/// - Extension operations: УстановитьРасширениеРаботыСФайлами, etc.
+/// - Async operations: КопироватьФайлАсинх, СоздатьКаталогАсинх, etc.
+fn is_file_system_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        // File operations
+        "значениевфайл"
+            | "valuetofile"
+            | "копироватьфайл"
+            | "filecopy"
+            | "объединитьфайлы"
+            | "mergefiles"
+            | "переместитьфайл"
+            | "movefile"
+            | "разделитьфайл"
+            | "splitfile"
+            | "создатькаталог"
+            | "createdirectory"
+            | "удалитьфайлы"
+            | "deletefiles"
+            // Directory operations
+            | "каталогпрограммы"
+            | "bindir"
+            | "каталогвременныхфайлов"
+            | "tempfilesdir"
+            | "каталогдокументов"
+            | "documentsdir"
+            | "рабочийкаталогданныхпользователя"
+            | "userdataworkdir"
+            // Extension operations
+            | "начатьподключениерасширенияработысфайлами"
+            | "beginattachingfilesystemextension"
+            | "начатьустановкурасширенияработысфайлами"
+            | "begininstallfilesystemextension"
+            | "установитьрасширениеработысфайлами"
+            | "installfilesystemextension"
+            | "установитьрасширениеработысфайламиасинх"
+            | "installfilesystemextensionasync"
+            | "подключитьрасширениеработысфайламиасинх"
+            | "attachfilesystemextensionasync"
+            // Async directory operations
+            | "каталогвременныхфайловасинх"
+            | "tempfilesdirasync"
+            | "каталогдокументовасинх"
+            | "documentsdirasync"
+            | "рабочийкаталогданныхпользователяасинч"
+            | "userdataworkdirasync"
+            | "начатьполучениякаталогавременныхфайлов"
+            | "begingettingtempfilesdir"
+            | "начатьполучениякаталогадокументов"
+            | "begingettingdocumentsdir"
+            | "начатьполучениярабочегокаталогаданныхпользователя"
+            | "begingettinguserdataworkdir"
+            // Async file operations
+            | "копироватьфайласинх"
+            | "copyfileasync"
+            | "найтифайлыасинч"
+            | "findfilesasync"
+            | "начатькопированияфайла"
+            | "begincopyingfile"
+            | "начатьперемещенияфайла"
+            | "beginmovingfile"
+            | "начатьпоискфайлов"
+            | "beginfindingfiles"
+            | "начатьсозданиядвоичныхданныхизфайла"
+            | "begincreatebinarydatafromfile"
+            | "начатьсозданиякаталога"
+            | "begincreatingdirectory"
+            | "начатьудаленияфайлов"
+            | "begindeletingfiles"
+            | "переместитьфайласинч"
+            | "movefileasync"
+            | "создатьдвоичныеданныеизфайласинч"
+            | "createbinarydatafromfileasync"
+            | "создатькаталогасинч"
+            | "createdirectoryasync"
+            | "удалитьфайлыасинч"
+            | "deletefilesasync"
     )
 }

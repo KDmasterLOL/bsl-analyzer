@@ -727,7 +727,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::external_app_starting::check,
     // ));
-    result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
+    // MIGRATED TO HIR: FileSystemAccess - now collected during lowering (lower_new_expr, lower_call_expr)
+    // result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
     result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
@@ -1078,6 +1079,9 @@ fn dispatch_hir_diagnostic(
             handlers::external_app_starting::from_hir(*range, ctx)
         }
         BodyDiagnostic::ExtraCommas { range } => handlers::extra_commas::from_hir(*range, ctx),
+        BodyDiagnostic::FileSystemAccess { range } => {
+            handlers::file_system_access::from_hir(*range, ctx)
+        }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

@@ -369,6 +369,14 @@ pub enum BodyDiagnostic {
     /// Detects commas before closing parenthesis: Method(a, b,)
     ExtraCommas { range: TextRange },
 
+    /// File system access operations.
+    /// Detects:
+    /// - Constructor patterns: Новый Файл, Новый ЗаписьТекста, Новый xBase, etc.
+    /// - Global methods: КопироватьФайл, УдалитьФайлы, СоздатьКаталог, etc.
+    ///
+    /// Security risk: creates attack vectors for data exfiltration and file manipulation.
+    FileSystemAccess { range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -423,6 +431,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::ExecuteExternalCode { range } => *range,
             BodyDiagnostic::ExternalAppStarting { range } => *range,
             BodyDiagnostic::ExtraCommas { range } => *range,
+            BodyDiagnostic::FileSystemAccess { range } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }
