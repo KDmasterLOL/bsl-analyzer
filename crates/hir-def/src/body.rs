@@ -139,7 +139,7 @@ impl Body {
 /// Used for:
 /// - Diagnostics: HIR node → source location
 /// - Go-to-definition: source location → HIR node
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BodySourceMap {
     /// Expression ID → source range.
     expr_ranges: FxHashMap<ExprId, TextRange>,
@@ -206,7 +206,7 @@ impl BodySourceMap {
 /// Result of body lowering.
 ///
 /// Contains the lowered body, source map, and any diagnostics collected during lowering.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerResult {
     /// The lowered HIR body.
     pub body: Body,

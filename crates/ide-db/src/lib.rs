@@ -328,25 +328,15 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
-        // Check cache first
-        if let Some(cached) = self.module_bodies_cache.get(&module_id) {
-            return cached.value().clone();
-        }
+        // Call Salsa tracked query to get lowered bodies
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        let mut bodies = (*hir_def::module_bodies_query(self, file_id_input)).clone();
 
-        let _span = tracing::info_span!("module_bodies", ?module_id).entered();
-
-        // Lower all method bodies
-        let mut result = hir_def::lower_module_bodies(self, module_id);
-
-        // Attach metadata (loaded separately by module_metadata query)
+        // Attach metadata (requires VFS access, so done here instead of in hir-def)
         let metadata = self.module_metadata(module_id);
-        result = result.with_metadata(metadata);
+        bodies = bodies.with_metadata(metadata);
 
-        let result = Arc::new(result);
-
-        // Cache the result
-        self.module_bodies_cache.insert(module_id, result.clone());
-        result
+        Arc::new(bodies)
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir_def::ModuleMetadata> {
