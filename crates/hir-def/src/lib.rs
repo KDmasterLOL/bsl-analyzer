@@ -10,6 +10,7 @@
 //!                    │
 //!                    ├── ItemTree (signatures only, invalidation barrier)
 //!                    ├── RegionTree (preprocessor regions hierarchy)
+//!                    ├── ConditionalTree (preprocessor conditionals hierarchy)
 //!                    ├── Body (method bodies, expressions/statements)
 //!                    └── SourceMap (HIR ↔ AST mapping for diagnostics)
 //! ```
@@ -18,12 +19,14 @@
 //!
 //! - **ItemTree**: Module-level definitions (procedures, functions, variables)
 //! - **RegionTree**: Hierarchical structure of preprocessor regions
+//! - **ConditionalTree**: Hierarchical structure of preprocessor conditionals (#Если/#If)
 //! - **Body**: HIR representation of method bodies
 //! - **hir**: Expression and statement types (Expr, Stmt, Literal)
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
 pub mod cognitive_complexity;
+pub mod conditional_tree;
 pub mod cyclomatic_complexity;
 pub mod hir;
 pub mod item_tree;
@@ -42,6 +45,7 @@ pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySource
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
+pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
 pub use item_tree::ItemTree;
 pub use name::Name;
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
@@ -69,6 +73,24 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// - Invalidated when file content changes
     /// - O(n) construction where n is number of region directives
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree>;
+
+    /// Get ConditionalTree for a file.
+    ///
+    /// ConditionalTree provides hierarchical structure of preprocessor conditionals
+    /// (#Если/#If, #ИначеЕсли/#ElsIf, #Иначе/#Else).
+    /// Stores condition TEXT only (not evaluated).
+    ///
+    /// Used for future diagnostics that need conditional context:
+    /// - Grammatical construct split detection (via parent_ast_kind)
+    /// - Platform context checks in client-server modules
+    /// - Unreachable preprocessor branches
+    /// - Duplicate conditional logic
+    ///
+    /// ## Performance
+    /// - Cached per file
+    /// - Invalidated when file content changes
+    /// - O(n) construction where n is number of conditional directives
+    fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree>;
 
     /// Get module data for a module (derived query).
     ///

@@ -10,8 +10,8 @@ use base_db::{Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use bsl_metadata::traits::Module;
 use dashmap::DashMap;
 use hir_def::{
-    DefDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleData, ModuleId, RegionTree,
-    SymbolTree,
+    ConditionalTree, DefDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleData, ModuleId,
+    RegionTree, SymbolTree,
 };
 use rustc_hash::FxHasher;
 use vfs::FileId;
@@ -99,6 +99,8 @@ pub struct RootDatabaseImpl {
     /// HIR caches (TODO: Replace with Salsa tracked queries)
     item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
     region_tree_cache: Arc<DashMap<FileId, Arc<RegionTree>, BuildHasherDefault<FxHasher>>>,
+    conditional_tree_cache:
+        Arc<DashMap<FileId, Arc<ConditionalTree>, BuildHasherDefault<FxHasher>>>,
     module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
     symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
     infer_types_cache: Arc<DashMap<ModuleId, Arc<InferenceResult>, BuildHasherDefault<FxHasher>>>,
@@ -122,6 +124,7 @@ impl RootDatabaseImpl {
             files: Files::new(),
             item_tree_cache: Arc::new(DashMap::default()),
             region_tree_cache: Arc::new(DashMap::default()),
+            conditional_tree_cache: Arc::new(DashMap::default()),
             module_data_cache: Arc::new(DashMap::default()),
             symbol_tree_cache: Arc::new(DashMap::default()),
             infer_types_cache: Arc::new(DashMap::default()),
@@ -294,6 +297,23 @@ impl DefDatabase for RootDatabaseImpl {
 
         // Cache the result
         self.region_tree_cache.insert(file_id, tree.clone());
+        tree
+    }
+
+    fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
+        // Check cache first
+        if let Some(cached) = self.conditional_tree_cache.get(&file_id) {
+            return cached.value().clone();
+        }
+
+        let _span = tracing::info_span!("conditional_tree", ?file_id).entered();
+
+        // Parse and lower AST → ConditionalTree
+        let parse = self.parse(file_id);
+        let tree = Arc::new(hir_def::conditional_tree::lower_conditionals(&parse.syntax_node()));
+
+        // Cache the result
+        self.conditional_tree_cache.insert(file_id, tree.clone());
         tree
     }
 
