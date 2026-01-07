@@ -354,6 +354,10 @@ pub enum BodyDiagnostic {
         kind: DeprecatedKind8312,
         range: TextRange,
     },
+
+    /// Empty preprocessor region (#Область/#КонецОбласти).
+    /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
+    EmptyRegion { name: String, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -398,6 +402,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
+            BodyDiagnostic::EmptyRegion { range, .. } => *range,
         }
     }
 }

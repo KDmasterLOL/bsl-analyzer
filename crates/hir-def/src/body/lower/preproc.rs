@@ -32,7 +32,60 @@ pub(crate) fn process_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) {
 
 /// Process preprocessor `#Область` directive, analyzing content for unreachable code.
 pub(crate) fn process_preproc_region(ctx: &mut LoweringCtx, node: &SyntaxNode) {
+    // Check if region is empty
+    if is_empty_region(node) {
+        if let Some(name) = get_region_name(node) {
+            ctx.emit(BodyDiagnostic::EmptyRegion { name, range: node.text_range() });
+        }
+    }
+
     process_preproc_branch_content(ctx, node);
+}
+
+/// Get region name from PRE_REGION_DIR node.
+fn get_region_name(node: &SyntaxNode) -> Option<String> {
+    use syntax::ast::{AstNode, PreRegionDir};
+
+    PreRegionDir::cast(node.clone()).and_then(|region| region.name())
+}
+
+/// Check if region contains only comments/whitespace/nested empty regions.
+fn is_empty_region(region_node: &SyntaxNode) -> bool {
+    for child in region_node.children() {
+        if is_meaningful_content(&child) {
+            return false;
+        }
+        if child.kind() == SyntaxKind::PRE_REGION_DIR && !is_empty_region(&child) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if node represents meaningful content (not comments/whitespace).
+fn is_meaningful_content(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::PROCEDURE_DEF
+            | SyntaxKind::FUNCTION_DEF
+            | SyntaxKind::VAR_DEF
+            | SyntaxKind::ASSIGN_STMT
+            | SyntaxKind::CALL_STMT
+            | SyntaxKind::RETURN_STMT
+            | SyntaxKind::IF_STMT
+            | SyntaxKind::WHILE_STMT
+            | SyntaxKind::FOR_STMT
+            | SyntaxKind::FOR_EACH_STMT
+            | SyntaxKind::TRY_STMT
+            | SyntaxKind::RAISE_STMT
+            | SyntaxKind::BREAK_STMT
+            | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::GOTO_STMT
+            | SyntaxKind::LABEL_STMT
+            | SyntaxKind::EXECUTE_STMT
+            | SyntaxKind::ADD_HANDLER_STMT
+            | SyntaxKind::REMOVE_HANDLER_STMT
+    )
 }
 
 /// Process content within a preprocessor branch (or region).

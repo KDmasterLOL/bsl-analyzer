@@ -513,7 +513,7 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
         handlers::extra_commas::check_node(&node, &mut diagnostics, ctx);
         handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
-        handlers::empty_region::check_node(&node, &mut diagnostics, ctx);
+        // empty_region is now HIR-based (checked during preprocessor lowering)
         // TODO: Add more node-based text diagnostics here:
         // handlers::commented_code::check_node(&node, &mut diagnostics, ctx);
         // handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
@@ -1070,6 +1070,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range } => {
             handlers::deprecated_attributes_8312::from_hir(name, *kind, *range, ctx)
+        }
+        BodyDiagnostic::EmptyRegion { name, range } => {
+            handlers::empty_region::from_hir(name, *range, ctx)
         }
     }
 }

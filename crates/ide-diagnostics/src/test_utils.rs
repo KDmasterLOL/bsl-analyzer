@@ -397,6 +397,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range } => {
             handlers::deprecated_attributes_8312::from_hir(name, *kind, *range, ctx)
         }
+        BodyDiagnostic::EmptyRegion { name, range } => {
+            handlers::empty_region::from_hir(name, *range, ctx)
+        }
     }
 }
 
