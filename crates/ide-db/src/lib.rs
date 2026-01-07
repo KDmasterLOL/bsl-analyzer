@@ -351,8 +351,8 @@ fn find_configuration_root_for_metadata(
 
 /// Default implementation of RootDatabase with Salsa integration.
 ///
-/// Uses Salsa for base queries and manual caching for HIR queries.
-/// TODO: Migrate HIR queries to Salsa tracked functions in future iteration.
+/// All HIR queries are now managed by Salsa for automatic caching and invalidation!
+/// No manual DashMap caches needed for HIR - Salsa handles everything.
 #[salsa::db]
 #[derive(Clone)]
 pub struct RootDatabaseImpl {
@@ -362,12 +362,11 @@ pub struct RootDatabaseImpl {
     /// Base file storage
     files: Files,
 
-    /// Manual HIR caches (TODO: Migrate remaining queries to Salsa)
-    /// Migrated to Salsa: item_tree, region_tree, conditional_tree, module_data, symbol_tree,
-    ///                    infer_types, module_bodies, module_metadata
-    /// Remaining manual: sdbl_hir
-    module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
-    sdbl_hir_cache: Arc<DashMap<FileId, SdblHirEntries, BuildHasherDefault<FxHasher>>>,
+    /// All HIR queries migrated to Salsa!
+    /// - item_tree, region_tree, conditional_tree, module_data, symbol_tree
+    /// - infer_types, module_bodies, module_metadata
+    /// - all_sdbl_in_file, sdbl_hir_in_file
+    /// No more manual DashMap caches for HIR queries!
     #[allow(dead_code)] // TODO: Used when reaching_definitions query is re-enabled
     reaching_defs_cache: Arc<
         DashMap<
@@ -390,8 +389,6 @@ impl RootDatabaseImpl {
         Self {
             storage: salsa::Storage::default(),
             files: Files::new(),
-            module_bodies_cache: Arc::new(DashMap::default()),
-            sdbl_hir_cache: Arc::new(DashMap::default()),
             reaching_defs_cache: Arc::new(DashMap::default()),
         }
     }
@@ -447,14 +444,15 @@ impl RootDatabaseImpl {
     /// Invalidate manual HIR caches for a file.
     ///
     /// Called when file content changes.
-    /// Note: Only invalidates remaining manual caches. Salsa-managed queries
-    /// (item_tree, region_tree, conditional_tree, module_data, symbol_tree, infer_types)
-    /// are invalidated automatically by Salsa.
-    fn invalidate_file(&self, file_id: FileId) {
-        self.sdbl_hir_cache.remove(&file_id);
-        let module_id = ModuleId::new(file_id);
-        self.module_bodies_cache.remove(&module_id);
-        // module_metadata: Salsa handles invalidation automatically
+    ///
+    /// Note: All HIR queries are now Salsa-managed and invalidated automatically!
+    /// This method is kept for potential future non-Salsa caches.
+    fn invalidate_file(&self, _file_id: FileId) {
+        // All HIR queries migrated to Salsa - no manual invalidation needed!
+        // Salsa automatically invalidates:
+        // - item_tree, region_tree, conditional_tree, module_data, symbol_tree
+        // - infer_types, module_bodies, module_metadata
+        // - all_sdbl_in_file, sdbl_hir_in_file
     }
 }
 
