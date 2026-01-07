@@ -9,7 +9,7 @@
 
 ### 1. rust-analyzer
 
-**Путь:** `/Users/kiriller/src/lsp/rust-analyzer/`
+**Путь:** `~/src/lsp/rust-analyzer/`
 **Роль:** Образец архитектуры
 
 Rust Language Server от команды rust-lang. Используем как образец для:
@@ -31,7 +31,7 @@ Rust Language Server от команды rust-lang. Используем как 
 
 ### 2. bsl-language-server (Java)
 
-**Путь:** `/Users/kiriller/src/lsp/bsl-language-server/`
+**Путь:** `~/src/lsp/bsl-language-server/`
 **Роль:** Целевая совместимость
 
 Java Language Server для BSL. Обеспечиваем 100% совместимость с:
@@ -58,7 +58,7 @@ Java Language Server для BSL. Обеспечиваем 100% совмести�
 
 ### 3. bsl-parser (Java/ANTLR4)
 
-**Путь:** `/Users/kiriller/src/lsp/bsl-parser/`
+**Путь:** `~/src/lsp/bsl-parser/`
 **Роль:** Грамматика языка
 
 ANTLR4 парсер BSL и SDBL. Референс для:
@@ -87,7 +87,7 @@ ANTLR4 парсер BSL и SDBL. Референс для:
 
 ### 4. salsa
 
-**Путь:** `/Users/kiriller/src/lsp/salsa/`
+**Путь:** `~/src/lsp/salsa/`
 **Роль:** Фреймворк инкрементальных вычислений
 
 Фреймворк для инкрементальных вычислений от команды rust-analyzer. Используем для:
