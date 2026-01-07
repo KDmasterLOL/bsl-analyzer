@@ -244,6 +244,10 @@ pub enum BodyDiagnostic {
     /// Separate from DeprecatedMethod because it's a commonly misused global function.
     DeprecatedFind { name: String, range: TextRange },
 
+    /// Deprecated Сообщить() / Message() global method call.
+    /// Separate from DeprecatedMethod because it's a commonly misused global function.
+    DeprecatedMessage { name: String, range: TextRange },
+
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
     MagicNumber { value: String, range: TextRange },
@@ -368,6 +372,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeprecatedMethod { range, .. } => *range,
             BodyDiagnostic::DeprecatedCurrentDate { range, .. } => *range,
             BodyDiagnostic::DeprecatedFind { range, .. } => *range,
+            BodyDiagnostic::DeprecatedMessage { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::UnusedVariable { range, .. } => *range,

@@ -345,6 +345,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::DeprecatedFind { name, range } => {
             handlers::deprecated_find::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::DeprecatedMessage { name, range } => {
+            handlers::deprecated_message::from_hir(name, *range, ctx)
+        }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }

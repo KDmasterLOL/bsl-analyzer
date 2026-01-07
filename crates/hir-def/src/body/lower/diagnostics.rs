@@ -173,6 +173,13 @@ pub(crate) fn is_deprecated_find(name: &str) -> bool {
     matches!(lower.as_str(), "найти" | "find")
 }
 
+/// Check if a method name is deprecated Сообщить() / Message().
+/// Returns true if the method is the deprecated global message function.
+pub(crate) fn is_deprecated_message(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "сообщить" | "message")
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================
