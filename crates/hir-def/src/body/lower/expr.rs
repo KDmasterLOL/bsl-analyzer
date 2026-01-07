@@ -298,9 +298,18 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         callee_node.clone()
     };
 
+    // Track safe mode method name for later diagnostic check
+    let mut safe_mode_name: Option<String> = None;
+
     // Only check for IDENT (global function call), not FIELD_EXPR (method call)
     if actual_callee.kind() == SyntaxKind::IDENT {
         let name = actual_callee.text().to_string();
+
+        // Check for safe mode methods FIRST (before name is moved)
+        use super::diagnostics::is_safe_mode_method;
+        if is_safe_mode_method(&name) {
+            safe_mode_name = Some(name.clone());
+        }
 
         // Check for deprecated global methods (8.3.12)
         use super::diagnostics::is_deprecated_global_method_8312;
@@ -396,6 +405,43 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Arguments
     let args =
         arg_list_node.as_ref().map(|arg_list| lower_arg_list(ctx, arg_list)).unwrap_or_default();
+
+    // Check for DisableSafeMode diagnostic after args are lowered
+    if let Some(method_name) = safe_mode_name {
+        // Check if this is a safe call by examining first argument
+        let is_safe = if !args.is_empty() {
+            match &ctx.body.exprs[args[0]] {
+                Expr::Literal(Literal::Bool(true)) => {
+                    // SetSafeMode(True) is safe
+                    method_name.to_lowercase() == "установитьбезопасныйрежим"
+                        || method_name.to_lowercase() == "setsafemode"
+                }
+                Expr::Literal(Literal::Bool(false)) => {
+                    // SetSafeModeDisabled(False) is safe
+                    method_name.to_lowercase() == "установитьотключениебезопасногорежима"
+                        || method_name.to_lowercase() == "setsafemodedisabled"
+                }
+                _ => false, // Variable or other expression - unsafe
+            }
+        } else {
+            false // No argument - unsafe
+        };
+
+        if !is_safe {
+            // Find the method name token for the range
+            let method_token = callee_node
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT);
+
+            if let Some(token) = method_token {
+                ctx.diagnostics.push(BodyDiagnostic::DisableSafeMode {
+                    method_name,
+                    range: token.text_range(),
+                });
+            }
+        }
+    }
 
     // Check for Query.Execute() call inside a loop for CreateQueryInCycle diagnostic
     if ctx.in_loop() && actual_callee.kind() == SyntaxKind::FIELD_EXPR {

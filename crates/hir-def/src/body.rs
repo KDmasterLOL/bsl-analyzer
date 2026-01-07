@@ -252,6 +252,11 @@ pub enum BodyDiagnostic {
     /// Detected when Type() is called with deprecated type name string.
     DeprecatedTypeManagedForm { type_name: String, range: TextRange },
 
+    /// Unsafe call to УстановитьБезопасныйРежим / SetSafeMode or
+    /// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
+    /// Detected when safe mode methods are called with unsafe arguments.
+    DisableSafeMode { method_name: String, range: TextRange },
+
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
     MagicNumber { value: String, range: TextRange },
@@ -378,6 +383,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeprecatedFind { range, .. } => *range,
             BodyDiagnostic::DeprecatedMessage { range, .. } => *range,
             BodyDiagnostic::DeprecatedTypeManagedForm { range, .. } => *range,
+            BodyDiagnostic::DisableSafeMode { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::UnusedVariable { range, .. } => *range,

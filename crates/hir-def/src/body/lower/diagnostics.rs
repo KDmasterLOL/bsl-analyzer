@@ -194,6 +194,20 @@ pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
     matches!(lower.as_str(), "управляемаяформа" | "managedform")
 }
 
+/// Check if a method name is УстановитьБезопасныйРежим / SetSafeMode or
+/// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
+/// Returns true if the method controls safe mode.
+pub(crate) fn is_safe_mode_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "установитьбезопасныйрежим"
+            | "setsafemode"
+            | "установитьотключениебезопасногорежима"
+            | "setsafemodedisabled"
+    )
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================

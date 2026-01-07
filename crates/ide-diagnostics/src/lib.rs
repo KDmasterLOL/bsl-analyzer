@@ -713,7 +713,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::deprecated_attributes_8312::check,
     ));
-    result.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
+    // The HIR version is collected during lowering via BodyDiagnostic::DisableSafeMode
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
     result.extend(run_diagnostic(
         "ExecuteExternalCode",
         ctx,
@@ -1022,6 +1024,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
             handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
+        }
+        BodyDiagnostic::DisableSafeMode { method_name, range } => {
+            handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
         }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)

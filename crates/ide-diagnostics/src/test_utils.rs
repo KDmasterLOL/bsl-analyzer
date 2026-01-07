@@ -351,6 +351,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
             handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
         }
+        BodyDiagnostic::DisableSafeMode { method_name, range } => {
+            handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
+        }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }
