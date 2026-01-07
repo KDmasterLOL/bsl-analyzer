@@ -297,7 +297,9 @@ impl SourceDatabase for RootDatabaseImpl {
 
     fn set_file_text(&mut self, file_id: FileId, text: &str) {
         let files = self.files.clone();
-        files.set_file_text(self, file_id, text);
+        // Use smart durability detection based on source root (library vs user code)
+        // This ensures library files get HIGH durability, user files get LOW
+        files.set_file_text_smart(self, file_id, text);
         // Salsa automatically invalidates parse query
         // But we need to manually invalidate HIR caches for now
         self.invalidate_file(file_id);

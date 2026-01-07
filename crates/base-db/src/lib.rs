@@ -256,12 +256,22 @@ impl Files {
             if let Some(root_input) = self.source_roots.get(&source_root_id) {
                 let root = root_input.root(db);
                 let durability = root.durability();
+                tracing::debug!(
+                    ?file_id,
+                    ?durability,
+                    is_library = root.is_library,
+                    "set_file_text_smart: determined durability from source root"
+                );
                 self.set_file_text_with_durability(db, file_id, text, durability);
                 return;
             }
         }
 
         // Fallback to LOW durability if source root not set yet
+        tracing::debug!(
+            ?file_id,
+            "set_file_text_smart: fallback to LOW durability (source root not set)"
+        );
         self.set_file_text_with_durability(db, file_id, text, salsa::Durability::LOW);
     }
 
