@@ -89,6 +89,11 @@ pub(crate) struct LoweringCtx {
     /// Whether current method is client-only (&НаКлиенте annotation ONLY).
     /// Used for ExecuteExternalCode diagnostic - Execute/Eval is allowed only in client-only context.
     pub(crate) is_client_only: bool,
+
+    /// Whether current method has "БезКонтекста" (NoContext) annotation.
+    /// Used for FormDataToValue diagnostic - call is allowed in БезКонтекста methods.
+    /// Checks for @НаСервереБезКонтекста or @НаКлиентеНаСервереБезКонтекста.
+    pub(crate) has_no_context_annotation: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -125,6 +130,7 @@ impl LoweringCtx {
             query_vars: FxHashMap::default(),
             foreach_collections: Vec::new(),
             is_client_only: false, // Will be set in lower_method_with_externals
+            has_no_context_annotation: false, // Will be set in lower_method_with_externals
         }
     }
 
@@ -295,6 +301,32 @@ fn is_client_only_method(method_node: &SyntaxNode) -> bool {
         .any(|token| token.kind() == SyntaxKind::ANN_AT_CLIENT)
 }
 
+/// Check if method has "БезКонтекста" (NoContext) annotation.
+///
+/// For FormDataToValue diagnostic - call is allowed in БезКонтекста methods.
+/// Returns true if method has:
+/// - @НаСервереБезКонтекста / @AtServerNoContext
+/// - @НаКлиентеНаСервереБезКонтекста / @AtClientAtServerNoContext
+fn has_no_context_annotation_method(method_node: &SyntaxNode) -> bool {
+    let annotations: Vec<_> = method_node
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect();
+
+    // Check any annotation for БезКонтекста tokens
+    annotations.iter().any(|ann| {
+        ann.descendants_with_tokens().filter_map(|el| el.into_token()).any(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
+                    | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+            )
+        })
+    })
+}
+
 /// Lower a method AST node to HIR with known external variable names.
 ///
 /// External variable names (like module-level variables) are passed to avoid
@@ -308,6 +340,9 @@ pub fn lower_method_with_externals(
 
     // Check if method is client-only (&НаКлиенте annotation ONLY)
     ctx.is_client_only = is_client_only_method(method_node);
+
+    // Check if method has "БезКонтекста" (NoContext) annotation
+    ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
 
     // Lower parameters
     if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {

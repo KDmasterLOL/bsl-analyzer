@@ -731,7 +731,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // result.extend(run_diagnostic("FileSystemAccess", ctx, handlers::file_system_access::check));
     result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
-    result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
+    // MIGRATED TO HIR: FormDataToValue - now collected during lowering (lower_call_expr)
+    // Detects calls to ДанныеФормыВЗначение/FormDataToValue in methods WITHOUT БезКонтекста annotation
+    // result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
     result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
     result.extend(run_diagnostic(
         "GlobalContextMethodCollision8312",
@@ -1081,6 +1083,9 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::ExtraCommas { range } => handlers::extra_commas::from_hir(*range, ctx),
         BodyDiagnostic::FileSystemAccess { range } => {
             handlers::file_system_access::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::FormDataToValue { range } => {
+            handlers::form_data_to_value::from_hir(*range, ctx)
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)

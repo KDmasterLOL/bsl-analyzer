@@ -377,6 +377,12 @@ pub enum BodyDiagnostic {
     /// Security risk: creates attack vectors for data exfiltration and file manipulation.
     FileSystemAccess { range: TextRange },
 
+    /// FormDataToValue() / ДанныеФормыВЗначение() call in method with context.
+    /// Detects calls to FormDataToValue in methods WITHOUT БезКонтекста annotation.
+    /// Allowed in: @НаСервереБезКонтекста, @НаКлиентеНаСервереБезКонтекста.
+    /// Bad practice: creates unnecessary form context dependency.
+    FormDataToValue { range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -432,6 +438,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::ExternalAppStarting { range } => *range,
             BodyDiagnostic::ExtraCommas { range } => *range,
             BodyDiagnostic::FileSystemAccess { range } => *range,
+            BodyDiagnostic::FormDataToValue { range } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

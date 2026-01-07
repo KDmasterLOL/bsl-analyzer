@@ -418,6 +418,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::FileSystemAccess { range } => {
             handlers::file_system_access::from_hir(*range, ctx)
         }
+        BodyDiagnostic::FormDataToValue { range } => {
+            handlers::form_data_to_value::from_hir(*range, ctx)
+        }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

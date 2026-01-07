@@ -422,6 +422,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::FileSystemAccess { range: actual_callee.text_range() });
         }
 
+        // Check for FormDataToValue method in context methods
+        if is_form_data_to_value_method(&name) && !ctx.has_no_context_annotation {
+            // Emit FormDataToValue diagnostic
+            // Range is just the method name (IDENT token), not the whole call
+            ctx.diagnostics
+                .push(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
@@ -449,6 +457,13 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 // Range is just the method name token, not the whole call
                 ctx.diagnostics
                     .push(BodyDiagnostic::FileSystemAccess { range: method_token.text_range() });
+            }
+
+            // Check for FormDataToValue method in context methods (qualified calls)
+            if is_form_data_to_value_method(method_name) && !ctx.has_no_context_annotation {
+                // Range is just the method name token, not the whole call
+                ctx.diagnostics
+                    .push(BodyDiagnostic::FormDataToValue { range: method_token.text_range() });
             }
         }
     }
@@ -1199,4 +1214,14 @@ fn is_file_system_method(name: &str) -> bool {
             | "удалитьфайлыасинч"
             | "deletefilesasync"
     )
+}
+
+/// Check if method name is FormDataToValue.
+///
+/// FormDataToValue / ДанныеФормыВЗначение method converts form data to value.
+/// Using it in context methods is bad practice - creates unnecessary form dependency.
+/// Allowed in БезКонтекста methods (@НаСервереБезКонтекста, @НаКлиентеНаСервереБезКонтекста).
+fn is_form_data_to_value_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "данныеформывзначение" | "formdatatovalue")
 }
