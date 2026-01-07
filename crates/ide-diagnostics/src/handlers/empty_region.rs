@@ -32,11 +32,14 @@
 //! - Reports only inner if outer has code
 //!
 //! ## Implementation
+//! **This is a node-based AST diagnostic** - collected during single-pass AST traversal.
+//!
+//! Preprocessor regions are not part of HIR, so this diagnostic remains AST-based.
+//! Uses `check_node()` pattern from rust-analyzer for efficient single-pass checking.
+//!
 //! Ported from:
 //! - EmptyRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - empty_region.rs (bsl-language-server-rust) - Algorithm reference
-//!
-//! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
@@ -64,34 +67,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
             }
         }
     }
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("EmptyRegion::check").entered();
-
-    if ctx.config.is_disabled(DiagnosticCode::EmptyRegion) {
-        return Vec::new();
-    }
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region) = PreRegionDir::cast(node.clone()) {
-                if is_empty_region(&node) {
-                    if let Some(name) = region.name() {
-                        diagnostics.push(create_diagnostic(name, node.text_range()));
-                    }
-                }
-            }
-        }
-    }
-
-    tracing::debug!(count = diagnostics.len(), "EmptyRegion diagnostics found");
-    diagnostics
 }
 
 fn is_empty_region(region_node: &SyntaxNode) -> bool {
@@ -153,6 +128,7 @@ mod tests {
     use std::rc::Rc;
     use test_fixture::Fixture;
 
+    /// Helper to check node-based diagnostic on test code.
     fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
         let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
         let file_id = fixture.first_file().unwrap();
@@ -173,7 +149,16 @@ mod tests {
             file_set: None,
         };
 
-        check(&ctx)
+        // Collect diagnostics using check_node for each syntax node
+        let parse = ctx.db.parse(ctx.file_id);
+        let root = parse.syntax_node();
+        let mut diagnostics = Vec::new();
+
+        for node in root.descendants() {
+            check_node(&node, &mut diagnostics, &ctx);
+        }
+
+        diagnostics
     }
 
     #[test]
