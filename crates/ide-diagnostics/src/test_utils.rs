@@ -451,6 +451,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::IfElseIfEndsWithElse { range } => {
             handlers::if_else_if_ends_with_else::from_hir(*range, ctx)
         }
+        BodyDiagnostic::IncorrectUseOfStrTemplate { range } => {
+            handlers::incorrect_use_of_str_template::from_hir(*range, ctx)
+        }
     }
 }
 

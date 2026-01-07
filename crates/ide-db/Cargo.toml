@@ -18,6 +18,8 @@ rustc-hash.workspace = true
 dashmap.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
+dataflow.workspace = true
+cfg.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

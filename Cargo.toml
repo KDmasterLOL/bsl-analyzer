@@ -22,6 +22,7 @@ lexer = { path = "crates/lexer" }
 base-db = { path = "crates/base-db" }
 bsl-metadata = { path = "crates/bsl-metadata" }
 cfg = { path = "crates/cfg" }
+dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }
 ide-db = { path = "crates/ide-db" }
 ide-diagnostics = { path = "crates/ide-diagnostics" }

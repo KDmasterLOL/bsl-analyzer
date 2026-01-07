@@ -406,6 +406,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dataflow"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "cfg",
+ "expect-test",
+ "hir-def",
+ "ide-db",
+ "la-arena",
+ "lexer",
+ "parser",
+ "petgraph",
+ "rustc-hash 2.1.1",
+ "smol_str",
+ "syntax",
+ "tracing",
+ "vfs",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -579,7 +599,10 @@ dependencies = [
  "intern",
  "la-arena",
  "lexer",
+ "once_cell",
  "parser",
+ "petgraph",
+ "regex",
  "rustc-hash 2.1.1",
  "salsa",
  "smol_str",
@@ -705,8 +728,10 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
+ "cfg",
  "criterion",
  "dashmap",
+ "dataflow",
  "expect-test",
  "hir",
  "hir-def",
@@ -725,6 +750,7 @@ version = "0.1.0"
 dependencies = [
  "bsl-metadata",
  "cfg",
+ "dataflow",
  "expect-test",
  "hir",
  "hir-def",

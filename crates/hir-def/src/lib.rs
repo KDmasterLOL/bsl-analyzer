@@ -25,6 +25,7 @@
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
+// pub mod cfg_builder; // TODO: Reimplement with updated cfg crate API
 pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod cyclomatic_complexity;

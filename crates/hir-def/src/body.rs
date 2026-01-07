@@ -46,7 +46,7 @@ use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
 ///
 /// Contains all expressions, statements, and bindings in arena-allocated form.
 /// This allows efficient storage and stable IDs for referencing HIR nodes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Body {
     /// All expressions in this body.
     pub exprs: Arena<Expr>,
@@ -435,6 +435,11 @@ pub enum BodyDiagnostic {
     /// Detected when if statement has elsif but no else (missing default case).
     /// Range points to КонецЕсли/EndIf keyword.
     IfElseIfEndsWithElse { range: TextRange },
+
+    /// Incorrect usage of СтрШаблон/StrTemplate method.
+    /// Detected when template string has mismatched parameter count, invalid placeholders, or wrong numbers.
+    /// Checks: %1-%10 valid, %0/%11+ invalid, parameter count matches placeholders.
+    IncorrectUseOfStrTemplate { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -494,6 +499,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
+            BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,
         }
     }
 }

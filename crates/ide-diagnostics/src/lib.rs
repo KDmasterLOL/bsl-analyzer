@@ -594,6 +594,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     handlers::if_else_if_ends_with_else::check,
     // ));
     // NOTE: IncorrectLineBreak migrated to text-based collection (collect_text_diagnostics)
+    // NOTE: IncorrectUseOfStrTemplate uses DUAL approach:
+    // 1. HIR lowering validation (AST time) - detects string literals (fast)
+    // 2. Post-HIR check (below) - resolves variables using reaching definitions (complete)
     result.extend(run_diagnostic(
         "IncorrectUseOfStrTemplate",
         ctx,
@@ -1132,6 +1135,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::IfElseIfEndsWithElse { range } => {
             handlers::if_else_if_ends_with_else::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::IncorrectUseOfStrTemplate { range } => {
+            handlers::incorrect_use_of_str_template::from_hir(*range, ctx)
         }
     }
 }

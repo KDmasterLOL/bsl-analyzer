@@ -310,6 +310,9 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Track safe mode method name for later diagnostic check
     let mut safe_mode_name: Option<String> = None;
 
+    // Track if this is a StrTemplate call for later validation
+    let mut is_str_template_call = false;
+
     // Only check for IDENT (global function call), not FIELD_EXPR (method call)
     if actual_callee.kind() == SyntaxKind::IDENT {
         let name = actual_callee.text().to_string();
@@ -440,6 +443,11 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        // Track StrTemplate call for later validation (after arg_list_node is available)
+        if is_str_template_method(&name) {
+            is_str_template_call = true;
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
@@ -529,6 +537,29 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     method_name,
                     range: token.text_range(),
                 });
+            }
+        }
+    }
+
+    // Check for StrTemplate/СтрШаблон incorrect usage
+    if is_str_template_call {
+        if let Some(ref arg_list) = arg_list_node {
+            // Extract template string (first argument)
+            if let Some(first_arg) = arg_list.children().next() {
+                if let Some(template_string) = find_string_in_node(&first_arg) {
+                    // Count parameters (number of commas = number of arguments - 1)
+                    let param_count = arg_list
+                        .children_with_tokens()
+                        .filter(|el| el.as_token().is_some_and(|t| t.kind() == SyntaxKind::COMMA))
+                        .count();
+
+                    // Validate template
+                    if is_wrong_str_template(&template_string, param_count) {
+                        ctx.diagnostics.push(BodyDiagnostic::IncorrectUseOfStrTemplate {
+                            range: node.text_range(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -1252,4 +1283,121 @@ fn is_form_data_to_value_method(name: &str) -> bool {
 fn is_get_form_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "получитьформу" | "getform")
+}
+
+/// Check if method name is StrTemplate.
+///
+/// StrTemplate / СтрШаблон is a string formatting method that requires validation.
+fn is_str_template_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "стршаблон" | "strtemplate")
+}
+
+/// Check if StrTemplate usage is incorrect.
+///
+/// Validates:
+/// - Parameter count matches template placeholders (%1-%10)
+/// - No invalid placeholders (%0, %11+)
+/// - All required parameters present
+fn is_wrong_str_template(template_string: &str, used_params_count: usize) -> bool {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static TWO_PERCENT_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("%%").unwrap());
+
+    let is_wrong_call = compare_template_and_params(template_string, used_params_count);
+    if !is_wrong_call {
+        return false;
+    }
+
+    // Remove %% escapes and check again
+    let str = TWO_PERCENT_PATTERN.replace_all(template_string, "");
+    compare_template_and_params(&str, used_params_count)
+}
+
+/// Compare template string and parameter count.
+#[allow(clippy::nonminimal_bool)]
+fn compare_template_and_params(template_string: &str, used_params_count: usize) -> bool {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    // These patterns are used across multiple functions, so we define them at the module level
+    // to avoid recompilation on every call.
+    static PARAMS_PATTERN_INNER: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
+
+    static WRONG_NUMBERS_PATTERN_INNER: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"%(?:(1[1-9]\d*|[2-9]\d+|0|10\d+)|\((1[1-9]\d*|[2-9]\d+|0|10\d+)\))").unwrap()
+    });
+
+    let have_params = used_params_count > 0;
+    let matches = PARAMS_PATTERN_INNER.is_match(template_string);
+
+    // Check conditions (keep logic as-is for clarity, matches Java implementation):
+    // 1. Template has parameters but no arguments provided
+    // 2. Template has no parameters but arguments provided
+    // 3. Template has parameters and various/mismatched params
+    // 4. Wrong parameter numbers (0, 11+)
+    (matches && !have_params)
+        || (!matches && have_params)
+        || (matches && various_params(used_params_count, template_string))
+        || WRONG_NUMBERS_PATTERN_INNER.is_match(template_string)
+}
+
+/// Check if template has mismatched parameter indices.
+fn various_params(used_params_count: usize, template_string: &str) -> bool {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    use std::collections::HashSet;
+
+    static PARAMS_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
+
+    let mut template_params = HashSet::new();
+    let bytes = template_string.as_bytes();
+
+    for cap in PARAMS_PATTERN.captures_iter(template_string) {
+        let match_obj = cap.get(0).unwrap();
+        let pos = match_obj.start();
+
+        // Skip if this is part of %% escape sequence
+        if pos > 0 && bytes.get(pos - 1) == Some(&b'%') {
+            continue;
+        }
+
+        // Group 1: %N format, Group 2: %(N) format
+        let group = cap.get(1).or_else(|| cap.get(2));
+        if let Some(g) = group {
+            if let Ok(index) = g.as_str().parse::<usize>() {
+                if index > used_params_count {
+                    return true;
+                }
+                template_params.insert(index);
+            }
+        }
+    }
+
+    // Check if all parameters from 1..used_params_count are present
+    for i in 1..=used_params_count {
+        if !template_params.contains(&i) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Extract string content from AST node.
+fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
+    for token in node.descendants_with_tokens() {
+        if let syntax::NodeOrToken::Token(t) = token {
+            if t.kind() == SyntaxKind::STRING {
+                let text = t.text().to_string();
+                if text.len() > 2 {
+                    return Some(text[1..text.len() - 1].to_string());
+                }
+            }
+        }
+    }
+    None
 }
