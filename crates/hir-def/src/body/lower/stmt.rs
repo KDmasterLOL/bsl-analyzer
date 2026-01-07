@@ -779,6 +779,12 @@ fn lower_label_stmt(node: &SyntaxNode) -> Option<Stmt> {
 
 /// Lower execute statement.
 fn lower_execute_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // Execute statement is forbidden on server (security risk)
+    if !ctx.is_client_only {
+        let range = node.text_range();
+        ctx.emit(BodyDiagnostic::ExecuteExternalCode { range });
+    }
+
     let expr = node
         .children()
         .next()

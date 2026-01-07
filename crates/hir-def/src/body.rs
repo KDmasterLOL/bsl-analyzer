@@ -355,6 +355,11 @@ pub enum BodyDiagnostic {
         range: TextRange,
     },
 
+    /// Execute() statement or Eval()/Вычислить() call.
+    /// Detects arbitrary code execution which is forbidden on server for security reasons.
+    /// Only allowed in client-only context (&НаКлиенте annotation).
+    ExecuteExternalCode { range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -406,6 +411,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
+            BodyDiagnostic::ExecuteExternalCode { range } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

@@ -85,6 +85,10 @@ pub(crate) struct LoweringCtx {
     /// Tracks the collection being iterated for DeletingCollectionItem diagnostic.
     /// Stack handles nested ForEach loops.
     pub(crate) foreach_collections: Vec<(ExprId, String)>,
+
+    /// Whether current method is client-only (&НаКлиенте annotation ONLY).
+    /// Used for ExecuteExternalCode diagnostic - Execute/Eval is allowed only in client-only context.
+    pub(crate) is_client_only: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -120,6 +124,7 @@ impl LoweringCtx {
             loop_depth: 0,
             query_vars: FxHashMap::default(),
             foreach_collections: Vec::new(),
+            is_client_only: false, // Will be set in lower_method_with_externals
         }
     }
 
@@ -267,6 +272,29 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
     lower_method_with_externals(method_node, is_function, FxHashSet::default())
 }
 
+/// Check if method has ONLY &НаКлиенте annotation.
+///
+/// For ExecuteExternalCode diagnostic - Execute/Eval is only allowed in client-only context.
+fn is_client_only_method(method_node: &SyntaxNode) -> bool {
+    let annotations: Vec<_> = method_node
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect();
+
+    // Must have exactly ONE annotation
+    if annotations.len() != 1 {
+        return false;
+    }
+
+    // Check if it's &НаКлиенте / &AtClient
+    annotations[0]
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|token| token.kind() == SyntaxKind::ANN_AT_CLIENT)
+}
+
 /// Lower a method AST node to HIR with known external variable names.
 ///
 /// External variable names (like module-level variables) are passed to avoid
@@ -277,6 +305,9 @@ pub fn lower_method_with_externals(
     known_externals: FxHashSet<String>,
 ) -> LowerResult {
     let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
+
+    // Check if method is client-only (&НаКлиенте annotation ONLY)
+    ctx.is_client_only = is_client_only_method(method_node);
 
     // Lower parameters
     if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {

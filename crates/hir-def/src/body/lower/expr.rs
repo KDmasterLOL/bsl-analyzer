@@ -389,6 +389,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             }
         }
 
+        // Check for Eval/Вычислить calls (forbidden on server) BEFORE name is moved
+        let name_lower = name.to_lowercase();
+        if (name_lower == "eval" || name_lower == "вычислить") && !ctx.is_client_only {
+            // Emit ExecuteExternalCode diagnostic
+            // Range covers the entire call expression including arguments
+            ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments

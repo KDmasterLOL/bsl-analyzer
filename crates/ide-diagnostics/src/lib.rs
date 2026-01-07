@@ -716,11 +716,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // The HIR version is collected during lowering via BodyDiagnostic::DisableSafeMode
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
-    result.extend(run_diagnostic(
-        "ExecuteExternalCode",
-        ctx,
-        handlers::execute_external_code::check,
-    ));
+    // The HIR version is collected during lowering via BodyDiagnostic::ExecuteExternalCode
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("ExecuteExternalCode", ctx, handlers::execute_external_code::check));
     result.extend(run_diagnostic(
         "ExternalAppStarting",
         ctx,
@@ -1070,6 +1068,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range } => {
             handlers::deprecated_attributes_8312::from_hir(name, *kind, *range, ctx)
+        }
+        BodyDiagnostic::ExecuteExternalCode { range } => {
+            handlers::execute_external_code::from_hir(*range, ctx)
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
