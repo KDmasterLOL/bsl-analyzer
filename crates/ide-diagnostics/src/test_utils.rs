@@ -414,6 +414,7 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::ExternalAppStarting { range } => {
             handlers::external_app_starting::from_hir(*range, ctx)
         }
+        BodyDiagnostic::ExtraCommas { range } => handlers::extra_commas::from_hir(*range, ctx),
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

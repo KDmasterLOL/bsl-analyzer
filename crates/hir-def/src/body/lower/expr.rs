@@ -621,7 +621,46 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
 /// Lower argument list.
 fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprId> {
+    // Check for trailing comma before lowering
+    if let Some(comma_range) = find_trailing_comma(node) {
+        ctx.diagnostics.push(BodyDiagnostic::ExtraCommas { range: comma_range });
+    }
+
     node.children().map(|n| lower_expr_node(ctx, &n)).collect()
+}
+
+/// Find the first trailing comma in an ARG_LIST node.
+/// Returns the TextRange of the first trailing comma, or None.
+fn find_trailing_comma(arg_list: &SyntaxNode) -> Option<syntax::TextRange> {
+    use syntax::NodeOrToken;
+
+    // Collect all children_with_tokens and iterate backwards
+    let tokens: Vec<_> = arg_list.children_with_tokens().collect();
+    let mut iter = tokens.iter().rev().filter(|element| !is_trivia_element(element));
+
+    // First should be R_PAREN
+    let r_paren = iter.next()?;
+    if !matches!(r_paren, NodeOrToken::Token(t) if t.kind() == SyntaxKind::R_PAREN) {
+        return None;
+    }
+
+    // Next should be either COMMA (bad) or expression/L_PAREN (good)
+    let prev = iter.next()?;
+    match prev {
+        NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => Some(token.text_range()),
+        _ => None,
+    }
+}
+
+/// Check if an element is trivia (whitespace, newline, comment)
+fn is_trivia_element(element: &syntax::NodeOrToken<SyntaxNode, syntax::SyntaxToken>) -> bool {
+    matches!(
+        element,
+        syntax::NodeOrToken::Token(t) if matches!(
+            t.kind(),
+            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+        )
+    )
 }
 
 /// Extract which arguments have values from an ARG_LIST node.

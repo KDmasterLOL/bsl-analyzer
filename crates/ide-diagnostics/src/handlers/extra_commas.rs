@@ -6,6 +6,9 @@
 //! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/extra_commas.rs
 //! **Test file:** ExtraCommasDiagnostic.bsl
 //!
+//! ## Implementation
+//! **This is a HIR-based diagnostic** - detects trailing commas during HIR lowering.
+//!
 //! ## Why?
 //! Trailing commas in BSL function calls are syntax errors or cause unexpected behavior.
 //! They reduce code readability and can lead to confusion with optional parameters.
@@ -23,142 +26,57 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
+use ide_db::TextRange;
 
-/// Check a single syntax node for trailing commas (node-based API).
+/// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// This is called from collect_text_diagnostics() for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    // Check if disabled
+/// Called from lib.rs dispatch when ExtraCommas diagnostic is emitted during lowering.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::ExtraCommas) {
-        return;
-    }
-
-    // Only process ARG_LIST nodes
-    if node.kind() != SyntaxKind::ARG_LIST {
-        return;
-    }
-
-    if let Some(comma_range) = find_trailing_comma(node) {
-        acc.push(Diagnostic {
-            code: DiagnosticCode::ExtraCommas,
-            message: "Trailing comma".to_string(),
-            severity: Severity::Critical,
-            range: comma_range,
-            tags: vec![],
-            fixes: vec![],
-        });
-    }
-}
-
-/// Main entry point for ExtraCommas diagnostic (for backward compatibility).
-/// TODO: Remove after migration to text-based API is complete.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ExtraCommas) {
-        return Vec::new();
-    }
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    diagnostics
-}
-
-/// Find the first trailing comma in an ARG_LIST node.
-/// Returns the TextRange of the first trailing comma, or None.
-fn find_trailing_comma(arg_list: &SyntaxNode) -> Option<ide_db::TextRange> {
-    // Collect all children_with_tokens into a Vec and iterate backwards
-    let tokens: Vec<_> = arg_list.children_with_tokens().collect();
-    let mut iter = tokens.iter().rev().filter(|element| !is_trivia(element));
-
-    // First should be R_PAREN
-    let r_paren = iter.next()?;
-    if !matches!(r_paren, NodeOrToken::Token(t) if t.kind() == SyntaxKind::R_PAREN) {
         return None;
     }
 
-    // Next should be either COMMA (bad) or expression/L_PAREN (good)
-    let prev = iter.next()?;
-    match prev {
-        NodeOrToken::Token(token) if token.kind() == SyntaxKind::COMMA => Some(token.text_range()),
-        _ => None,
-    }
-}
-
-/// Check if an element is trivia (whitespace, newline, comment)
-fn is_trivia(element: &NodeOrToken<SyntaxNode, syntax::SyntaxToken>) -> bool {
-    matches!(
-        element,
-        NodeOrToken::Token(t) if matches!(
-            t.kind(),
-            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-        )
-    )
+    Some(Diagnostic {
+        code: DiagnosticCode::ExtraCommas,
+        message: "Trailing comma".to_string(),
+        severity: Severity::Critical,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use crate::test_utils::*;
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_extra_commas() {
         let code = include_str!("../../test_data/ExtraCommasDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
 
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
+        assert_eq!(extra_diags.len(), 6, "Expected 6 diagnostics");
 
         // Line 9 (0-indexed line 8): Метод1(Парам1, , Парам2,)
-        assert_diagnostic_range(code, &diagnostics[0], 8, 35, 36);
+        assert_diagnostic_range(code, extra_diags[0], 8, 35, 36);
 
         // Line 10: Метод2(Парам1, Парам2,,,)
-        assert_diagnostic_range(code, &diagnostics[1], 9, 35, 36);
+        assert_diagnostic_range(code, extra_diags[1], 9, 35, 36);
 
         // Line 11: Модуль.Метод3(Парам1, Парам2, Парам3,, )
-        assert_diagnostic_range(code, &diagnostics[2], 10, 49, 50);
+        assert_diagnostic_range(code, extra_diags[2], 10, 49, 50);
 
         // Line 12: Модуль.Метод4(Парам1, , Парам2,,,,)
-        assert_diagnostic_range(code, &diagnostics[3], 11, 45, 46);
+        assert_diagnostic_range(code, extra_diags[3], 11, 45, 46);
 
         // Line 14: Если Метод5(Парам1, , Парам2,,,,) Тогда
-        assert_diagnostic_range(code, &diagnostics[4], 13, 31, 32);
+        assert_diagnostic_range(code, extra_diags[4], 13, 31, 32);
 
         // Line 18: Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
-        assert_diagnostic_range(code, &diagnostics[5], 17, 38, 39);
+        assert_diagnostic_range(code, extra_diags[5], 17, 38, 39);
     }
 
     #[test]
@@ -167,8 +85,10 @@ mod tests {
 Результат = Метод(Парам1, Парам2);
 Результат = Метод(Парам1, , Парам2);
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 0);
     }
 
     #[test]
@@ -176,8 +96,10 @@ mod tests {
         let code = r#"
 Результат = Метод(А, Б,);
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
     }
 
     #[test]
@@ -185,9 +107,11 @@ mod tests {
         let code = r#"
 Результат = Метод(А, Б,,,);
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
         // Only first trailing comma is reported
-        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(extra_diags.len(), 1);
     }
 
     #[test]
@@ -195,7 +119,9 @@ mod tests {
         let code = r#"
 Результат = Метод();
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 0);
     }
 }
