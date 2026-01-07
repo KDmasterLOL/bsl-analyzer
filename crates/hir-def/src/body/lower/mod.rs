@@ -332,6 +332,84 @@ fn has_no_context_annotation_method(method_node: &SyntaxNode) -> bool {
     })
 }
 
+/// Check if function always returns the same primitive value.
+///
+/// For FunctionReturnsSamePrimitive diagnostic.
+/// Skips "Attachable" methods (names starting with "Подключаемый_" or "Attachable_").
+fn check_function_returns_same_primitive(ctx: &mut LoweringCtx, method_node: &SyntaxNode) {
+    use crate::hir::{Expr, Literal, Stmt};
+
+    // Skip attachable methods
+    if let Some(name_token) = method_node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT)
+    {
+        let name = name_token.text().to_lowercase();
+        if name.starts_with("подключаемый_") || name.starts_with("attachable_") {
+            return;
+        }
+    }
+
+    // Collect all return statements with their literal values
+    let mut return_literals: Vec<&Literal> = Vec::new();
+
+    for (stmt_id, _) in ctx.body.stmts.iter() {
+        if let Stmt::Return { value: Some(expr_id) } = &ctx.body.stmts[stmt_id] {
+            // Check if expression is a literal (primitive)
+            if let Expr::Literal(lit) = &ctx.body.exprs[*expr_id] {
+                return_literals.push(lit);
+            } else {
+                // Non-primitive return found (variable, function call, etc.)
+                return;
+            }
+        }
+    }
+
+    // Need at least 2 return statements
+    if return_literals.len() < 2 {
+        return;
+    }
+
+    // Compare all literals - check if all are the same
+    let first = return_literals[0];
+    let all_same = return_literals[1..].iter().all(|lit| literals_equal(first, lit));
+
+    if all_same {
+        // Emit diagnostic on function name
+        if let Some(name_token) = method_node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        {
+            ctx.emit(BodyDiagnostic::FunctionReturnsSamePrimitive {
+                range: name_token.text_range(),
+            });
+        }
+    }
+}
+
+/// Compare two literals for equality (case-insensitive for strings by default).
+///
+/// Matches Java behavior: strings are compared case-insensitively unless configured otherwise.
+/// TODO: add caseSensitiveForString parameter when needed.
+fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
+    use crate::hir::Literal;
+
+    match (a, b) {
+        (Literal::Number(a), Literal::Number(b)) => (a - b).abs() < f64::EPSILON,
+        (Literal::String(a), Literal::String(b)) => {
+            // Case-insensitive comparison (default behavior)
+            a.to_uppercase() == b.to_uppercase()
+        }
+        (Literal::Date(a), Literal::Date(b)) => a == b,
+        (Literal::Bool(a), Literal::Bool(b)) => a == b,
+        (Literal::Undefined, Literal::Undefined) => true,
+        (Literal::Null, Literal::Null) => true,
+        _ => false,
+    }
+}
+
 /// Lower a method AST node to HIR with known external variable names.
 ///
 /// External variable names (like module-level variables) are passed to avoid
@@ -414,6 +492,11 @@ pub fn lower_method_with_externals(
 
         // Check for code after async calls
         diagnostics::check_code_after_async_call(&mut ctx, &stmt_list);
+    }
+
+    // Check for FunctionReturnsSamePrimitive
+    if is_function {
+        check_function_returns_same_primitive(&mut ctx, method_node);
     }
 
     // Check for unused local variables

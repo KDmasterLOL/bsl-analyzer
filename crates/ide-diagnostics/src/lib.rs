@@ -800,11 +800,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::function_name_starts_with_get::check,
     // ));
-    result.extend(run_diagnostic(
-        "FunctionReturnsSamePrimitive",
-        ctx,
-        handlers::function_returns_same_primitive::check,
-    ));
+    // MIGRATED TO HIR: FunctionReturnsSamePrimitive - now collected during lowering (check_function_returns_same_primitive)
+    // result.extend(run_diagnostic(
+    //     "FunctionReturnsSamePrimitive",
+    //     ctx,
+    //     handlers::function_returns_same_primitive::check,
+    // ));
     // Note: FunctionShouldHaveReturn is now handled via hir_diagnostics (Phase 4)
 
     // Tier 3: Metadata diagnostics
@@ -1093,6 +1094,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::FunctionOutParameter { name, range } => {
             handlers::function_out_parameter::from_hir(name, *range, ctx)
+        }
+        BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
+            handlers::function_returns_same_primitive::from_hir(*range, ctx)
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)

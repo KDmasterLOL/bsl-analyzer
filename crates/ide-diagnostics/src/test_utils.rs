@@ -427,6 +427,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::FunctionOutParameter { name, range } => {
             handlers::function_out_parameter::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
+            handlers::function_returns_same_primitive::from_hir(*range, ctx)
+        }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

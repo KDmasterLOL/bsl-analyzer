@@ -394,6 +394,13 @@ pub enum BodyDiagnostic {
     /// Functions should use return values instead of output parameters.
     FunctionOutParameter { name: String, range: TextRange },
 
+    /// Function always returns the same primitive value in all branches.
+    /// Detected when a function has 2+ return statements, all returning the same primitive literal.
+    /// Primitives: numbers, strings, boolean literals, Null, Undefined.
+    /// Variables and function calls are not considered primitives.
+    /// Attachable methods (starting with "Подключаемый_"/"Attachable_") are excluded.
+    FunctionReturnsSamePrimitive { range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -452,6 +459,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::FormDataToValue { range } => *range,
             BodyDiagnostic::FunctionNameStartsWithGet { range, .. } => *range,
             BodyDiagnostic::FunctionOutParameter { range, .. } => *range,
+            BodyDiagnostic::FunctionReturnsSamePrimitive { range } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }
