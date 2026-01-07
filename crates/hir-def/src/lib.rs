@@ -46,17 +46,44 @@ pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySource
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
-pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
-pub use item_tree::ItemTree;
+pub use conditional_tree::{
+    conditional_tree_query, ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree,
+};
+pub use item_tree::{item_tree_query, ItemTree};
 pub use name::Name;
-pub use region_tree::{RegionData, RegionIdx, RegionTree};
-pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
+pub use region_tree::{region_tree_query, RegionData, RegionIdx, RegionTree};
+pub use symbol_tree::{symbol_tree_query, MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::infer::{FunctionSignature, InferenceContext, InferenceResult};
 pub use ty::Ty;
 
 /// Database trait for HIR queries.
 ///
 /// This trait extends base_db::RootQueryDb with queries for ItemTree and module-level data.
+///
+/// ## Salsa Integration
+///
+/// This trait provides convenience methods that accept FileId/ModuleId directly.
+/// Internally, these methods convert to FileIdInput (Salsa interned) and call
+/// Salsa tracked functions for automatic caching and invalidation.
+///
+/// **Pattern:**
+/// ```ignore
+/// // Trait method (convenience API):
+/// fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
+///
+/// // Salsa tracked query (actual implementation):
+/// #[salsa::tracked(lru = 512)]
+/// fn item_tree_query(db: &dyn RootQueryDb, file_id_input: FileIdInput) -> Arc<ItemTree>;
+///
+/// // Implementation:
+/// impl DefDatabase for RootDatabaseImpl {
+///     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+///         let file_id_input = base_db::FileIdInput::new(self, file_id);
+///         hir_def::item_tree_query(self, file_id_input)
+///     }
+/// }
+/// ```
+#[salsa::db]
 pub trait DefDatabase: base_db::RootQueryDb {
     /// Get ItemTree for a file (main query).
     ///
@@ -611,4 +638,71 @@ fn collect_module_vars(var_def: &syntax::SyntaxNode, vars: &mut Vec<ModuleVarDec
             });
         }
     }
+}
+
+/// Salsa tracked query for ModuleData construction.
+///
+/// ModuleData is derived from ItemTree - it's a lightweight transformation
+/// that extracts procedure/function/variable IDs from the ItemTree.
+///
+/// ## Performance
+/// - LRU: 512 files (derived from ItemTree, frequently accessed)
+/// - Depends on: item_tree (via FileIdInput)
+/// - Invalidation: Automatic when ItemTree changes
+///
+/// ## Dependency tracking
+/// Salsa automatically tracks that this query depends on `item_tree_query`.
+/// When ItemTree changes, ModuleData is automatically invalidated.
+///
+/// ## Usage
+/// ```ignore
+/// // In DefDatabase implementation:
+/// fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
+///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+///     hir_def::module_data_query(self, file_id_input)
+/// }
+/// ```
+#[salsa::tracked(lru = 512)]
+pub fn module_data_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<ModuleData> {
+    let _span = tracing::info_span!("module_data", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let tree = db.item_tree(file_id);
+    let module_id = ModuleId::new(file_id);
+    Arc::new(ModuleData::from_item_tree(module_id, tree))
+}
+
+// TODO Phase 4.1: ModuleBodies migration to Salsa
+// Currently blocked by PartialEq/Eq requirements for ModuleBodies and all nested types.
+// Need to add derives to: Body, BodySourceMap, LowerResult, ModuleVarDecl, etc.
+// This requires Arena<T> to implement PartialEq, which may not be straightforward.
+
+/// Salsa tracked query for type inference.
+///
+/// Performs type inference for all expressions, variables, and methods in a module.
+///
+/// ## Performance
+/// - LRU: 256 files (type inference is moderately expensive)
+/// - Depends on: ItemTree (via FileIdInput)
+/// - Invalidation: Automatic when signatures change
+///
+/// ## Usage
+/// ```ignore
+/// // In DefDatabase implementation:
+/// fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
+///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+///     hir_def::infer_types_query(self, file_id_input)
+/// }
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn infer_types_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<ty::infer::InferenceResult> {
+    let _span = tracing::info_span!("infer_types", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+    Arc::new(ty::infer::InferenceContext::infer_module(db, module_id))
 }

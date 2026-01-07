@@ -351,6 +351,34 @@ pub fn lower_regions(root: &SyntaxNode) -> RegionTree {
     RegionTreeBuilder::new().build(root)
 }
 
+/// Salsa tracked query for RegionTree construction.
+///
+/// This query is automatically cached and invalidated by Salsa when file content changes.
+///
+/// ## Performance
+/// - LRU: 256 files (lightweight tree, used by many diagnostics)
+/// - Depends on: parse (via FileIdInput)
+/// - Invalidation: Automatic when file text changes
+///
+/// ## Usage
+/// ```ignore
+/// // In DefDatabase implementation:
+/// fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
+///     let file_id_input = base_db::FileIdInput::new(self, file_id);
+///     hir_def::region_tree_query(self, file_id_input)
+/// }
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn region_tree_query<'db>(
+    db: &'db dyn base_db::RootQueryDb,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> std::sync::Arc<RegionTree> {
+    let _span = tracing::info_span!("region_tree", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let parse = db.parse(file_id);
+    std::sync::Arc::new(lower_regions(&parse.syntax_node()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

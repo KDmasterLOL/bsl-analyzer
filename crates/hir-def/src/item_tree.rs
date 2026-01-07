@@ -194,6 +194,33 @@ pub enum AnnotationKind {
     Instead,
 }
 
+/// Salsa tracked query for ItemTree construction.
+///
+/// This query is automatically cached and invalidated by Salsa when file content changes.
+///
+/// ## Performance
+/// - LRU: 512 files (signatures don't change often)
+/// - Depends on: parse (via FileIdInput)
+/// - Invalidation: Automatic when file text changes
+///
+/// ## Usage
+/// ```ignore
+/// // In DefDatabase implementation:
+/// fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+///     let file_id_input = base_db::FileIdInput::new(self, file_id);
+///     hir_def::item_tree_query(self, file_id_input)
+/// }
+/// ```
+#[salsa::tracked(lru = 512)]
+pub fn item_tree_query<'db>(
+    db: &'db dyn base_db::RootQueryDb,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<ItemTree> {
+    let _span = tracing::info_span!("item_tree", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    lower_file(db, file_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

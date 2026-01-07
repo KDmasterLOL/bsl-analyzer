@@ -124,14 +124,9 @@ pub struct RootDatabaseImpl {
     /// Base file storage
     files: Files,
 
-    /// HIR caches (TODO: Replace with Salsa tracked queries)
-    item_tree_cache: Arc<DashMap<FileId, Arc<ItemTree>, BuildHasherDefault<FxHasher>>>,
-    region_tree_cache: Arc<DashMap<FileId, Arc<RegionTree>, BuildHasherDefault<FxHasher>>>,
-    conditional_tree_cache:
-        Arc<DashMap<FileId, Arc<ConditionalTree>, BuildHasherDefault<FxHasher>>>,
-    module_data_cache: Arc<DashMap<ModuleId, Arc<ModuleData>, BuildHasherDefault<FxHasher>>>,
-    symbol_tree_cache: Arc<DashMap<ModuleId, Arc<SymbolTree>, BuildHasherDefault<FxHasher>>>,
-    infer_types_cache: Arc<DashMap<ModuleId, Arc<InferenceResult>, BuildHasherDefault<FxHasher>>>,
+    /// Manual HIR caches (TODO: Migrate remaining queries to Salsa)
+    /// Migrated to Salsa: item_tree, region_tree, conditional_tree, module_data, symbol_tree, infer_types
+    /// Remaining manual: module_bodies, module_metadata, sdbl_hir
     module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
     module_metadata_cache:
         Arc<DashMap<ModuleId, Arc<hir_def::ModuleMetadata>, BuildHasherDefault<FxHasher>>>,
@@ -158,12 +153,6 @@ impl RootDatabaseImpl {
         Self {
             storage: salsa::Storage::default(),
             files: Files::new(),
-            item_tree_cache: Arc::new(DashMap::default()),
-            region_tree_cache: Arc::new(DashMap::default()),
-            conditional_tree_cache: Arc::new(DashMap::default()),
-            module_data_cache: Arc::new(DashMap::default()),
-            symbol_tree_cache: Arc::new(DashMap::default()),
-            infer_types_cache: Arc::new(DashMap::default()),
             module_bodies_cache: Arc::new(DashMap::default()),
             module_metadata_cache: Arc::new(DashMap::default()),
             sdbl_hir_cache: Arc::new(DashMap::default()),
@@ -219,18 +208,15 @@ impl RootDatabaseImpl {
         }
     }
 
-    /// Invalidate HIR caches for a file.
+    /// Invalidate manual HIR caches for a file.
     ///
     /// Called when file content changes.
-    /// Note: This is temporary. Will be automatic when we migrate to Salsa tracked queries.
+    /// Note: Only invalidates remaining manual caches. Salsa-managed queries
+    /// (item_tree, region_tree, conditional_tree, module_data, symbol_tree, infer_types)
+    /// are invalidated automatically by Salsa.
     fn invalidate_file(&self, file_id: FileId) {
-        self.item_tree_cache.remove(&file_id);
-        self.region_tree_cache.remove(&file_id);
         self.sdbl_hir_cache.remove(&file_id);
         let module_id = ModuleId::new(file_id);
-        self.module_data_cache.remove(&module_id);
-        self.symbol_tree_cache.remove(&module_id);
-        self.infer_types_cache.remove(&module_id);
         self.module_bodies_cache.remove(&module_id);
         self.module_metadata_cache.remove(&module_id);
     }
@@ -303,105 +289,42 @@ impl RootQueryDb for RootDatabaseImpl {
     }
 }
 
+#[salsa::db]
 impl DefDatabase for RootDatabaseImpl {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
-        // Check cache first
-        if let Some(cached) = self.item_tree_cache.get(&file_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("item_tree", ?file_id).entered();
-
-        // Lower AST → ItemTree
-        let tree = hir_def::item_tree::lower_file(self, file_id);
-
-        // Cache the result
-        self.item_tree_cache.insert(file_id, tree.clone());
-        tree
+        // Use Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir_def::item_tree_query(self, file_id_input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
-        // Check cache first
-        if let Some(cached) = self.region_tree_cache.get(&file_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("region_tree", ?file_id).entered();
-
-        // Parse and lower AST → RegionTree
-        let parse = self.parse(file_id);
-        let tree = Arc::new(hir_def::region_tree::lower_regions(&parse.syntax_node()));
-
-        // Cache the result
-        self.region_tree_cache.insert(file_id, tree.clone());
-        tree
+        // Use Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir_def::region_tree_query(self, file_id_input)
     }
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
-        // Check cache first
-        if let Some(cached) = self.conditional_tree_cache.get(&file_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("conditional_tree", ?file_id).entered();
-
-        // Parse and lower AST → ConditionalTree
-        let parse = self.parse(file_id);
-        let tree = Arc::new(hir_def::conditional_tree::lower_conditionals(&parse.syntax_node()));
-
-        // Cache the result
-        self.conditional_tree_cache.insert(file_id, tree.clone());
-        tree
+        // Use Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        hir_def::conditional_tree_query(self, file_id_input)
     }
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
-        // Check cache first
-        if let Some(cached) = self.module_data_cache.get(&module_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("module_data", ?module_id).entered();
-
-        // Get ItemTree and convert to ModuleData
-        let tree = self.item_tree(module_id.file_id);
-        let data = Arc::new(ModuleData::from_item_tree(module_id, tree));
-
-        // Cache the result
-        self.module_data_cache.insert(module_id, data.clone());
-        data
+        // Use Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir_def::module_data_query(self, file_id_input)
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
-        // Check cache first
-        if let Some(cached) = self.symbol_tree_cache.get(&module_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("symbol_tree", ?module_id).entered();
-
-        // Get ItemTree and build SymbolTree
-        let item_tree = self.item_tree(module_id.file_id);
-        let tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
-
-        // Cache the result
-        self.symbol_tree_cache.insert(module_id, tree.clone());
-        tree
+        // Use Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir_def::symbol_tree_query(self, file_id_input)
     }
 
     fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
-        // Check cache first
-        if let Some(cached) = self.infer_types_cache.get(&module_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("infer_types", ?module_id).entered();
-
-        // Perform type inference
-        let result = Arc::new(hir_def::InferenceContext::infer_module(self, module_id));
-
-        // Cache the result
-        self.infer_types_cache.insert(module_id, result.clone());
-        result
+        // Call Salsa tracked query with FileIdInput
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir_def::infer_types_query(self, file_id_input)
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {

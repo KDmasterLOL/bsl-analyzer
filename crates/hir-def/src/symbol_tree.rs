@@ -295,6 +295,40 @@ impl From<&Param> for ParamSymbol {
     }
 }
 
+/// Salsa tracked query for SymbolTree construction.
+///
+/// SymbolTree is derived from ItemTree - it builds O(1) case-insensitive
+/// lookup tables for methods and variables.
+///
+/// ## Performance
+/// - LRU: 512 files (O(1) lookup, frequently accessed)
+/// - Depends on: item_tree (via FileIdInput)
+/// - Invalidation: Automatic when ItemTree changes
+///
+/// ## Dependency tracking
+/// Salsa automatically tracks that this query depends on `item_tree_query`.
+/// When ItemTree changes, SymbolTree is automatically invalidated.
+///
+/// ## Usage
+/// ```ignore
+/// // In DefDatabase implementation:
+/// fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+///     hir_def::symbol_tree_query(self, file_id_input)
+/// }
+/// ```
+#[salsa::tracked(lru = 512)]
+pub fn symbol_tree_query<'db>(
+    db: &'db dyn crate::DefDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> std::sync::Arc<SymbolTree> {
+    let _span = tracing::info_span!("symbol_tree", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let item_tree = db.item_tree(file_id);
+    let module_id = crate::ModuleId::new(file_id);
+    std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

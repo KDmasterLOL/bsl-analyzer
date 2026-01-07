@@ -95,6 +95,31 @@ pub struct FileSourceRootInput {
     pub source_root_id: SourceRootId,
 }
 
+/// Salsa interned FileId for HIR queries.
+///
+/// This wrapper makes FileId compatible with Salsa tracked functions.
+/// Salsa 0.25 requires parameters to tracked functions to be Salsa types,
+/// so we wrap the raw FileId in a Salsa interned struct.
+///
+/// ## Usage
+///
+/// ```ignore
+/// // In HIR queries:
+/// #[salsa::tracked(lru = 512)]
+/// pub fn item_tree_query(
+///     db: &dyn salsa::Database,
+///     file_id_input: FileIdInput,
+/// ) -> Arc<ItemTree> {
+///     let file_id = file_id_input.file_id(db);
+///     // ... use file_id
+/// }
+/// ```
+#[salsa::interned(debug)]
+pub struct FileIdInput {
+    /// The raw FileId value
+    pub file_id: vfs::FileId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

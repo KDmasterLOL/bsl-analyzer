@@ -19,7 +19,9 @@ mod change;
 mod input;
 
 pub use change::FileChange;
-pub use input::{FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput};
+pub use input::{
+    FileIdInput, FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionInfo {
@@ -571,6 +573,46 @@ mod tests {
             let input = self.file_text_input(file_id);
             module_level_regions(self, input)
         }
+    }
+
+    // Test query to verify FileIdInput (Salsa interned FileId) works with Salsa tracked functions.
+    // This is critical for Phase 1 of the Salsa HIR integration plan.
+    //
+    // Note: FileId directly is NOT compatible with Salsa 0.25 (requires SalsaStructInDb trait).
+    // We use FileIdInput wrapper (Salsa interned) as fallback solution.
+    #[salsa::tracked(lru = 10)]
+    fn test_fileid_query<'db>(
+        db: &'db dyn salsa::Database,
+        file_id_input: FileIdInput<'db>,
+    ) -> u32 {
+        file_id_input.file_id(db).0
+    }
+
+    #[test]
+    fn test_fileid_salsa_compatible() {
+        let db = TestDatabase::default();
+
+        // Test basic usage
+        let file_id = FileId(42);
+        let file_id_input = FileIdInput::new(&db, file_id);
+
+        // If this compiles and runs, FileIdInput works with Salsa
+        let result = test_fileid_query(&db, file_id_input);
+        assert_eq!(result, 42);
+
+        // Test caching - should return the same value
+        let result2 = test_fileid_query(&db, file_id_input);
+        assert_eq!(result2, 42);
+
+        // Test different FileId - should compute different value
+        let file_id2 = FileId(100);
+        let file_id_input2 = FileIdInput::new(&db, file_id2);
+        let result3 = test_fileid_query(&db, file_id_input2);
+        assert_eq!(result3, 100);
+
+        // Test interning - same FileId should return same FileIdInput
+        let file_id_input3 = FileIdInput::new(&db, file_id);
+        assert_eq!(file_id_input, file_id_input3);
     }
 
     #[test]
