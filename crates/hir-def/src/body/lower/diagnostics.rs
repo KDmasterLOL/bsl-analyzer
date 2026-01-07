@@ -166,6 +166,13 @@ pub(crate) fn is_deprecated_current_date(name: &str) -> bool {
     matches!(lower.as_str(), "текущаядата" | "currentdate")
 }
 
+/// Check if a method name is deprecated Найти() / Find().
+/// Returns true if the method is the deprecated global find function.
+pub(crate) fn is_deprecated_find(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "найти" | "find")
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================

@@ -342,6 +342,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::DeprecatedCurrentDate { name, range } => {
             handlers::deprecated_current_date::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::DeprecatedFind { name, range } => {
+            handlers::deprecated_find::from_hir(name, *range, ctx)
+        }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }

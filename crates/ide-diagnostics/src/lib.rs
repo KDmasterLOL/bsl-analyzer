@@ -681,7 +681,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::deprecated_current_date::check,
     // ));
-    result.extend(run_diagnostic("DeprecatedFind", ctx, handlers::deprecated_find::check));
+    // NOTE: Replaced with HIR-based DeprecatedFind diagnostic
+    // The HIR version is collected during lowering via BodyDiagnostic::DeprecatedFind
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic("DeprecatedFind", ctx, handlers::deprecated_find::check));
     result.extend(run_diagnostic("DeprecatedMessage", ctx, handlers::deprecated_message::check));
     result.extend(run_diagnostic(
         "DeprecatedTypeManagedForm",
@@ -1006,6 +1009,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedCurrentDate { name, range } => {
             handlers::deprecated_current_date::from_hir(name, *range, ctx)
+        }
+        BodyDiagnostic::DeprecatedFind { name, range } => {
+            handlers::deprecated_find::from_hir(name, *range, ctx)
         }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)

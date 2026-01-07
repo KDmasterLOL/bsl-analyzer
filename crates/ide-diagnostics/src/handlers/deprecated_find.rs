@@ -34,74 +34,34 @@
 //! - **Minutes to fix:** 2
 //!
 //! ## Implementation
+//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
+//!
 //! Ported from:
 //! - DeprecatedFindDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - deprecated_find.rs (bsl-language-server-rust) - Rust reference
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxToken};
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedFind` is encountered.
+pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    // Check if the diagnostic is disabled
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedFind) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
+    let message = get_message(name);
 
-    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    // Find all global method calls (IDENT + LPAREN without preceding DOT)
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot {
-                    let method_name = token.text().to_string();
-                    if is_deprecated_find(&method_name) {
-                        let diagnostic = create_diagnostic(token, &method_name);
-                        if seen_ranges.insert(diagnostic.range) {
-                            diagnostics.push(diagnostic);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-fn is_deprecated_find(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "найти" || lower == "find"
-}
-
-fn create_diagnostic(token: &SyntaxToken, method_name: &str) -> Diagnostic {
-    let message = get_message(method_name);
-    let range = token.text_range();
-
-    Diagnostic {
+    Some(Diagnostic {
         code: DiagnosticCode::DeprecatedFind,
         message,
         severity: Severity::Information,
         range,
         tags: vec![],
         fixes: vec![],
-    }
+    })
 }
 
 fn get_message(method_name: &str) -> String {
@@ -117,41 +77,6 @@ fn get_message(method_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
 
     #[test]
     fn test_deprecated_russian() {
@@ -160,10 +85,13 @@ mod tests {
     Позиция = Найти("Строка", "о");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedFind);
-        assert_eq!(diagnostics[0].severity, Severity::Information);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+
+        assert_eq!(deprecated_diags.len(), 1);
+        assert_eq!(deprecated_diags[0].severity, Severity::Information);
+        assert!(deprecated_diags[0].message.contains("СтрНайти"));
     }
 
     #[test]
@@ -173,9 +101,12 @@ Procedure Test()
     Position = Find("String", "S");
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedFind);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+
+        assert_eq!(deprecated_diags.len(), 1);
+        assert!(deprecated_diags[0].message.contains("StrFind"));
     }
 
     #[test]
@@ -185,8 +116,12 @@ EndProcedure
     Индекс = Массив.Найти("Элемент");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+
+        // Should not trigger for method calls
+        assert_eq!(deprecated_diags.len(), 0);
     }
 
     #[test]
@@ -199,19 +134,25 @@ EndProcedure
     Поз4 = НайтИ("G", "H");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 4);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
+
+        assert_eq!(deprecated_diags.len(), 4);
     }
 
     #[test]
     fn test_from_java_fixture() {
         let input = include_str!("../../test_data/DeprecatedFindDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(input);
+        let diagnostics = check_hir_diagnostic(input);
 
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
+        let deprecated_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedFind).collect();
 
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 8, 13);
+        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
 
-        assert_diagnostic_range(&file_content, &diagnostics[1], 9, 3, 7);
+        // Verify diagnostic positions match Java test expectations
+        assert_diagnostic_range(input, deprecated_diags[0], 3, 8, 13);
+        assert_diagnostic_range(input, deprecated_diags[1], 9, 3, 7);
     }
 }
