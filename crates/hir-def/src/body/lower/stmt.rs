@@ -355,7 +355,20 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
         SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
         SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
         SyntaxKind::VAR_DEF => lower_var_decl(ctx, node),
-        SyntaxKind::EMPTY_STMT => return None,
+        SyntaxKind::EMPTY_STMT => {
+            // Check if parent or siblings contain ERROR nodes
+            // (Java: !Trees.treeContainsErrors(previousNode))
+            let has_error = node
+                .parent()
+                .map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR))
+                .unwrap_or(false);
+
+            if !has_error {
+                ctx.emit(BodyDiagnostic::EmptyStatement { range });
+            }
+
+            return None;
+        }
         _ => return None,
     }?;
 

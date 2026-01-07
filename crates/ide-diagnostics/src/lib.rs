@@ -510,10 +510,10 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for node in root.descendants() {
         // Node-based diagnostic handlers (check_node API)
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
-        handlers::empty_statement::check_node(&node, &mut diagnostics, ctx);
         handlers::extra_commas::check_node(&node, &mut diagnostics, ctx);
         handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
         // empty_region is now HIR-based (checked during preprocessor lowering)
+        // empty_statement is now HIR-based (checked during statement lowering)
         // TODO: Add more node-based text diagnostics here:
         // handlers::commented_code::check_node(&node, &mut diagnostics, ctx);
         // handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
@@ -1073,6 +1073,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
+        }
+        BodyDiagnostic::EmptyStatement { range } => {
+            handlers::empty_statement::from_hir(*range, ctx)
         }
     }
 }

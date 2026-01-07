@@ -400,6 +400,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::EmptyStatement { range } => {
+            handlers::empty_statement::from_hir(*range, ctx)
+        }
     }
 }
 

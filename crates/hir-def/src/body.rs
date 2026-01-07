@@ -358,6 +358,10 @@ pub enum BodyDiagnostic {
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
+
+    /// Empty statement (standalone semicolon).
+    /// Detected when EMPTY_STMT AST node is encountered without parser errors nearby.
+    EmptyStatement { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -403,6 +407,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
+            BodyDiagnostic::EmptyStatement { range } => *range,
         }
     }
 }

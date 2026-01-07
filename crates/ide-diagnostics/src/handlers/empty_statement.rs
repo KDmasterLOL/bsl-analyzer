@@ -7,107 +7,55 @@
 //!
 //! Empty statements are usually typos or leftover from refactoring.
 //! They make code less readable and can be confusing.
+//!
+//! ## Implementation
+//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
+//!
+//! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when EMPTY_STMT
+//! AST node is encountered during statement lowering (if no parser errors nearby).
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode};
+use ide_db::TextRange;
 
-/// Check a single syntax node for empty statements (node-based API).
+/// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// This is called from collect_text_diagnostics() for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    // Check if disabled
+/// Called from lib.rs dispatch when `BodyDiagnostic::EmptyStatement` is encountered.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::EmptyStatement) {
-        return;
+        return None;
     }
 
-    // Only process EMPTY_STMT nodes
-    if node.kind() != SyntaxKind::EMPTY_STMT {
-        return;
-    }
-
-    // Check if parent or siblings contain ERROR nodes
-    // (Java: !Trees.treeContainsErrors(previousNode))
-    let has_error =
-        node.parent().map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR)).unwrap_or(false);
-
-    if !has_error {
-        acc.push(Diagnostic {
-            code: DiagnosticCode::EmptyStatement,
-            message: "Empty statement".to_string(),
-            severity: Severity::Information,
-            range: node.text_range(),
-            tags: vec![],
-            fixes: vec![],
-        });
-    }
-}
-
-/// Main entry point for EmptyStatement diagnostic (for backward compatibility).
-/// TODO: Remove after migration to text-based API is complete.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::EmptyStatement) {
-        return Vec::new();
-    }
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    // Traverse all nodes looking for EMPTY_STMT
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    diagnostics
+    Some(Diagnostic {
+        code: DiagnosticCode::EmptyStatement,
+        message: "Empty statement".to_string(),
+        severity: Severity::Information,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use crate::test_utils::*;
 
     #[test]
     fn test_empty_statement() {
         let code = include_str!("../../test_data/EmptyStatementDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+
+        let empty_stmt_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
 
         // Java expects 2 diagnostics
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
+        assert_eq!(empty_stmt_diags.len(), 2, "Expected 2 diagnostics");
 
         // Line 1 (0-indexed), cols 18-19: semicolon after "Тогда"
-        assert_diagnostic_range(code, &diagnostics[0], 1, 18, 19);
+        assert_diagnostic_range(code, empty_stmt_diags[0], 1, 18, 19);
 
         // Line 2 (0-indexed), cols 8-9: second semicolon in ";;"
-        assert_diagnostic_range(code, &diagnostics[1], 2, 8, 9);
+        assert_diagnostic_range(code, empty_stmt_diags[1], 2, 8, 9);
     }
 
     #[test]
@@ -119,8 +67,10 @@ mod tests {
     Возврат А + Б;
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let empty_stmt_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        assert_eq!(empty_stmt_diags.len(), 0);
     }
 
     #[test]
@@ -130,7 +80,9 @@ mod tests {
     А = 1;;
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 empty statement");
+        let diagnostics = check_hir_diagnostic(code);
+        let empty_stmt_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
+        assert_eq!(empty_stmt_diags.len(), 1, "Expected 1 empty statement");
     }
 }

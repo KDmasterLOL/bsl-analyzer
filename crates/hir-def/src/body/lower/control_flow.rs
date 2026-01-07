@@ -161,6 +161,7 @@ pub(crate) fn is_statement_node(node: &SyntaxNode) -> bool {
             | SyntaxKind::ADD_HANDLER_STMT
             | SyntaxKind::REMOVE_HANDLER_STMT
             | SyntaxKind::VAR_DEF
+            | SyntaxKind::EMPTY_STMT
     )
 }
 
@@ -182,6 +183,10 @@ pub(crate) fn find_first_unreachable_stmt(
     after_range: TextRange,
 ) -> Option<TextRange> {
     for child in stmt_list.children() {
+        // Skip empty statements - they shouldn't be reported as unreachable
+        if child.kind() == SyntaxKind::EMPTY_STMT {
+            continue;
+        }
         if is_statement_node(&child) && child.text_range().start() > after_range.end() {
             return Some(child.text_range());
         }
@@ -201,6 +206,10 @@ pub(crate) fn find_first_unreachable_at_root(
     after_range: TextRange,
 ) -> Option<TextRange> {
     for child in root.children() {
+        // Skip empty statements - they shouldn't be reported as unreachable
+        if child.kind() == SyntaxKind::EMPTY_STMT {
+            continue;
+        }
         let child_start = child.text_range().start();
         if child_start > after_range.end()
             && (is_statement_node(&child)

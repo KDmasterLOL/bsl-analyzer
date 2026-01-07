@@ -29,8 +29,10 @@ fn test_lower_empty_procedure() {
     let result = lower_method(&method, false);
 
     assert_eq!(result.body.params.len(), 0);
-    // Empty procedure should emit EmptyCodeBlock diagnostic
-    assert!(result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })));
+    // Empty procedure body should NOT emit EmptyCodeBlock diagnostic
+    // (per Java fixture comment: "Ошибка быть не должно, есть другая проверка")
+    // Empty functions/procedures are handled by FunctionShouldHaveReturn or similar
+    assert!(!result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })));
 }
 
 #[test]
