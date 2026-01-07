@@ -35,109 +35,34 @@
 //! - **Minutes to fix:** 1
 //!
 //! ## Implementation
+//! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
+//!
 //! Ported from:
 //! - DeprecatedTypeManagedFormDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - deprecated_type_managed_form.rs (bsl-language-server-rust) - Rust reference
-//!
-//! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxToken};
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedTypeManagedForm` is encountered.
+pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    // Check if the diagnostic is disabled
     if ctx.config.is_disabled(DiagnosticCode::DeprecatedTypeManagedForm) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
+    let message = get_message(type_name);
 
-    // Optimized: single traversal O(n) instead of O(n³)
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() != SyntaxKind::IDENT {
-            continue;
-        }
-
-        // Check if this is "Тип" or "Type" method call
-        let method_name = token.text().to_string();
-        if !is_type_method(&method_name) {
-            continue;
-        }
-
-        // Check pattern: IDENT ( but not .IDENT(
-        let next_is_lparen =
-            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-        if !next_is_lparen {
-            continue;
-        }
-
-        let prev_is_dot = i
-            .checked_sub(1)
-            .and_then(|idx| tokens.get(idx))
-            .map(|t| t.kind() == SyntaxKind::DOT)
-            .unwrap_or(false);
-
-        if prev_is_dot {
-            continue;
-        }
-
-        // Look for first STRING token in next ~20 tokens (within argument list)
-        if let Some((string_token, arg_value)) =
-            find_string_argument(&tokens[i..i.saturating_add(20).min(tokens.len())])
-        {
-            if is_deprecated_managed_form(&arg_value) {
-                diagnostics.push(create_diagnostic(&string_token, &arg_value));
-            }
-        }
-    }
-
-    diagnostics
-}
-
-/// Find first STRING token in token slice and extract its content
-fn find_string_argument(tokens: &[SyntaxToken]) -> Option<(SyntaxToken, String)> {
-    for token in tokens {
-        if token.kind() == SyntaxKind::STRING {
-            let text = token.text();
-            if text.len() < 2 {
-                continue;
-            }
-            // Remove quotes
-            let inner = &text[1..text.len() - 1];
-            // Unescape double quotes
-            let content = inner.replace("\"\"", "\"");
-            return Some((token.clone(), content));
-        }
-    }
-    None
-}
-
-fn is_type_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "тип" || lower == "type"
-}
-
-fn is_deprecated_managed_form(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    lower == "управляемаяформа" || lower == "managedform"
-}
-
-fn create_diagnostic(string_token: &SyntaxToken, arg_value: &str) -> Diagnostic {
-    let message = get_message(arg_value);
-    let range = string_token.text_range();
-
-    Diagnostic {
+    Some(Diagnostic {
         code: DiagnosticCode::DeprecatedTypeManagedForm,
         message,
         severity: Severity::Information,
         range,
         tags: vec![],
         fixes: vec![],
-    }
+    })
 }
 
 fn get_message(arg_value: &str) -> String {
@@ -157,41 +82,6 @@ fn get_message(arg_value: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
 
     #[test]
     fn test_deprecated_type_russian() {
@@ -202,10 +92,15 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedTypeManagedForm);
-        assert_eq!(diagnostics[0].severity, Severity::Information);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
+
+        assert_eq!(deprecated_diags.len(), 1);
+        assert_eq!(deprecated_diags[0].severity, Severity::Information);
+        assert!(deprecated_diags[0].message.contains("УправляемаяФорма"));
     }
 
     #[test]
@@ -217,9 +112,14 @@ Procedure Test()
     EndIf;
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::DeprecatedTypeManagedForm);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
+
+        assert_eq!(deprecated_diags.len(), 1);
+        assert!(deprecated_diags[0].message.contains("ManagedForm"));
     }
 
     #[test]
@@ -229,8 +129,13 @@ EndProcedure
     Сообщить("УправляемаяФорма");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
+
+        assert_eq!(deprecated_diags.len(), 0);
     }
 
     #[test]
@@ -245,19 +150,29 @@ EndProcedure
     Т6 = Type("ManagedForm");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 6);
+        let diagnostics = check_hir_diagnostic(code);
+        let deprecated_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
+
+        assert_eq!(deprecated_diags.len(), 6);
     }
 
     #[test]
     fn test_from_java_fixture() {
         let input = include_str!("../../test_data/DeprecatedTypeManagedForm.bsl");
-        let (diagnostics, file_content) = check_diagnostic(input);
+        let diagnostics = check_hir_diagnostic(input);
 
-        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
+        let deprecated_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 1, 29, 1, 47);
+        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 11, 27, 11, 40);
+        // Verify diagnostic positions match Java test expectations
+        assert_diagnostic_range_multiline(input, deprecated_diags[0], 1, 29, 1, 47);
+        assert_diagnostic_range_multiline(input, deprecated_diags[1], 11, 27, 11, 40);
     }
 }

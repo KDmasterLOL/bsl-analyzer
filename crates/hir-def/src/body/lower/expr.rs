@@ -346,6 +346,40 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        use super::diagnostics::{is_deprecated_managed_form, is_type_method};
+
+        if is_type_method(&name) {
+            // Check for Type("УправляемаяФорма") / Type("ManagedForm")
+            // Find ARG_LIST and check first argument
+            if let Some(arg_list) = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST) {
+                // Get first argument (first child of ARG_LIST)
+                if let Some(first_arg) = arg_list.children().next() {
+                    // Check if it's a STRING literal
+                    if let Some(string_token) = first_arg
+                        .descendants_with_tokens()
+                        .filter_map(|el| el.into_token())
+                        .find(|tok| tok.kind() == SyntaxKind::STRING)
+                    {
+                        let text = string_token.text();
+                        if text.len() >= 2 {
+                            // Remove quotes and unescape
+                            let inner = &text[1..text.len() - 1];
+                            let content = inner.replace("\"\"", "\"");
+
+                            if is_deprecated_managed_form(&content) {
+                                // Emit DeprecatedTypeManagedForm diagnostic
+                                // Range covers the string literal token
+                                ctx.diagnostics.push(BodyDiagnostic::DeprecatedTypeManagedForm {
+                                    type_name: content,
+                                    range: string_token.text_range(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments

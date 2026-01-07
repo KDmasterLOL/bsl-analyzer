@@ -688,11 +688,13 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // The HIR version is collected during lowering via BodyDiagnostic::DeprecatedMessage
     // and dispatched through collect_hir_diagnostics()
     // result.extend(run_diagnostic("DeprecatedMessage", ctx, handlers::deprecated_message::check));
-    result.extend(run_diagnostic(
-        "DeprecatedTypeManagedForm",
-        ctx,
-        handlers::deprecated_type_managed_form::check,
-    ));
+    // The HIR version is collected during lowering via BodyDiagnostic::DeprecatedTypeManagedForm
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "DeprecatedTypeManagedForm",
+    //     ctx,
+    //     handlers::deprecated_type_managed_form::check,
+    // ));
     // NOTE: Replaced with HIR-based DeprecatedMethod diagnostic
     // The HIR version is collected during lowering via BodyDiagnostic::DeprecatedMethod
     // and dispatched through collect_hir_diagnostics()
@@ -1017,6 +1019,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::DeprecatedMessage { name, range } => {
             handlers::deprecated_message::from_hir(name, *range, ctx)
+        }
+        BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
+            handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
         }
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)

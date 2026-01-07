@@ -180,6 +180,20 @@ pub(crate) fn is_deprecated_message(name: &str) -> bool {
     matches!(lower.as_str(), "сообщить" | "message")
 }
 
+/// Check if a method name is Тип() / Type().
+/// Returns true if the method is the type construction function.
+pub(crate) fn is_type_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "тип" | "type")
+}
+
+/// Check if a type name is deprecated УправляемаяФорма / ManagedForm.
+/// Returns true if the type name is the deprecated managed form type.
+pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
+    let lower = type_name.to_lowercase();
+    matches!(lower.as_str(), "управляемаяформа" | "managedform")
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================
