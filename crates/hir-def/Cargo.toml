@@ -13,6 +13,7 @@ intern.workspace = true
 salsa.workspace = true
 rustc-hash.workspace = true
 la-arena.workspace = true
+ordered-float.workspace = true
 smol_str.workspace = true
 text-size.workspace = true
 tracing.workspace = true

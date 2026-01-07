@@ -23,6 +23,7 @@
 //! - Diagnostics are collected during AST → HIR lowering
 
 use la_arena::Idx;
+use ordered_float::NotNan;
 
 use crate::Name;
 
@@ -36,11 +37,12 @@ pub type StmtId = Idx<Stmt>;
 pub type BindingId = Idx<Binding>;
 
 /// Literal value in BSL.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Literal {
     /// Numeric literal (integer or float).
     /// BSL doesn't distinguish between int and float at syntax level.
-    Number(f64),
+    /// Uses NotNan<f64> to enable Eq/Hash traits required by Salsa.
+    Number(NotNan<f64>),
     /// String literal.
     String(String),
     /// Date literal ('YYYYMMDD' or 'YYYYMMDDHHmmss').
@@ -90,7 +92,7 @@ pub enum UnaryOp {
 /// HIR expression.
 ///
 /// Represents a value-producing construct in BSL code.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     /// Placeholder for parse errors or missing expressions.
     Missing,
@@ -136,7 +138,7 @@ pub enum Expr {
 /// HIR statement.
 ///
 /// Represents an executable construct in BSL code.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// Expression statement (standalone expression like function call).
     Expr(ExprId),
@@ -222,13 +224,13 @@ mod tests {
 
     #[test]
     fn test_literal_creation() {
-        let num = Literal::Number(42.0);
+        let num = Literal::Number(NotNan::new(42.0).unwrap());
         let str_lit = Literal::String("test".to_string());
         let bool_lit = Literal::Bool(true);
         let undef = Literal::Undefined;
         let null = Literal::Null;
 
-        assert_eq!(num, Literal::Number(42.0));
+        assert_eq!(num, Literal::Number(NotNan::new(42.0).unwrap()));
         assert_eq!(str_lit, Literal::String("test".to_string()));
         assert_eq!(bool_lit, Literal::Bool(true));
         assert_eq!(undef, Literal::Undefined);

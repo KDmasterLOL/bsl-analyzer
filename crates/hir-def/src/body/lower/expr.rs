@@ -135,6 +135,9 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 });
             }
 
+            // Wrap in NotNan, fallback to 0.0 if somehow NaN (should never happen with parsed literals)
+            let value = ordered_float::NotNan::new(value)
+                .unwrap_or_else(|_| ordered_float::NotNan::new(0.0).unwrap());
             Literal::Number(value)
         }
         SyntaxKind::STRING | SyntaxKind::STRING_START => {

@@ -46,7 +46,7 @@ use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
 ///
 /// Contains all expressions, statements, and bindings in arena-allocated form.
 /// This allows efficient storage and stable IDs for referencing HIR nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
     /// All expressions in this body.
     pub exprs: Arena<Expr>,
@@ -139,7 +139,7 @@ impl Body {
 /// Used for:
 /// - Diagnostics: HIR node → source location
 /// - Go-to-definition: source location → HIR node
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct BodySourceMap {
     /// Expression ID → source range.
     expr_ranges: FxHashMap<ExprId, TextRange>,
@@ -206,7 +206,7 @@ impl BodySourceMap {
 /// Result of body lowering.
 ///
 /// Contains the lowered body, source map, and any diagnostics collected during lowering.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct LowerResult {
     /// The lowered HIR body.
     pub body: Body,
@@ -535,6 +535,7 @@ mod tests {
     use super::*;
     use crate::hir::{Binding, Expr, Literal, Stmt};
     use crate::Name;
+    use ordered_float::NotNan;
 
     #[test]
     fn test_body_creation() {
@@ -550,18 +551,20 @@ mod tests {
     fn test_body_with_expressions() {
         let mut body = Body::new();
 
-        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(42.0)));
+        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
         assert_eq!(body.expr_count(), 1);
 
         let expr = body.expr(expr_id);
-        assert!(matches!(expr, Expr::Literal(Literal::Number(n)) if *n == 42.0));
+        assert!(
+            matches!(expr, Expr::Literal(Literal::Number(n)) if *n == NotNan::new(42.0).unwrap())
+        );
     }
 
     #[test]
     fn test_body_with_statements() {
         let mut body = Body::new();
 
-        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(1.0)));
+        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(1.0).unwrap())));
         let stmt_id = body.stmts.alloc(Stmt::Expr(expr_id));
 
         assert_eq!(body.stmt_count(), 1);
@@ -586,7 +589,7 @@ mod tests {
         let mut body = Body::new();
         let mut source_map = BodySourceMap::new();
 
-        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(42.0)));
+        let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
         let range = TextRange::new(0.into(), 2.into());
 
         source_map.record_expr(expr_id, range);
