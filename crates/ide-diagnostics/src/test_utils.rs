@@ -225,6 +225,17 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
         }
     }
 
+    // Collect module-level diagnostics (e.g., ExportVariables from module_vars)
+    for var in module_bodies.module_vars() {
+        if var.is_export {
+            if let Some(diag) =
+                crate::handlers::export_variables::from_hir(&var.name, var.range, &ctx)
+            {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
     diagnostics
 }
 

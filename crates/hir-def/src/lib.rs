@@ -394,6 +394,12 @@ impl ModuleBodies {
     pub fn module_code_result(&self) -> Option<&body::LowerResult> {
         self.module_code.as_ref()
     }
+
+    /// Get module-level variable declarations.
+    /// Includes both exported and non-exported variables.
+    pub fn module_vars(&self) -> &[ModuleVarDecl] {
+        &self.module_vars
+    }
 }
 
 impl Default for ModuleBodies {

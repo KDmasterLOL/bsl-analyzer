@@ -733,7 +733,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::global_context_method_collision8312::check,
     ));
-    result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
+    // NOTE: ExportVariables migrated to HIR-based collection
+    // Uses module_vars from module_bodies() and is collected in collect_metadata_diagnostics()
+    // result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
     // NOTE: CodeAfterAsyncCall migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::CodeAfterAsyncCall
     // and dispatched through collect_hir_diagnostics()
@@ -1147,6 +1149,15 @@ fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         // - execute_external_code_in_common_module (AST-based, not metadata)
         // - common_module_assign (AST-based, not metadata)
         // - missing_event_subscription_handler
+    }
+
+    // Check ExportVariables - module-level variables with is_export flag
+    for var in module_bodies.module_vars() {
+        if var.is_export {
+            if let Some(diag) = handlers::export_variables::from_hir(&var.name, var.range, ctx) {
+                diagnostics.push(diag);
+            }
+        }
     }
 
     diagnostics
