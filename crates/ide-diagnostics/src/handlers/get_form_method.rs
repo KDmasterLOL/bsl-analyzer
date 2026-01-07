@@ -54,107 +54,37 @@
 //! Uses AbstractFindMethodDiagnostic pattern - checks both global and object method calls.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxToken};
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when GetFormMethod diagnostic is emitted during lowering.
+pub fn from_hir(
+    method_name: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::GetFormMethod) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
-
-    // ✅ OPTIMIZATION: Collect tokens ONCE instead of O(N²) nested tree traversal
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    // Find all method calls: both global (IDENT + LPAREN) and object (DOT + IDENT + LPAREN)
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                let method_name = token.text().to_string();
-                if is_get_form_method(&method_name) {
-                    let diagnostic = create_diagnostic(token, &method_name);
-                    if seen_ranges.insert(diagnostic.range) {
-                        diagnostics.push(diagnostic);
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-fn is_get_form_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "получитьформу" || lower == "getform"
-}
-
-fn create_diagnostic(token: &SyntaxToken, method_name: &str) -> Diagnostic {
-    let message = get_message(method_name);
-    let range = token.text_range();
-
-    Diagnostic {
+    Some(Diagnostic {
         code: DiagnosticCode::GetFormMethod,
-        message,
+        message: format!(
+            "Использование метода '{}' приводит к ошибкам. Используйте 'ОткрытьФорму()' / 'OpenForm()' вместо него",
+            method_name
+        ),
         severity: Severity::Major,
         range,
         tags: vec![],
         fixes: vec![],
-    }
-}
-
-fn get_message(method_name: &str) -> String {
-    format!(
-        "Использование метода '{}' приводит к ошибкам. Используйте 'ОткрытьФорму()' / 'OpenForm()' вместо него",
-        method_name
-    )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_no_get_form() {
@@ -163,8 +93,10 @@ mod tests {
     ОткрытьФорму("Справочник.Номенклатура.ФормаСписка");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Should NOT detect - using ОткрытьФорму");
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 0, "Should NOT detect - using ОткрытьФорму");
     }
 
     #[test]
@@ -174,10 +106,11 @@ mod tests {
     ФормаРедактора = ПолучитьФорму("Обработка.УниверсальныйРедактор.Форма");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect global ПолучитьФорму");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::GetFormMethod);
-        assert!(diagnostics[0].message.contains("ПолучитьФорму"));
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 1, "Should detect global ПолучитьФорму");
+        assert!(get_form_diags[0].message.contains("ПолучитьФорму"));
     }
 
     #[test]
@@ -187,10 +120,11 @@ Procedure Test2()
     Form = GetForm("Document.PlanOperation.Form");
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect global GetForm");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::GetFormMethod);
-        assert!(diagnostics[0].message.contains("GetForm"));
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 1, "Should detect global GetForm");
+        assert!(get_form_diags[0].message.contains("GetForm"));
     }
 
     #[test]
@@ -201,9 +135,10 @@ EndProcedure
     Форма = Док.ПолучитьФорму("ФормаДокумента");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect object method ПолучитьФорму");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::GetFormMethod);
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 1, "Should detect object method ПолучитьФорму");
     }
 
     #[test]
@@ -214,9 +149,10 @@ Procedure Test()
     Form = Doc.GetForm("DocumentForm");
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect object method GetForm");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::GetFormMethod);
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 1, "Should detect object method GetForm");
     }
 
     #[test]
@@ -230,8 +166,10 @@ EndProcedure
     Форма5 = GETFORM("Form5");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 5, "Should detect all case variations");
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 5, "Should detect all case variations");
     }
 
     #[test]
@@ -245,18 +183,22 @@ EndProcedure
     Форма4 = Док.GetForm("Form4");
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 4, "Should detect all 4 calls");
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
+        assert_eq!(get_form_diags.len(), 4, "Should detect all 4 calls");
     }
 
     #[test]
     fn test_from_java_fixture() {
         // Source: bsl-language-server/src/test/resources/diagnostics/GetFormMethodDiagnostic.bsl
-        let input = include_str!("get_form_method/GetFormMethodDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(input);
+        let code = include_str!("get_form_method/GetFormMethodDiagnostic.bsl");
+        let diagnostics = check_hir_diagnostic(code);
+        let get_form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
 
         // Java expects 4 diagnostics
-        assert_eq!(diagnostics.len(), 4, "Should match Java implementation: 4 diagnostics");
+        assert_eq!(get_form_diags.len(), 4, "Should match Java implementation: 4 diagnostics");
 
         // Java test expectations (0-based lines):
         // .hasRange(2, 14, 2, 27)   // Док.ПолучитьФорму
@@ -264,9 +206,9 @@ EndProcedure
         // .hasRange(11, 15, 11, 22) // Doc.GetForm
         // .hasRange(15, 11, 15, 18) // GetForm (global)
 
-        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 14, 27);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 6, 21, 34);
-        assert_diagnostic_range(&file_content, &diagnostics[2], 11, 15, 22);
-        assert_diagnostic_range(&file_content, &diagnostics[3], 15, 11, 18);
+        assert_diagnostic_range(code, get_form_diags[0], 2, 14, 27);
+        assert_diagnostic_range(code, get_form_diags[1], 6, 21, 34);
+        assert_diagnostic_range(code, get_form_diags[2], 11, 15, 22);
+        assert_diagnostic_range(code, get_form_diags[3], 15, 11, 18);
     }
 }

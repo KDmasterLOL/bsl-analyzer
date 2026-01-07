@@ -430,6 +430,16 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
         }
 
+        // Check for deprecated GetForm/ПолучитьФорму method
+        if is_get_form_method(&name) {
+            // Emit GetFormMethod diagnostic
+            // Range is just the method name (IDENT token), not the whole call
+            ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
+                method_name: name.clone(),
+                range: actual_callee.text_range(),
+            });
+        }
+
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
@@ -464,6 +474,15 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 // Range is just the method name token, not the whole call
                 ctx.diagnostics
                     .push(BodyDiagnostic::FormDataToValue { range: method_token.text_range() });
+            }
+
+            // Check for deprecated GetForm/ПолучитьФорму method (qualified calls)
+            if is_get_form_method(method_name) {
+                // Range is just the method name token, not the whole call
+                ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
+                    method_name: method_name.to_string(),
+                    range: method_token.text_range(),
+                });
             }
         }
     }
@@ -1224,4 +1243,13 @@ fn is_file_system_method(name: &str) -> bool {
 fn is_form_data_to_value_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "данныеформывзначение" | "formdatatovalue")
+}
+
+/// Check if method name is GetForm.
+///
+/// GetForm / ПолучитьФорму is a deprecated method that returns managed form objects.
+/// Should be replaced with OpenForm / ОткрытьФорму.
+fn is_get_form_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "получитьформу" | "getform")
 }

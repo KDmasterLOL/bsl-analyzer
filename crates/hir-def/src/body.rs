@@ -401,6 +401,12 @@ pub enum BodyDiagnostic {
     /// Attachable methods (starting with "Подключаемый_"/"Attachable_") are excluded.
     FunctionReturnsSamePrimitive { range: TextRange },
 
+    /// Usage of deprecated ПолучитьФорму() / GetForm() method.
+    /// Detected when calling GetForm/ПолучитьФорму method (case-insensitive).
+    /// This is an error-prone approach that returns managed form objects (deprecated).
+    /// Should be replaced with ОткрытьФорму() / OpenForm().
+    GetFormMethod { method_name: String, range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -460,6 +466,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::FunctionNameStartsWithGet { range, .. } => *range,
             BodyDiagnostic::FunctionOutParameter { range, .. } => *range,
             BodyDiagnostic::FunctionReturnsSamePrimitive { range } => *range,
+            BodyDiagnostic::GetFormMethod { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

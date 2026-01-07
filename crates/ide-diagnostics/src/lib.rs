@@ -733,8 +733,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
     // MIGRATED TO HIR: FormDataToValue - now collected during lowering (lower_call_expr)
     // Detects calls to ДанныеФормыВЗначение/FormDataToValue in methods WITHOUT БезКонтекста annotation
+    // MIGRATED TO HIR: FormDataToValue - now collected during lowering (lower_call_expr)
     // result.extend(run_diagnostic("FormDataToValue", ctx, handlers::form_data_to_value::check));
-    result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
+
+    // MIGRATED TO HIR: GetFormMethod - now collected during lowering (lower_call_expr)
+    // result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
     result.extend(run_diagnostic(
         "GlobalContextMethodCollision8312",
         ctx,
@@ -1088,6 +1091,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::FormDataToValue { range } => {
             handlers::form_data_to_value::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::GetFormMethod { method_name, range } => {
+            handlers::get_form_method::from_hir(method_name, *range, ctx)
         }
         BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
             handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
