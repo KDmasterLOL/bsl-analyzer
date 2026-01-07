@@ -201,6 +201,131 @@ pub fn module_metadata_query<'db>(
     Arc::new(hir_def::ModuleMetadata { module_type, execution_context, common_module, mdo: None })
 }
 
+/// Get all SDBL queries in a file with their ExprId in BSL HIR.
+///
+/// This Salsa tracked query extracts SDBL queries from already-lowered BSL HIR bodies.
+/// No separate AST traversal needed - reuses module_bodies query!
+///
+/// ## Salsa caching
+/// - LRU: 128 (lightweight extraction from module bodies)
+/// - Invalidation: Automatic when module_bodies changes
+/// - Sorted: Results sorted by source position for deterministic output
+///
+/// ## Dependencies tracked by Salsa
+/// - module_bodies (via DefDatabase)
+/// - Automatically invalidates when file content changes
+///
+/// ## Performance
+/// - First call: ~1-5ms (iterates HIR bodies to find SDBL exprs)
+/// - Cached: < 1ms
+/// - Memory: ~100 bytes per SDBL query (ExprId + SdblQueryInfo)
+///
+/// ## Returns
+/// Vec of (ExprId, SdblQueryInfo) sorted by position in source file
+#[salsa::tracked(lru = 128)]
+pub fn all_sdbl_in_file_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+    let _span = tracing::info_span!("all_sdbl_in_file", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+
+    // Get module bodies (Salsa dependency tracked automatically)
+    let module_bodies = db.module_bodies(module_id);
+    let mut result = Vec::new();
+
+    // Collect from all method bodies (procedures and functions)
+    for (_local_id, body) in module_bodies.iter_bodies() {
+        for (expr_id, query_info) in body.sdbl_exprs() {
+            result.push((*expr_id, query_info.clone()));
+        }
+    }
+
+    // Collect from module-level code (statements outside methods)
+    if let Some(module_code) = module_bodies.module_code() {
+        for (expr_id, query_info) in module_code.sdbl_exprs() {
+            result.push((*expr_id, query_info.clone()));
+        }
+    }
+
+    // Sort by position in file for deterministic output
+    result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
+
+    tracing::debug!(count = result.len(), "Collected SDBL from HIR");
+    Arc::new(result)
+}
+
+/// Get SDBL HIR for all queries in a file.
+///
+/// This Salsa tracked query performs SDBL lowering to HIR with metadata-based type inference.
+/// Depends on all_sdbl_in_file_query and load_configuration for automatic dependency tracking.
+///
+/// ## Salsa caching
+/// - LRU: 64 (heavy SDBL HIR lowering operation)
+/// - Invalidation: Automatic when file content or configuration changes
+/// - Dependencies: all_sdbl_in_file, load_configuration
+///
+/// ## Performance
+/// - First call: ~10-50ms (SDBL parsing + lowering + type inference)
+/// - Cached: < 1ms
+/// - Memory: ~1-5 KB per SDBL query (depends on query complexity)
+///
+/// ## Semantic analysis performed
+/// - Type inference from metadata (table types, field types)
+/// - Name resolution (tables, fields, aliases)
+/// - Semantic diagnostics (unknown tables, type mismatches, etc.)
+///
+/// ## Returns
+/// Vec of (ExprId, Arc<SdblHir>) - one entry per successfully parsed SDBL query
+#[salsa::tracked(lru = 64)]
+pub fn sdbl_hir_in_file_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> SdblHirEntries {
+    let _span = tracing::info_span!("sdbl_hir_in_file", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+
+    // Get SDBL queries from BSL HIR (Salsa dependency tracked)
+    let sdbl_queries = all_sdbl_in_file_query(db, file_id_input);
+
+    // Try to load configuration for metadata-based type inference
+    let configuration = get_file_path_for_sdbl(db, file_id).and_then(|file_path| {
+        find_configuration_root_for_sdbl(db, &file_path).map(|config_root| {
+            let config_path_str = config_root.to_string_lossy().to_string();
+            let path_input = metadata::ConfigurationPathInput::new(db, config_path_str);
+            // Salsa dependency tracked automatically!
+            metadata::load_configuration(db, path_input)
+        })
+    });
+
+    // Lower each SDBL query to HIR
+    let config_ref = configuration.as_deref();
+    let mut result = Vec::with_capacity(sdbl_queries.len());
+    for (expr_id, query_info) in sdbl_queries.iter() {
+        // Only lower if we have a parsed AST
+        if let Some(ref sdbl_ast) = query_info.query_ast {
+            let sdbl_hir = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+            result.push((*expr_id, Arc::new(sdbl_hir)));
+        }
+    }
+
+    tracing::debug!(count = result.len(), "Lowered SDBL to HIR");
+    Arc::new(result)
+}
+
+/// Helper: Get file path for SDBL HIR loading.
+fn get_file_path_for_sdbl(db: &dyn RootDatabase, file_id: FileId) -> Option<PathBuf> {
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.get_file_path(file_id)
+}
+
+/// Helper: Find configuration root for SDBL HIR loading.
+fn find_configuration_root_for_sdbl(db: &dyn RootDatabase, file_path: &Path) -> Option<PathBuf> {
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.find_configuration_root(file_path)
+}
+
 /// Helper: Get file path for metadata loading.
 ///
 /// This function provides VFS access for the Salsa query.
@@ -463,71 +588,15 @@ impl RootDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
     ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
-        let _span = tracing::info_span!("all_sdbl_in_file", ?file_id).entered();
-
-        let module_id = ModuleId::new(file_id);
-        let module_bodies = self.module_bodies(module_id);
-        let mut result = Vec::new();
-
-        // Collect from all method bodies (procedures and functions)
-        for (_local_id, body) in module_bodies.iter_bodies() {
-            for (expr_id, query_info) in body.sdbl_exprs() {
-                result.push((*expr_id, query_info.clone()));
-            }
-        }
-
-        // Collect from module-level code (statements outside methods)
-        if let Some(module_code) = module_bodies.module_code() {
-            for (expr_id, query_info) in module_code.sdbl_exprs() {
-                result.push((*expr_id, query_info.clone()));
-            }
-        }
-
-        // Sort by position in file (bsl_literal_range start)
-        // This ensures diagnostics are returned in source order, which tests expect
-        result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
-
-        tracing::debug!(count = result.len(), "Collected SDBL from HIR");
-        Arc::new(result)
+        // Call Salsa tracked query (caching handled by Salsa)
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        all_sdbl_in_file_query(self, file_id_input)
     }
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries {
-        // Check cache first
-        if let Some(cached) = self.sdbl_hir_cache.get(&file_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("sdbl_hir_in_file", ?file_id).entered();
-
-        // Get SDBL queries from BSL HIR
-        let sdbl_queries = self.all_sdbl_in_file(file_id);
-
-        // Try to load configuration for metadata-based type inference
-        let configuration = self.get_file_path(file_id).and_then(|file_path| {
-            self.find_configuration_root(&file_path).map(|config_root| {
-                let config_path_str = config_root.to_string_lossy().to_string();
-                let path_input = metadata::ConfigurationPathInput::new(self, config_path_str);
-                metadata::load_configuration(self, path_input)
-            })
-        });
-
-        // Lower each SDBL query to HIR
-        let config_ref = configuration.as_deref();
-        let mut result = Vec::with_capacity(sdbl_queries.len());
-        for (expr_id, query_info) in sdbl_queries.iter() {
-            // Only lower if we have a parsed AST
-            if let Some(ref sdbl_ast) = query_info.query_ast {
-                let sdbl_hir = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
-                result.push((*expr_id, Arc::new(sdbl_hir)));
-            }
-        }
-
-        tracing::debug!(count = result.len(), "Lowered SDBL to HIR");
-        let result = Arc::new(result);
-
-        // Cache the result
-        self.sdbl_hir_cache.insert(file_id, result.clone());
-        result
+        // Call Salsa tracked query (caching handled by Salsa)
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        sdbl_hir_in_file_query(self, file_id_input)
     }
 
     fn reaching_definitions(
