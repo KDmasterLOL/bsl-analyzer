@@ -50,6 +50,7 @@ pub struct SymbolInfo {
 ///
 /// This database extends SourceDatabase, RootQueryDb, DefDatabase, and MetadataDb,
 /// providing full HIR functionality and metadata support with caching.
+#[salsa::db]
 pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::MetadataDb {
     /// Get all SDBL queries in a file with their ExprId in BSL HIR.
     ///
@@ -109,6 +110,118 @@ pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::M
         &self,
         method_id: hir_def::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+
+    /// Downcast to `Any` for accessing implementation-specific methods.
+    ///
+    /// Used by helper functions to access VFS and file system operations
+    /// that are not part of the trait interface.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Load metadata for a module (type and execution context).
+///
+/// This Salsa tracked query loads metadata from 1C Configuration if available.
+/// Used by module_bodies_query to attach metadata and by metadata-based diagnostics.
+///
+/// ## Salsa caching
+/// - LRU: 128 (metadata loading can be I/O intensive)
+/// - Invalidation: Automatic when file content or configuration changes
+/// - Shared: load_configuration() is cached separately (LRU=16)
+///
+/// ## Dependencies tracked by Salsa
+/// - File content (implicit via file_id)
+/// - Configuration (via load_configuration query)
+/// - VFS file path resolution
+///
+/// ## Performance
+/// - First load: ~50-100ms (file path + configuration loading)
+/// - Cached: < 1ms
+/// - Configuration is shared across all modules in same project
+#[salsa::tracked(lru = 128)]
+pub fn module_metadata_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<hir_def::ModuleMetadata> {
+    let _span = tracing::info_span!("module_metadata", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+
+    // Get file path using VFS access
+    let file_path = match get_file_path_for_metadata(db, file_id) {
+        Some(path) => path,
+        None => {
+            tracing::debug!("Could not determine file path for metadata");
+            return Arc::new(hir_def::ModuleMetadata {
+                module_type: bsl_metadata::ModuleType::CommonModule,
+                execution_context: None,
+                common_module: None,
+                mdo: None,
+            });
+        }
+    };
+
+    // Determine module type from file URI
+    let module_type = {
+        let uri = file_path.to_string_lossy().to_string();
+        metadata::get_module_type_from_uri(&uri).unwrap_or(bsl_metadata::ModuleType::CommonModule)
+    };
+
+    // Load metadata if this is a CommonModule
+    let (execution_context, common_module) =
+        if matches!(module_type, bsl_metadata::ModuleType::CommonModule) {
+            // Find configuration root by searching for Configuration.xml
+            match find_configuration_root_for_metadata(db, &file_path) {
+                Some(config_root) => {
+                    let config_path_str = config_root.to_string_lossy().to_string();
+                    tracing::debug!(?config_path_str, "Loading configuration for metadata");
+
+                    // Load configuration via Salsa query (already tracked!)
+                    let path_input = metadata::ConfigurationPathInput::new(db, config_path_str);
+                    let configuration = metadata::load_configuration(db, path_input);
+
+                    // Find CommonModule for this file
+                    if let Some(common_module) =
+                        find_common_module_by_uri(&configuration, &file_path)
+                    {
+                        let execution_context = hir_def::compute_execution_context(&common_module);
+                        (Some(execution_context), Some(Arc::new(common_module)))
+                    } else {
+                        tracing::debug!("CommonModule not found in configuration");
+                        (None, None)
+                    }
+                }
+                None => {
+                    tracing::debug!("Configuration root not found");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+    Arc::new(hir_def::ModuleMetadata { module_type, execution_context, common_module, mdo: None })
+}
+
+/// Helper: Get file path for metadata loading.
+///
+/// This function provides VFS access for the Salsa query.
+/// It downcasts the database to RootDatabaseImpl to access file path resolution.
+fn get_file_path_for_metadata(db: &dyn RootDatabase, file_id: FileId) -> Option<PathBuf> {
+    // Downcast to concrete type to access get_file_path method
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.get_file_path(file_id)
+}
+
+/// Helper: Find configuration root for metadata loading.
+///
+/// This function provides file system access for the Salsa query.
+/// It downcasts the database to RootDatabaseImpl to access configuration search.
+fn find_configuration_root_for_metadata(
+    db: &dyn RootDatabase,
+    file_path: &Path,
+) -> Option<PathBuf> {
+    // Downcast to concrete type to access find_configuration_root method
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.find_configuration_root(file_path)
 }
 
 /// Default implementation of RootDatabase with Salsa integration.
@@ -125,11 +238,10 @@ pub struct RootDatabaseImpl {
     files: Files,
 
     /// Manual HIR caches (TODO: Migrate remaining queries to Salsa)
-    /// Migrated to Salsa: item_tree, region_tree, conditional_tree, module_data, symbol_tree, infer_types
-    /// Remaining manual: module_bodies, module_metadata, sdbl_hir
+    /// Migrated to Salsa: item_tree, region_tree, conditional_tree, module_data, symbol_tree,
+    ///                    infer_types, module_bodies, module_metadata
+    /// Remaining manual: sdbl_hir
     module_bodies_cache: Arc<DashMap<ModuleId, Arc<ModuleBodies>, BuildHasherDefault<FxHasher>>>,
-    module_metadata_cache:
-        Arc<DashMap<ModuleId, Arc<hir_def::ModuleMetadata>, BuildHasherDefault<FxHasher>>>,
     sdbl_hir_cache: Arc<DashMap<FileId, SdblHirEntries, BuildHasherDefault<FxHasher>>>,
     #[allow(dead_code)] // TODO: Used when reaching_definitions query is re-enabled
     reaching_defs_cache: Arc<
@@ -154,7 +266,6 @@ impl RootDatabaseImpl {
             storage: salsa::Storage::default(),
             files: Files::new(),
             module_bodies_cache: Arc::new(DashMap::default()),
-            module_metadata_cache: Arc::new(DashMap::default()),
             sdbl_hir_cache: Arc::new(DashMap::default()),
             reaching_defs_cache: Arc::new(DashMap::default()),
         }
@@ -218,7 +329,7 @@ impl RootDatabaseImpl {
         self.sdbl_hir_cache.remove(&file_id);
         let module_id = ModuleId::new(file_id);
         self.module_bodies_cache.remove(&module_id);
-        self.module_metadata_cache.remove(&module_id);
+        // module_metadata: Salsa handles invalidation automatically
     }
 }
 
@@ -340,82 +451,13 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir_def::ModuleMetadata> {
-        // Check cache first
-        if let Some(cached) = self.module_metadata_cache.get(&module_id) {
-            return cached.value().clone();
-        }
-
-        let _span = tracing::info_span!("module_metadata", ?module_id).entered();
-
-        // Get file path
-        let file_path = match self.get_file_path(module_id.file_id) {
-            Some(path) => path,
-            None => {
-                tracing::debug!("Could not determine file path for metadata");
-                return Arc::new(hir_def::ModuleMetadata {
-                    module_type: bsl_metadata::ModuleType::CommonModule,
-                    execution_context: None,
-                    common_module: None,
-                    mdo: None,
-                });
-            }
-        };
-
-        // Determine module type from file URI
-        let module_type = {
-            let uri = file_path.to_string_lossy().to_string();
-            metadata::get_module_type_from_uri(&uri)
-                .unwrap_or(bsl_metadata::ModuleType::CommonModule)
-        };
-
-        // Load metadata if this is a CommonModule
-        let (execution_context, common_module) =
-            if matches!(module_type, bsl_metadata::ModuleType::CommonModule) {
-                // Find configuration root by searching for Configuration.xml
-                match self.find_configuration_root(&file_path) {
-                    Some(config_root) => {
-                        let config_path_str = config_root.to_string_lossy().to_string();
-                        tracing::debug!(?config_path_str, "Loading configuration for metadata");
-
-                        // Load configuration via Salsa query
-                        let path_input =
-                            metadata::ConfigurationPathInput::new(self, config_path_str);
-                        let configuration = metadata::load_configuration(self, path_input);
-
-                        // Find CommonModule for this file
-                        if let Some(common_module) =
-                            find_common_module_by_uri(&configuration, &file_path)
-                        {
-                            let execution_context =
-                                hir_def::compute_execution_context(&common_module);
-                            (Some(execution_context), Some(Arc::new(common_module)))
-                        } else {
-                            tracing::debug!("CommonModule not found in configuration");
-                            (None, None)
-                        }
-                    }
-                    None => {
-                        tracing::debug!("Configuration root not found");
-                        (None, None)
-                    }
-                }
-            } else {
-                (None, None)
-            };
-
-        let metadata = Arc::new(hir_def::ModuleMetadata {
-            module_type,
-            execution_context,
-            common_module,
-            mdo: None,
-        });
-
-        // Cache the result
-        self.module_metadata_cache.insert(module_id, metadata.clone());
-        metadata
+        // Call Salsa tracked query (caching handled by Salsa)
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        module_metadata_query(self, file_id_input)
     }
 }
 
+#[salsa::db]
 impl RootDatabase for RootDatabaseImpl {
     fn all_sdbl_in_file(
         &self,
@@ -541,6 +583,10 @@ impl RootDatabase for RootDatabaseImpl {
 
         Some(result)
         */
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
