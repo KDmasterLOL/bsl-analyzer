@@ -738,11 +738,13 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // MIGRATED TO HIR: GetFormMethod - now collected during lowering (lower_call_expr)
     // result.extend(run_diagnostic("GetFormMethod", ctx, handlers::get_form_method::check));
-    result.extend(run_diagnostic(
-        "GlobalContextMethodCollision8312",
-        ctx,
-        handlers::global_context_method_collision8312::check,
-    ));
+
+    // MIGRATED TO HIR: GlobalContextMethodCollision8312 - now collected during lowering (lower_method_with_externals)
+    // result.extend(run_diagnostic(
+    //     "GlobalContextMethodCollision8312",
+    //     ctx,
+    //     handlers::global_context_method_collision8312::check,
+    // ));
     // NOTE: ExportVariables migrated to HIR-based collection
     // Uses module_vars from module_bodies() and is collected in collect_metadata_diagnostics()
     // result.extend(run_diagnostic("ExportVariables", ctx, handlers::export_variables::check));
@@ -1094,6 +1096,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::GetFormMethod { method_name, range } => {
             handlers::get_form_method::from_hir(method_name, *range, ctx)
+        }
+        BodyDiagnostic::GlobalContextMethodCollision8312 { method_name, range } => {
+            handlers::global_context_method_collision8312::from_hir(method_name, *range, ctx)
         }
         BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
             handlers::function_name_starts_with_get::from_hir(name, *range, ctx)

@@ -424,6 +424,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::GetFormMethod { method_name, range } => {
             handlers::get_form_method::from_hir(method_name, *range, ctx)
         }
+        BodyDiagnostic::GlobalContextMethodCollision8312 { method_name, range } => {
+            handlers::global_context_method_collision8312::from_hir(method_name, *range, ctx)
+        }
         BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
             handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
         }

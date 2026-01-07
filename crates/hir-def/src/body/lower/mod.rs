@@ -306,6 +306,40 @@ fn is_client_only_method(method_node: &SyntaxNode) -> bool {
         .any(|token| token.kind() == SyntaxKind::ANN_AT_CLIENT)
 }
 
+/// Check if method name collides with platform 8.3.12 global context methods.
+///
+/// Platform 8.3.12 added bitwise operation methods to global context.
+/// User-defined methods with these names will conflict.
+/// List matches GlobalContextMethodCollision8312Diagnostic.java.
+fn is_global_context_collision_8312(name: &str) -> bool {
+    const COLLISION_METHODS: &[&str] = &[
+        // Russian variants
+        "проверитьбит",
+        "проверитьпобитовоймаске",
+        "установитьбит",
+        "побитовоеи",
+        "побитовоеили",
+        "побитовоене",
+        "побитовоеине",
+        "побитовоеисключительноеили",
+        "побитовыйсдвигвлево",
+        "побитовыйсдвигвправо",
+        // English variants
+        "checkbit",
+        "checkbybitmask",
+        "setbit",
+        "bitwiseand",
+        "bitwiseor",
+        "bitwisenot",
+        "bitwiseandnot",
+        "bitwisexor",
+        "bitwiseshiftleft",
+        "bitwiseshiftright",
+    ];
+
+    COLLISION_METHODS.contains(&name.to_lowercase().as_str())
+}
+
 /// Check if method has "БезКонтекста" (NoContext) annotation.
 ///
 /// For FormDataToValue diagnostic - call is allowed in БезКонтекста methods.
@@ -441,6 +475,30 @@ pub fn lower_method_with_externals(
             if name_text.to_lowercase().starts_with("получить") {
                 ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
                     name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+
+            // Check for GlobalContextMethodCollision8312 diagnostic
+            // Applies to both functions and procedures
+            if is_global_context_collision_8312(name_text) {
+                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
+                    method_name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+        }
+    } else {
+        // For procedures, only check GlobalContextMethodCollision8312
+        if let Some(name_token) = method_node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        {
+            let name_text = name_token.text();
+            if is_global_context_collision_8312(name_text) {
+                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
+                    method_name: name_text.to_string(),
                     range: name_token.text_range(),
                 });
             }

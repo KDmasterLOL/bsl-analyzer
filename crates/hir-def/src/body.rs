@@ -407,6 +407,12 @@ pub enum BodyDiagnostic {
     /// Should be replaced with ОткрытьФорму() / OpenForm().
     GetFormMethod { method_name: String, range: TextRange },
 
+    /// Method name collides with platform 8.3.12 global context method.
+    /// Detected when function name matches bitwise operation methods added in 8.3.12:
+    /// ПроверитьБит/CheckBit, ПобитовоеИ/BitwiseAnd, etc. (20 methods total).
+    /// User-defined methods with these names will conflict with platform methods.
+    GlobalContextMethodCollision8312 { method_name: String, range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -467,6 +473,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::FunctionOutParameter { range, .. } => *range,
             BodyDiagnostic::FunctionReturnsSamePrimitive { range } => *range,
             BodyDiagnostic::GetFormMethod { range, .. } => *range,
+            BodyDiagnostic::GlobalContextMethodCollision8312 { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

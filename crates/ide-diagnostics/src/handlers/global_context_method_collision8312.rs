@@ -52,143 +52,37 @@
 //! - Source: https://its.1c.ru/db/metod8dev#content:5293:hdoc:pereimenovaniya_metodov_i_svojstv
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode};
+use ide_db::TextRange;
 
-/// List of platform 8.3.12 global context methods that can conflict with user-defined methods.
-/// Both Russian and English variants are included.
+/// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// Reference: GlobalContextMethodCollision8312Diagnostic.java, line 46-49
-const COLLISION_METHODS: &[&str] = &[
-    // Russian variants
-    "проверитьбит",
-    "проверитьпобитовоймаске",
-    "установитьбит",
-    "побитовоеи",
-    "побитовоеили",
-    "побитовоене",
-    "побитовоеине",
-    "побитовоеисключительноеили",
-    "побитовыйсдвигвлево",
-    "побитовыйсдвигвправо",
-    // English variants
-    "checkbit",
-    "checkbybitmask",
-    "setbit",
-    "bitwiseand",
-    "bitwiseor",
-    "bitwisenot",
-    "bitwiseandnot",
-    "bitwisexor",
-    "bitwiseshiftleft",
-    "bitwiseshiftright",
-];
-
-/// Runs the GlobalContextMethodCollision8312 diagnostic.
-///
-/// Complexity: O(n) where n is the number of AST nodes.
-/// Only one pass through the syntax tree to find all function definitions.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Check if diagnostic is disabled
+/// Called from lib.rs dispatch when GlobalContextMethodCollision8312 diagnostic is emitted during lowering.
+pub fn from_hir(
+    method_name: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::GlobalContextMethodCollision8312) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    // O(n) complexity: single pass to find all function definitions
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::FUNCTION_DEF {
-            if let Some(diag) = check_function(&node) {
-                diagnostics.push(diag);
-            }
-        }
-    }
-
-    diagnostics
-}
-
-/// Check a single function for name collision with platform methods.
-///
-/// Returns Some(Diagnostic) if the function name matches a platform method.
-fn check_function(func_node: &SyntaxNode) -> Option<Diagnostic> {
-    // Get function name token (first IDENT before PARAM_LIST)
-    let name_token = func_node
-        .children_with_tokens()
-        .take_while(|el| !matches!(el.kind(), SyntaxKind::PARAM_LIST))
-        .filter_map(|el| el.into_token())
-        .filter(|tok| !tok.kind().is_trivia())
-        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
-
-    let name = name_token.text();
-    let name_lowercase = name.to_lowercase();
-
-    // Check if name matches any collision method (case-insensitive)
-    // This matches Java's CaseInsensitivePattern.matcher(method.getName()).matches()
-    if COLLISION_METHODS.contains(&name_lowercase.as_str()) {
-        let range = name_token.text_range();
-
-        return Some(Diagnostic {
-            code: DiagnosticCode::GlobalContextMethodCollision8312,
-            message: format!(
-                "Имя метода \"{}\" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12",
-                name
-            ),
-            severity: Severity::Blocker,
-            range,
-            tags: vec![],
-            fixes: vec![],
-        });
-    }
-
-    None
+    Some(Diagnostic {
+        code: DiagnosticCode::GlobalContextMethodCollision8312,
+        message: format!(
+            "Имя метода \"{}\" конфликтует с методом глобального контекста, появившимся в версии платформы 8.3.12",
+            method_name
+        ),
+        severity: Severity::Blocker,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig};
-    use ide_db::RootDatabase;
-    use std::sync::Arc;
-
-    /// Helper to run diagnostic on test code
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::SourceDatabase;
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use crate::test_utils::*;
+    use crate::{DiagnosticCode, Severity};
 
     /// Integration test matching Java test structure.
     ///
@@ -203,10 +97,14 @@ mod tests {
             "global_context_method_collision8312/GlobalContextMethodCollision8312Diagnostic.bsl"
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
         // Java test expects 20 diagnostics
-        assert_eq!(diagnostics.len(), 20, "Expected 20 diagnostics");
+        assert_eq!(collision_diags.len(), 20, "Expected 20 diagnostics");
 
         // Verify all diagnostics match Java ranges exactly
         // Format: line, start_col, end_col
@@ -235,18 +133,12 @@ mod tests {
 
         for (i, (line, start_col, end_col)) in expected_ranges.iter().enumerate() {
             assert_eq!(
-                diagnostics[i].code,
-                DiagnosticCode::GlobalContextMethodCollision8312,
-                "Diagnostic {} should have correct code",
-                i
-            );
-            assert_eq!(
-                diagnostics[i].severity,
+                collision_diags[i].severity,
                 Severity::Blocker,
                 "Diagnostic {} should have Blocker severity",
                 i
             );
-            assert_diagnostic_range(&file_content, &diagnostics[i], *line, *start_col, *end_col);
+            assert_diagnostic_range(code, collision_diags[i], *line, *start_col, *end_col);
         }
     }
 
@@ -262,10 +154,14 @@ mod tests {
 Функция БИТУстановитьБит()
 КонецФункции"#;
 
-        let (diagnostics, _file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
         // These methods have prefixes/suffixes so they don't conflict
-        assert_eq!(diagnostics.len(), 0, "Methods with prefix/suffix should not trigger");
+        assert_eq!(collision_diags.len(), 0, "Methods with prefix/suffix should not trigger");
     }
 
     /// Test case-insensitive matching (Russian uppercase)
@@ -274,10 +170,14 @@ mod tests {
         let code = r#"Функция ПРОВЕРИТЬБИТ()
 КонецФункции"#;
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 8, 20);
+        assert_eq!(collision_diags.len(), 1);
+        assert_diagnostic_range(code, collision_diags[0], 0, 8, 20);
     }
 
     /// Test case-insensitive matching (English mixed case)
@@ -286,10 +186,14 @@ mod tests {
         let code = r#"Function CheckBit()
 EndFunction"#;
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 9, 17);
+        assert_eq!(collision_diags.len(), 1);
+        assert_diagnostic_range(code, collision_diags[0], 0, 9, 17);
     }
 
     /// Test multiple conflicting functions
@@ -304,9 +208,13 @@ EndFunction"#;
 Функция ПобитовоеИ()
 КонецФункции"#;
 
-        let (diagnostics, _file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
-        assert_eq!(diagnostics.len(), 3, "Should detect all 3 collisions");
+        assert_eq!(collision_diags.len(), 3, "Should detect all 3 collisions");
     }
 
     /// Test non-conflicting function names
@@ -318,8 +226,12 @@ EndFunction"#;
 Функция ВычислитьСумму()
 КонецФункции"#;
 
-        let (diagnostics, _file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let collision_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
+            .collect();
 
-        assert_eq!(diagnostics.len(), 0, "Non-conflicting names should not trigger");
+        assert_eq!(collision_diags.len(), 0, "Non-conflicting names should not trigger");
     }
 }
