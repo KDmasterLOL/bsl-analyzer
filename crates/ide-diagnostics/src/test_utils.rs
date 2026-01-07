@@ -445,6 +445,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
             handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
         }
+        BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
+            handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)
+        }
     }
 }
 

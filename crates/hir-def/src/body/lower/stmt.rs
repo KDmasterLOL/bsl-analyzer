@@ -143,6 +143,78 @@ fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode
     }
 }
 
+/// Normalize condition text for comparison.
+///
+/// Matches Java behavior:
+/// - Remove whitespace (except inside string literals)
+/// - Convert to lowercase (except inside string literals)
+/// - String literals remain case-sensitive
+fn normalize_condition(condition: &str) -> String {
+    let mut result = String::new();
+    let mut in_string = false;
+
+    for ch in condition.chars() {
+        // Track string literal boundaries
+        if ch == '"' {
+            in_string = !in_string;
+            result.push(ch);
+            continue;
+        }
+
+        // Skip whitespace (unless inside string)
+        if ch.is_whitespace() && !in_string {
+            continue;
+        }
+
+        // Inside string: preserve case and all characters
+        if in_string {
+            result.push(ch);
+        } else {
+            // Outside string: convert to lowercase (case-insensitive identifiers)
+            result.push(ch.to_lowercase().next().unwrap_or(ch));
+        }
+    }
+
+    result
+}
+
+/// Check for duplicated conditions in if/elsif chain.
+///
+/// Detects when an elsif condition is identical to a previous if/elsif condition.
+/// Reports diagnostics on duplicate occurrences (not the first one).
+fn check_duplicated_conditions(ctx: &mut LoweringCtx, condition_nodes: &[SyntaxNode]) {
+    if condition_nodes.len() < 2 {
+        return; // Need at least 2 conditions to compare
+    }
+
+    use std::collections::HashMap;
+
+    // Map: normalized condition text -> list of (index, node)
+    let mut condition_map: HashMap<String, Vec<(usize, &SyntaxNode)>> = HashMap::new();
+
+    // Group conditions by normalized text
+    for (i, node) in condition_nodes.iter().enumerate() {
+        let text = node.text().to_string();
+        let normalized = normalize_condition(&text);
+        condition_map.entry(normalized).or_default().push((i, node));
+    }
+
+    // Report diagnostics for duplicated conditions
+    for (_normalized_text, occurrences) in condition_map {
+        if occurrences.len() > 1 {
+            // Report diagnostic on each duplicate (not the first one)
+            // This matches Java behavior: first occurrence is the reference
+            for (_idx, node) in occurrences.iter().skip(1) {
+                let range = node.text_range();
+                ctx.emit(BodyDiagnostic::IfElseDuplicatedCondition {
+                    first_occurrence_index: occurrences[0].0,
+                    range,
+                });
+            }
+        }
+    }
+}
+
 /// Find the range for WHILE/DO header (from WHILE to DO keyword).
 fn find_while_do_range(while_stmt: &SyntaxNode) -> TextRange {
     let mut start = None;
@@ -579,6 +651,10 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
     let condition = lower_expr_node(ctx, &condition_node);
 
+    // Collect all condition nodes for duplicate condition detection
+    let mut condition_nodes: Vec<SyntaxNode> = Vec::new();
+    condition_nodes.push(condition_node.clone());
+
     // Collect all branch STMT_LIST nodes for duplicate detection
     let mut branch_nodes: Vec<SyntaxNode> = Vec::new();
 
@@ -604,6 +680,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         if let Some(cond_node) = elsif_children.next() {
             // Check elsif condition complexity
             check_condition_complexity(ctx, &cond_node);
+
+            // Collect elsif condition for duplicate detection
+            condition_nodes.push(cond_node.clone());
 
             let cond = lower_expr_node(ctx, &cond_node);
             let stmt_list_node = elsif_children.find(|n| n.kind() == SyntaxKind::STMT_LIST);
@@ -645,6 +724,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
     // Check for duplicated code blocks
     check_duplicated_code_blocks(ctx, &branch_nodes);
+
+    // Check for duplicated conditions
+    check_duplicated_conditions(ctx, &condition_nodes);
 
     Some(Stmt::If {
         condition,

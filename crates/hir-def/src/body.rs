@@ -425,6 +425,11 @@ pub enum BodyDiagnostic {
     /// Detected when if/elsif condition has more boolean operations (AND/OR) than maxComplexity.
     /// Complexity = number of boolean operations + 1 (default max: 3).
     IfConditionComplexity { complexity: usize, max_complexity: usize, range: TextRange },
+
+    /// Duplicated condition in if/elsif chain.
+    /// Detected when an elsif condition is identical to a previous if/elsif condition.
+    /// First occurrence index is 0-based (0 = if, 1+ = elsif).
+    IfElseDuplicatedCondition { first_occurrence_index: usize, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -482,6 +487,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
             BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
+            BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
         }
     }
 }

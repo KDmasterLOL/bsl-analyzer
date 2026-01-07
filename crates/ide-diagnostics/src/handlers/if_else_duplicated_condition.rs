@@ -28,172 +28,45 @@
 //! КонецЕсли;
 //! ```
 //!
-//! ## Source
+//! ## Implementation
+//!
+//! Migrated to HIR-based collection (rust-analyzer pattern).
+//!
 //! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedConditionDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_condition.rs
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use std::collections::HashMap;
-use syntax::{SyntaxKind, SyntaxNode};
+use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from lib.rs dispatch when IfElseDuplicatedCondition diagnostic is emitted during lowering.
+pub fn from_hir(
+    first_occurrence_index: usize,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::IfElseDuplicatedCondition) {
-        return Vec::new();
+        return None;
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::IF_STMT {
-            check_if_statement(&node, &mut diagnostics);
-        }
-    }
-
-    diagnostics
-}
-
-fn check_if_statement(if_stmt: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
-    let conditions = collect_conditions(if_stmt);
-
-    if conditions.len() < 2 {
-        return; // Need at least 2 conditions to compare
-    }
-
-    // Map: normalized condition text -> list of (index, original node)
-    let mut condition_map: HashMap<String, Vec<(usize, SyntaxNode)>> = HashMap::new();
-
-    // Group conditions by normalized text
-    for (i, (condition_node, condition_text)) in conditions.iter().enumerate() {
-        let normalized = normalize_condition(condition_text);
-        condition_map.entry(normalized).or_default().push((i, condition_node.clone()));
-    }
-
-    // Report diagnostics for duplicated conditions
-    for (_normalized_text, occurrences) in condition_map {
-        if occurrences.len() > 1 {
-            // Report diagnostic on each duplicate (not the first one)
-            // This matches Java behavior: first occurrence is the reference,
-            // subsequent ones are duplicates
-            for (_idx, node) in occurrences.iter().skip(1) {
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::IfElseDuplicatedCondition,
-                    message: format!(
-                        "Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции {})",
-                        occurrences[0].0 + 1
-                    ),
-                    severity: Severity::Major,
-                    range: node.text_range(),
-                    tags: vec![],
-                    fixes: vec![],
-                });
-            }
-        }
-    }
-}
-
-/// Collect all conditions (expressions) from if/elsif branches
-/// Returns: Vec of (condition_node, condition_text)
-fn collect_conditions(if_stmt: &SyntaxNode) -> Vec<(SyntaxNode, String)> {
-    let mut conditions = Vec::new();
-
-    // Structure: IF_STMT > [KW_IF, EXPR, KW_THEN, STMT_LIST, ELSIF_CLAUSE*, ELSE_CLAUSE?]
-
-    // First pass: collect the main if condition
-    for child in if_stmt.children() {
-        if child.kind() == SyntaxKind::EXPR {
-            conditions.push((child.clone(), child.text().to_string()));
-            break;
-        }
-    }
-
-    // Second pass: collect elsif conditions
-    for child in if_stmt.children() {
-        if child.kind() == SyntaxKind::ELSIF_CLAUSE {
-            // ELSIF_CLAUSE > [KW_ELSEIF, EXPR, KW_THEN, STMT_LIST]
-            for elsif_child in child.children() {
-                if elsif_child.kind() == SyntaxKind::EXPR {
-                    conditions.push((elsif_child.clone(), elsif_child.text().to_string()));
-                    break; // Only take first EXPR in each elsif
-                }
-            }
-        }
-    }
-
-    conditions
-}
-
-/// Normalize condition for comparison
-/// - Remove whitespace
-/// - Convert to lowercase for identifiers (case-insensitive variable names)
-/// - Keep string literals case-sensitive
-fn normalize_condition(condition: &str) -> String {
-    // For simplicity, we'll use a text-based normalization approach
-    // This matches the Java behavior via DiagnosticHelper.equalNodes()
-    // which is case-insensitive for tokens except STRING literals
-
-    let mut result = String::new();
-    let mut in_string = false;
-
-    for ch in condition.chars() {
-        // Track string literal boundaries
-        if ch == '"' {
-            in_string = !in_string;
-            result.push(ch);
-            continue;
-        }
-
-        // Skip whitespace (unless inside string)
-        if ch.is_whitespace() && !in_string {
-            continue;
-        }
-
-        // Inside string: preserve case and all characters
-        if in_string {
-            result.push(ch);
-        } else {
-            // Outside string: convert to lowercase (case-insensitive identifiers)
-            result.push(ch.to_lowercase().next().unwrap_or(ch));
-        }
-    }
-
-    result
+    Some(Diagnostic {
+        code: DiagnosticCode::IfElseDuplicatedCondition,
+        message: format!(
+            "Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции {})",
+            first_occurrence_index + 1
+        ),
+        severity: Severity::Major,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::range_to_line_col;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, fixture.files[&file_id].content.to_string())
-    }
+    use crate::test_utils::*;
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_simple_duplicate() {
@@ -209,8 +82,13 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for duplicate x = 1 condition");
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
+        assert_eq!(dupl_diags.len(), 1, "Expected 1 diagnostic for duplicate x = 1 condition");
     }
 
     #[test]
@@ -227,8 +105,13 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Should not report different conditions");
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
+        assert_eq!(dupl_diags.len(), 0, "Should not report different conditions");
     }
 
     #[test]
@@ -243,9 +126,14 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
         assert_eq!(
-            diagnostics.len(),
+            dupl_diags.len(),
             1,
             "Should detect п = 1 and П = 1 as identical (case-insensitive)"
         );
@@ -263,9 +151,14 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
         assert_eq!(
-            diagnostics.len(),
+            dupl_diags.len(),
             1,
             "Should detect conditions as identical despite whitespace differences"
         );
@@ -283,8 +176,13 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "String literals should be case-sensitive: 'Ё' != 'ё'");
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
+        assert_eq!(dupl_diags.len(), 0, "String literals should be case-sensitive: 'Ё' != 'ё'");
     }
 
     #[test]
@@ -299,8 +197,13 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Should detect identical string literal conditions");
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
+        assert_eq!(dupl_diags.len(), 1, "Should detect identical string literal conditions");
     }
 
     #[test]
@@ -319,11 +222,16 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+
         // Should find 2 diagnostics:
         // 1. Inner if: п = 2 duplicate
         // 2. Outer if: п = 1 duplicate
-        assert_eq!(diagnostics.len(), 2, "Should detect duplicates in both outer and inner if");
+        assert_eq!(dupl_diags.len(), 2, "Should detect duplicates in both outer and inner if");
     }
 
     #[test]
@@ -332,22 +240,23 @@ mod tests {
             "if_else_duplicated_condition/fixtures/IfElseDuplicatedConditionDiagnostic.bsl"
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
 
-        // Java version finds 4 diagnostics
-        let found_count = diagnostics.len();
-        eprintln!("Found {} diagnostics (Java expects 4)", found_count);
+        let found_count = dupl_diags.len();
 
         // Show which lines we found
-        let mut found_lines: Vec<u32> = diagnostics
+        let mut found_lines: Vec<u32> = dupl_diags
             .iter()
             .map(|d| {
-                let (line, _, _, _) = range_to_line_col(&file_content, d.range);
+                let (line, _, _, _) = range_to_line_col(code, d.range);
                 line
             })
             .collect();
         found_lines.sort();
-        eprintln!("Found on lines: {:?}", found_lines);
 
         // Expected diagnostics on duplicate conditions:
         // Lines 4, 6, 10 - duplicates of п = 1 (first group) -> 2 diagnostics (6, 10)
