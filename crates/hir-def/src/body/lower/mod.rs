@@ -318,10 +318,8 @@ pub fn lower_method_with_externals(
             ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
         }
 
-        // Check for empty body
-        if stmt_list.children().count() == 0 {
-            ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
-        }
+        // NOTE: Empty function/procedure bodies are NOT checked by EmptyCodeBlock diagnostic.
+        // They are handled by a separate diagnostic (if needed).
 
         // Check for code after async calls
         diagnostics::check_code_after_async_call(&mut ctx, &stmt_list);

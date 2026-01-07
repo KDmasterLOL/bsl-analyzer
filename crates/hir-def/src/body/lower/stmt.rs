@@ -24,6 +24,122 @@ use super::preproc::{
 };
 use super::LoweringCtx;
 
+/// Find the range for IF/THEN header (from IF to THEN keyword).
+fn find_if_then_range(if_stmt: &SyntaxNode) -> TextRange {
+    let mut start = None;
+    let mut end = None;
+
+    for token in if_stmt.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_IF) && start.is_none() {
+            start = Some(token.text_range().start());
+        }
+        if matches!(token.kind(), SyntaxKind::KW_THEN) && start.is_some() && end.is_none() {
+            end = Some(token.text_range().end());
+            break;
+        }
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) => TextRange::new(s, e),
+        _ => if_stmt.text_range(),
+    }
+}
+
+/// Find the range for ELSIF/THEN header (from ELSIF to THEN keyword).
+fn find_elsif_then_range(elsif_clause: &SyntaxNode) -> TextRange {
+    let mut start = None;
+    let mut end = None;
+
+    for token in elsif_clause.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_ELSIF) && start.is_none() {
+            start = Some(token.text_range().start());
+        }
+        if matches!(token.kind(), SyntaxKind::KW_THEN) && start.is_some() && end.is_none() {
+            end = Some(token.text_range().end());
+            break;
+        }
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) => TextRange::new(s, e),
+        _ => elsif_clause.text_range(),
+    }
+}
+
+/// Find the range for ELSE keyword.
+fn find_else_range(else_clause: &SyntaxNode) -> TextRange {
+    for token in else_clause.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_ELSE) {
+            return token.text_range();
+        }
+    }
+    else_clause.text_range()
+}
+
+/// Find the range for WHILE/DO header (from WHILE to DO keyword).
+fn find_while_do_range(while_stmt: &SyntaxNode) -> TextRange {
+    let mut start = None;
+    let mut end = None;
+
+    for token in while_stmt.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_WHILE) && start.is_none() {
+            start = Some(token.text_range().start());
+        }
+        if matches!(token.kind(), SyntaxKind::KW_DO) && start.is_some() && end.is_none() {
+            end = Some(token.text_range().end());
+            break;
+        }
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) => TextRange::new(s, e),
+        _ => while_stmt.text_range(),
+    }
+}
+
+/// Find the range for FOR/DO header (from FOR to DO keyword).
+fn find_for_do_range(for_stmt: &SyntaxNode) -> TextRange {
+    let mut start = None;
+    let mut end = None;
+
+    for token in for_stmt.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_FOR) && start.is_none() {
+            start = Some(token.text_range().start());
+        }
+        if matches!(token.kind(), SyntaxKind::KW_DO) && start.is_some() && end.is_none() {
+            end = Some(token.text_range().end());
+            break;
+        }
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) => TextRange::new(s, e),
+        _ => for_stmt.text_range(),
+    }
+}
+
+/// Find the range for FOREACH header (from FOR to DO keyword).
+/// ForEach uses "Для Каждого X Из Y Цикл" / "For Each X In Y Do"
+fn find_foreach_do_range(foreach_stmt: &SyntaxNode) -> TextRange {
+    let mut start = None;
+    let mut end = None;
+
+    for token in foreach_stmt.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if matches!(token.kind(), SyntaxKind::KW_FOR) && start.is_none() {
+            start = Some(token.text_range().start());
+        }
+        if matches!(token.kind(), SyntaxKind::KW_DO) && start.is_some() && end.is_none() {
+            end = Some(token.text_range().end());
+            break;
+        }
+    }
+
+    match (start, end) {
+        (Some(s), Some(e)) => TextRange::new(s, e),
+        _ => foreach_stmt.text_range(),
+    }
+}
+
 /// Lower parameter list.
 pub(crate) fn lower_params(ctx: &mut LoweringCtx, param_list: &SyntaxNode) -> Vec<BindingId> {
     let mut params = Vec::new();
@@ -371,10 +487,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let then_branch = then_stmt_list.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
     // Check for empty then branch
-    if then_branch.is_empty() {
-        if let Some(ref stmt_list) = then_stmt_list {
-            ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
-        }
+    if then_branch.is_empty() && then_stmt_list.is_some() {
+        let range = find_if_then_range(node);
+        ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
     }
 
     // Add then branch to branch_nodes for duplicate detection
@@ -392,10 +507,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             let body = stmt_list_node.as_ref().map(|n| lower_stmt_list(ctx, n)).unwrap_or_default();
 
             // Check for empty elsif branch
-            if body.is_empty() {
-                if let Some(ref stmt_list) = stmt_list_node {
-                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: stmt_list.text_range() });
-                }
+            if body.is_empty() && stmt_list_node.is_some() {
+                let range = find_elsif_then_range(&elsif);
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
 
             // Add elsif branch to branch_nodes for duplicate detection
@@ -415,7 +529,8 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
                 // Check for empty else branch
                 if stmts.is_empty() {
-                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                    let range = find_else_range(&else_clause);
+                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
                 }
 
                 // Add else branch to branch_nodes for duplicate detection
@@ -453,7 +568,8 @@ fn lower_while_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
             // Check for empty while body
             if stmts.is_empty() {
-                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                let range = find_while_do_range(node);
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
 
             stmts.into_boxed_slice()
@@ -510,7 +626,8 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
             // Check for empty for body
             if stmts.is_empty() {
-                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                let range = find_for_do_range(node);
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
 
             stmts.into_boxed_slice()
@@ -575,7 +692,8 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
 
             // Check for empty for-each body
             if stmts.is_empty() {
-                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
+                let range = find_foreach_do_range(node);
+                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range });
             }
 
             stmts.into_boxed_slice()
@@ -603,32 +721,17 @@ fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let body = node
         .children()
         .find(|n| n.kind() == SyntaxKind::STMT_LIST)
-        .map(|n| {
-            let stmts = lower_stmt_list(ctx, &n);
-
-            // Check for empty try body
-            if stmts.is_empty() {
-                ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
-            }
-
-            stmts.into_boxed_slice()
-        })
+        .map(|n| lower_stmt_list(ctx, &n).into_boxed_slice())
         .unwrap_or_default();
 
     let except = node
         .children()
         .find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
         .and_then(|except_clause| {
-            except_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| {
-                let stmts = lower_stmt_list(ctx, &n);
-
-                // Check for empty except body
-                if stmts.is_empty() {
-                    ctx.emit(BodyDiagnostic::EmptyCodeBlock { range: n.text_range() });
-                }
-
-                stmts.into_boxed_slice()
-            })
+            except_clause
+                .children()
+                .find(|n| n.kind() == SyntaxKind::STMT_LIST)
+                .map(|n| lower_stmt_list(ctx, &n).into_boxed_slice())
         })
         .unwrap_or_default();
 
