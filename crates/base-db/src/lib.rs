@@ -8,7 +8,6 @@
 //! will be completed in a later iteration.
 
 use std::hash::BuildHasherDefault;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -17,17 +16,16 @@ use vfs::{FileId, VfsPath};
 
 mod change;
 mod input;
+mod queries;
 
 pub use change::FileChange;
 pub use input::{
     FileIdInput, FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegionInfo {
-    pub name: String,
-    pub range: syntax::TextRange,
-}
+pub use queries::{
+    method_regions_query, module_level_regions_query, parse_query, resolve_vfs_path_query,
+    RegionInfo,
+};
 
 /// The main Salsa database trait for source file operations.
 ///
@@ -62,226 +60,57 @@ pub trait SourceDatabase: salsa::Database {
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 }
 
-/// Salsa tracked query for parsing.
+/// Base-level queries for BSL parsing and region extraction.
 ///
-/// This query automatically depends on the FileTextInput and is cached with LRU (512 entries).
-/// When file text changes, Salsa automatically invalidates this query.
-#[salsa::tracked(lru = 512)]
-pub fn parse_query(
-    db: &dyn salsa::Database,
-    input: FileTextInput,
-) -> syntax::Parse<syntax::SyntaxNode> {
-    let _span = tracing::info_span!("parse").entered();
-
-    let text = input.text(db);
-    parser::parse(&text)
-}
-
-/// Map from method source ranges to parent API region names.
+/// # Query Group Organization
 ///
-/// This query identifies all methods (procedures/functions) that are inside
-/// API regions (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal)
-/// and returns a mapping from their TextRange to the root region name.
+/// This trait defines the foundation layer of BSL analysis queries.
+/// All queries are Salsa-cached and automatically invalidated when file content changes.
 ///
-/// # Performance
-/// - LRU cache: 256 files (region analysis is inexpensive)
-/// - Depends on: parse_query (automatic invalidation via Salsa)
-/// - Recomputed only when file content changes
-/// - Shared by region-based diagnostics (no redundant tree walking)
+/// **Dependencies:** SourceDatabase (file inputs)
+/// **Used by:** DefDatabase (HIR lowering)
 ///
-/// # Root Region Lookup
-/// For nested regions, always returns the TOP-LEVEL (root) region name,
-/// not the immediate parent. This matches bsl-language-server behavior.
+/// # Query Categories
 ///
-/// Example:
-/// ```bsl
-/// #Region Public
-///     #Region Internal
-///         Procedure MyProc()  // Maps to "Public" (root), not "Internal"
-///         EndProcedure
-///     #EndRegion
-/// #EndRegion
+/// ## Parsing (Core)
+/// - [`parse`](Self::parse) - BSL file → AST (LRU: 512)
+///
+/// ## Region Analysis
+/// - [`method_regions`](Self::method_regions) - Methods in API regions (LRU: 256)
+/// - [`module_level_regions`](Self::module_level_regions) - All top-level regions (LRU: 256)
+///
+/// # Implementation Pattern
+///
+/// Implementations delegate to tracked query functions in the `queries` module:
+///
+/// ```ignore
+/// impl RootQueryDb for MyDatabase {
+///     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
+///         let input = self.file_text_input(file_id);
+///         parse_query(self, input)
+///     }
+/// }
 /// ```
-#[salsa::tracked(lru = 256)]
-pub fn method_regions(
-    db: &dyn salsa::Database,
-    input: FileTextInput,
-) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
-    let _span = tracing::info_span!("method_regions").entered();
-
-    let parse = parse_query(db, input);
-    let root = parse.syntax_node();
-
-    let mut map = std::collections::HashMap::new();
-    collect_methods_in_regions(&root, &mut Vec::new(), &mut map);
-
-    tracing::debug!(count = map.len(), "Collected methods in API regions");
-
-    Arc::new(map)
-}
-
-/// Recursively collect methods in API regions.
-///
-/// Tracks region stack to identify root (first) region for nested structures.
-fn collect_methods_in_regions(
-    node: &syntax::SyntaxNode,
-    region_stack: &mut Vec<String>,
-    map: &mut std::collections::HashMap<syntax::TextRange, String>,
-) {
-    use syntax::{
-        ast::{self, AstNode},
-        SyntaxKind,
-    };
-
-    for child in node.children() {
-        match child.kind() {
-            SyntaxKind::PRE_REGION_DIR => {
-                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                    if region.is_start() {
-                        if let Some(name) = region.name() {
-                            region_stack.push(name);
-                            collect_methods_in_regions(region.syntax(), region_stack, map);
-                            region_stack.pop();
-                        }
-                    }
-                }
-            }
-            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
-                if let Some(root_region) = region_stack.first() {
-                    if is_api_region(root_region) {
-                        let range = child.text_range();
-                        map.insert(range, root_region.clone());
-                    }
-                }
-            }
-            _ => {
-                if child.kind() != SyntaxKind::PRE_REGION_DIR {
-                    collect_methods_in_regions(&child, region_stack, map);
-                }
-            }
-        }
-    }
-}
-
-/// Check if a region name is an API region.
-///
-/// API regions (case-insensitive):
-/// - ПрограммныйИнтерфейс / Public
-/// - СлужебныйПрограммныйИнтерфейс / Internal
-fn is_api_region(name: &str) -> bool {
-    const API_REGIONS: &[&str] =
-        &["программныйинтерфейс", "public", "служебныйпрограммныйинтерфейс", "internal"];
-    API_REGIONS.contains(&name.to_lowercase().as_str())
-}
-
-/// Extract all module-level region names and their text ranges.
-///
-/// This query collects information about all top-level regions in a BSL file.
-/// Only module-level regions are collected (nested regions inside methods are excluded).
-///
-/// # Performance
-/// - LRU cache: 256 files (region collection is inexpensive)
-/// - Depends on: parse_query (automatic invalidation via Salsa)
-/// - Recomputed only when file content changes
-/// - Shared by ALL region-based diagnostics (NonStandardRegion, DuplicateRegion, EmptyRegion, etc.)
-///
-/// # Returns
-/// Vector of RegionInfo containing region names and their text ranges (first line only).
-/// Ranges point to the #Область/#Region directive line.
-#[salsa::tracked(lru = 256)]
-pub fn module_level_regions(
-    db: &dyn salsa::Database,
-    input: FileTextInput,
-) -> Arc<Vec<RegionInfo>> {
-    let _span = tracing::info_span!("module_level_regions").entered();
-
-    let parse = parse_query(db, input);
-    let root = parse.syntax_node();
-
-    let regions = collect_module_level_regions(&root);
-
-    tracing::debug!(count = regions.len(), "Collected module-level regions");
-
-    Arc::new(regions)
-}
-
-/// Collect module-level regions (not nested inside methods).
-///
-/// Walks root.children() (not descendants) to get only top-level regions.
-/// For each region start directive, extracts name and range of first line.
-fn collect_module_level_regions(root: &syntax::SyntaxNode) -> Vec<RegionInfo> {
-    use syntax::{
-        ast::{self, AstNode},
-        SyntaxKind, TextRange, TextSize,
-    };
-
-    let mut regions = Vec::new();
-
-    for child in root.children() {
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
-                if region.is_start() {
-                    if let Some(name) = region.name() {
-                        let text = child.text().to_string();
-                        let first_line = text.lines().next().unwrap_or(&text);
-                        let first_line_len = first_line.len();
-
-                        let start = child.text_range().start();
-                        let end = start + TextSize::from(first_line_len as u32);
-                        let range = TextRange::new(start, end);
-
-                        regions.push(RegionInfo { name, range });
-                    }
-                }
-            }
-        }
-    }
-
-    regions
-}
-
-/// Resolve a VfsPath to FileId within a SourceRoot.
-///
-/// Searches the FileSet of a SourceRoot for a given VfsPath.
-/// Used by diagnostics to resolve metadata URIs to FileIds.
-///
-/// # Performance
-/// - O(1) FileSet lookup (HashMap)
-/// - Cached by Salsa (LRU 256)
-/// - Expected: < 1ms after first call
-///
-/// # Parameters
-/// - `source_root_input`: The SourceRoot to search in
-/// - `vfs_path_str`: String representation of VfsPath (PathBuf is not Hash)
-///
-/// # Returns
-/// - `Some(FileId)` if path exists in FileSet
-/// - `None` if path not found
-#[salsa::tracked(lru = 256)]
-pub fn resolve_vfs_path_query(
-    db: &dyn salsa::Database,
-    source_root_input: SourceRootInput,
-    vfs_path_str: String,
-) -> Option<FileId> {
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    let vfs_path = VfsPath::new(PathBuf::from(vfs_path_str));
-    file_set.file_for_path(&vfs_path).copied()
-}
-
-/// Higher-level database trait with derived queries.
-///
-/// This trait extends SourceDatabase with parse queries.
-/// Implementations should delegate to parse_query Salsa tracked function.
 #[salsa::db]
 pub trait RootQueryDb: SourceDatabase {
-    /// Parse a file into a syntax tree.
+    /// Parse a BSL file into a syntax tree.
     ///
-    /// This query is cached for incremental computation via Salsa.
-    /// Implementations should call parse_query(self, file_text_input(file_id)).
+    /// This is the foundational query for all BSL analysis. It converts raw BSL source text
+    /// into a concrete syntax tree (CST) using the Rowan library.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 files (frequently accessed)
+    /// - **Depends on:** `file_text_input` (Salsa input)
+    /// - **Typical time:** 5-15ms for medium files (after parsing)
+    ///
+    /// # Invalidation
+    /// Automatically invalidated by Salsa when file text changes.
+    ///
+    /// # Implementation
+    /// Should delegate to [`parse_query`].
     fn parse(&self, file_id: FileId) -> syntax::Parse<syntax::SyntaxNode>;
 
-    /// Map from method source ranges to parent API region names.
+    /// Map method source ranges to their parent API region names.
     ///
     /// Returns a HashMap mapping TextRange (of method definitions) to their
     /// parent API region name (ПрограммныйИнтерфейс, Public, СлужебныйПрограммныйИнтерфейс, Internal).
@@ -289,26 +118,26 @@ pub trait RootQueryDb: SourceDatabase {
     /// Only methods inside API regions are included in the map.
     /// For nested regions, the root (top-level) region name is returned.
     ///
-    /// ## Performance Benefits
+    /// # Performance
+    /// - **LRU cache:** 256 files (region analysis is inexpensive)
+    /// - **Depends on:** [`parse`](Self::parse)
+    /// - **Shared usage:** Multiple region-based diagnostics
     ///
-    /// - **Salsa-cached**: Recomputed only when file changes
-    /// - **Shared across diagnostics**: Multiple region-based diagnostics reuse the same cache
-    /// - **Auto-invalidation**: Salsa invalidates when file changes
-    ///
-    /// ## Usage in Diagnostics
+    /// # Usage Example
     ///
     /// ```ignore
-    /// pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    ///     let method_regions = ctx.db.method_regions(ctx.file_id);
-    ///     let item_tree = ctx.db.item_tree(ctx.file_id);
+    /// let method_regions = db.method_regions(file_id);
+    /// let item_tree = db.item_tree(file_id);
     ///
-    ///     for (_, proc) in item_tree.procedures() {
-    ///         if let Some(region_name) = method_regions.get(&proc.source_range) {
-    ///             // proc is in an API region named region_name
-    ///         }
+    /// for (_, proc) in item_tree.procedures() {
+    ///     if let Some(region_name) = method_regions.get(&proc.source_range) {
+    ///         // proc is in an API region named region_name
     ///     }
     /// }
     /// ```
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_regions_query`].
     fn method_regions(
         &self,
         file_id: FileId,
@@ -316,27 +145,27 @@ pub trait RootQueryDb: SourceDatabase {
 
     /// Extract all module-level regions from a BSL file.
     ///
-    /// Returns cached list of region names with their source ranges.
-    /// Used by region-based diagnostics (NonStandardRegion, DuplicateRegion, EmptyRegion, CodeOutOfRegion).
+    /// Returns cached list of region names with their source ranges (first line only).
+    /// Only top-level regions are collected (nested regions inside methods are excluded).
     ///
-    /// ## Performance Benefits
+    /// # Performance
+    /// - **LRU cache:** 256 files (region collection is inexpensive)
+    /// - **Depends on:** [`parse`](Self::parse)
+    /// - **Shared usage:** 4+ region diagnostics (NonStandardRegion, DuplicateRegion, etc.)
     ///
-    /// - **Salsa-cached**: AST traversal happens once per file change (LRU 256)
-    /// - **Shared across diagnostics**: 4+ region diagnostics reuse same cache
-    /// - **Auto-invalidation**: Salsa invalidates when file changes
-    ///
-    /// ## Usage in Diagnostics
+    /// # Usage Example
     ///
     /// ```ignore
-    /// pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    ///     let regions = ctx.db.module_level_regions(ctx.file_id);
+    /// let regions = db.module_level_regions(file_id);
     ///
-    ///     for region in regions.iter() {
-    ///         // region.name contains region name
-    ///         // region.range contains first line of #Область directive
-    ///     }
+    /// for region in regions.iter() {
+    ///     // region.name - region name (e.g., "Public", "Internal")
+    ///     // region.range - TextRange of first line of #Область directive
     /// }
     /// ```
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_level_regions_query`].
     fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>>;
 }
 
@@ -566,12 +395,12 @@ mod tests {
             file_id: FileId,
         ) -> Arc<std::collections::HashMap<syntax::TextRange, String>> {
             let input = self.file_text_input(file_id);
-            method_regions(self, input)
+            method_regions_query(self, input)
         }
 
         fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<RegionInfo>> {
             let input = self.file_text_input(file_id);
-            module_level_regions(self, input)
+            module_level_regions_query(self, input)
         }
     }
 

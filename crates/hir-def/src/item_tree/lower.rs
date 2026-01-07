@@ -293,7 +293,7 @@ mod tests {
             file_id: FileId,
         ) -> std::sync::Arc<std::collections::HashMap<syntax::TextRange, String>> {
             let input = self.file_text_input(file_id);
-            base_db::method_regions(self, input)
+            base_db::method_regions_query(self, input)
         }
 
         fn module_level_regions(
@@ -301,7 +301,7 @@ mod tests {
             file_id: FileId,
         ) -> std::sync::Arc<Vec<base_db::RegionInfo>> {
             let input = self.file_text_input(file_id);
-            base_db::module_level_regions(self, input)
+            base_db::module_level_regions_query(self, input)
         }
     }
 

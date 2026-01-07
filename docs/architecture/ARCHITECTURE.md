@@ -201,6 +201,169 @@ fn module_tree(db: &dyn Db, file_id: FileId) -> Arc<ModuleTree> {
 
 См. `docs/planning/PERFORMANCE_ESTIMATES.md` для детальных расчетов.
 
+### 1.1. Query Groups Organization
+
+**Статус:** ✅ **Реализовано** (Phase 7 - Query Groups Reorganization)
+
+#### Зачем нужны Query Groups?
+
+Query Groups — это логическая группировка related Salsa queries в database traits. Организация queries в группы критична для:
+
+1. **Навигации** - все queries одного слоя видны в одном trait definition
+2. **Документации** - можно документировать целую группу queries с указанием зависимостей
+3. **Архитектурной ясности** - четкая иерархия database layers
+4. **Тестируемости** - можно mock'ать отдельные database groups
+
+#### Database Hierarchy
+
+```
+salsa::Database
+    ↓
+SourceDatabase (base-db)
+    - Inputs: file_text(), source_root(), file_source_root()
+    ↓
+RootQueryDb (base-db)
+    - parse() - BSL file → AST (LRU: 512)
+    - method_regions() - Methods in API regions (LRU: 256)
+    - module_level_regions() - All top-level regions (LRU: 256)
+    - resolve_vfs_path() - VfsPath → FileId (LRU: 256)
+    ↓
+DefDatabase (hir-def)
+    - Invalidation Barriers (AST → HIR metadata):
+      • item_tree() - Method/variable signatures (LRU: 512)
+      • region_tree() - Preprocessor region hierarchy (LRU: 256)
+      • conditional_tree() - Preprocessor conditional hierarchy (LRU: 256)
+    - Derived queries:
+      • symbol_tree() - Case-insensitive symbol lookup (LRU: 512)
+      • module_data() - Module-level data (LRU: 512)
+    - Type inference:
+      • infer_types() - Type inference for module (LRU: 256)
+    - HIR lowering (AST → HIR bodies + diagnostics):
+      • module_bodies() - Lower method bodies (LRU: 128)
+    ↓
+MetadataDb (ide-db)
+    - load_configuration() - 1C Configuration from disk (LRU: 16, Durability::HIGH)
+    ↓
+RootDatabase (ide-db)
+    - Metadata:
+      • module_metadata() - Module type + execution context (LRU: 128)
+    - SDBL:
+      • all_sdbl_in_file() - Extract SDBL queries from HIR (LRU: 128)
+      • sdbl_hir_in_file() - Lower SDBL to HIR + type inference (LRU: 64)
+    - Dataflow:
+      • method_cfg() - Control Flow Graph for method (LRU: 256)
+      • reaching_definitions() - Reaching definitions analysis (LRU: 256)
+```
+
+#### File Organization Pattern
+
+**Принцип:** Все queries одной группы централизованы в trait + queries.rs модуле.
+
+Каждый database layer следует единой структуре:
+
+```
+crates/base-db/
+├── src/
+│   ├── lib.rs                  # Database trait definition
+│   ├── queries.rs              # All query implementations
+│   └── ...
+
+crates/hir-def/
+├── src/
+│   ├── lib.rs                  # DefDatabase trait definition
+│   ├── queries.rs              # Query implementations + re-exports
+│   ├── item_tree.rs            # item_tree_query implementation
+│   ├── region_tree.rs          # region_tree_query implementation
+│   └── ...
+
+crates/ide-db/
+├── src/
+│   ├── lib.rs                  # RootDatabase + MetadataDb traits
+│   ├── queries.rs              # All query implementations
+│   └── metadata.rs             # load_configuration query
+```
+
+#### Database Trait Pattern
+
+```rust
+// crates/ide-db/src/lib.rs
+
+/// Top-level database with SDBL, metadata, and dataflow queries.
+///
+/// # Query Group Organization
+///
+/// **Dependencies:** DefDatabase (HIR), MetadataDb (configuration)
+/// **Used by:** IDE features (diagnostics, completion, navigation)
+///
+/// # Query Categories
+///
+/// ## Metadata
+/// - [`module_metadata`](Self::module_metadata) - Module type + context (LRU: 128)
+///   - First load: ~50-100ms (file path + configuration loading)
+///   - Cached: < 1ms
+///
+/// ## SDBL (Query Language Analysis)
+/// - [`all_sdbl_in_file`](Self::all_sdbl_in_file) - Extract SDBL from HIR (LRU: 128)
+///   - First call: ~1-5ms (iterates HIR bodies)
+///   - Cached: < 1ms
+/// - [`sdbl_hir_in_file`](Self::sdbl_hir_in_file) - SDBL lowering + type inference (LRU: 64)
+///   - First call: ~10-50ms (parsing + lowering + type inference)
+///   - Memory: ~1-5 KB per query
+///
+/// ## Dataflow Analysis
+/// - [`method_cfg`](Self::method_cfg) - Control Flow Graph (LRU: 256)
+///   - Construction time: ~1-2ms for 100-line method
+///   - Reused across multiple dataflow analyses
+/// - [`reaching_definitions`](Self::reaching_definitions) - Reaching definitions (LRU: 256)
+///   - First analysis: ~5-20ms (CFG + dataflow solve)
+///   - Convergence: Usually 3-10 iterations
+///
+/// # Implementation Pattern
+///
+/// All queries are implemented in the `queries` module as `#[salsa::tracked]` functions,
+/// and the trait provides convenience methods that delegate to those functions:
+///
+/// ```ignore
+/// #[salsa::db]
+/// pub trait RootDatabase: DefDatabase + MetadataDb {
+///     fn method_cfg(&self, method_id: MethodId) -> Arc<ControlFlowGraph>;
+/// }
+///
+/// // Implementation delegates to tracked function
+/// #[salsa::db]
+/// impl RootDatabase for RootDatabaseImpl {
+///     fn method_cfg(&self, method_id: MethodId) -> Arc<ControlFlowGraph> {
+///         let input = MethodIdInput::new(self, method_id);
+///         queries::method_cfg_query(self, input)
+///     }
+/// }
+/// ```
+#[salsa::db]
+pub trait RootDatabase: DefDatabase + MetadataDb {
+    // Trait methods...
+}
+```
+
+#### Преимущества организации
+
+| Аспект | До реорганизации | После реорганизации |
+|--------|------------------|---------------------|
+| **Навигация** | Queries разбросаны по файлам | Все queries видны в trait definition |
+| **Документация** | Разрозненные doc comments | Единая точка документации с категориями |
+| **Зависимости** | Неявные зависимости | Четкая иерархия traits |
+| **Обучение** | Трудно понять структуру | Один trait показывает весь API слоя |
+| **Производительность** | Непонятно зачем LRU | Документировано в trait (LRU + timing) |
+
+#### Сравнение с rust-analyzer
+
+rust-analyzer использует кастомный proc-macro `#[query_group::query_group]` для генерации boilerplate кода. Это legacy решение для миграции с Salsa 0.16 → 0.25+.
+
+bsl-analyzer использует современную Salsa 0.25.2 напрямую:
+- ✅ Меньше магии (нет кастомных макросов)
+- ✅ Явная структура (все видно в коде)
+- ✅ Salsa native patterns (tracked functions + db traits)
+- ✅ Легче для новых разработчиков
+
 ### 2. Rowan для Syntax Trees
 
 Red-green trees для эффективного представления синтаксиса:

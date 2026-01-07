@@ -32,6 +32,7 @@ pub mod cyclomatic_complexity;
 pub mod hir;
 pub mod item_tree;
 pub mod name;
+pub mod queries;
 pub mod region_tree;
 pub mod resolver;
 pub mod scope;
@@ -46,92 +47,143 @@ pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySource
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
-pub use conditional_tree::{
-    conditional_tree_query, ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree,
-};
-pub use item_tree::{item_tree_query, ItemTree};
+pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
+pub use item_tree::ItemTree;
 pub use name::Name;
-pub use region_tree::{region_tree_query, RegionData, RegionIdx, RegionTree};
-pub use symbol_tree::{symbol_tree_query, MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
+pub use region_tree::{RegionData, RegionIdx, RegionTree};
+pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::infer::{FunctionSignature, InferenceContext, InferenceResult};
 pub use ty::Ty;
 
-// Note: Salsa query functions (module_data_query, module_bodies_query, etc.)
-// are already public via #[salsa::tracked] and don't need explicit pub use
+// Re-export all Salsa query functions from the queries module
+pub use queries::{
+    conditional_tree_query, infer_types_query, item_tree_query, module_bodies_query,
+    module_data_query, module_metadata_query, region_tree_query, symbol_tree_query,
+};
 
-/// Database trait for HIR queries.
+/// HIR definition layer - lowering from AST to HIR.
 ///
-/// This trait extends base_db::RootQueryDb with queries for ItemTree and module-level data.
+/// # Query Group Organization
 ///
-/// ## Salsa Integration
+/// This trait defines the HIR-level queries that transform BSL syntax trees (AST)
+/// into semantic representations (HIR) and extract metadata for analysis.
 ///
-/// This trait provides convenience methods that accept FileId/ModuleId directly.
-/// Internally, these methods convert to FileIdInput (Salsa interned) and call
-/// Salsa tracked functions for automatic caching and invalidation.
+/// **Dependencies:** base_db::RootQueryDb (parsing)
+/// **Used by:** ide_db::RootDatabase (IDE queries, dataflow, SDBL)
 ///
-/// **Pattern:**
+/// # Query Categories
+///
+/// ## Invalidation Barrier Queries (AST → HIR metadata)
+///
+/// These queries extract signatures and structure WITHOUT analyzing method bodies.
+/// They form an "invalidation barrier" - changes to method bodies don't invalidate consumers.
+///
+/// - [`item_tree`](Self::item_tree) - Method/variable signatures (LRU: 512)
+/// - [`region_tree`](Self::region_tree) - Preprocessor region hierarchy (LRU: 256)
+/// - [`conditional_tree`](Self::conditional_tree) - Preprocessor conditional hierarchy (LRU: 256)
+///
+/// ## Derived Queries (depend on ItemTree)
+///
+/// - [`symbol_tree`](Self::symbol_tree) - Case-insensitive symbol lookup (LRU: 512)
+/// - [`module_data`](Self::module_data) - Module-level data (LRU: 512)
+///
+/// ## Type Inference
+///
+/// - [`infer_types`](Self::infer_types) - Type inference for module (LRU: 256)
+///
+/// ## HIR Lowering (AST → HIR bodies, produces diagnostics)
+///
+/// - [`module_bodies`](Self::module_bodies) - Lower method bodies + diagnostics (LRU: 128)
+///
+/// ## Metadata
+///
+/// - [`module_metadata`](Self::module_metadata) - Module type and execution context (LRU: 128)
+///
+/// # Implementation Pattern
+///
+/// Implementations delegate to tracked query functions in the `queries` module:
+///
 /// ```ignore
-/// // Trait method (convenience API):
-/// fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
-///
-/// // Salsa tracked query (actual implementation):
-/// #[salsa::tracked(lru = 512)]
-/// fn item_tree_query(db: &dyn RootQueryDb, file_id_input: FileIdInput) -> Arc<ItemTree>;
-///
-/// // Implementation:
-/// impl DefDatabase for RootDatabaseImpl {
+/// impl DefDatabase for MyDatabase {
 ///     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
 ///         let file_id_input = base_db::FileIdInput::new(self, file_id);
-///         hir_def::item_tree_query(self, file_id_input)
+///         item_tree_query(self, file_id_input)
 ///     }
 /// }
 /// ```
 #[salsa::db]
 pub trait DefDatabase: base_db::RootQueryDb {
-    /// Get ItemTree for a file (main query).
+    /// Get ItemTree for a file.
     ///
-    /// ItemTree is the "invalidation barrier" - it only changes when signatures change,
-    /// not when procedure bodies are edited.
+    /// ItemTree is the "invalidation barrier" - it contains only method/variable signatures,
+    /// NOT method bodies. Changes to procedure/function bodies don't invalidate ItemTree,
+    /// so consumers (like symbol_tree, module_data) aren't re-computed unnecessarily.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 files (frequently accessed)
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse)
+    /// - **Typical time:** 2-5ms for medium files (after parsing)
+    ///
+    /// # Implementation
+    /// Should delegate to [`item_tree_query`].
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
 
     /// Get RegionTree for a file.
     ///
     /// RegionTree provides hierarchical structure of preprocessor regions (#Область/#Region).
-    /// Used for diagnostics (code_out_of_region, non_standard_region, etc.) and IDE features.
+    /// Used for diagnostics (CodeOutOfRegion, NonStandardRegion, etc.) and IDE features.
     ///
-    /// ## Performance
-    /// - Cached per file
-    /// - Invalidated when file content changes
-    /// - O(n) construction where n is number of region directives
+    /// # Performance
+    /// - **LRU cache:** 256 files (region extraction is inexpensive)
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse)
+    /// - **Typical time:** ~1ms (shallow tree walk)
+    ///
+    /// # Implementation
+    /// Should delegate to [`region_tree_query`].
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree>;
 
     /// Get ConditionalTree for a file.
     ///
     /// ConditionalTree provides hierarchical structure of preprocessor conditionals
-    /// (#Если/#If, #ИначеЕсли/#ElsIf, #Иначе/#Else).
-    /// Stores condition TEXT only (not evaluated).
+    /// (#Если/#If, #ИначеЕсли/#ElsIf, #Иначе/#Else). Stores condition TEXT only (not evaluated).
     ///
-    /// Used for future diagnostics that need conditional context:
-    /// - Grammatical construct split detection (via parent_ast_kind)
-    /// - Platform context checks in client-server modules
-    /// - Unreachable preprocessor branches
-    /// - Duplicate conditional logic
+    /// Used for conditional context diagnostics (grammatical construct splits, platform checks, etc.).
     ///
-    /// ## Performance
-    /// - Cached per file
-    /// - Invalidated when file content changes
-    /// - O(n) construction where n is number of conditional directives
+    /// # Performance
+    /// - **LRU cache:** 256 files (conditional extraction is inexpensive)
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse)
+    /// - **Typical time:** ~1ms (shallow tree walk)
+    ///
+    /// # Implementation
+    /// Should delegate to [`conditional_tree_query`].
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree>;
 
-    /// Get module data for a module (derived query).
+    /// Get module data for a module (derived from ItemTree).
     ///
-    /// In BSL, 1 file = 1 module, so ModuleId contains FileId.
+    /// ModuleData is a simplified view of ItemTree containing lists of procedures,
+    /// functions, and variables with their IDs. In BSL: 1 file = 1 module.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 (derived query, cheap to compute)
+    /// - **Depends on:** [`item_tree`](Self::item_tree)
+    /// - **Typical time:** ~1ms (extracts data from ItemTree)
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_data_query`].
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData>;
 
     /// Get symbol tree for a module (derived from ItemTree).
     ///
     /// SymbolTree provides fast O(1) case-insensitive lookup of methods and variables.
     /// Built from ItemTree and cached.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 (frequently accessed by completion/hover)
+    /// - **Depends on:** [`item_tree`](Self::item_tree)
+    /// - **Typical time:** ~1-2ms (builds lookup maps from ItemTree)
+    ///
+    /// # Implementation
+    /// Should delegate to [`symbol_tree_query`].
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
 
     /// Infer types for a module.
@@ -139,27 +191,28 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// Performs type inference for all expressions, variables, and methods in a module.
     /// Results are cached and only re-computed when the module's ItemTree changes.
     ///
-    /// ## Performance
-    /// - Initial inference: ~10-20ms for a typical 1000-line module
-    /// - Cached access: < 1ms (via Salsa caching when fully integrated)
-    /// - Invalidation: Only when ItemTree changes (signature changes, not body edits)
+    /// # Performance
+    /// - **LRU cache:** 256 files (type inference is moderately expensive)
+    /// - **Depends on:** [`item_tree`](Self::item_tree)
+    /// - **Typical time:** ~10-20ms for 1000-line module
     ///
-    /// ## Phase 1 Support
-    /// - Literals: `42`, `"text"`, `True`
-    /// - Binary operations: `5 + 3`, `"a" + "b"`, `x > 5`
-    ///
-    /// Future phases will add support for function calls, method calls, and variables.
+    /// # Implementation
+    /// Should delegate to [`infer_types_query`].
     fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult>;
 
     /// Get all method bodies for a module with their diagnostics.
     ///
     /// Returns lowered HIR bodies for all procedures and functions in the module.
-    /// Diagnostics are collected during lowering as a byproduct of semantic analysis.
+    /// Diagnostics are collected during lowering as a byproduct of semantic analysis
+    /// (MissingReturn, UnreachableCode, etc.).
     ///
-    /// ## Performance
-    /// - Cached per module
-    /// - Invalidated when file content changes
-    /// - O(n) where n is number of statements in methods
+    /// # Performance
+    /// - **LRU cache:** 128 (heavy lowering operation)
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse), [`item_tree`](Self::item_tree)
+    /// - **Typical time:** ~5-10ms for 1000-line module
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_bodies_query`].
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
 
     /// Get metadata for a module (type and execution context).
@@ -167,13 +220,16 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// Loads metadata from 1C Configuration if available. Used by metadata-based diagnostics
     /// to provide context-sensitive checks (naming rules, API requirements, etc.).
     ///
-    /// ## Performance
-    /// - Configuration loading: ~1 second (Salsa cached, LRU=16)
-    /// - Cached per module alongside ModuleBodies
-    /// - Invalidated when file content changes
+    /// # Performance
+    /// - **LRU cache:** 128 (metadata loading is I/O intensive)
+    /// - **Depends on:** VFS, Configuration loading (in ide-db)
+    /// - **Typical time:** ~1s for first load (configuration parsing), < 1ms cached
     ///
-    /// ## Returns
-    /// - `Arc<ModuleMetadata>` containing module type, execution context, and metadata objects
+    /// # Implementation
+    /// Should delegate to [`module_metadata_query`].
+    ///
+    /// **Note:** Actual implementation is in ide-db (needs VFS access). The query
+    /// in hir-def is a placeholder.
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
 }
 
@@ -653,146 +709,5 @@ fn collect_module_vars(var_def: &syntax::SyntaxNode, vars: &mut Vec<ModuleVarDec
     }
 }
 
-/// Salsa tracked query for ModuleData construction.
-///
-/// ModuleData is derived from ItemTree - it's a lightweight transformation
-/// that extracts procedure/function/variable IDs from the ItemTree.
-///
-/// ## Performance
-/// - LRU: 512 files (derived from ItemTree, frequently accessed)
-/// - Depends on: item_tree (via FileIdInput)
-/// - Invalidation: Automatic when ItemTree changes
-///
-/// ## Dependency tracking
-/// Salsa automatically tracks that this query depends on `item_tree_query`.
-/// When ItemTree changes, ModuleData is automatically invalidated.
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     hir_def::module_data_query(self, file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 512)]
-pub fn module_data_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<ModuleData> {
-    let _span = tracing::info_span!("module_data", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let tree = db.item_tree(file_id);
-    let module_id = ModuleId::new(file_id);
-    Arc::new(ModuleData::from_item_tree(module_id, tree))
-}
-
-/// Lower all method bodies in a module and collect diagnostics.
-///
-/// This is the main query for body lowering. It:
-/// 1. Lowers all procedure and function bodies to HIR
-/// 2. Collects diagnostics during lowering (MissingReturn, UnreachableCode, etc.)
-/// 3. Attaches module metadata for context-sensitive checks
-///
-/// ## Salsa caching
-/// - LRU: 128 (heavy lowering operation)
-/// - Invalidation: Automatic when file content changes
-/// - Dependency: calls module_metadata_query internally
-///
-/// ## Performance
-/// - Lowering: ~5-10ms for typical 1000-line module
-/// - Cached access: < 1ms
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     hir_def::module_bodies_query(self, file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 128)]
-pub fn module_bodies_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<ModuleBodies> {
-    let _span = tracing::info_span!("module_bodies", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let module_id = ModuleId::new(file_id);
-
-    // Lower all method bodies
-    let result = lower_module_bodies(db, module_id);
-
-    // Note: Metadata is NOT attached here - it's attached by the DefDatabase
-    // implementation in ide-db where VFS access is available for loading Configuration.
-    // This keeps hir-def independent of VFS.
-    Arc::new(result)
-}
-
-/// Get metadata for a module (type and execution context).
-///
-/// Loads metadata from 1C Configuration if available. Used by:
-/// - ModuleBodies query (attaches metadata to bodies)
-/// - Metadata-based diagnostics (naming rules, API requirements)
-///
-/// ## Salsa caching
-/// - LRU: 128 (metadata loading is I/O intensive)
-/// - Invalidation: Automatic when file content or configuration changes
-/// - Shared: load_configuration() is cached separately (LRU=16)
-///
-/// ## Implementation note
-/// This query is implemented in ide-db (not hir-def) because it needs access to:
-/// - VFS for file path resolution
-/// - Configuration loading infrastructure
-///
-/// For now, this is a placeholder. Actual implementation is in RootDatabaseImpl.
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     // Actual query implemented in ide-db
-///     self.module_metadata_impl(file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 128)]
-pub fn module_metadata_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<ModuleMetadata> {
-    let _span = tracing::info_span!("module_metadata", ?file_id_input).entered();
-    let _file_id = file_id_input.file_id(db);
-
-    // TODO: This should be moved to ide-db where VFS access is available
-    // For now, return unknown metadata
-    Arc::new(ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown))
-}
-
-/// Salsa tracked query for type inference.
-///
-/// Performs type inference for all expressions, variables, and methods in a module.
-///
-/// ## Performance
-/// - LRU: 256 files (type inference is moderately expensive)
-/// - Depends on: ItemTree (via FileIdInput)
-/// - Invalidation: Automatic when signatures change
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     hir_def::infer_types_query(self, file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 256)]
-pub fn infer_types_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<ty::infer::InferenceResult> {
-    let _span = tracing::info_span!("infer_types", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let module_id = ModuleId::new(file_id);
-    Arc::new(ty::infer::InferenceContext::infer_module(db, module_id))
-}
+// Note: All Salsa query implementations have been moved to the `queries` module.
+// See `queries.rs` for the full list of HIR-level queries.
