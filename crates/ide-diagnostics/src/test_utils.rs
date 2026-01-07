@@ -424,6 +424,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
             handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::FunctionOutParameter { name, range } => {
+            handlers::function_out_parameter::from_hir(name, *range, ctx)
+        }
         BodyDiagnostic::EmptyRegion { name, range } => {
             handlers::empty_region::from_hir(name, *range, ctx)
         }

@@ -388,6 +388,12 @@ pub enum BodyDiagnostic {
     /// Only applies to functions (FUNCTION_DEF), not procedures.
     FunctionNameStartsWithGet { name: String, range: TextRange },
 
+    /// Function modifies by-reference parameter (output parameter).
+    /// Detected when a function (not procedure) assigns to a parameter declared without "Знач".
+    /// Only simple assignments are flagged - property/index assignments are ignored.
+    /// Functions should use return values instead of output parameters.
+    FunctionOutParameter { name: String, range: TextRange },
+
     /// Empty preprocessor region (#Область/#КонецОбласти).
     /// Detected when a region contains no meaningful content (only comments/whitespace/nested empty regions).
     EmptyRegion { name: String, range: TextRange },
@@ -445,6 +451,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::FileSystemAccess { range } => *range,
             BodyDiagnostic::FormDataToValue { range } => *range,
             BodyDiagnostic::FunctionNameStartsWithGet { range, .. } => *range,
+            BodyDiagnostic::FunctionOutParameter { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
         }

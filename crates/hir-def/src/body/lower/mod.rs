@@ -70,6 +70,10 @@ pub(crate) struct LoweringCtx {
     /// Parameters should not trigger "unused variable" even if only assigned.
     pub(crate) param_names: FxHashSet<String>,
 
+    /// By-reference parameter names (lowercase) - parameters without "Знач" keyword.
+    /// Used for FunctionOutParameter diagnostic.
+    pub(crate) by_ref_param_names: FxHashSet<String>,
+
     /// Pending SDBL queries (before ExprId allocation).
     pub(crate) pending_sdbl: Vec<(String, syntax::SdblQueryInfo)>,
 
@@ -125,6 +129,7 @@ impl LoweringCtx {
             used_vars: FxHashSet::default(),
             known_externals,
             param_names: FxHashSet::default(),
+            by_ref_param_names: FxHashSet::default(),
             pending_sdbl: Vec::new(),
             loop_depth: 0,
             query_vars: FxHashMap::default(),

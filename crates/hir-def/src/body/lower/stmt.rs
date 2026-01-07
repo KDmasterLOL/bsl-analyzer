@@ -168,6 +168,11 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
     // Register parameter name so it's not flagged as unused
     ctx.register_param(name_token.text());
 
+    // Track by-ref parameters for FunctionOutParameter diagnostic
+    if !is_val {
+        ctx.by_ref_param_names.insert(name_token.text().to_lowercase());
+    }
+
     let binding = Binding::new(Name::new(name_token.text()), is_val);
     Some(ctx.alloc_binding(binding, name_token.text_range()))
 }
@@ -414,6 +419,15 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             variable_name: name.as_str().to_string(),
             range,
         });
+
+        // Check for FunctionOutParameter diagnostic
+        // Functions should not modify by-reference parameters
+        if ctx.is_function && ctx.by_ref_param_names.contains(&key) {
+            ctx.emit(BodyDiagnostic::FunctionOutParameter {
+                name: name.as_str().to_string(),
+                range,
+            });
+        }
     }
 
     // Second child should be value expression (or EXPR wrapper)
