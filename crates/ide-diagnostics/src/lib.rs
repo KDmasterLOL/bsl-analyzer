@@ -146,7 +146,7 @@ pub enum DiagnosticCode {
     CommonModuleNameServerCall,
     CommonModuleNameWords,
     DenyIncompleteValues,
-    ExecuteExternalCodeInCommonModule,
+    // ExecuteExternalCodeInCommonModule removed - duplicate of ExecuteExternalCode
     MetadataObjectNameLength,
     MissingCommonModuleMethod,
     MissingEventSubscriptionHandler,
@@ -260,7 +260,6 @@ impl DiagnosticCode {
             Self::CommonModuleNameGlobalClient => "CommonModuleNameGlobalClient",
             Self::CommonModuleNameServerCall => "CommonModuleNameServerCall",
             Self::CommonModuleNameWords => "CommonModuleNameWords",
-            Self::ExecuteExternalCodeInCommonModule => "ExecuteExternalCodeInCommonModule",
             Self::MetadataObjectNameLength => "MetadataObjectNameLength",
             Self::MissingCommonModuleMethod => "MissingCommonModuleMethod",
             Self::MissingEventSubscriptionHandler => "MissingEventSubscriptionHandler",
@@ -873,11 +872,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::deny_incomplete_values::check,
     ));
-    result.extend(run_diagnostic(
-        "ExecuteExternalCodeInCommonModule",
-        ctx,
-        handlers::execute_external_code_in_common_module::check,
-    ));
+    // Removed: ExecuteExternalCodeInCommonModule - duplicate of ExecuteExternalCode (HIR-based)
+    // ExecuteExternalCode already covers all cases without client-only annotation
     result.extend(run_diagnostic(
         "MetadataObjectNameLength",
         ctx,

@@ -171,4 +171,30 @@ mod tests {
             "Client+Server annotation should be detected (has server context)"
         );
     }
+
+    #[test]
+    fn test_common_module_without_annotations() {
+        // Same code as ExecuteExternalCodeInCommonModule test data
+        let code = r#"
+Процедура ВыполнитьПроизвольныйКод(Строка)
+    Выполнить(Строка);
+КонецПроцедуры
+
+Функция РассчитатьЧтоТоИзСтроки(Строка)
+    Возврат Вычислить(Строка);
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+
+        let exec_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+
+        eprintln!("Total diagnostics: {}", diagnostics.len());
+        for d in &diagnostics {
+            eprintln!("  - {:?}: {:?}", d.code, d.message);
+        }
+
+        // ExecuteExternalCode should catch these too (no client-only annotation)
+        assert_eq!(exec_diags.len(), 2, "Should detect both Execute and Eval in CommonModule");
+    }
 }
