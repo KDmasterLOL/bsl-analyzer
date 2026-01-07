@@ -448,6 +448,9 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
             handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)
         }
+        BodyDiagnostic::IfElseIfEndsWithElse { range } => {
+            handlers::if_else_if_ends_with_else::from_hir(*range, ctx)
+        }
     }
 }
 

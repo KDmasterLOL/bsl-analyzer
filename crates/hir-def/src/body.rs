@@ -430,6 +430,11 @@ pub enum BodyDiagnostic {
     /// Detected when an elsif condition is identical to a previous if/elsif condition.
     /// First occurrence index is 0-based (0 = if, 1+ = elsif).
     IfElseDuplicatedCondition { first_occurrence_index: usize, range: TextRange },
+
+    /// If-elsif chain without else clause.
+    /// Detected when if statement has elsif but no else (missing default case).
+    /// Range points to КонецЕсли/EndIf keyword.
+    IfElseIfEndsWithElse { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -488,6 +493,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::EmptyStatement { range } => *range,
             BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
+            BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
         }
     }
 }

@@ -585,11 +585,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     //     ctx,
     //     handlers::if_else_duplicated_condition::check,
     // ));
-    result.extend(run_diagnostic(
-        "IfElseIfEndsWithElse",
-        ctx,
-        handlers::if_else_if_ends_with_else::check,
-    ));
+    // NOTE: IfElseIfEndsWithElse migrated to HIR-based collection
+    // The HIR version is collected during lowering via BodyDiagnostic::IfElseIfEndsWithElse
+    // and dispatched through collect_hir_diagnostics()
+    // result.extend(run_diagnostic(
+    //     "IfElseIfEndsWithElse",
+    //     ctx,
+    //     handlers::if_else_if_ends_with_else::check,
+    // ));
     // NOTE: IncorrectLineBreak migrated to text-based collection (collect_text_diagnostics)
     result.extend(run_diagnostic(
         "IncorrectUseOfStrTemplate",
@@ -1126,6 +1129,9 @@ fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
             handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)
+        }
+        BodyDiagnostic::IfElseIfEndsWithElse { range } => {
+            handlers::if_else_if_ends_with_else::from_hir(*range, ctx)
         }
     }
 }

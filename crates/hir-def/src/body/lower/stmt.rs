@@ -728,6 +728,20 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Check for duplicated conditions
     check_duplicated_conditions(ctx, &condition_nodes);
 
+    // Check for elsif without else (IfElseIfEndsWithElse diagnostic)
+    // Must have elsif but no else
+    if !elsif_branches.is_empty() && else_branch.is_none() {
+        // Find КонецЕсли/EndIf token for the diagnostic range
+        if let Some(endif_token) = node
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.kind() == SyntaxKind::KW_END_IF)
+        {
+            let range = endif_token.text_range();
+            ctx.emit(BodyDiagnostic::IfElseIfEndsWithElse { range });
+        }
+    }
+
     Some(Stmt::If {
         condition,
         then_branch: then_branch.into_boxed_slice(),
