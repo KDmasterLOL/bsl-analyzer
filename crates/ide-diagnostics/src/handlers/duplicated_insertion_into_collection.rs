@@ -383,8 +383,13 @@ impl<'a> InsertionTracker<'a> {
                 }
             }
 
-            Expr::UnaryOp { .. } | Expr::Ternary { .. } | Expr::Array(_) | Expr::Await { .. } => {
+            Expr::UnaryOp { .. }
+            | Expr::Ternary { .. }
+            | Expr::Array(_)
+            | Expr::Await { .. }
+            | Expr::QualifiedPath(_) => {
                 // For complex expressions, use Missing tag to avoid false positives
+                // TODO: Implement proper hashing for QualifiedPath once resolution is available
                 hasher.write_u8(expr_tag::MISSING);
             }
         }

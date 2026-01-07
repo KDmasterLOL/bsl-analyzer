@@ -32,12 +32,14 @@ pub mod cyclomatic_complexity;
 pub mod hir;
 pub mod item_tree;
 pub mod name;
+pub mod path;
 pub mod queries;
 pub mod region_tree;
 pub mod resolver;
 pub mod scope;
 pub mod symbol_tree;
 pub mod ty;
+pub mod workspace;
 
 use std::sync::Arc;
 
@@ -50,15 +52,18 @@ pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId,
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
 pub use item_tree::ItemTree;
 pub use name::Name;
+pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::infer::{FunctionSignature, InferenceContext, InferenceResult};
 pub use ty::Ty;
+pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
     conditional_tree_query, infer_types_query, item_tree_query, module_bodies_query,
     module_data_query, module_metadata_query, region_tree_query, symbol_tree_query,
+    workspace_symbols_query,
 };
 
 /// HIR definition layer - lowering from AST to HIR.
@@ -231,6 +236,37 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// **Note:** Actual implementation is in ide-db (needs VFS access). The query
     /// in hir-def is a placeholder.
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
+
+    /// Get workspace-wide symbol index for CommonModules.
+    ///
+    /// Builds a global index of all CommonModules in the provided files, enabling
+    /// O(1) lookup for qualified name resolution (e.g., `ОбщийМодуль.Метод()`).
+    ///
+    /// # Arguments
+    /// * `files` - List of file IDs to index (typically all files in SourceRoot)
+    ///
+    /// # Performance
+    /// - **Computation:** O(n×m) where n = files, m = avg methods per file (~100ms for 6,540 files)
+    /// - **Memory:** ~1-5 KB per module (signatures only, not bodies)
+    /// - **Caching:** Salsa-tracked, recomputed when any file in the list changes
+    ///
+    /// # Usage
+    /// ```ignore
+    /// let all_files: Vec<FileId> = source_root.files().collect();
+    /// let symbols = db.workspace_symbols(&all_files);
+    ///
+    /// if let Some(module_info) = symbols.common_modules().get(&Name::new("ОбщегоНазначения")) {
+    ///     // Found CommonModule, access its methods
+    /// }
+    /// ```
+    ///
+    /// # Implementation
+    /// Should delegate to [`workspace_symbols_query`].
+    ///
+    /// # Note
+    /// This is a workspace-level query. Invalidation happens when any file in the
+    /// workspace changes. For large workspaces, consider optimizing with finer-grained tracking.
+    fn workspace_symbols(&self, files: &[FileId]) -> WorkspaceSymbols;
 }
 
 /// Module identifier.

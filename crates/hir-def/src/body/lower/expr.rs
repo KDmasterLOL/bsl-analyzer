@@ -6,7 +6,7 @@ use syntax::{SyntaxKind, SyntaxNode};
 
 use crate::body::{Body, BodyDiagnostic};
 use crate::hir::{BinaryOp, Expr, ExprId, Literal, UnaryOp};
-use crate::Name;
+use crate::{Name, QualifiedName};
 
 use super::diagnostics::is_deprecated_method;
 use super::utils::{extract_string_content, looks_like_sdbl};
@@ -877,18 +877,15 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     if arg_list_node.is_some() {
         let method = field_name.to_string();
 
-        // Analyze call structure to determine call type
+        // Analyze call structure to determine call type (for diagnostics)
         let call_info = analyze_qualified_call(node, ctx);
 
-        if let Some(info) = call_info {
+        if let Some(ref info) = call_info {
             match info {
                 QualifiedCallInfo::TwoLevel { module } => {
-                    // Emit MissingCommonModuleMethod diagnostic for potential CommonModule calls.
-                    ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
-                        module: module.clone(),
-                        method: method.clone(),
-                        range: node.text_range(),
-                    });
+                    // NOTE: MissingCommonModuleMethod diagnostic is now generated via path resolution
+                    // in ide-diagnostics instead of during lowering. This provides more accurate
+                    // diagnostics using the workspace symbol index from Phase 2.
 
                     // Emit MissedRequiredParameter diagnostic for qualified calls.
                     let arg_presence =
@@ -896,7 +893,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
                     ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                         callee: method,
-                        module: Some(module),
+                        module: Some(module.clone()),
                         mdo_type: None,
                         mdo_name: None,
                         args: arg_presence,
@@ -911,8 +908,8 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
                         callee: method,
                         module: None,
-                        mdo_type: Some(mdo_type),
-                        mdo_name: Some(mdo_name),
+                        mdo_type: Some(mdo_type.clone()),
+                        mdo_name: Some(mdo_name.clone()),
                         args: arg_presence,
                         range: node.text_range(),
                     });
@@ -920,12 +917,49 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             }
         }
 
+        // === NEW: Build QualifiedPath for qualified method calls ===
+        // Check if this is a qualified call (Module.Method or A.B.Method)
+        // by examining the base expression type
+        let base_expr = ctx.body.expr(base);
+        let qualified_path_opt = match base_expr {
+            Expr::Path(module_name) => {
+                // Two-level qualified call: Module.Method()
+                // Only create QualifiedPath if analyze_qualified_call detected it
+                // (to avoid treating local variables as modules)
+                if call_info.is_some() {
+                    Some(QualifiedName::from_segments([module_name.clone(), field_name.clone()]))
+                } else {
+                    None
+                }
+            }
+            Expr::QualifiedPath(path) => {
+                // Multi-level qualified call: add another segment
+                // Example: Documents.PKO.Method() where path = [Documents, PKO]
+                let mut segments = path.segments().to_vec();
+                segments.push(field_name.clone());
+                Some(QualifiedName::from_segments(segments))
+            }
+            _ => {
+                // Not a qualified call - regular method call on an expression
+                // Example: GetObject().Method() or variable.Method()
+                None
+            }
+        };
+
         let args = arg_list_node
             .as_ref()
             .map(|arg_list| lower_arg_list(ctx, arg_list))
             .unwrap_or_default();
 
-        Expr::MethodCall { receiver: base, method: field_name, args: args.into_boxed_slice() }
+        if let Some(qualified_path) = qualified_path_opt {
+            // This is a qualified call - create Call with QualifiedPath as callee
+            // Example: Module.Method(args) → Call { callee: QualifiedPath([Module, Method]), args }
+            let callee = ctx.alloc_expr(Expr::QualifiedPath(qualified_path), node.text_range());
+            Expr::Call { callee, args: args.into_boxed_slice() }
+        } else {
+            // Regular method call on an expression
+            Expr::MethodCall { receiver: base, method: field_name, args: args.into_boxed_slice() }
+        }
     } else {
         Expr::Field { base, field: field_name }
     }

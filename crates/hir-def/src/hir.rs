@@ -103,6 +103,14 @@ pub enum Expr {
     /// Variable or identifier reference.
     Path(Name),
 
+    /// Qualified name (multi-segment path like Module.Method or Documents.PKO.Create).
+    ///
+    /// Used for:
+    /// - CommonModule calls: `ОбщийМодуль.Метод()`
+    /// - Manager module calls: `Документы.ПКО.Создать()`
+    /// - Chained field access that requires resolution
+    QualifiedPath(crate::path::QualifiedName),
+
     /// Binary operation (a + b, a И b, etc.).
     BinaryOp { lhs: ExprId, rhs: ExprId, op: BinaryOp },
 

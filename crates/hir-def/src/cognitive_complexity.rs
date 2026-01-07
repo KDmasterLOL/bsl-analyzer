@@ -263,7 +263,7 @@ fn count_expr_complexity(body: &Body, expr_id: ExprId, complexity: &mut u32) {
         }
 
         // No complexity for these
-        Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
+        Expr::Missing | Expr::Literal(_) | Expr::Path(_) | Expr::QualifiedPath(_) => {}
     }
 }
 

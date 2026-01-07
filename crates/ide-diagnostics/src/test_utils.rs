@@ -365,9 +365,8 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::DisableSafeMode { method_name, range } => {
             handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
         }
-        BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
-            handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
-        }
+        // NOTE: MissingCommonModuleMethod removed from HIR lowering (Phase 4)
+        // Now collected via AST-based check() with path resolution
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }

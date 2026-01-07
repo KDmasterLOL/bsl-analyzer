@@ -15,6 +15,7 @@ rustc-hash.workspace = true
 la-arena.workspace = true
 ordered-float.workspace = true
 smol_str.workspace = true
+smallvec.workspace = true
 text-size.workspace = true
 tracing.workspace = true
 # NOTE: cfg dependency creates circular dependency (hir-def → cfg → hir-def)

@@ -402,6 +402,13 @@ impl DefDatabase for RootDatabaseImpl {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         module_metadata_query(self, file_id_input)
     }
+
+    fn workspace_symbols(&self, files: &[FileId]) -> hir_def::WorkspaceSymbols {
+        // Call workspace_symbols_query from hir-def
+        // NOTE: Not yet Salsa-tracked in Phase 2 MVP
+        // TODO: Add proper Salsa tracking in future iteration
+        hir_def::workspace_symbols_query(self, files)
+    }
 }
 
 #[salsa::db]

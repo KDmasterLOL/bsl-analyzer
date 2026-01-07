@@ -270,11 +270,9 @@ pub enum BodyDiagnostic {
     /// Function should have return.
     FunctionShouldHaveReturn { range: TextRange },
 
-    /// Missing CommonModule method or non-export method call.
-    /// Emitted during lowering for potential CommonModule calls.
-    /// Module name and method name are stored for validation in from_hir().
-    MissingCommonModuleMethod { module: String, method: String, range: TextRange },
-
+    // NOTE: MissingCommonModuleMethod removed (Phase 4)
+    // Now collected via AST-based check() with path resolution instead of during lowering.
+    // This provides more accurate diagnostics using workspace symbols.
     /// BeginTransaction/НачатьТранзакцию call not immediately followed by Try statement.
     /// Detects three violation patterns:
     /// 1. Code between BeginTransaction and Try
@@ -474,7 +472,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::SelfAssign { range } => *range,
             BodyDiagnostic::UnusedVariable { range, .. } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
-            BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => *range,

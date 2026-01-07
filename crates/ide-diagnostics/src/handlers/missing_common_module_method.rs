@@ -56,7 +56,8 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::{MdObject, Module};
-use ide_db::hir_def::{ModuleId, Name};
+use ide_db::hir_def::resolver::Resolver;
+use ide_db::hir_def::{ModuleId, Name, PathResolution, QualifiedName};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
@@ -64,11 +65,14 @@ use vfs::{FileId, VfsPath};
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::MissingCommonModuleMethod` is encountered.
 ///
-/// This function validates a qualified call against metadata:
-/// 1. Checks if module_name refers to a CommonModule in metadata
-/// 2. If not found, returns None (might be a regular variable)
-/// 3. If found, checks if method exists and is exported
-/// 4. Returns diagnostic if method is missing or non-exported
+/// This function validates a qualified call using path resolution:
+/// 1. Constructs QualifiedName from module and method names
+/// 2. Uses Resolver with WorkspaceScope to resolve the qualified path
+/// 3. PathResolution::Method(id) → check if method is exported (via metadata fallback)
+/// 4. PathResolution::Unresolved → method or module doesn't exist
+///
+/// This approach leverages the new workspace indexing and path resolution infrastructure
+/// from Phases 1-3, providing more accurate diagnostics than metadata-only checking.
 pub fn from_hir(
     module: &str,
     method: &str,
@@ -79,45 +83,67 @@ pub fn from_hir(
         return None;
     }
 
-    // Load metadata via ctx.load_configuration() for Salsa caching
-    let configuration = ctx.load_configuration()?;
+    // Build qualified path
+    let qualified_name = QualifiedName::from_segments([Name::new(module), Name::new(method)]);
 
-    // Find CommonModule in metadata (case-insensitive)
-    let common_module = configuration.find_common_module(module)?;
+    // Create resolver with workspace scope for cross-module resolution
+    let module_id = ModuleId::new(ctx.file_id);
+    let resolver = Resolver::with_workspace_scope(module_id);
 
-    // Resolve CommonModule file via VFS
-    let module_file_id = find_common_module_file(ctx, common_module)?;
-
-    // Build SymbolTree for CommonModule
-    let module_id = ModuleId::new(module_file_id);
-    let module_symbol_tree = ctx.db.symbol_tree(module_id);
-
-    // Lookup method
-    let method_name_obj = Name::new(method);
-    let method_sym = module_symbol_tree.find_method(&method_name_obj);
+    // Resolve the qualified path using workspace symbols
+    let resolution = resolver.resolve_path(ctx.db, &qualified_name);
 
     tracing::trace!(
         module_name = module,
         method_name = method,
-        found = method_sym.is_some(),
-        is_export = method_sym.as_ref().map(|m| m.is_export).unwrap_or(false),
-        "Method lookup result in HIR diagnostic"
+        resolution = ?resolution,
+        "Path resolution result in HIR diagnostic"
     );
 
-    // Create diagnostic based on result
-    match method_sym {
-        None => {
-            // Method does not exist
-            Some(create_diagnostic_from_hir(range, ErrorType::MethodNotFound, method, module))
-        }
-        Some(m) if !m.is_export => {
-            // Method exists but not exported
-            Some(create_diagnostic_from_hir(range, ErrorType::NonExportMethod, method, module))
-        }
-        Some(_) => {
+    match resolution {
+        PathResolution::Method(method_id) => {
+            // Method found - check if it's exported via SymbolTree
+            let method_module_id = method_id.module;
+            let symbol_tree = ctx.db.symbol_tree(method_module_id);
+            let method_name_obj = Name::new(method);
+
+            if let Some(method_sym) = symbol_tree.find_method(&method_name_obj) {
+                if !method_sym.is_export {
+                    // Method exists but not exported
+                    return Some(create_diagnostic_from_hir(
+                        range,
+                        ErrorType::NonExportMethod,
+                        method,
+                        module,
+                    ));
+                }
+            }
+
             // Valid exported method
             None
         }
+        PathResolution::Unresolved(_) => {
+            // Could not resolve - method or module doesn't exist
+            // Fallback to metadata check to distinguish between missing module and missing method
+            if let Some(configuration) = ctx.load_configuration() {
+                if let Some(common_module) = configuration.find_common_module(module) {
+                    if find_common_module_file(ctx, common_module).is_some() {
+                        // Module exists - method must be missing
+                        return Some(create_diagnostic_from_hir(
+                            range,
+                            ErrorType::MethodNotFound,
+                            method,
+                            module,
+                        ));
+                    }
+                }
+            }
+
+            // Module not found in metadata - might be a local variable or typo
+            // Return diagnostic for method not found (conservative approach)
+            Some(create_diagnostic_from_hir(range, ErrorType::MethodNotFound, method, module))
+        }
+        _ => None,
     }
 }
 

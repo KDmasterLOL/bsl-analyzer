@@ -907,14 +907,15 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::metadata_object_name_length::check,
     ));
-    // NOTE: MissingCommonModuleMethod migrated to HIR-based collection
-    // The HIR version is collected during lowering via BodyDiagnostic::MissingCommonModuleMethod
-    // and dispatched through collect_hir_diagnostics()
-    // result.extend(run_diagnostic(
-    //     "MissingCommonModuleMethod",
-    //     ctx,
-    //     handlers::missing_common_module_method::check,
-    // ));
+    // NOTE: MissingCommonModuleMethod uses AST-based collection with path resolution (Phase 4)
+    // After Phase 4, we use AST-based check() which validates qualified calls via
+    // workspace symbol index and path resolution instead of during HIR lowering.
+    // This provides more accurate diagnostics using the workspace symbols from Phase 2.
+    result.extend(run_diagnostic(
+        "MissingCommonModuleMethod",
+        ctx,
+        handlers::missing_common_module_method::check,
+    ));
     result.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
@@ -1050,9 +1051,8 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::DisableSafeMode { method_name, range } => {
             handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
         }
-        BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
-            handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
-        }
+        // NOTE: MissingCommonModuleMethod removed from HIR lowering (Phase 4)
+        // Now collected via AST-based check() with path resolution
         BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
             handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
         }
