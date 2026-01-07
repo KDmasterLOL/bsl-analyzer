@@ -44,6 +44,7 @@ use hir_def::body::Body;
 use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// Lattice trait for abstract interpretation.
 ///
@@ -122,8 +123,8 @@ pub trait Transfer<L: Lattice> {
 ///    d. If OUT\[block\] changed, add successors to worklist
 /// 4. Return fixed-point solution (IN and OUT for all blocks)
 pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
-    /// Control flow graph
-    cfg: ControlFlowGraph,
+    /// Control flow graph (shared via Arc for efficient caching)
+    cfg: Arc<ControlFlowGraph>,
 
     /// HIR body (for statement lookup in transfer functions)
     body: Body,
@@ -146,10 +147,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     ///
     /// ## Arguments
     ///
-    /// - `cfg`: Control flow graph to analyze
+    /// - `cfg`: Control flow graph to analyze (shared via Arc)
     /// - `body`: HIR body for statement lookup
     /// - `transfer`: Transfer function implementation
-    pub fn new(cfg: ControlFlowGraph, body: Body, transfer: T) -> Self {
+    pub fn new(cfg: Arc<ControlFlowGraph>, body: Body, transfer: T) -> Self {
         Self {
             cfg,
             body,
@@ -321,8 +322,8 @@ pub struct DataflowResult<L: Lattice> {
     /// OUT sets for each block
     block_out: FxHashMap<NodeIndex, L>,
 
-    /// Control flow graph (for mapping statements to blocks)
-    cfg: ControlFlowGraph,
+    /// Control flow graph (for mapping statements to blocks, shared via Arc)
+    cfg: Arc<ControlFlowGraph>,
 
     /// HIR body (for statement lookup)
     body: Body,

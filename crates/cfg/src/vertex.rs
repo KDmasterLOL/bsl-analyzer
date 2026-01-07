@@ -35,7 +35,7 @@ use hir_def::{BindingId, ExprId, Name, StmtId};
 /// Vertex in the control flow graph
 ///
 /// Maps to CfgVertex hierarchy in Java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CfgVertex {
     /// Basic block - sequence of sequential statements
     /// Maps to BasicBlockVertex.java
@@ -119,7 +119,7 @@ impl CfgVertex {
 /// Basic block vertex - sequence of statements with no branches
 ///
 /// Maps to BasicBlockVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlockVertex {
     /// Sequential statements in this basic block
     /// Stores HIR statement indices from Body arena
@@ -165,7 +165,7 @@ impl Default for BasicBlockVertex {
 /// Conditional vertex - if/elsif branching
 ///
 /// Maps to ConditionalVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionalVertex {
     /// Condition expression (HIR index from Body)
     pub condition: ExprId,
@@ -180,7 +180,7 @@ impl ConditionalVertex {
 /// While loop vertex
 ///
 /// Maps to WhileLoopVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhileLoopVertex {
     /// Loop condition (HIR index from Body)
     pub condition: ExprId,
@@ -203,7 +203,7 @@ impl WhileLoopVertex {
 /// For loop vertex
 ///
 /// Maps to ForLoopVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForLoopVertex {
     /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
@@ -218,7 +218,7 @@ impl ForLoopVertex {
 /// ForEach loop vertex
 ///
 /// Maps to ForeachLoopVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForEachLoopVertex {
     /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
@@ -237,7 +237,7 @@ impl ForEachLoopVertex {
 /// Note: CFG doesn't need to store any data for Try-Except blocks,
 /// just mark their presence in the control flow. Body statements
 /// are tracked in BasicBlock vertices.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TryExceptVertex;
 
 impl TryExceptVertex {
@@ -255,7 +255,7 @@ impl Default for TryExceptVertex {
 /// Label vertex (for Goto statements)
 ///
 /// Maps to LabelVertex.java
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelVertex {
     /// Label name (HIR Name from Body)
     pub name: Name,
