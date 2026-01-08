@@ -211,7 +211,341 @@ impl ReachingDefsResult {
 }
 ```
 
-#### 3. HIR-based CFG (`crates/cfg/`, `crates/hir-def/src/cfg_builder.rs`)
+#### 3. Liveness Analysis (`crates/dataflow/src/liveness.rs`)
+
+**Status**: ✅ Implemented (2026-01-08)
+
+Liveness analysis detects unused local variables by tracking which variables may be read on some execution path after each program point. Unlike reaching definitions (forward analysis), liveness is a **backward dataflow analysis**.
+
+**Use Case**: UnusedLocalVariable diagnostic (replaces ad-hoc `used_vars`/`read_vars` tracking)
+
+**Definition:**
+
+A variable is **live** at a program point if its value may be read on some path to the exit without being overwritten first.
+
+**Example:**
+
+```bsl
+Процедура Пример()
+    Перем А, Б, В;  // Declare variables
+
+    А = 10;         // A is NOT live here (never read after)
+    Б = 20;         // B IS live (read in line below)
+    В = Б + 5;      // B read, V IS live (read later)
+    Сообщить(В);    // V read
+КонецПроцедуры
+```
+
+**Analysis Result:**
+- Variable `А`: unused (assigned but never read)
+- Variable `Б`: used (read at line `В = Б + 5`)
+- Variable `В`: used (read at `Сообщить(В)`)
+
+**Lattice:**
+
+```rust
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Liveness {
+    pub live_vars: FxHashSet<String>,  // Set of live variable names (lowercase)
+}
+
+impl Lattice for Liveness {
+    fn bottom() -> Self {
+        Self { live_vars: FxHashSet::default() }  // ∅: no variables live
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        // Union: variable is live if live on ANY path
+        Self {
+            live_vars: self.live_vars.union(&other.live_vars).cloned().collect()
+        }
+    }
+
+    fn is_more_informative_than(&self, other: &Self) -> bool {
+        // Subset relation: self ⊇ other (more live vars = more information)
+        other.live_vars.is_subset(&self.live_vars)
+    }
+}
+```
+
+**Transfer Function (Backward):**
+
+For backward analysis, we compute IN[B] from OUT[B]:
+
+```
+IN[B] = USE[B] ∪ (OUT[B] - DEF[B])
+```
+
+Where:
+- **USE**: Variables read in block B
+- **DEF**: Variables written (assigned) in block B
+- **OUT[B]**: Live variables at block exit (from successors)
+- **IN[B]**: Live variables at block entry
+
+**Implementation:**
+
+```rust
+pub struct LivenessTransfer;
+
+impl Transfer<Liveness> for LivenessTransfer {
+    fn transfer_stmt(&self, stmt_id: RawIdx, state: &Liveness, body: &Body) -> Liveness {
+        let mut in_state = state.clone();  // Start with OUT state
+
+        match &body.stmts[StmtId::from_raw(stmt_id)] {
+            Stmt::Assign { target, value } => {
+                // 1. Add variables read in value (USE)
+                collect_expr_vars(*value, body, &mut in_state.live_vars);
+
+                // 2. Remove assigned variable (DEF/KILL)
+                if let Expr::Path(name) = &body.exprs[*target] {
+                    in_state.live_vars.remove(&name.as_str().to_lowercase());
+                }
+
+                // 3. Add variables read in target (e.g., array index, field)
+                if matches!(body.exprs[*target], Expr::Index { .. } | Expr::Field { .. }) {
+                    collect_expr_vars(*target, body, &mut in_state.live_vars);
+                }
+            }
+
+            Stmt::Return { value } => {
+                if let Some(val) = value {
+                    collect_expr_vars(*val, body, &mut in_state.live_vars);
+                }
+            }
+
+            Stmt::MethodCall { receiver, args, .. } => {
+                if let Some(recv) = receiver {
+                    collect_expr_vars(*recv, body, &mut in_state.live_vars);
+                }
+                for &arg in args.iter() {
+                    collect_expr_vars(arg, body, &mut in_state.live_vars);
+                }
+            }
+
+            // VarDecl, For, ForEach: definitions are handled, not here
+            _ => {}
+        }
+
+        in_state
+    }
+
+    fn transfer_expr(&self, expr_id: hir_def::ExprId, state: &Liveness, body: &Body) -> Liveness {
+        let mut in_state = state.clone();
+        // Process variables in control flow expressions (While condition, If condition)
+        collect_expr_vars(expr_id, body, &mut in_state.live_vars);
+        in_state
+    }
+}
+
+/// Recursively collect all Path expressions (variable references)
+fn collect_expr_vars(expr_id: ExprId, body: &Body, vars: &mut FxHashSet<String>) {
+    match &body.exprs[expr_id] {
+        Expr::Path(name) => {
+            vars.insert(name.as_str().to_lowercase());
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_vars(*lhs, body, vars);
+            collect_expr_vars(*rhs, body, vars);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_expr_vars(*expr, body, vars);
+        }
+        // ... other expression types
+        _ => {}
+    }
+}
+```
+
+**Backward Dataflow Algorithm:**
+
+```rust
+// Set direction to backward
+solver.set_direction(Direction::Backward);
+
+// For backward analysis:
+// 1. Traverse CFG in reverse (from exit to entry)
+// 2. Confluence: OUT[B] = ⊔ { IN[S] | S is successor of B }
+// 3. Transfer: IN[B] = transfer(OUT[B], B)
+// 4. Propagate to predecessors (not successors!)
+```
+
+**Key Difference from Forward Analysis:**
+
+| Aspect | Forward (Reaching Defs) | Backward (Liveness) |
+|--------|------------------------|---------------------|
+| **Direction** | Entry → Exit | Exit → Entry |
+| **Confluence** | IN[B] = ⊔ OUT[P] (predecessors) | OUT[B] = ⊔ IN[S] (successors) |
+| **Transfer** | OUT[B] = f(IN[B]) | IN[B] = f(OUT[B]) |
+| **Propagation** | Add successors to worklist | Add predecessors to worklist |
+| **Initial State** | Entry block = parameters | Exit block = ∅ (no vars live after exit) |
+
+**Control Flow Expression Handling:**
+
+**Problem**: While loop control variables were falsely flagged as unused.
+
+**Example:**
+
+```bsl
+Процедура Пример()
+    Перем ЕстьЗадания;
+
+    ЕстьЗадания = ПолучитьЗадания().Количество() > 0;
+    Пока ЕстьЗадания Цикл  // ЕстьЗадания read in condition!
+        ОбработатьЗадание();
+        ЕстьЗадания = ЕстьЗадания();
+    КонецЦикла;
+КонецПроцедуры
+```
+
+**Root Cause**: `transfer_block()` only processed BasicBlock vertices, ignoring WhileLoop/Conditional vertices.
+
+**Solution**: Added `Transfer::transfer_expr()` method to process control flow expressions:
+
+```rust
+fn transfer_block(&self, block_idx: NodeIndex, in_state: &L) -> L {
+    match &self.cfg.vertices[block_idx] {
+        CfgVertex::BasicBlock(block) => {
+            // Process statements in reverse for backward analysis
+            // ...
+        }
+
+        CfgVertex::WhileLoop(while_vertex) => {
+            // NEW: Process condition expression
+            self.transfer.transfer_expr(while_vertex.condition, in_state, &self.body)
+        }
+
+        CfgVertex::Conditional(conditional_vertex) => {
+            // NEW: Process condition expression
+            self.transfer.transfer_expr(conditional_vertex.condition, in_state, &self.body)
+        }
+
+        _ => in_state.clone(),
+    }
+}
+```
+
+**Module-Level Code Support:**
+
+BSL allows code outside procedures/functions (module initialization code). Liveness analysis must handle this.
+
+**Implementation:**
+
+```rust
+// Salsa queries for module-level code
+#[salsa::tracked(lru = 128)]
+pub fn module_level_cfg_query(db: &dyn RootDatabase, file_id: FileId) -> Arc<ControlFlowGraph>;
+
+#[salsa::tracked(lru = 128)]
+pub fn module_level_liveness_analysis_query(
+    db: &dyn RootDatabase,
+    file_id: FileId
+) -> Option<Arc<DataflowResult<Liveness>>>;
+
+// Diagnostic handler
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // 1. Check each method
+    for (local_id, _) in module_bodies.iter_bodies() {
+        let method_id = MethodId { module: module_id, local_id };
+        diagnostics.extend(check_method(ctx.db, method_id, ctx));
+    }
+
+    // 2. Check module-level code (NEW!)
+    diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
+
+    diagnostics
+}
+```
+
+**Implicit Variable Detection:**
+
+BSL allows variables to be used without `Перем` declaration (implicit variables). These should be flagged as unused if never read.
+
+**Challenge**: An implicit variable assigned then used won't be live at entry point:
+
+```bsl
+ИмяФайла = "test.txt";  // Implicit variable (no Перем)
+Сообщить(ИмяФайла);     // Read
+```
+
+At entry point, `ИмяФайла` is NOT live (it's written before being read). But it IS used!
+
+**Solution**: Check if variable is live in ANY block (not just entry):
+
+```rust
+let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {
+    in_state.is_live(&lowercase_name) || out_state.is_live(&lowercase_name)
+});
+
+if !is_live_anywhere {
+    diagnostics.push(create_diagnostic(&original_name, range));
+}
+```
+
+**Salsa Integration:**
+
+```rust
+trait RootDatabase {
+    fn liveness_analysis(&self, method_id: MethodId) -> Option<Arc<DataflowResult<Liveness>>>;
+    fn module_level_liveness_analysis(&self, module_id: ModuleId) -> Option<Arc<DataflowResult<Liveness>>>;
+}
+
+impl RootDatabase for RootDatabaseImpl {
+    fn liveness_analysis(&self, method_id: MethodId) -> Option<Arc<DataflowResult<Liveness>>> {
+        queries::liveness_analysis_query(self, FileIdInput::new(self, method_id.module.file_id))
+    }
+}
+```
+
+**Query Implementation:**
+
+```rust
+#[salsa::tracked(lru = 128)]
+pub fn liveness_analysis_query(
+    db: &dyn RootDatabase,
+    file_id_input: FileIdInput,
+) -> Option<Arc<DataflowResult<Liveness>>> {
+    let body = /* get body from module_bodies */;
+    let cfg = db.cfg(method_id)?;
+
+    let transfer = LivenessTransfer;
+    let mut solver = DataflowSolver::new(cfg, body.clone(), transfer);
+    solver.set_max_iterations(100);
+    solver.set_direction(Direction::Backward);  // KEY: backward analysis
+
+    let result = solver.solve()?;
+    Some(Arc::new(result))
+}
+```
+
+**Performance:**
+
+- **Time**: O(N × I × V) where N = blocks, I = iterations (~2-5), V = variables
+- **Typical method**: ~5-10ms for initial analysis
+- **Cache hit**: < 1ms (Arc clone)
+- **Memory**: ~40 KB per method (smaller than reaching defs)
+
+**Testing:**
+
+19/19 tests passing including:
+- Sequential assignments (gen-kill)
+- While loop control variables (transfer_expr)
+- Module-level code (implicit variables)
+- Case-insensitive variable tracking
+- Nested control flow (convergence)
+
+**Benefits vs. Old Approach:**
+
+| Aspect | Old (used_vars tracking) | New (Liveness Analysis) |
+|--------|-------------------------|-------------------------|
+| **Accuracy** | ❌ False positives (While loops) | ✅ Control flow aware |
+| **Architecture** | ❌ Ad-hoc in HIR lowering | ✅ Reusable framework |
+| **Caching** | ❌ No caching | ✅ Salsa cached |
+| **Module-level** | ❌ Not supported | ✅ Fully supported |
+| **Testing** | ❌ Implicit in lowering | ✅ 19 explicit tests |
+
+#### 4. HIR-based CFG (`crates/cfg/`, `crates/hir-def/src/cfg_builder.rs`)
 
 **Why HIR, not AST?**
 
@@ -245,7 +579,7 @@ pub fn build_cfg_for_body(body: Body) -> ControlFlowGraph {
 }
 ```
 
-#### 4. Salsa Integration (`crates/ide-db/src/lib.rs`)
+#### 5. Salsa Integration (`crates/ide-db/src/lib.rs`)
 
 **Query Definition:**
 
@@ -449,17 +783,32 @@ impl RootDatabase for RootDatabaseImpl {
 - [x] Unit + integration tests (22 tests passing)
 - [x] Documentation (README + ADR)
 
-### Phase 2: Diagnostic Migration (Planned)
+### Phase 1.5: Backward Analysis ✅ (Completed 2026-01-08)
 
-**Target Diagnostics:**
+- [x] Direction enum (Forward/Backward)
+- [x] Liveness analysis implementation
+- [x] Transfer expression handling (control flow vertices)
+- [x] Module-level code support
+- [x] UnusedLocalVariable diagnostic migration (19/19 tests)
+- [x] Old tracking code removal from HIR lowering
+- [x] Documentation update
 
-1. **IncorrectUseOfStrTemplate** (75% → 95% coverage)
+### Phase 2: Diagnostic Migration (In Progress)
+
+**Completed:**
+
+1. **UnusedLocalVariable** ✅
+   - Liveness analysis (backward dataflow)
+   - Module-level code support
+   - Implicit variable detection
+   - 19/19 tests passing
+   - Replaces ad-hoc `used_vars`/`read_vars` tracking
+
+**Planned:**
+
+2. **IncorrectUseOfStrTemplate** (75% → 95% coverage)
    - Use `resolve_var_to_string()` pattern
    - Handle multi-level assignments
-
-2. **UnusedLocalVariable**
-   - Implement liveness analysis (backward)
-   - Detect unused assignments
 
 3. **RewriteMethodParameter**
    - Check parameter use before reassignment
@@ -520,8 +869,9 @@ impl RootDatabase for RootDatabaseImpl {
 
 ### Quality
 
-- ✅ **22/22 tests passing** (100%)
-- ⏳ **11+ diagnostics** using framework (target: 5+ in Phase 2)
+- ✅ **41/41 tests passing** (22 framework + 19 liveness)
+- ✅ **1 diagnostic** using framework (UnusedLocalVariable with liveness)
+- ⏳ **11+ diagnostics** planned (target: 5+ in Phase 2)
 - ⏳ **90%+ coverage** for IncorrectUseOfStrTemplate (75% baseline)
 
 ### Developer Experience
