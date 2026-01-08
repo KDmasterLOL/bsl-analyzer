@@ -25,6 +25,7 @@
 mod control_flow;
 mod diagnostics;
 mod expr;
+mod magic_number;
 mod preproc;
 mod stmt;
 mod utils;
@@ -559,6 +560,9 @@ pub fn lower_method_with_externals(
 
     // Check for unused local variables
     ctx.check_unused_variables();
+
+    // Check for magic numbers using HIR
+    magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
 
     // Collect referenced externals before consuming ctx
     let referenced_externals = ctx.referenced_externals();

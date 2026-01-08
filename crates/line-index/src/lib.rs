@@ -164,10 +164,20 @@ impl LineIndex {
     /// For example:
     /// - Cyrillic "П" = 2 bytes UTF-8 = 1 char = 1 UTF-16 code unit
     /// - Emoji "😀" = 4 bytes UTF-8 = 1 char = 2 UTF-16 code units
+    ///
+    /// **Defensive**: If the range endpoints are not on character boundaries,
+    /// we round them to the nearest character boundaries to avoid panics.
     pub fn utf16_len(text: &str, range: TextRange) -> u32 {
         let start: usize = range.start().into();
         let end: usize = range.end().into();
         let end = end.min(text.len());
+
+        // SAFETY: Ensure both start and end are on char boundaries to avoid panic.
+        // If a diagnostic generates an invalid TextRange (not on char boundary),
+        // we defensively round to the nearest character boundaries.
+        let start = text.floor_char_boundary(start);
+        let end = text.floor_char_boundary(end);
+
         text[start..end].encode_utf16().count() as u32
     }
 
@@ -176,6 +186,9 @@ impl LineIndex {
     /// LSP requires positions in UTF-16 code units, not bytes.
     /// This function takes a byte offset from line start and returns the corresponding
     /// UTF-16 code unit offset.
+    ///
+    /// **Defensive**: If `byte_col` points to the middle of a UTF-8 character,
+    /// we round down to the nearest character boundary to avoid panics.
     pub fn utf16_col(&self, text: &str, line: u32, byte_col: u32) -> u32 {
         let Some(line_range) = self.line_range(line) else {
             return 0;
@@ -184,6 +197,12 @@ impl LineIndex {
         let line_start: usize = line_range.start().into();
         let col_end = line_start + byte_col as usize;
         let col_end = col_end.min(text.len()).min(line_range.end().into());
+
+        // SAFETY: Ensure both line_start and col_end are on char boundaries to avoid panic.
+        // If a diagnostic generates an invalid TextRange (not on char boundary),
+        // we defensively round down to the nearest character boundary.
+        let line_start = text.floor_char_boundary(line_start);
+        let col_end = text.floor_char_boundary(col_end);
 
         text[line_start..col_end].encode_utf16().count() as u32
     }
@@ -457,5 +476,44 @@ mod tests {
 
         // After "Привет ": byte 13 = UTF-16 position 7
         assert_eq!(index.utf16_col(text, 0, 13), 7);
+    }
+
+    #[test]
+    fn test_utf16_col_invalid_offset() {
+        // Regression test for crash: "byte index is not a char boundary"
+        // This happened when a diagnostic had a TextRange with endpoints not on char boundaries.
+        //
+        // Text: "ВладимирБондаревский"
+        // 'В' occupies bytes 0..2
+        // Asking for utf16_col with byte_col=1 (middle of 'В') should not panic.
+        let text = "ВладимирБондаревский";
+        let index = LineIndex::new(text);
+
+        // byte_col=1 is in the middle of 'В' (bytes 0..2)
+        // Should defensively round down to byte 0 and return UTF-16 position 0
+        let utf16_col = index.utf16_col(text, 0, 1);
+        assert_eq!(utf16_col, 0, "Should round down to char boundary");
+
+        // byte_col=3 is in the middle of 'л' (bytes 2..4)
+        // Should round down to byte 2 (start of 'л') and return UTF-16 position 1
+        let utf16_col = index.utf16_col(text, 0, 3);
+        assert_eq!(utf16_col, 1, "Should round down to start of 'л'");
+    }
+
+    #[test]
+    fn test_utf16_len_invalid_range() {
+        // Regression test for crash with invalid TextRange endpoints
+        let text = "ПрограммныйИнтерфейс";
+
+        // Valid range
+        let valid_range = TextRange::new(0.into(), 4.into()); // "Пр" (2 chars, 4 bytes)
+        assert_eq!(LineIndex::utf16_len(text, valid_range), 2);
+
+        // Invalid range: end=3 is in the middle of 'о' (bytes 2..4)
+        // Should defensively round down to byte 2
+        let invalid_range = TextRange::new(0.into(), 3.into());
+        let len = LineIndex::utf16_len(text, invalid_range);
+        // Should return 1 (just 'П'), since 3 rounds down to 2
+        assert_eq!(len, 1, "Should handle invalid range endpoint");
     }
 }

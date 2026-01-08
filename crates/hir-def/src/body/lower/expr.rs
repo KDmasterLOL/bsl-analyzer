@@ -127,14 +127,6 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             let text = token.text().replace(' ', "");
             let value = text.parse::<f64>().unwrap_or(0.0);
 
-            // Check for magic number
-            if is_magic_number(value) {
-                ctx.emit(BodyDiagnostic::MagicNumber {
-                    value: text.clone(),
-                    range: token.text_range(),
-                });
-            }
-
             // Wrap in NotNan, fallback to 0.0 if somehow NaN (should never happen with parsed literals)
             let value = ordered_float::NotNan::new(value)
                 .unwrap_or_else(|_| ordered_float::NotNan::new(0.0).unwrap());
@@ -175,19 +167,6 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     };
 
     Expr::Literal(literal)
-}
-
-/// Check if a number is a "magic number" (should be a named constant).
-fn is_magic_number(value: f64) -> bool {
-    // Common non-magic numbers
-    const ALLOWED: &[f64] = &[-1.0, 0.0, 1.0, 2.0, 10.0, 100.0];
-
-    if ALLOWED.contains(&value) {
-        return false;
-    }
-
-    // Numbers with many digits are likely magic
-    value.abs() > 2.0
 }
 
 /// Lower binary expression.

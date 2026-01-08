@@ -7,7 +7,7 @@
 ### 1. Настройка окружения
 
 **Требования:**
-- Rust 1.75+ (`rustup install stable`)
+- Rust 1.91+ (`rustup install stable`)
 - Git
 - jq (для скрипта проверки CI)
 

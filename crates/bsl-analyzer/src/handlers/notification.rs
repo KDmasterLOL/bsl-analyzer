@@ -39,7 +39,7 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
     );
 
     // Convert to LSP diagnostics
-    let lsp_diagnostics = crate::lsp::diagnostics(&line_index, &ide_diagnostics);
+    let lsp_diagnostics = crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics);
     tracing::info!("Publishing {} diagnostics for {}", lsp_diagnostics.len(), uri);
 
     // Publish

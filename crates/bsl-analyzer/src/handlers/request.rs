@@ -51,7 +51,7 @@ pub fn handle_goto_definition(
         Some(nav_target) => {
             // For simplicity, assume the target is in the same file
             // In the future, we'll need to map FileId back to URL
-            let target_range = crate::lsp::range(&line_index, nav_target.range)
+            let target_range = crate::lsp::range(&line_index, &text, nav_target.range)
                 .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
 
             let location = Location { uri: uri.clone(), range: target_range };
@@ -100,8 +100,10 @@ pub fn handle_find_references(
         return Ok(None);
     }
 
-    let lsp_locations: Vec<Location> =
-        locations.into_iter().filter_map(|loc| convert_location(&line_index, &uri, loc)).collect();
+    let lsp_locations: Vec<Location> = locations
+        .into_iter()
+        .filter_map(|loc| convert_location(&line_index, &text, &uri, loc))
+        .collect();
 
     if lsp_locations.is_empty() {
         Ok(None)
@@ -151,10 +153,11 @@ pub fn handle_semantic_tokens_full(
 /// TODO: Support cross-file references when we have FileId → URL mapping.
 fn convert_location(
     line_index: &LineIndex,
+    text: &str,
     uri: &lsp_types::Url,
     ide_loc: IdeLocation,
 ) -> Option<Location> {
-    let range = crate::lsp::range(line_index, ide_loc.range)?;
+    let range = crate::lsp::range(line_index, text, ide_loc.range)?;
     Some(Location { uri: uri.clone(), range })
 }
 

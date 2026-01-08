@@ -46,13 +46,24 @@ use syntax::{SyntaxKind, SyntaxToken};
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::MagicNumber` is encountered.
+/// Applies configuration filtering (authorizedNumbers).
 pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::MagicNumber) {
         return None;
     }
+
+    // Apply authorizedNumbers configuration
+    let config = Config::from_context(ctx);
+    if is_authorized(value, &config) {
+        return None;
+    }
+
     Some(Diagnostic {
         code: DiagnosticCode::MagicNumber,
-        message: format!("Магическое число: {}", value),
+        message: format!(
+            "Магическое число {}. Замените число на константу с понятным названием.",
+            value
+        ),
         severity: Severity::Warning,
         range,
         tags: vec![],
@@ -656,5 +667,97 @@ mod tests {
 
         // All numbers are authorized
         assert_eq!(diagnostics.len(), 0, "All numbers should be authorized with custom config");
+    }
+
+    #[test]
+    fn test_simple_assignment_with_meaningful_name() {
+        // Пример 1: простое присваивание переменной с понятным именем
+        // Не должно быть магии - название переменной объясняет значение
+        let code = r"
+Процедура Тест()
+    ДлительностьОперации = 120;
+    МаксимальноеКоличествоПопыток = 5;
+    ТаймаутСоединения = 30;
+КонецПроцедуры
+        ";
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        // Все числа в простых присваиваниях - исключаются
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Simple assignments to meaningfully named variables should not be detected"
+        );
+    }
+
+    #[test]
+    fn test_structure_insert_with_meaningful_key() {
+        // Примеры 2 и 3: вставка в структуру с понятным ключом
+        // Не должно быть магии - ключ структуры объясняет значение
+        let code = r#"
+Процедура Тест()
+    Параметры = Новый Структура;
+    Параметры.Вставить("Таймаут", 30);
+    Параметры.Вставить("МаксимальныйРазмер", 1024);
+
+    Сессия = Новый Структура;
+    Сессия.Вставить("ВремяЖизни", 50);
+    Сессия.Вставить("ПериодПроверки", 15);
+КонецПроцедуры
+        "#;
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        // Все числа в .Вставить() - исключаются
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Structure.Insert() with meaningful keys should not be detected"
+        );
+    }
+
+    #[test]
+    fn test_property_assignment_with_meaningful_name() {
+        // Присваивание свойству структуры с понятным именем
+        let code = r#"
+Процедура Тест()
+    Настройки = Новый Структура("Таймаут, Повторы");
+    Настройки.Таймаут = 30;
+    Настройки.Повторы = 5;
+КонецПроцедуры
+        "#;
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        // Присваивания свойствам - исключаются
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Property assignments with meaningful names should not be detected"
+        );
+    }
+
+    #[test]
+    fn test_magic_numbers_in_expressions() {
+        // Числа в выражениях ДОЛЖНЫ детектироваться
+        let code = r"
+Процедура Тест()
+    СекундВЧасе = 60 * 60; // магия - 60
+    Результат = Значение + 25; // магия - 25
+    Если Счетчик > 100 Тогда // магия - 100
+        Возврат 12; // магия - 12
+    КонецЕсли;
+КонецПроцедуры
+        ";
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        // Должны быть обнаружены: 60 (дважды), 25, 100, 12 = 5 диагностик
+        assert!(
+            diagnostics.len() >= 4,
+            "Magic numbers in expressions should be detected, found {}",
+            diagnostics.len()
+        );
     }
 }

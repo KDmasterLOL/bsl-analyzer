@@ -75,7 +75,7 @@ Uses `.bsl-analyzer.json` configuration format (also supports `.bsl-language-ser
 ### Quick Start
 
 **Requirements:**
-- Rust 1.75+ (`rustup install stable`)
+- Rust 1.91+ (`rustup install stable`)
 - Git
 - jq (для скрипта проверки CI)
 

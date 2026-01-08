@@ -205,6 +205,11 @@ fn process_code_tokens(
                 let byte_col = u32::from(range.end()) - u32::from(line_start);
                 let line_text_start: usize = line_start.into();
                 let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
+
+                // SAFETY: Ensure line_text_end is on a char boundary to avoid panic.
+                // If range.end() is not on a char boundary (parser bug), round down.
+                let line_text_end = file_text.floor_char_boundary(line_text_end);
+
                 let char_col = file_text[line_text_start..line_text_end].chars().count();
 
                 info.max_code_char_pos = info.max_code_char_pos.max(char_col);
@@ -312,6 +317,11 @@ fn process_comments(
                 let byte_col = u32::from(range.end()) - u32::from(line_start);
                 let line_text_start: usize = line_start.into();
                 let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
+
+                // SAFETY: Ensure line_text_end is on a char boundary to avoid panic.
+                // If range.end() is not on a char boundary (parser bug), round down.
+                let line_text_end = file_text.floor_char_boundary(line_text_end);
+
                 let char_col = file_text[line_text_start..line_text_end].chars().count();
 
                 info.max_char_pos = info.max_char_pos.max(char_col);

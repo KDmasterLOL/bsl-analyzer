@@ -15,11 +15,14 @@ use lsp_types::{
 
 /// Converts a TextRange to an LSP Range.
 ///
+/// Uses UTF-16 code units for positions as required by LSP protocol.
+/// This is critical for non-ASCII text (e.g., Cyrillic) where byte positions differ from UTF-16 positions.
+///
 /// # Errors
 /// Returns an error if the range is out of bounds.
-pub fn range(line_index: &LineIndex, range: TextRange) -> Option<Range> {
-    let start = position(line_index, range.start())?;
-    let end = position(line_index, range.end())?;
+pub fn range(line_index: &LineIndex, text: &str, range: TextRange) -> Option<Range> {
+    let start = position_utf16(line_index, text, range.start())?;
+    let end = position_utf16(line_index, text, range.end())?;
     Some(Range { start, end })
 }
 
@@ -75,8 +78,8 @@ pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
 ///
 /// # Errors
 /// Returns None if the diagnostic range cannot be converted.
-pub fn diagnostic(line_index: &LineIndex, diag: &IdeDiagnostic) -> Option<Diagnostic> {
-    let range = range(line_index, diag.range)?;
+pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> Option<Diagnostic> {
+    let range = range(line_index, text, diag.range)?;
     let severity = severity(diag.severity);
     let code = Some(NumberOrString::String(diag.code.as_str().to_string()));
     let tags = diagnostic_tags(&diag.tags);
@@ -95,27 +98,33 @@ pub fn diagnostic(line_index: &LineIndex, diag: &IdeDiagnostic) -> Option<Diagno
 }
 
 /// Converts multiple diagnostics to LSP format.
-pub fn diagnostics(line_index: &LineIndex, diags: &[IdeDiagnostic]) -> Vec<Diagnostic> {
-    diags.iter().filter_map(|d| diagnostic(line_index, d)).collect()
+pub fn diagnostics(line_index: &LineIndex, text: &str, diags: &[IdeDiagnostic]) -> Vec<Diagnostic> {
+    diags.iter().filter_map(|d| diagnostic(line_index, text, d)).collect()
 }
 
 /// Converts a FileId + TextRange to an LSP Location.
 ///
 /// # Errors
 /// Returns None if the range cannot be converted or URL cannot be created.
-pub fn location(line_index: &LineIndex, url: &Url, text_range: TextRange) -> Option<Location> {
-    let lsp_range = range(line_index, text_range)?;
+pub fn location(
+    line_index: &LineIndex,
+    text: &str,
+    url: &Url,
+    text_range: TextRange,
+) -> Option<Location> {
+    let lsp_range = range(line_index, text, text_range)?;
     Some(Location { uri: url.clone(), range: lsp_range })
 }
 
 /// Converts related information for diagnostics.
 pub fn related_information(
     line_index: &LineIndex,
+    text: &str,
     url: &Url,
     message: String,
     text_range: TextRange,
 ) -> Option<DiagnosticRelatedInformation> {
-    let loc = location(line_index, url, text_range)?;
+    let loc = location(line_index, text, url, text_range)?;
     Some(DiagnosticRelatedInformation { location: loc, message })
 }
 
@@ -247,7 +256,7 @@ mod tests {
 
         // Range covering "world"
         let text_range = TextRange::new(6.into(), 11.into());
-        let lsp_range = range(&line_index, text_range).unwrap();
+        let lsp_range = range(&line_index, text, text_range).unwrap();
 
         assert_eq!(lsp_range.start.line, 1);
         assert_eq!(lsp_range.start.character, 0);
@@ -276,12 +285,39 @@ mod tests {
             fixes: vec![],
         };
 
-        let lsp_diag = diagnostic(&line_index, &ide_diag).unwrap();
+        let lsp_diag = diagnostic(&line_index, text, &ide_diag).unwrap();
 
         assert_eq!(lsp_diag.message, "Empty code block");
         assert_eq!(lsp_diag.severity, Some(DiagnosticSeverity::WARNING));
         assert_eq!(lsp_diag.code, Some(NumberOrString::String("EmptyCodeBlock".to_string())));
         assert_eq!(lsp_diag.source, Some("bsl-analyzer".to_string()));
         assert_eq!(lsp_diag.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[test]
+    fn test_range_utf16_cyrillic() {
+        // Test case from MissingReturnedValueDescription bug report.
+        // Code: "// Описание\nФункция ЗапросВERP(СервисПублика) Экспорт"
+        // Diagnostic should highlight "ЗапросВERP" which is at bytes 35..52.
+        //
+        // IMPORTANT: LSP positions must use UTF-16 code units, not bytes!
+        // "// Описание\nФункция " = 11 Cyrillic chars + 10 ASCII = 21 chars total
+        // In UTF-16: 11*1 + 10*1 = 21 code units
+        // "ЗапросВERP" = 7 Cyrillic + 3 ASCII = 10 chars = 10 UTF-16 code units
+        //
+        // Expected LSP position: line 1, characters 8..18 (UTF-16 code units)
+        // (8 = "Функция " in UTF-16, 18 = 8 + 10)
+        let text = "// Описание\nФункция ЗапросВERP(СервисПублика) Экспорт";
+        let line_index = LineIndex::new(text);
+
+        // Byte range for "ЗапросВERP" (35..52 in UTF-8)
+        let text_range = TextRange::new(35.into(), 52.into());
+        let lsp_range = range(&line_index, text, text_range).unwrap();
+
+        // Verify UTF-16 positions
+        assert_eq!(lsp_range.start.line, 1, "Start line should be 1");
+        assert_eq!(lsp_range.start.character, 8, "Start character should be 8 (UTF-16 code units)");
+        assert_eq!(lsp_range.end.line, 1, "End line should be 1");
+        assert_eq!(lsp_range.end.character, 18, "End character should be 18 (UTF-16 code units)");
     }
 }

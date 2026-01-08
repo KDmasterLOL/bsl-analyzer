@@ -11,7 +11,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
 repository = "https://github.com/bsl-analyzer/bsl-analyzer"
-rust-version = "1.75"
+rust-version = "1.91"
 
 [workspace.dependencies]
 # Internal crates
