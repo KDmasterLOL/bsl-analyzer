@@ -184,7 +184,7 @@ Each diagnostic can be:
 
 ### dataflow_max_iterations
 
-**Default:** 3000 iterations
+**Default:** 5000 iterations
 
 **Description:** Maximum iterations for dataflow analysis (liveness, reaching definitions, etc.).
 
@@ -197,7 +197,7 @@ Warning is logged if analysis exceeds this limit.
 ```json
 {
   "diagnostics": {
-    "dataflow_max_iterations": 5000
+    "dataflow_max_iterations": 10000
   }
 }
 ```

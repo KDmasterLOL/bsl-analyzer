@@ -336,7 +336,7 @@ pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
     pub parameters: std::collections::HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
-    /// Maximum iterations for dataflow analysis (default: 3000)
+    /// Maximum iterations for dataflow analysis (default: 5000)
     ///
     /// Controls convergence limit for liveness analysis and other dataflow algorithms.
     /// Increase this for very complex methods with deep nesting or many loops.
@@ -350,7 +350,7 @@ impl Default for DiagnosticsConfig {
             disabled: Vec::new(),
             parameters: std::collections::HashMap::new(),
             ordinary_app_support: false,
-            dataflow_max_iterations: 3000,
+            dataflow_max_iterations: 5000,
         }
     }
 }
