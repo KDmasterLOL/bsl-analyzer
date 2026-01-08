@@ -158,6 +158,19 @@ impl LineIndex {
         self.len
     }
 
+    /// Calculates the UTF-16 length of text in a given range.
+    ///
+    /// This is needed for LSP, which uses UTF-16 code units for positions and lengths.
+    /// For example:
+    /// - Cyrillic "П" = 2 bytes UTF-8 = 1 char = 1 UTF-16 code unit
+    /// - Emoji "😀" = 4 bytes UTF-8 = 1 char = 2 UTF-16 code units
+    pub fn utf16_len(text: &str, range: TextRange) -> u32 {
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        let end = end.min(text.len());
+        text[start..end].encode_utf16().count() as u32
+    }
+
     /// Iterates over all lines, yielding (line_number, line_range) pairs.
     pub fn lines(&self) -> impl Iterator<Item = (u32, TextRange)> + '_ {
         (0..self.len_lines()).filter_map(|line| self.line_range(line).map(|range| (line, range)))
@@ -374,5 +387,29 @@ mod tests {
         assert_eq!(lines[0], (0, TextRange::new(TextSize::from(0), TextSize::from(5))));
         assert_eq!(lines[1], (1, TextRange::new(TextSize::from(6), TextSize::from(11))));
         assert_eq!(lines[2], (2, TextRange::new(TextSize::from(12), TextSize::from(16))));
+    }
+
+    #[test]
+    fn test_utf16_len() {
+        // ASCII: 1 byte = 1 UTF-16 code unit
+        let text = "hello";
+        let range = TextRange::new(TextSize::from(0), TextSize::from(5));
+        assert_eq!(LineIndex::utf16_len(text, range), 5);
+
+        // Cyrillic: 2 bytes = 1 UTF-16 code unit
+        // "ПрограммныйИнтерфейс" = 40 bytes, 20 chars, 20 UTF-16 code units
+        let text = "ПрограммныйИнтерфейс";
+        let range = TextRange::new(TextSize::from(0), TextSize::from(40));
+        assert_eq!(LineIndex::utf16_len(text, range), 20);
+
+        // Mixed: "Функция" = 14 bytes, 7 chars, 7 UTF-16 code units
+        let text = "Функция";
+        let range = TextRange::new(TextSize::from(0), TextSize::from(14));
+        assert_eq!(LineIndex::utf16_len(text, range), 7);
+
+        // Emoji: "😀" = 4 bytes, 1 char, 2 UTF-16 code units (surrogate pair)
+        let text = "hello😀world";
+        let range = TextRange::new(TextSize::from(5), TextSize::from(9)); // just the emoji
+        assert_eq!(LineIndex::utf16_len(text, range), 2);
     }
 }
