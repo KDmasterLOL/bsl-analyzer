@@ -409,4 +409,58 @@ mod tests {
         let (diagnostics, _) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 0, "English keywords should work");
     }
+
+    #[test]
+    fn test_structure_with_nested_fields() {
+        // Real-world example from user: function with structured return type
+        let code = r#"// Возвращает структуру с доступными публикациями HTTP-сервисов ERP.
+//
+// Возвращаемое значение:
+//   Структура - Структура с ключами-названиями сервисов и значениями-URL путями к публикациям:
+//     * ПОЗК - Строка - Публикация для работы с производственными заказами.
+//     * ДанныеДО - Строка - Публикация для получения данных документооборота.
+//     * ДанныеДООтветственный - Строка - Публикация для получения данных об ответственных.
+//     * Рецептура - Строка - Публикация для работы с рецептурами.
+//
+Функция ПубликацииERP() Экспорт
+    Структура = Новый Структура;
+    Структура.Вставить("ПОЗК", "/hs/pozk/getdirection");
+    Структура.Вставить("ДанныеДО", "/hs/dodata/statusdocument");
+    Структура.Вставить("ДанныеДООтветственный", "/hs/dodata/responsible");
+    Структура.Вставить("Рецептура", "/hs/recipe/changestatus");
+    Возврат Структура;
+КонецФункции"#;
+        let (diagnostics, _file_content) = check_diagnostic(code);
+
+        // Should have NO diagnostics - return value is properly documented
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Function with structured return type description should be valid"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_range_for_export_function() {
+        // Test that diagnostic highlights only the function name, not "() Экспорт"
+        let code = "// Описание\nФункция ПубликацииERP() Экспорт\nКонецФункции";
+        let (diagnostics, file_content) = check_diagnostic(code);
+
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
+
+        // Extract actual highlighted text
+        let range = diagnostics[0].range;
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        let highlighted_text = &file_content[start..end];
+
+        eprintln!("Highlighted text: '{}'", highlighted_text);
+        eprintln!("Expected: 'ПубликацииERP'");
+
+        // Should highlight only the function name
+        assert_eq!(
+            highlighted_text, "ПубликацииERP",
+            "Should highlight only function name, not parameters or modifiers"
+        );
+    }
 }

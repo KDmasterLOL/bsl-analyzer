@@ -161,7 +161,8 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
     }
 
     // Skip type definitions (e.g., "Structure:", "  Структура:")
-    if trimmed.ends_with(':') {
+    // But DON'T skip if line contains " - " (type with description that ends with colon)
+    if trimmed.ends_with(':') && !trimmed.contains(" - ") {
         return None;
     }
 
@@ -171,7 +172,12 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
         if trimmed.matches('-').count() >= 2 {
             if let Some(sep_pos) = without_dash.find(" - ") {
                 let type_name = without_dash[..sep_pos].trim().to_string();
-                let description = without_dash[sep_pos + 3..].trim().to_string();
+                let mut description = without_dash[sep_pos + 3..].trim().to_string();
+                // Remove trailing colon if present (e.g., "описание:")
+                if description.ends_with(':') {
+                    description.pop();
+                    description = description.trim_end().to_string();
+                }
                 return Some((type_name, Some(description)));
             }
         }
@@ -185,7 +191,12 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
             return None;
         }
         let type_name = type_name.to_string();
-        let description = trimmed[sep_pos + 3..].trim().to_string();
+        let mut description = trimmed[sep_pos + 3..].trim().to_string();
+        // Remove trailing colon if present (e.g., "описание:")
+        if description.ends_with(':') {
+            description.pop();
+            description = description.trim_end().to_string();
+        }
         return Some((type_name, Some(description)));
     }
 
@@ -428,5 +439,36 @@ mod tests {
         assert!(info.has_return_keyword);
         assert_eq!(info.types.len(), 1);
         assert_eq!(info.types[0].0, "Строка");
+    }
+
+    #[test]
+    fn test_parse_structure_with_nested_fields() {
+        let comments = vec![
+            "Возвращает структуру с доступными публикациями HTTP-сервисов ERP.".to_string(),
+            "".to_string(),
+            "Возвращаемое значение:".to_string(),
+            "  Структура - Структура с ключами-названиями сервисов и значениями-URL путями к публикациям:".to_string(),
+            "    * ПОЗК - Строка - Публикация для работы с производственными заказами.".to_string(),
+            "    * ДанныеДО - Строка - Публикация для получения данных документооборота.".to_string(),
+            "    * ДанныеДООтветственный - Строка - Публикация для получения данных об ответственных.".to_string(),
+            "    * Рецептура - Строка - Публикация для работы с рецептурами.".to_string(),
+            "".to_string(),
+        ];
+
+        let info = parse_return_block_simple(&comments);
+
+        eprintln!("has_return_keyword: {}", info.has_return_keyword);
+        eprintln!("is_hyperlink: {}", info.is_hyperlink);
+        eprintln!("types found: {}", info.types.len());
+        for (type_name, desc) in &info.types {
+            eprintln!("  - {}: {:?}", type_name, desc);
+        }
+
+        assert!(info.has_return_keyword, "Should find return keyword");
+        assert!(!info.is_hyperlink, "Should not be hyperlink");
+        assert!(!info.types.is_empty(), "Should find at least one type");
+
+        // Should find "Структура" type
+        assert!(info.types.iter().any(|(t, _)| t == "Структура"), "Should find 'Структура' type");
     }
 }
