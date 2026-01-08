@@ -1,5 +1,7 @@
 //! MissingReturnedValueDescription diagnostic.
 //!
+//! **HIR-based implementation** using structured documentation from `method.docs()`.
+//!
 //! Checks that:
 //! 1. Functions have return value descriptions in comments ("Возвращаемое значение:")
 //! 2. Procedures do NOT have return value descriptions
@@ -43,83 +45,78 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{
-    method_description::parse_return_block_simple, Diagnostic, DiagnosticCode, DiagnosticsContext,
-    Severity,
-};
-use syntax::{extract_leading_comments, SyntaxKind, SyntaxNode, TextRange};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir::Method;
+use syntax::TextRange;
 
 /// Run the MissingReturnedValueDescription diagnostic.
+///
+/// Uses HIR-based documentation API (`method.docs()`) instead of ad-hoc comment parsing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::MissingReturnedValueDescription) {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
-    // Get source text for comment extraction
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let source_text = file_text_input.text(ctx.db);
-
     let mut diagnostics = Vec::new();
 
-    // Check all functions and procedures
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::FUNCTION_DEF => {
-                if let Some(diag) = check_function(&node, &source_text, ctx) {
-                    diagnostics.push(diag);
-                }
-            }
-            SyntaxKind::PROCEDURE_DEF => {
-                if let Some(diag) = check_procedure(&node, &source_text) {
-                    diagnostics.push(diag);
-                }
-            }
-            _ => {}
+    // Get module data from HIR
+    let module_id = hir_def::ModuleId::new(ctx.file_id);
+    let module_data = ctx.db.module_data(module_id);
+
+    // Check all procedures
+    for method_id in &module_data.procedures {
+        if let Some(diag) = check_procedure_hir(ctx.db, *method_id) {
+            diagnostics.push(diag);
+        }
+    }
+
+    // Check all functions
+    for method_id in &module_data.functions {
+        if let Some(diag) = check_function_hir(ctx.db, *method_id, ctx) {
+            diagnostics.push(diag);
         }
     }
 
     diagnostics
 }
 
-/// Check if a method (function or procedure) has the Export keyword.
-fn is_export_method(method_node: &SyntaxNode) -> bool {
-    method_node.children_with_tokens().any(|el| el.kind() == SyntaxKind::KW_EXPORT)
-}
-
-/// Check a function for missing or invalid return description.
-fn check_function(
-    func_node: &SyntaxNode,
-    source_text: &str,
+/// Check a function for missing or invalid return description (HIR-based).
+fn check_function_hir(
+    db: &dyn hir_def::DefDatabase,
+    method_id: hir_def::MethodId,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
+    let method = Method::new(db, method_id);
+
     // Only check export functions (public API)
-    // Private functions don't require return value documentation
-    if !is_export_method(func_node) {
+    if !method.is_export() {
         return None;
     }
 
-    // Extract comments before the function
-    // If there are no comments, use empty vector (export functions must have docs)
-    let comments = extract_leading_comments(func_node, source_text).unwrap_or_default();
+    // Get documentation via HIR
+    let docs = method.docs();
 
-    // Check if the first non-empty comment is a hyperlink reference (См./See)
-    // This bypasses validation even without "Возвращаемое значение:"
-    if let Some(first_comment) = comments.iter().find(|c| !c.trim().is_empty()) {
-        let first_trimmed = first_comment.trim().to_lowercase();
-        if first_trimmed.starts_with("см.") || first_trimmed.starts_with("see ") {
-            return None;
-        }
+    // Check if documentation exists
+    if docs.is_none() {
+        return Some(create_diagnostic_hir(
+            &method,
+            "Добавьте описание возвращаемого значения функции",
+        ));
     }
 
-    // Parse return block
-    let return_info = parse_return_block_simple(&comments);
+    let docs = docs.unwrap();
 
-    // If it's a hyperlink reference after "Возвращаемое значение:", skip validation
-    if return_info.is_hyperlink {
+    // If it's a hyperlink reference, skip validation
+    if docs.is_hyperlink() {
         return None;
+    }
+
+    // Check if return value section exists
+    if docs.returned_value.is_empty() {
+        return Some(create_diagnostic_hir(
+            &method,
+            "Добавьте описание возвращаемого значения функции",
+        ));
     }
 
     // Get configuration parameter
@@ -131,36 +128,19 @@ fn check_function(
         )
         .unwrap_or(true);
 
-    // Check 1: Function must have return keyword
-    if !return_info.has_return_keyword {
-        return Some(create_diagnostic(
-            func_node,
-            "Добавьте описание возвращаемого значения функции",
-        ));
-    }
-
-    // Check 2: Return block must not be empty
-    if return_info.types.is_empty() {
-        return Some(create_diagnostic(
-            func_node,
-            "Добавьте описание возвращаемого значения функции",
-        ));
-    }
-
-    // Check 3: Strict mode - all types must have descriptions
+    // Strict mode - all types must have descriptions
     if !allow_short {
-        let types_without_desc: Vec<&str> = return_info
-            .types
+        let types_without_desc: Vec<&str> = docs
+            .returned_value
             .iter()
-            .filter_map(
-                |(type_name, desc)| {
-                    if desc.is_none() {
-                        Some(type_name.as_str())
-                    } else {
-                        None
-                    }
-                },
-            )
+            .filter_map(|type_doc| {
+                // Type has no description AND no sub-parameters (structured type)
+                if type_doc.description.is_none() && type_doc.parameters.is_empty() {
+                    Some(type_doc.name.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
 
         if !types_without_desc.is_empty() {
@@ -169,25 +149,27 @@ fn check_function(
                 "Необходимо добавить описание типов \"{}\" возвращаемого значения",
                 types_list
             );
-            return Some(create_diagnostic(func_node, &message));
+            return Some(create_diagnostic_hir(&method, &message));
         }
     }
 
     None
 }
 
-/// Check a procedure for invalid return description.
-fn check_procedure(proc_node: &SyntaxNode, source_text: &str) -> Option<Diagnostic> {
-    // Extract comments before the procedure
-    let comments = extract_leading_comments(proc_node, source_text)?;
+/// Check a procedure for invalid return description (HIR-based).
+fn check_procedure_hir(
+    db: &dyn hir_def::DefDatabase,
+    method_id: hir_def::MethodId,
+) -> Option<Diagnostic> {
+    let method = Method::new(db, method_id);
 
-    // Parse return block
-    let return_info = parse_return_block_simple(&comments);
+    // Get documentation via HIR
+    let docs = method.docs()?;
 
     // Procedures must NOT have return value descriptions
-    if return_info.has_return_keyword {
-        return Some(create_diagnostic(
-            proc_node,
+    if !docs.returned_value.is_empty() {
+        return Some(create_diagnostic_hir(
+            &method,
             "Удалите описание возвращаемого значения для процедуры",
         ));
     }
@@ -195,11 +177,18 @@ fn check_procedure(proc_node: &SyntaxNode, source_text: &str) -> Option<Diagnost
     None
 }
 
-/// Create a diagnostic with the given message.
+/// Create a diagnostic with the given message (HIR-based).
 ///
-/// The diagnostic range is set to the method name (first IDENT token before PARAM_LIST).
-fn create_diagnostic(method_node: &SyntaxNode, message: &str) -> Diagnostic {
-    let range = get_method_name_range(method_node).unwrap_or_else(|| method_node.text_range());
+/// The diagnostic range is set to the method name (identifier only).
+fn create_diagnostic_hir<DB: hir_def::DefDatabase + ?Sized>(
+    method: &Method<'_, DB>,
+    message: &str,
+) -> Diagnostic {
+    // Get method's name range from HIR (identifier only, not full method body)
+    let range = method.name_range().unwrap_or_else(|| {
+        // Fallback: return a default range (shouldn't happen in practice)
+        TextRange::empty(0.into())
+    });
 
     Diagnostic {
         code: DiagnosticCode::MissingReturnedValueDescription,
@@ -209,21 +198,6 @@ fn create_diagnostic(method_node: &SyntaxNode, message: &str) -> Diagnostic {
         tags: vec![],
         fixes: vec![],
     }
-}
-
-/// Get the text range of the method name.
-///
-/// Returns the range of the first IDENT token that appears before PARAM_LIST.
-/// This matches the behavior of FunctionShouldHaveReturn diagnostic.
-fn get_method_name_range(method_node: &SyntaxNode) -> Option<TextRange> {
-    let name_token = method_node
-        .children_with_tokens()
-        .take_while(|el| !matches!(el.kind(), SyntaxKind::PARAM_LIST))
-        .filter_map(|el| el.into_token())
-        .filter(|tok| !tok.kind().is_trivia())
-        .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
-
-    Some(name_token.text_range())
 }
 
 #[cfg(test)]
@@ -559,5 +533,77 @@ mod tests {
         let (diagnostics, _) = check_diagnostic(code);
 
         assert_eq!(diagnostics.len(), 0, "Export function with return docs should be OK");
+    }
+
+    #[test]
+    fn test_fields_without_main_type_triggers_diagnostic() {
+        // This is CORRECT behavior - diagnostic should trigger when fields (*)
+        // are listed without specifying the main return type.
+        //
+        // INCORRECT format (should trigger diagnostic):
+        //   Возвращаемое значение:
+        //     * Field1 - Type1 - description
+        //     * Field2 - Type2 - description
+        //
+        // CORRECT format (should NOT trigger):
+        //   Возвращаемое значение:
+        //     Структура:
+        //     * Field1 - Type1 - description
+        //     * Field2 - Type2 - description
+        //
+        // This matches bsl-language-server behavior: sub-parameters (fields with *)
+        // are added to the last type. If there's no type, they're ignored and the
+        // return value block is considered empty.
+        let code = r#"// Пакет ответа результата вызова метода HTTP.
+//
+// Возвращаемое значение:
+//   * Метод - Строка - имя HTTP-метода запроса
+//   * URL - Строка - итоговый URL, по которому был выполнен запрос.
+//   * КодСостояния - Число - Код состояния ответа.
+//   * Заголовки - Соответствие - Заголовки ответа.
+//   * Тело - ДвоичныеДанные - Тело ответа.
+//   * Кодировка - Строка - код кодировки ответа.
+//
+Функция НовыйОтвет() Экспорт
+    Возврат Новый Структура;
+КонецФункции"#;
+        let (diagnostics, file_content) = check_diagnostic(code);
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Should trigger diagnostic - fields without main type declaration"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
+        assert!(
+            diagnostics[0].message.contains("Добавьте описание"),
+            "Expected 'Добавьте описание' in message, got: {}",
+            diagnostics[0].message
+        );
+        // Line 10, function name НовыйОтвет
+        assert_diagnostic_range(&file_content, &diagnostics[0], 10, 8, 18);
+    }
+
+    #[test]
+    fn test_fields_with_main_type_ok() {
+        // CORRECT format - main type declared before fields
+        let code = r#"// Пакет ответа результата вызова метода HTTP.
+//
+// Возвращаемое значение:
+//   Структура:
+//   * Метод - Строка - имя HTTP-метода запроса
+//   * URL - Строка - итоговый URL, по которому был выполнен запрос.
+//   * КодСостояния - Число - Код состояния ответа.
+//
+Функция НовыйОтвет() Экспорт
+    Возврат Новый Структура;
+КонецФункции"#;
+        let (diagnostics, _) = check_diagnostic(code);
+
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Should NOT trigger - main type 'Структура:' is declared before fields"
+        );
     }
 }

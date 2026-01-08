@@ -455,6 +455,13 @@ impl DefDatabase for RootDatabaseImpl {
         module_metadata_query(self, file_id_input)
     }
 
+    fn method_docs(&self, method: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+        // Call documentation parsing query
+        // TODO: Make this a proper Salsa tracked query with MethodIdInput
+        // For now, call directly (still benefits from parse() caching)
+        hir_def::docs::method_docs_query(self, method)
+    }
+
     fn workspace_symbols(&self, files: &[FileId]) -> hir_def::WorkspaceSymbols {
         // Call workspace_symbols_query from hir-def
         // NOTE: Not yet Salsa-tracked in Phase 2 MVP

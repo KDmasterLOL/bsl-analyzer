@@ -160,9 +160,15 @@ fn parse_type_line(line: &str) -> Option<(String, Option<String>)> {
         return None;
     }
 
-    // Skip type definitions (e.g., "Structure:", "  Структура:")
-    // But DON'T skip if line contains " - " (type with description that ends with colon)
+    // Pattern 0: "Type:" (type name with colon, no description)
+    // This is used to declare structured types before listing their fields
+    // Example: "Структура:", "Structure:", "Массив:"
     if trimmed.ends_with(':') && !trimmed.contains(" - ") {
+        let type_name = trimmed.trim_end_matches(':').trim();
+        if !type_name.is_empty() && is_likely_type_name(type_name) {
+            return Some((type_name.to_string(), None));
+        }
+        // Not a type name - skip this line
         return None;
     }
 
@@ -391,8 +397,11 @@ mod tests {
 
         assert!(info.has_return_keyword);
         assert!(!info.is_hyperlink);
-        // Structured fields (with *) are skipped, "Структура:" ends with ':' so also skipped
-        assert!(info.types.is_empty());
+        // "Структура:" is now parsed as a type (Pattern 0: type with colon)
+        // Structured fields (with *) are still skipped as they represent nested structure
+        assert_eq!(info.types.len(), 1);
+        assert_eq!(info.types[0].0, "Структура");
+        assert_eq!(info.types[0].1, None); // No description for the type itself
     }
 
     #[test]

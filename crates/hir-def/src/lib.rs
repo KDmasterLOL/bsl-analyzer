@@ -29,6 +29,7 @@ pub mod body;
 pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod cyclomatic_complexity;
+pub mod docs;
 pub mod hir;
 pub mod item_tree;
 pub mod name;
@@ -236,6 +237,35 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// **Note:** Actual implementation is in ide-db (needs VFS access). The query
     /// in hir-def is a placeholder.
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
+
+    /// Get parsed documentation for a method.
+    ///
+    /// Extracts and parses documentation comments (lines starting with //) before
+    /// a procedure or function. Returns structured `MethodDocs` containing:
+    /// - Purpose/description
+    /// - Parameter types and descriptions
+    /// - Return value types and descriptions
+    /// - Examples, call options, deprecation info
+    ///
+    /// Returns `None` if the method has no documentation comments.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 256 methods (documentation parsing is inexpensive)
+    /// - **Depends on:** [`parse`](base_db::RootQueryDb::parse), [`item_tree`](Self::item_tree)
+    /// - **Typical time:** ~0.5-1ms per method (comment extraction + parsing)
+    ///
+    /// # Implementation
+    /// Should delegate to [`method_docs_query`](docs::method_docs_query).
+    ///
+    /// # Usage
+    /// ```ignore
+    /// let docs = db.method_docs(method_id)?;
+    /// println!("Purpose: {}", docs.purpose.unwrap_or_default());
+    /// for param in &docs.parameters {
+    ///     println!("  {}: {:?}", param.name, param.types);
+    /// }
+    /// ```
+    fn method_docs(&self, method: MethodId) -> Option<Arc<crate::docs::MethodDocs>>;
 
     /// Get workspace-wide symbol index for CommonModules.
     ///
