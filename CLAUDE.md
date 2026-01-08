@@ -211,7 +211,43 @@ Before using any external crate, consult its current documentation using the Con
 - Use `query-docs` to get up-to-date documentation
 - Key libraries: `rowan`, `salsa`, `logos`, `lsp-types`, `lsp-server`
 
-### 2. Reference Source Projects
+### 2. Use LSP for Navigation and Code Intelligence
+
+The `LSP` tool provides Rust language server integration for efficient code navigation. Use it when:
+
+**When to use LSP:**
+
+- **Exploring unfamiliar code** - Use `hover` to understand types, traits, and function signatures
+- **Finding definitions** - Use `goToDefinition` to jump to symbol declarations instead of manual searching
+- **Understanding API usage** - Use `findReferences` to see how a type or function is used across the codebase
+- **Getting code structure** - Use `documentSymbol` to see all functions, structs, enums in a file
+- **Finding symbols by name** - Use `workspaceSymbol` to locate types/functions across the entire project
+- **Understanding call chains** - Use `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` to trace function calls
+
+**When NOT to use LSP:**
+
+- When you already know the exact file path and line number (use `Read` instead)
+- For simple text search (use `Grep` instead)
+- For file pattern matching (use `Glob` instead)
+- When exploring multiple files in parallel (LSP is better for focused navigation)
+
+**Examples:**
+
+```
+# Check what a function returns
+LSP: operation=hover, line=378, character=10
+
+# Find where a struct is defined
+LSP: operation=goToDefinition, line=37, character=20
+
+# See all usages of a function
+LSP: operation=findReferences, line=100, character=15
+
+# Get overview of file structure
+LSP: operation=documentSymbol, line=1, character=1
+```
+
+### 3. Reference Source Projects
 
 When implementing features, reference these source projects (see `docs/planning/SOURCES.md`):
 
@@ -222,7 +258,7 @@ When implementing features, reference these source projects (see `docs/planning/
 - **bsl-language-server-rust** (`~/src/lsp/bsl-language-server-rust/`) - Existing Rust components (diagnostics, metadata)
 - **salsa** (`~/src/lsp/salsa/`) - Incremental computation framework (v0.25.2)
 
-### 3. Logging: Use tracing, Never println
+### 4. Logging: Use tracing, Never println
 
 **Required:**
 
@@ -250,7 +286,7 @@ dbg!(value);                     // ❌ Never use
 
 **Exception:** `println!` is acceptable only for CLI output in binary crates, not for debugging.
 
-### 4. Code Must Be Self-Documenting
+### 5. Code Must Be Self-Documenting
 
 Minimize comments. Use expressive names, extract functions, and use type system instead.
 
@@ -268,7 +304,7 @@ Minimize comments. Use expressive names, extract functions, and use type system 
 - Commented-out code
 - Decorative separators
 
-### 5. Tests Are Mandatory
+### 6. Tests Are Mandatory
 
 - All new functionality requires tests
 - Never break existing tests without understanding why
@@ -297,7 +333,7 @@ assert_eq!(diagnostics[0].range, TextRange::new(42.into(), 156.into()));
 
 **Why:** Java tests specify line/column positions. Using helpers ensures we match Java behavior exactly and makes tests readable.
 
-### 6. No Warnings Allowed
+### 7. No Warnings Allowed
 
 ```bash
 # Must pass with no warnings before commit
@@ -306,7 +342,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Use `#[allow(...)]` only with explanation comment.
 
-### 7. Self-Contained Project
+### 8. Self-Contained Project
 
 All test files must be copied into this repository. Never use absolute paths to external projects:
 
