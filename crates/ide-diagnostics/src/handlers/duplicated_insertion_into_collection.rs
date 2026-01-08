@@ -870,8 +870,10 @@ fn check_expr_for_side_effects(
     }
 }
 
-/// Legacy AST-based check function (for fallback/compatibility).
-/// This will be removed once HIR-based check is fully validated.
+/// Check for duplicated insertions into collections across all methods in a module.
+///
+/// This diagnostic analyzes HIR bodies directly without requiring dataflow analysis.
+/// It tracks insertion patterns and detects when the same value is inserted multiple times.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicatedInsertionIntoCollection::check").entered();
 
@@ -879,20 +881,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Use HIR-based check via module_bodies
-    use hir::ModuleId;
-
-    let module_id = ModuleId::new(ctx.file_id);
-    let module_bodies = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.db.module_bodies(module_id)
-    })) {
-        Ok(bodies) => bodies,
-        Err(_) => return Vec::new(),
-    };
+    let module_id = hir_def::ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
 
     let mut diagnostics = Vec::new();
 
-    for (_method_id, body, source_map) in module_bodies.method_bodies() {
+    // Check each method body for duplicated insertions
+    for (_local_id, body, source_map) in module_bodies.method_bodies() {
         diagnostics.extend(check_body(body, source_map, ctx.config));
     }
 
