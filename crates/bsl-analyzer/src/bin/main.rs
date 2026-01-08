@@ -82,7 +82,21 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let log_file = env::var("BSL_LOG_FILE").ok().map(PathBuf::from);
-    setup_logging(log_file)?;
+
+    // Setup logging first, before any errors can occur
+    if let Err(e) = setup_logging(log_file.clone()) {
+        // If logging setup fails, write to stderr as fallback
+        eprintln!("Failed to setup logging: {}", e);
+        // Try to write to log file directly
+        if let Some(ref path) = log_file {
+            let _ = fs::write(path, format!("ERROR: Failed to setup logging: {}\n", e));
+        }
+        return Err(e.into());
+    }
+
+    tracing::info!("BSL Analyzer starting (pid: {})", std::process::id());
+    tracing::info!("Working directory: {:?}", env::current_dir().ok());
+    tracing::info!("Command line args: {:?}", env::args().collect::<Vec<_>>());
 
     let cli = Cli::parse();
 
@@ -120,13 +134,21 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Create LSP connection over stdio
     let (connection, io_threads) = Connection::stdio();
+    tracing::info!("LSP connection established via stdio");
 
     // Run the main loop
-    bsl_analyzer::main_loop(connection)?;
+    tracing::info!("Entering main loop");
+    if let Err(e) = bsl_analyzer::main_loop(connection) {
+        tracing::error!("Main loop error: {}", e);
+        tracing::error!("Error chain: {:?}", e);
+        return Err(e.into());
+    }
 
     // Join IO threads
+    tracing::info!("Joining IO threads");
     io_threads.join()?;
 
+    tracing::info!("LSP server shut down cleanly");
     Ok(())
 }
 
