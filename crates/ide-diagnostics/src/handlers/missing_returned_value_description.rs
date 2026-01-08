@@ -84,12 +84,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Check if a method (function or procedure) has the Export keyword.
+fn is_export_method(method_node: &SyntaxNode) -> bool {
+    method_node.children_with_tokens().any(|el| el.kind() == SyntaxKind::KW_EXPORT)
+}
+
 /// Check a function for missing or invalid return description.
 fn check_function(
     func_node: &SyntaxNode,
     source_text: &str,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
+    // Only check export functions (public API)
+    // Private functions don't require return value documentation
+    if !is_export_method(func_node) {
+        return None;
+    }
+
     // Extract comments before the function
     let comments = extract_leading_comments(func_node, source_text)?;
 
@@ -305,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_function_with_description_no_return() {
-        let code = "// Описание вроде\nФункция Example()\nКонецФункции";
+        let code = "// Описание вроде\nФункция Example() Экспорт\nКонецФункции";
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
@@ -316,7 +327,8 @@ mod tests {
 
     #[test]
     fn test_function_with_empty_return_block() {
-        let code = "// Описание вроде\n// Возвращаемое значение:\nФункция Example()\nКонецФункции";
+        let code =
+            "// Описание вроде\n// Возвращаемое значение:\nФункция Example() Экспорт\nКонецФункции";
         let (diagnostics, file_content) = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
@@ -361,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_function_with_type_no_description_strict_mode() {
-        let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка\nФункция Example()\nКонецФункции";
+        let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка\nФункция Example() Экспорт\nКонецФункции";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -387,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_function_with_multiple_types_no_description_strict() {
-        let code = "// Описание вроде\n// Возвращаемое значение:\n// - Строка\n// - булево\nФункция Example()\nКонецФункции";
+        let code = "// Описание вроде\n// Возвращаемое значение:\n// - Строка\n// - булево\nФункция Example() Экспорт\nКонецФункции";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -488,5 +500,45 @@ mod tests {
             "Should highlight only function name 'ЗапросВERP', got '{}'",
             highlighted_text
         );
+    }
+
+    #[test]
+    fn test_non_export_function_no_diagnostic() {
+        // Non-export (private) functions don't require return value documentation
+        let code = "// Описание\nФункция НастройкиПодключения(СервисПубликации)\n\tВозврат Новый Структура;\nКонецФункции";
+        let (diagnostics, _) = check_diagnostic(code);
+
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Non-export functions should not require return value documentation"
+        );
+    }
+
+    #[test]
+    fn test_export_function_requires_documentation() {
+        // Export functions must have return value documentation
+        let code =
+            "// Описание\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
+        let (diagnostics, file_content) = check_diagnostic(code);
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Export function without return docs should trigger diagnostic"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
+        assert!(diagnostics[0].message.contains("Добавьте описание"));
+        // Line 1, function name
+        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 8, 28);
+    }
+
+    #[test]
+    fn test_export_function_with_complete_docs_ok() {
+        // Export function with complete documentation should pass
+        let code = "// Описание\n// Возвращаемое значение:\n//  Структура - настройки подключения\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
+        let (diagnostics, _) = check_diagnostic(code);
+
+        assert_eq!(diagnostics.len(), 0, "Export function with return docs should be OK");
     }
 }
