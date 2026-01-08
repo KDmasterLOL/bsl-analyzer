@@ -24,9 +24,22 @@ pub fn range(line_index: &LineIndex, range: TextRange) -> Option<Range> {
 }
 
 /// Converts a TextSize to an LSP Position.
+///
+/// **IMPORTANT**: LSP requires character positions in UTF-16 code units, not bytes!
+/// This function is a helper - you must use `position_utf16()` which takes text parameter.
 pub fn position(line_index: &LineIndex, offset: TextSize) -> Option<Position> {
     let line_col = line_index.line_col(offset);
     Some(Position { line: line_col.line, character: line_col.col })
+}
+
+/// Converts a TextSize to an LSP Position with UTF-16 character offset.
+///
+/// **USE THIS** instead of `position()` for all LSP protocol conversions.
+/// LSP requires positions in UTF-16 code units, not bytes.
+pub fn position_utf16(line_index: &LineIndex, text: &str, offset: TextSize) -> Option<Position> {
+    let line_col = line_index.line_col(offset);
+    let utf16_col = line_index.utf16_col(text, line_col.line, line_col.col);
+    Some(Position { line: line_col.line, character: utf16_col })
 }
 
 /// Converts our Severity to LSP DiagnosticSeverity.
@@ -192,13 +205,14 @@ pub fn semantic_tokens(
     sorted.sort_by_key(|hl| hl.range.start());
 
     for hl in sorted {
-        let start_pos = match position(line_index, hl.range.start()) {
+        // CRITICAL: Use UTF-16 positions, not byte positions!
+        let start_pos = match position_utf16(line_index, text, hl.range.start()) {
             Some(pos) => pos,
             None => continue,
         };
 
         // CRITICAL: Use UTF-16 length, not byte length!
-        // For Cyrillic: "ПрограммныйИнтерфейс" = 42 bytes but only 21 UTF-16 code units
+        // For Cyrillic: "ПрограммныйИнтерфейс" = 40 bytes but only 20 UTF-16 code units
         let length = LineIndex::utf16_len(text, hl.range);
 
         // Calculate deltas

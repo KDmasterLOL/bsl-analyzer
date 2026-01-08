@@ -171,6 +171,23 @@ impl LineIndex {
         text[start..end].encode_utf16().count() as u32
     }
 
+    /// Converts a byte offset within a line to UTF-16 code unit offset.
+    ///
+    /// LSP requires positions in UTF-16 code units, not bytes.
+    /// This function takes a byte offset from line start and returns the corresponding
+    /// UTF-16 code unit offset.
+    pub fn utf16_col(&self, text: &str, line: u32, byte_col: u32) -> u32 {
+        let Some(line_range) = self.line_range(line) else {
+            return 0;
+        };
+
+        let line_start: usize = line_range.start().into();
+        let col_end = line_start + byte_col as usize;
+        let col_end = col_end.min(text.len()).min(line_range.end().into());
+
+        text[line_start..col_end].encode_utf16().count() as u32
+    }
+
     /// Iterates over all lines, yielding (line_number, line_range) pairs.
     pub fn lines(&self) -> impl Iterator<Item = (u32, TextRange)> + '_ {
         (0..self.len_lines()).filter_map(|line| self.line_range(line).map(|range| (line, range)))
@@ -411,5 +428,34 @@ mod tests {
         let text = "hello😀world";
         let range = TextRange::new(TextSize::from(5), TextSize::from(9)); // just the emoji
         assert_eq!(LineIndex::utf16_len(text, range), 2);
+    }
+
+    #[test]
+    fn test_utf16_col() {
+        // "    Перем ЛокальнаяПеременная;" - example from user
+        // "Перем" starts at byte 4, which is UTF-16 position 4 (leading spaces are ASCII)
+        // "ЛокальнаяПеременная" starts at byte 15 (4 spaces + "Перем" (10 bytes) + 1 space)
+        let text = "    Перем ЛокальнаяПеременная;";
+        let index = LineIndex::new(text);
+
+        // ASCII spaces: byte 4 = UTF-16 position 4
+        assert_eq!(index.utf16_col(text, 0, 4), 4);
+
+        // After "Перем" (10 bytes = 5 chars): byte 14 = UTF-16 position 9 (4 spaces + 5 chars)
+        assert_eq!(index.utf16_col(text, 0, 14), 9);
+
+        // Start of "ЛокальнаяПеременная": byte 15 = UTF-16 position 10 (4 + 5 + 1 space)
+        assert_eq!(index.utf16_col(text, 0, 15), 10);
+
+        // Cyrillic: "Привет Мир"
+        // "Привет" = 12 bytes, 6 chars, 6 UTF-16 code units
+        let text = "Привет Мир";
+        let index = LineIndex::new(text);
+
+        // After "Привет": byte 12 = UTF-16 position 6
+        assert_eq!(index.utf16_col(text, 0, 12), 6);
+
+        // After "Привет ": byte 13 = UTF-16 position 7
+        assert_eq!(index.utf16_col(text, 0, 13), 7);
     }
 }
