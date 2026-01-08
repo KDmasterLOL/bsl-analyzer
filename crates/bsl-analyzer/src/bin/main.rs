@@ -12,6 +12,10 @@ use ide_db::metadata;
 #[command(version)]
 #[command(about = "BSL Language Server and Analyzer")]
 struct Cli {
+    /// Run in LSP server mode via stdio (same as no arguments)
+    #[arg(long)]
+    stdio: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -99,6 +103,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("Command line args: {:?}", env::args().collect::<Vec<_>>());
 
     let cli = Cli::parse();
+
+    // --stdio flag is same as running without arguments (LSP mode)
+    if cli.stdio && cli.command.is_some() {
+        tracing::error!("Cannot use --stdio with other commands");
+        eprintln!("Error: --stdio flag cannot be used with other subcommands");
+        std::process::exit(1);
+    }
 
     match cli.command {
         Some(Commands::Analyze {
