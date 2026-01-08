@@ -463,4 +463,30 @@ mod tests {
             "Should highlight only function name, not parameters or modifiers"
         );
     }
+
+    #[test]
+    fn test_diagnostic_range_mixed_cyrillic_latin() {
+        // Real example from user: mixed Cyrillic+Latin function name
+        // NOTE: This test verifies diagnostic GENERATES correct byte-based TextRange.
+        // The incorrect column positions reported by user (columns 16-33 instead of 8-18)
+        // are due to LSP server not converting byte positions to UTF-16 code units.
+        // See: crates/bsl-analyzer/src/lsp/to_proto.rs:range() - needs to use position_utf16()
+        let code = "// Описание\nФункция ЗапросВERP(СервисПубликации, ПараметрыЗапроса, Сессия = Неопределено) Экспорт\nКонецФункции";
+        let (diagnostics, file_content) = check_diagnostic(code);
+
+        assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
+
+        // Extract actual highlighted text
+        let range = diagnostics[0].range;
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+        let highlighted_text = &file_content[start..end];
+
+        // Should highlight only the function name
+        assert_eq!(
+            highlighted_text, "ЗапросВERP",
+            "Should highlight only function name 'ЗапросВERP', got '{}'",
+            highlighted_text
+        );
+    }
 }
