@@ -967,6 +967,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // These are cached by Salsa via module_bodies() query
     result.extend(collect_hir_diagnostics(ctx));
 
+    // Dataflow-based diagnostics (using CFG + liveness analysis)
+    // These use Salsa-cached CFG and dataflow results
+    result.extend(run_diagnostic(
+        "UnusedLocalVariable",
+        ctx,
+        handlers::unused_local_variable::check,
+    ));
+
     // Metadata-based diagnostics (Phase 2: using module_metadata from HIR)
     result.extend(collect_metadata_diagnostics(ctx));
 

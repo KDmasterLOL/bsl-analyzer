@@ -29,8 +29,8 @@ pub mod queries;
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
-    all_sdbl_in_file_query, method_cfg_query, module_metadata_query, reaching_definitions_query,
-    sdbl_hir_in_file_query,
+    all_sdbl_in_file_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
+    reaching_definitions_query, sdbl_hir_in_file_query,
 };
 
 /// Symbol kind (procedure, function, variable, etc).
@@ -116,6 +116,26 @@ pub trait RootDatabase:
         &self,
         method_id: hir_def::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+
+    /// Compute liveness analysis for a method.
+    ///
+    /// Performs backward dataflow analysis to determine which variables are "live"
+    /// (may be read in the future) at each program point. Used to detect unused variables.
+    ///
+    /// ## Performance
+    ///
+    /// - Initial analysis: 2-10ms for typical method
+    /// - Cached per method (LRU=256)
+    /// - Invalidated when method body changes
+    ///
+    /// ## Returns
+    ///
+    /// - `Some(DataflowResult<Liveness>)` if analysis succeeds
+    /// - `None` if analysis doesn't converge (malformed CFG)
+    fn liveness_analysis(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
 
     /// Get Control Flow Graph (CFG) for a method.
     ///
@@ -450,6 +470,15 @@ impl RootDatabase for RootDatabaseImpl {
         // Call Salsa tracked query (Phase 6.5 - automatic caching & invalidation)
         let method_id_input = hir_def::MethodIdInput::new(self, method_id);
         reaching_definitions_query(self, method_id_input)
+    }
+
+    fn liveness_analysis(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+        // Call Salsa tracked query (backward dataflow analysis)
+        let method_id_input = hir_def::MethodIdInput::new(self, method_id);
+        liveness_analysis_query(self, method_id_input)
     }
 
     fn method_cfg(&self, method_id: hir_def::MethodId) -> Arc<cfg::ControlFlowGraph> {

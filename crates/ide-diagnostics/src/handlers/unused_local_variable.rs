@@ -2,6 +2,22 @@
 //!
 //! Detects local variables that are declared but never used.
 //!
+//! ## Implementation
+//!
+//! Uses backward liveness dataflow analysis to accurately detect unused variables.
+//! A variable is "unused" if it's never live at any program point (never read).
+//!
+//! **Algorithm:**
+//! 1. Build CFG for each method
+//! 2. Run backward liveness analysis (OUT → IN)
+//! 3. Check if each declared variable is live at entry point
+//! 4. If not live → unused → report diagnostic
+//!
+//! **Why liveness analysis?**
+//! - Handles control flow correctly (loops, branches, etc.)
+//! - Distinguishes read vs write (assignment alone doesn't make variable "used")
+//! - Fixes false positives from simple tracking (e.g., While loop control variables)
+//!
 //! ## Severity
 //! Info (with Unnecessary tag)
 //!
@@ -22,23 +38,160 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticTag, DiagnosticsContext, Severity};
+use hir_def::{MethodId, ModuleId};
+use ide_db::RootDatabase;
 use ide_db::TextRange;
 
-/// Creates diagnostic from HIR BodyDiagnostic.
+/// Collect UnusedLocalVariable diagnostics using liveness analysis.
 ///
-/// Called from lib.rs dispatch when `BodyDiagnostic::UnusedVariable` is encountered.
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+/// This function performs dataflow-based detection of unused local variables:
+/// 1. Iterates over all methods in the module
+/// 2. Runs liveness analysis for each method (cached by Salsa)
+/// 3. Checks which declared variables are never live
+/// 4. Generates diagnostics for unused variables
+///
+/// **Performance:**
+/// - O(methods × avg_cfg_size) - liveness analysis is cached by Salsa
+/// - Only recomputed when method code changes
+/// - CFG is shared across multiple analyses
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::UnusedLocalVariable) {
-        return None;
+        return vec![];
     }
-    Some(Diagnostic {
+
+    let mut diagnostics = Vec::new();
+    let module_id = ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
+
+    // Check each method for unused local variables
+    for (local_id, _body) in module_bodies.iter_bodies() {
+        let method_id = MethodId { module: module_id, local_id };
+        diagnostics.extend(check_method(ctx.db, method_id, ctx));
+    }
+
+    // TODO: Check module-level code (Phase 2)
+    // if let Some(module_code) = module_bodies.module_code() {
+    //     diagnostics.extend(check_module_code(ctx.db, module_id, module_code, ctx));
+    // }
+
+    diagnostics
+}
+
+/// Check a single method for unused variables using liveness analysis.
+fn check_method(
+    db: &dyn RootDatabase,
+    method_id: MethodId,
+    _ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Get method body and source_map
+    let module_bodies = db.module_bodies(method_id.module);
+    let body = match module_bodies.body(method_id.local_id) {
+        Some(b) => b,
+        None => return diagnostics,
+    };
+    let source_map = match module_bodies.source_map(method_id.local_id) {
+        Some(sm) => sm,
+        None => return diagnostics,
+    };
+
+    // Run liveness analysis (cached by Salsa)
+    let liveness_result = match db.liveness_analysis(method_id) {
+        Some(result) => result,
+        None => {
+            tracing::warn!("Liveness analysis failed for method: {:?}", method_id);
+            return diagnostics;
+        }
+    };
+
+    // Get CFG to find entry point
+    let cfg = db.method_cfg(method_id);
+    let entry = match cfg.entry_point() {
+        Some(e) => e,
+        None => {
+            tracing::warn!("CFG has no entry point for method: {:?}", method_id);
+            return diagnostics;
+        }
+    };
+
+    // Get live variables at entry point (IN set)
+    let live_at_entry = match liveness_result.block_in(entry) {
+        Some(live) => live,
+        None => {
+            tracing::warn!("No liveness data for entry block: {:?}", method_id);
+            return diagnostics;
+        }
+    };
+
+    // Check each declared variable
+    // 1. Check VarDecl bindings
+    for stmt_id in body.body_stmts.iter() {
+        if let hir_def::hir::Stmt::VarDecl { bindings } = &body.stmts[*stmt_id] {
+            for &binding_id in bindings.iter() {
+                let binding = &body.bindings[binding_id];
+
+                // Variable is unused if it's not live at entry
+                if !live_at_entry.is_live(binding.name.as_str()) {
+                    // Get source range for the variable name
+                    if let Some(range) = source_map.binding_range(binding_id) {
+                        diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check For loop variables
+    for stmt_id in body.body_stmts.iter() {
+        if let hir_def::hir::Stmt::For { var, .. } = &body.stmts[*stmt_id] {
+            let binding = &body.bindings[*var]; // Need to deref var to index Arena
+            if !live_at_entry.is_live(binding.name.as_str()) {
+                if let Some(range) = source_map.binding_range(*var) {
+                    diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                }
+            }
+        }
+    }
+
+    // 3. Check ForEach loop variables
+    for stmt_id in body.body_stmts.iter() {
+        if let hir_def::hir::Stmt::ForEach { var, .. } = &body.stmts[*stmt_id] {
+            let binding = &body.bindings[*var]; // Need to deref var to index Arena
+            if !live_at_entry.is_live(binding.name.as_str()) {
+                if let Some(range) = source_map.binding_range(*var) {
+                    diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
+/// Create diagnostic for an unused variable.
+fn create_diagnostic(name: &str, range: TextRange) -> Diagnostic {
+    Diagnostic {
         code: DiagnosticCode::UnusedLocalVariable,
         message: format!("Переменная \"{}\" объявлена, но не используется", name),
         severity: Severity::Information,
         range,
         tags: vec![DiagnosticTag::Unnecessary],
         fixes: vec![],
-    })
+    }
+}
+
+/// Creates diagnostic from HIR BodyDiagnostic (legacy path).
+///
+/// Called from lib.rs dispatch when `BodyDiagnostic::UnusedVariable` is encountered.
+/// This is the OLD detection path that will be removed in Phase 5.
+/// The NEW detection path is via `check()` function above.
+#[allow(dead_code)]
+pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::UnusedLocalVariable) {
+        return None;
+    }
+    Some(create_diagnostic(name, range))
 }
 
 #[cfg(test)]
