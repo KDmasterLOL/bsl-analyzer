@@ -267,8 +267,16 @@ fn raise_stmt(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Optional expression
-    if !p.at(TokenKind::Semicolon) {
+    // ВызватьИсключение supports two forms:
+    // 1. Old style (deprecated): ВызватьИсключение "string";
+    // 2. New style: ВызватьИсключение(arg1, arg2, ...);
+    //
+    // The keyword acts as a function call, so we need to check if next token is '('.
+    if p.at(TokenKind::LParen) {
+        // Parse as function call with argument list
+        parse_raise_call_args(p);
+    } else if !p.at(TokenKind::Semicolon) {
+        // Old style: parse single expression (usually a string literal)
         expressions::expression(p);
     }
 
@@ -276,6 +284,44 @@ fn raise_stmt(p: &mut Parser) {
     p.eat(TokenKind::Semicolon);
 
     m.complete(p, NodeKind::RaiseStmt);
+}
+
+/// Parse argument list for ВызватьИсключение(...).
+///
+/// This handles the function-call style syntax:
+/// ВызватьИсключение(message, category, , , errorInfo)
+///
+/// Arguments can be omitted (empty between commas).
+fn parse_raise_call_args(p: &mut Parser) {
+    assert!(p.at(TokenKind::LParen));
+    p.bump(); // (
+
+    p.skip_trivia();
+
+    // Parse arguments until we hit ')'
+    while !p.at(TokenKind::RParen) && !p.at_end() {
+        p.skip_trivia();
+
+        // Check if this is an omitted argument (empty between commas or after comma)
+        if p.at(TokenKind::Comma) {
+            // Empty argument - skip
+        } else if !p.at(TokenKind::RParen) {
+            // Parse argument expression
+            expressions::expression(p);
+        }
+
+        p.skip_trivia();
+
+        // Consume comma if present
+        if p.at(TokenKind::Comma) {
+            p.bump();
+        } else if !p.at(TokenKind::RParen) {
+            // Expected comma or ')'
+            break;
+        }
+    }
+
+    p.expect(TokenKind::RParen);
 }
 
 fn goto_stmt(p: &mut Parser) {

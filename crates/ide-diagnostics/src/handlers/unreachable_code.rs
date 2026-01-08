@@ -388,4 +388,57 @@ mod tests {
         // 17. line 182, col 0-8 - after Возврат (module-level)
         assert_diagnostic_range(code, unreachable_diags[16], 182, 0, 8);
     }
+
+    #[test]
+    fn test_if_elsif_with_raise_in_else_only() {
+        // Bug report: False positive when only else branch has raise
+        // If-elsif-else where only else has terminator should NOT be considered all-branches-terminate
+        let code = "Процедура Тест(Важность, ВариантВажности)\n\tЕсли Важность = \"Обычная\" Тогда\n\t\tВариантВажности = 1;\n\tИначеЕсли Важность = \"Высокая\" Тогда\n\t\tВариантВажности = 2;\n\tИначеЕсли Важность = \"Низкая\" Тогда\n\t\tВариантВажности = 3;\n\tИначе\n\t\tВызватьИсключение(\"Ошибка\");\n\tКонецЕсли;\nКонецПроцедуры\n";
+        let diagnostics = check_hir_diagnostic(code);
+        let unreachable_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
+
+        // Debug: print what we found
+        eprintln!("Found {} UnreachableCode diagnostics", unreachable_diags.len());
+        for (i, d) in unreachable_diags.iter().enumerate() {
+            let (start_line, start_col, end_line, end_col) =
+                crate::test_utils::range_to_line_col(code, d.range);
+            eprintln!(
+                "  {}: line {}-{}, col {}-{}, message: {}",
+                i + 1,
+                start_line,
+                end_line,
+                start_col,
+                end_col,
+                d.message
+            );
+        }
+
+        // Should NOT have any unreachable code - only else branch has raise, not all branches
+        assert_eq!(
+            unreachable_diags.len(),
+            0,
+            "Should not detect unreachable code when only else branch has terminator"
+        );
+    }
+
+    #[test]
+    fn test_raise_with_two_arguments_in_if() {
+        // Bug report: False positive on ВызватьИсключение with 2 arguments inside if
+        // Root cause: parser was treating ВызватьИсключение as keyword + single expression,
+        // so second argument was parsed as separate CALL_STMT and marked as unreachable.
+        // Fixed by parsing ВызватьИсключение(...) as proper call with argument list.
+        let code = "Функция Тест()\n\tДля Каждого Элемент Из Коллекция Цикл\n\t\tЕсли Условие Тогда\n\t\t\tТекст = СтрШаблон(\"Ошибка: %1\", Элемент);\n\t\t\tВызватьИсключение(Текст, КатегорияОшибки.ОшибкаХранимыхДанных);\n\t\tКонецЕсли;\n\t\tРезультат = Элемент + 1;\n\tКонецЦикла;\n\tВозврат Результат;\nКонецФункции\n";
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unreachable_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
+
+        // Should NOT have unreachable code - if block has raise but there's no else branch
+        assert_eq!(
+            unreachable_diags.len(),
+            0,
+            "Should not detect unreachable code after if without else, even if if-branch has raise with 2 args"
+        );
+    }
 }

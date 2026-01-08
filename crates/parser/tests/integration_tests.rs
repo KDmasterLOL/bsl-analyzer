@@ -4,6 +4,64 @@ use parser::parse;
 use std::time::Instant;
 
 #[test]
+fn test_raise_old_style_string() {
+    // Old style (deprecated): ВызватьИсключение "string";
+    let input = r#"Процедура Тест()
+    ВызватьИсключение "Текст исключения";
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse old-style raise without errors");
+}
+
+#[test]
+fn test_raise_call_one_arg() {
+    // New style with one argument: ВызватьИсключение(expr);
+    let input = r#"Процедура Тест()
+    ВызватьИсключение("Текст ошибки");
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse raise with one argument without errors");
+}
+
+#[test]
+fn test_raise_call_multiple_args_with_omitted() {
+    // New style with multiple arguments, some omitted: ВызватьИсключение(arg1, arg2, , , arg5);
+    let input = r#"Процедура Тест()
+    ВызватьИсключение("Текст ошибки", КатегорияОшибки.ОшибкаСети, , ,
+                        ФоновоеЗадание.ИнформацияОбОшибке);
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(
+        !result.has_errors(),
+        "Should parse raise with multiple arguments (some omitted) without errors"
+    );
+}
+
+#[test]
+fn test_raise_call_two_args() {
+    // Common case: ВызватьИсключение(message, category);
+    let input = r#"Процедура Тест()
+    ВызватьИсключение("Текст ошибки", КатегорияОшибки.ОшибкаХранимыхДанных);
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse raise with two arguments without errors");
+}
+
+#[test]
+fn test_raise_empty() {
+    // ВызватьИсключение; (re-raises current exception)
+    let input = r#"Процедура Тест()
+    Попытка
+        // code
+    Исключение
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Should parse empty raise (re-raise) without errors");
+}
+
+#[test]
 fn test_async_procedure() {
     let input = "Асинх Процедура Тест() КонецПроцедуры";
     let result = parse(input);
