@@ -480,7 +480,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 /// Result of dataflow analysis.
 ///
 /// Contains IN and OUT sets for each block, plus references to CFG and Body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataflowResult<L: Lattice> {
     /// IN sets for each block
     block_in: FxHashMap<NodeIndex, L>,

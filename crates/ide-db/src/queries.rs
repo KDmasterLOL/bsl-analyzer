@@ -17,6 +17,7 @@
 //! **Dataflow:**
 //! - [`method_cfg_query`] - Control Flow Graph for method (LRU: 256)
 //! - [`reaching_definitions_query`] - Reaching definitions analysis (LRU: 256)
+//! - [`liveness_analysis_query`] - Liveness analysis for unused variables (LRU: 256)
 
 use std::sync::Arc;
 
@@ -340,4 +341,70 @@ pub fn reaching_definitions_query<'db>(
 
     tracing::debug!("Dataflow analysis converged");
     Some(result)
+}
+
+/// Compute liveness analysis for a method using backward dataflow.
+///
+/// This Salsa tracked query performs liveness analysis - tracking which variables
+/// are "live" (may be read in the future) at each program point. Used to detect
+/// unused local variables.
+///
+/// # Salsa caching
+/// - LRU: 256 (per-method dataflow analysis)
+/// - Invalidation: Automatic when module_bodies changes (method code changed)
+/// - Memory: ~1-3 KB per method (live variable sets at each CFG node)
+///
+/// # Dependencies tracked by Salsa
+/// - method_cfg (via method_cfg_query) - gets cached CFG
+/// - module_bodies (via DefDatabase) - gets method HIR body
+/// - Automatically invalidates when method code changes
+///
+/// # Algorithm
+/// 1. Get cached CFG from method_cfg_query
+/// 2. Create Liveness lattice (set of live variables)
+/// 3. Run backward dataflow analysis (Kildall's algorithm)
+///    - Start from exit with empty set (no variables live after exit)
+///    - OUT[B] = join of IN[S] for all successors
+///    - IN[B] = USE[B] ∪ (OUT[B] - DEF[B])
+/// 4. Return DataflowResult<Liveness> with in/out sets for each CFG node
+///
+/// # Performance
+/// - First call: ~2-10ms (backward dataflow solve)
+/// - Cached: < 1ms
+/// - Convergence: Usually 2-8 iterations for typical BSL methods
+///
+/// # Returns
+/// None if analysis fails (malformed CFG, no convergence), Some(result) otherwise
+#[salsa::tracked(lru = 256)]
+pub fn liveness_analysis_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir_def::MethodIdInput<'db>,
+) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+    let _span = tracing::info_span!("liveness_analysis", ?method_id_input).entered();
+    let method_id = method_id_input.method_id(db);
+
+    // Get module bodies (Salsa dependency tracked automatically)
+    let module_id = hir_def::ModuleId::new(method_id.module.file_id);
+    let module_bodies = db.module_bodies(module_id);
+
+    // Get body for this method
+    let body = module_bodies.body(method_id.local_id)?;
+
+    // Get cached CFG (reuse across multiple analyses)
+    let cfg = db.method_cfg(method_id);
+
+    // Run backward dataflow analysis for liveness
+    let transfer = dataflow::liveness::LivenessTransfer;
+    let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+
+    // Configure solver for backward analysis
+    solver.set_max_iterations(100); // Reasonable limit for BSL methods
+    solver.set_direction(dataflow::Direction::Backward);
+    // No initial state needed - backward analysis starts from bottom (empty set)
+
+    // Solve dataflow equations
+    let dataflow_result = solver.solve()?;
+
+    tracing::debug!("Liveness analysis converged");
+    Some(Arc::new(dataflow_result))
 }
