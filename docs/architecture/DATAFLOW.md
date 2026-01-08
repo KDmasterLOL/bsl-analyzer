@@ -828,12 +828,13 @@ impl RootDatabase for RootDatabaseImpl {
 
 ### Risk 1: Fixed-Point Non-Convergence
 
-**Scenario**: Infinite loop in worklist (malformed CFG).
+**Scenario**: Infinite loop in worklist (malformed CFG) or complex real-world methods.
 
 **Mitigation:**
-- Max iterations limit (100 by default)
+- Max iterations limit (1000 by default, increased from 100 for complex methods)
 - Warning logged if exceeded
-- Returns `None` (diagnostic skipped gracefully)
+- Returns partial solution (conservative, usable) instead of None
+- Most methods converge in 2-8 iterations; only deeply nested methods use >100
 
 **Test**: `test_convergence_with_complex_control_flow`
 
