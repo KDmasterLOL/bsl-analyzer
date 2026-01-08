@@ -29,3 +29,6 @@ coverage/
 # Logs
 *.log
 /experiments/
+
+# Test data
+/data/

@@ -1,0 +1,24 @@
+[package]
+name = "hir-ty"
+version = "0.1.0"
+edition = "2021"
+authors = ["BSL Analyzer Contributors"]
+license = "MIT"
+repository = "https://github.com/1c-syntax/bsl-analyzer"
+
+[dependencies]
+hir-def = { path = "../hir-def" }
+base-db = { path = "../base-db" }
+syntax = { path = "../syntax" }
+intern = { path = "../intern" }
+stdx = { path = "../stdx" }
+vfs = { path = "../vfs" }
+
+salsa.workspace = true
+rustc-hash.workspace = true
+la-arena.workspace = true
+tracing.workspace = true
+smol_str.workspace = true
+
+[dev-dependencies]
+expect-test = "1.5.0"
