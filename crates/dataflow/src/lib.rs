@@ -37,6 +37,7 @@
 //! let result = solver.solve();
 //! ```
 
+pub mod liveness;
 pub mod reaching_defs;
 
 use cfg::ControlFlowGraph;
@@ -45,6 +46,29 @@ use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// Direction of dataflow analysis.
+///
+/// ## Forward Analysis
+///
+/// Information flows from entry to exit.
+/// - IN\[B\] = join(OUT\[pred\]) for all predecessors
+/// - OUT\[B\] = transfer(IN\[B\], B)
+/// - Examples: Reaching definitions, constant propagation
+///
+/// ## Backward Analysis
+///
+/// Information flows from exit to entry.
+/// - OUT\[B\] = join(IN\[succ\]) for all successors
+/// - IN\[B\] = transfer(OUT\[B\], B)
+/// - Examples: Liveness analysis, available expressions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Forward dataflow (entry → exit)
+    Forward,
+    /// Backward dataflow (exit → entry)
+    Backward,
+}
 
 /// Lattice trait for abstract interpretation.
 ///
@@ -81,16 +105,23 @@ pub trait Lattice: Clone + PartialEq + Eq {
 /// Transfer function trait.
 ///
 /// Defines how statements transform abstract state.
-/// Given input state IN and a statement, computes output state OUT.
 ///
 /// ## Forward Analysis
 ///
+/// Given input state IN and a statement, computes output state OUT.
 /// - OUT\[stmt\] = transfer(IN\[stmt\], stmt)
 /// - IN\[stmt\] = join of OUT\[pred\] for all predecessors
 ///
 /// ## Backward Analysis
 ///
-/// (Not yet supported, but can be added by reversing CFG traversal)
+/// Given output state OUT and a statement, computes input state IN.
+/// - IN\[stmt\] = transfer(OUT\[stmt\], stmt)
+/// - OUT\[stmt\] = join of IN\[succ\] for all successors
+///
+/// **Note:** The same `transfer_stmt()` method is used for both directions,
+/// but the interpretation differs:
+/// - Forward: `state` parameter is IN, return value is OUT
+/// - Backward: `state` parameter is OUT, return value is IN
 pub trait Transfer<L: Lattice> {
     /// Apply transfer function for a single statement.
     ///
@@ -140,16 +171,24 @@ pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
 
     /// Maximum iterations before giving up (prevents infinite loops)
     max_iterations: usize,
+
+    /// Direction of dataflow analysis (forward or backward)
+    direction: Direction,
 }
 
 impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
-    /// Create a new dataflow solver.
+    /// Create a new dataflow solver (defaults to forward analysis).
     ///
     /// ## Arguments
     ///
     /// - `cfg`: Control flow graph to analyze (shared via Arc)
     /// - `body`: HIR body for statement lookup
     /// - `transfer`: Transfer function implementation
+    ///
+    /// ## Default Settings
+    ///
+    /// - Direction: Forward
+    /// - Max iterations: 100
     pub fn new(cfg: Arc<ControlFlowGraph>, body: Body, transfer: T) -> Self {
         Self {
             cfg,
@@ -157,8 +196,26 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             transfer,
             block_in: FxHashMap::default(),
             block_out: FxHashMap::default(),
-            max_iterations: 100, // Reasonable default for BSL methods
+            max_iterations: 100,           // Reasonable default for BSL methods
+            direction: Direction::Forward, // Default to forward analysis
         }
+    }
+
+    /// Set the direction of dataflow analysis.
+    ///
+    /// ## Arguments
+    ///
+    /// - `direction`: Direction::Forward or Direction::Backward
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let mut solver = DataflowSolver::new(cfg, body, transfer);
+    /// solver.set_direction(Direction::Backward);  // For liveness analysis
+    /// let result = solver.solve();
+    /// ```
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.direction = direction;
     }
 
     /// Set maximum iterations (default: 100).
@@ -190,11 +247,24 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     /// Run dataflow analysis and return fixed-point solution.
     ///
     /// Uses worklist algorithm to compute IN and OUT sets for each block.
+    /// Direction (forward/backward) is determined by the `direction` field.
     ///
     /// ## Returns
     ///
     /// `DataflowResult` containing IN/OUT sets for all blocks, or None if analysis didn't converge.
-    pub fn solve(mut self) -> Option<DataflowResult<L>> {
+    pub fn solve(self) -> Option<DataflowResult<L>> {
+        match self.direction {
+            Direction::Forward => self.solve_forward(),
+            Direction::Backward => self.solve_backward(),
+        }
+    }
+
+    /// Run forward dataflow analysis.
+    ///
+    /// Computes fixed-point solution using worklist algorithm:
+    /// - IN\[B\] = join of OUT\[pred\] for all predecessors
+    /// - OUT\[B\] = transfer(IN\[B\], B)
+    fn solve_forward(mut self) -> Option<DataflowResult<L>> {
         use std::collections::VecDeque;
 
         // Initialize all blocks to bottom (skip entry if already set via set_initial_state)
@@ -274,7 +344,103 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             }
         }
 
-        tracing::debug!("Dataflow analysis converged in {} iterations", iterations);
+        tracing::debug!("Forward dataflow analysis converged in {} iterations", iterations);
+
+        Some(DataflowResult {
+            block_in: self.block_in,
+            block_out: self.block_out,
+            cfg: self.cfg,
+            body: self.body,
+        })
+    }
+
+    /// Run backward dataflow analysis.
+    ///
+    /// Computes fixed-point solution using worklist algorithm (backward):
+    /// - OUT\[B\] = join of IN\[succ\] for all successors
+    /// - IN\[B\] = transfer(OUT\[B\], B)
+    ///
+    /// Starts from exit point and propagates backwards to entry.
+    fn solve_backward(mut self) -> Option<DataflowResult<L>> {
+        use std::collections::VecDeque;
+
+        // Initialize all blocks to bottom
+        let exit = self.cfg.exit_point();
+        for (block_idx, _vertex) in self.cfg.vertices() {
+            self.block_in.insert(block_idx, L::bottom());
+            // Exit block might have initial state (though usually empty for liveness)
+            if block_idx != exit || !self.block_out.contains_key(&block_idx) {
+                self.block_out.insert(block_idx, L::bottom());
+            }
+        }
+
+        // Ensure exit block has an OUT state (default to bottom if not set)
+        self.block_out.entry(exit).or_insert(L::bottom());
+
+        // Worklist: blocks that need reprocessing (start from exit)
+        let mut worklist: VecDeque<NodeIndex> = self.cfg.vertices().map(|(idx, _)| idx).collect();
+
+        let mut iterations = 0;
+
+        while let Some(block_idx) = worklist.pop_front() {
+            iterations += 1;
+
+            // Safety check: prevent infinite loops
+            if iterations > self.max_iterations {
+                tracing::warn!(
+                    "Backward dataflow analysis exceeded max iterations ({}), stopping",
+                    self.max_iterations
+                );
+                return None;
+            }
+
+            // Compute OUT[block] = join of IN[succ] for all successors
+            // Special case: if this is exit block with no successors, preserve initial state
+            let has_successors = self.cfg.outgoing_edges(block_idx).next().is_some();
+            let is_exit = block_idx == exit;
+
+            let out_state = if is_exit && !has_successors {
+                // Exit block with no successors: preserve initial state (usually bottom)
+                self.block_out.get(&block_idx).cloned().unwrap_or_else(L::bottom)
+            } else {
+                // Normal case: join from successors
+                let mut state = L::bottom();
+                for (succ_idx, _edge) in self.cfg.outgoing_edges(block_idx) {
+                    if let Some(succ_in) = self.block_in.get(&succ_idx) {
+                        state = state.join(succ_in);
+                    }
+                }
+                state
+            };
+
+            // Update OUT[block]
+            self.block_out.insert(block_idx, out_state.clone());
+
+            // Compute IN[block] = transfer(OUT[block], block)
+            // Note: for backward analysis, transfer expects OUT and returns IN
+            let in_state = self.transfer_block(block_idx, &out_state);
+
+            // Check if IN[block] changed
+            let changed = if let Some(old_in) = self.block_in.get(&block_idx) {
+                &in_state != old_in
+            } else {
+                true
+            };
+
+            if changed {
+                // Update IN[block]
+                self.block_in.insert(block_idx, in_state);
+
+                // Add predecessors to worklist (backward propagation)
+                for (pred_idx, _edge) in self.cfg.incoming_edges(block_idx) {
+                    if !worklist.contains(&pred_idx) {
+                        worklist.push_back(pred_idx);
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("Backward dataflow analysis converged in {} iterations", iterations);
 
         Some(DataflowResult {
             block_in: self.block_in,
