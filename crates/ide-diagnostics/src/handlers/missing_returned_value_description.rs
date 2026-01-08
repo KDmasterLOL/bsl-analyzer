@@ -102,14 +102,16 @@ fn check_function(
     }
 
     // Extract comments before the function
-    let comments = extract_leading_comments(func_node, source_text)?;
+    // If there are no comments, use empty vector (export functions must have docs)
+    let comments = extract_leading_comments(func_node, source_text).unwrap_or_default();
 
     // Check if the first non-empty comment is a hyperlink reference (См./See)
     // This bypasses validation even without "Возвращаемое значение:"
-    let first_comment = comments.iter().find(|c| !c.trim().is_empty())?;
-    let first_trimmed = first_comment.trim().to_lowercase();
-    if first_trimmed.starts_with("см.") || first_trimmed.starts_with("see ") {
-        return None;
+    if let Some(first_comment) = comments.iter().find(|c| !c.trim().is_empty()) {
+        let first_trimmed = first_comment.trim().to_lowercase();
+        if first_trimmed.starts_with("см.") || first_trimmed.starts_with("see ") {
+            return None;
+        }
     }
 
     // Parse return block
@@ -311,7 +313,24 @@ mod tests {
     fn test_function_without_comments() {
         let code = "Функция Example()\nКонецФункции";
         let (diagnostics, _) = check_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Function without comments should not trigger");
+        assert_eq!(diagnostics.len(), 0, "Non-export function without comments should not trigger");
+    }
+
+    #[test]
+    fn test_export_function_without_comments() {
+        // Export function without any comments should trigger diagnostic
+        let code = "Функция Example() Экспорт\nКонецФункции";
+        let (diagnostics, file_content) = check_diagnostic(code);
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Export function without any comments should trigger diagnostic"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
+        assert!(diagnostics[0].message.contains("Добавьте описание"));
+        // Line 0, function name
+        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 8, 15);
     }
 
     #[test]
