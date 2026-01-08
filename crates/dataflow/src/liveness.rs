@@ -57,7 +57,65 @@ use hir_def::ExprId;
 use la_arena::RawIdx;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+
+// ============================================================================
+// Profiling counters for performance analysis
+// ============================================================================
+
+/// Counter for get_index() calls (each involves to_lowercase + SmolStr allocation)
+pub static GET_INDEX_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for is_live() calls
+pub static IS_LIVE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for insert() calls
+pub static INSERT_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for remove() calls
+pub static REMOVE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for collect_expr_vars() calls
+pub static COLLECT_EXPR_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for VariableIndex::from_body() calls
+pub static FROM_BODY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Total time spent in VariableIndex::from_body() (nanoseconds)
+pub static FROM_BODY_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset all profiling counters to zero.
+pub fn reset_counters() {
+    GET_INDEX_CALLS.store(0, Ordering::Relaxed);
+    IS_LIVE_CALLS.store(0, Ordering::Relaxed);
+    INSERT_CALLS.store(0, Ordering::Relaxed);
+    REMOVE_CALLS.store(0, Ordering::Relaxed);
+    COLLECT_EXPR_CALLS.store(0, Ordering::Relaxed);
+    FROM_BODY_CALLS.store(0, Ordering::Relaxed);
+    FROM_BODY_TIME_NS.store(0, Ordering::Relaxed);
+}
+
+/// Print profiling counters.
+pub fn print_counters() {
+    let get_index = GET_INDEX_CALLS.load(Ordering::Relaxed);
+    let is_live = IS_LIVE_CALLS.load(Ordering::Relaxed);
+    let insert = INSERT_CALLS.load(Ordering::Relaxed);
+    let remove = REMOVE_CALLS.load(Ordering::Relaxed);
+    let collect_expr = COLLECT_EXPR_CALLS.load(Ordering::Relaxed);
+    let from_body = FROM_BODY_CALLS.load(Ordering::Relaxed);
+    let from_body_ms = FROM_BODY_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
+
+    eprintln!("\n=== Liveness Profiling ===");
+    eprintln!("  get_index_calls:      {:>12}", get_index);
+    eprintln!("  is_live_calls:        {:>12}", is_live);
+    eprintln!("  insert_calls:         {:>12}", insert);
+    eprintln!("  remove_calls:         {:>12}", remove);
+    eprintln!("  collect_expr_calls:   {:>12}", collect_expr);
+    eprintln!("  from_body_calls:      {:>12}", from_body);
+    eprintln!("  from_body_time_ms:    {:>12}", from_body_ms);
+}
 
 /// Maps variable names to compact indices for BitSet representation.
 ///
@@ -69,6 +127,12 @@ pub struct VariableIndex {
     name_to_idx: FxHashMap<SmolStr, usize>,
     /// Map from index back to name (for debugging)
     idx_to_name: Vec<SmolStr>,
+    /// Cache: ExprId -> variable index for all Path expressions
+    /// This enables O(1) lookup in collect_expr_vars without string allocation
+    expr_idx_cache: FxHashMap<ExprId, usize>,
+    /// Cache: BindingId -> variable index for all bindings
+    /// This enables O(1) lookup in transfer_stmt without string allocation
+    binding_idx_cache: FxHashMap<hir_def::BindingId, usize>,
 }
 
 impl VariableIndex {
@@ -77,6 +141,9 @@ impl VariableIndex {
     /// Extracts all variable names (bindings + implicit variables from assignments)
     /// and assigns sequential indices.
     pub fn from_body(body: &Body) -> Arc<Self> {
+        FROM_BODY_CALLS.fetch_add(1, Ordering::Relaxed);
+        let start = Instant::now();
+
         let mut name_to_idx = FxHashMap::default();
         let mut idx_to_name = Vec::new();
 
@@ -141,13 +208,74 @@ impl VariableIndex {
 
         collect_implicit_vars(&body.body_stmts, body, &mut name_to_idx, &mut idx_to_name);
 
-        Arc::new(Self { name_to_idx, idx_to_name })
+        // Build expr_idx_cache: map all Path expressions to their variable indices
+        // This enables O(1) lookup in collect_expr_vars without string allocation
+        let mut expr_idx_cache = FxHashMap::default();
+        for (expr_id, expr) in body.exprs.iter() {
+            if let Expr::Path(name) = expr {
+                let lowercase: SmolStr = name.as_str().to_lowercase().into();
+                if let Some(&idx) = name_to_idx.get(&lowercase) {
+                    expr_idx_cache.insert(expr_id, idx);
+                }
+            }
+        }
+
+        // Build binding_idx_cache: map all bindings to their variable indices
+        // This enables O(1) lookup in transfer_stmt for VarDecl, For, ForEach
+        let mut binding_idx_cache = FxHashMap::default();
+        for (binding_id, binding) in body.bindings.iter() {
+            let lowercase: SmolStr = binding.name.as_str().to_lowercase().into();
+            if let Some(&idx) = name_to_idx.get(&lowercase) {
+                binding_idx_cache.insert(binding_id, idx);
+            }
+        }
+
+        FROM_BODY_TIME_NS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        Arc::new(Self { name_to_idx, idx_to_name, expr_idx_cache, binding_idx_cache })
     }
 
     /// Get index for a variable name (lowercase).
+    ///
+    /// **Performance:** This method allocates a SmolStr for lowercase conversion.
+    /// For hot paths, prefer `get_index_by_smolstr` with pre-computed lowercase.
     pub fn get_index(&self, var_name: &str) -> Option<usize> {
+        GET_INDEX_CALLS.fetch_add(1, Ordering::Relaxed);
         let lowercase: SmolStr = var_name.to_lowercase().into();
         self.name_to_idx.get(&lowercase).copied()
+    }
+
+    /// Get index for a variable name without allocation.
+    ///
+    /// **Performance:** O(1) lookup, no allocation. Caller must provide lowercase SmolStr.
+    #[inline]
+    pub fn get_index_by_smolstr(&self, lowercase_name: &SmolStr) -> Option<usize> {
+        self.name_to_idx.get(lowercase_name).copied()
+    }
+
+    /// Get the internal name->index map for batch lookups.
+    ///
+    /// This is useful for building a cache of variable indices.
+    #[inline]
+    pub fn name_to_idx_map(&self) -> &FxHashMap<SmolStr, usize> {
+        &self.name_to_idx
+    }
+
+    /// Get variable index by ExprId (for Path expressions).
+    ///
+    /// **Performance:** O(1) lookup from pre-computed cache, no allocation.
+    /// Returns None if expr_id is not a Path or the variable is not known.
+    #[inline]
+    pub fn get_index_by_expr(&self, expr_id: ExprId) -> Option<usize> {
+        self.expr_idx_cache.get(&expr_id).copied()
+    }
+
+    /// Get variable index by BindingId.
+    ///
+    /// **Performance:** O(1) lookup from pre-computed cache, no allocation.
+    #[inline]
+    pub fn get_index_by_binding(&self, binding_id: hir_def::BindingId) -> Option<usize> {
+        self.binding_idx_cache.get(&binding_id).copied()
     }
 
     /// Get total number of variables.
@@ -181,22 +309,69 @@ impl Liveness {
     }
 
     /// Check if a variable is live.
+    ///
+    /// **Performance:** Allocates for lowercase conversion. Use `is_live_by_idx` in hot paths.
     pub fn is_live(&self, var_name: &str) -> bool {
+        IS_LIVE_CALLS.fetch_add(1, Ordering::Relaxed);
         self.var_index.get_index(var_name).map(|idx| self.live_vars.contains(idx)).unwrap_or(false)
     }
 
+    /// Check if a variable is live by index.
+    ///
+    /// **Performance:** O(1), no allocation.
+    #[inline]
+    pub fn is_live_by_idx(&self, idx: usize) -> bool {
+        self.live_vars.contains(idx)
+    }
+
     /// Add a variable to the live set.
+    ///
+    /// **Performance:** Allocates for lowercase conversion. Use `insert_by_idx` in hot paths.
     pub fn insert(&mut self, var_name: &str) {
+        INSERT_CALLS.fetch_add(1, Ordering::Relaxed);
         if let Some(idx) = self.var_index.get_index(var_name) {
             self.live_vars.insert(idx);
         }
     }
 
+    /// Add a variable to the live set by index.
+    ///
+    /// **Performance:** O(1), no allocation.
+    #[inline]
+    pub fn insert_by_idx(&mut self, idx: usize) {
+        INSERT_CALLS.fetch_add(1, Ordering::Relaxed);
+        self.live_vars.insert(idx);
+    }
+
     /// Remove a variable from the live set (variable is killed).
+    ///
+    /// **Performance:** Allocates for lowercase conversion. Use `remove_by_idx` in hot paths.
     pub fn remove(&mut self, var_name: &str) {
+        REMOVE_CALLS.fetch_add(1, Ordering::Relaxed);
         if let Some(idx) = self.var_index.get_index(var_name) {
             self.live_vars.set(idx, false);
         }
+    }
+
+    /// Remove a variable from the live set by index.
+    ///
+    /// **Performance:** O(1), no allocation.
+    #[inline]
+    pub fn remove_by_idx(&mut self, idx: usize) {
+        REMOVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        self.live_vars.set(idx, false);
+    }
+
+    /// Get access to the raw BitSet for batch operations.
+    #[inline]
+    pub fn live_vars(&self) -> &FixedBitSet {
+        &self.live_vars
+    }
+
+    /// Get mutable access to the raw BitSet for batch operations.
+    #[inline]
+    pub fn live_vars_mut(&mut self) -> &mut FixedBitSet {
+        &mut self.live_vars
     }
 
     /// Get the number of live variables.
@@ -246,6 +421,20 @@ impl Lattice for Liveness {
             var_index: self.var_index.clone(), // Arc clone is O(1)
         }
     }
+
+    /// In-place join: union of live variables without allocation.
+    ///
+    /// Optimized version that modifies self directly instead of creating a new Liveness.
+    /// This avoids BitSet clone which is O(n/64) for n variables.
+    fn join_in_place(&mut self, other: &Self) {
+        debug_assert!(
+            Arc::ptr_eq(&self.var_index, &other.var_index),
+            "Cannot join liveness sets from different methods"
+        );
+
+        // Just do in-place union - no clone needed!
+        self.live_vars.union_with(&other.live_vars);
+    }
 }
 
 /// Liveness transfer function (backward).
@@ -284,8 +473,10 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // Variable declaration: DEF(var)
                 // Kill: remove all declared variables from live set (they're defined here)
                 for &binding_id in bindings.iter() {
-                    let binding = body.binding(binding_id);
-                    in_state.remove(binding.name.as_str());
+                    // Fast path: use pre-computed binding index (O(1), no allocation)
+                    if let Some(idx) = in_state.var_index().get_index_by_binding(binding_id) {
+                        in_state.remove_by_idx(idx);
+                    }
                 }
 
                 // Note: VarDecl in HIR doesn't have initializers
@@ -296,9 +487,11 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // Assignment: DEF(target), USE(value)
 
                 // Kill: target variable (if simple path)
-                if let Expr::Path(name) = body.expr(*target) {
-                    // Simple assignment: X = ...
-                    in_state.remove(name.as_str());
+                if matches!(body.expr(*target), Expr::Path(_)) {
+                    // Fast path: use pre-computed expr index (O(1), no allocation)
+                    if let Some(idx) = in_state.var_index().get_index_by_expr(*target) {
+                        in_state.remove_by_idx(idx);
+                    }
                 } else {
                     // Complex assignment: Obj.Field = ... or Arr[i] = ...
                     // Base object is used (read), not killed
@@ -354,8 +547,10 @@ impl Transfer<Liveness> for LivenessTransfer {
                 collect_expr_vars(*to, body, &mut in_state);
 
                 // Kill: loop variable (it's defined by for loop)
-                let binding = body.binding(*var);
-                in_state.remove(binding.name.as_str());
+                // Fast path: use pre-computed binding index (O(1), no allocation)
+                if let Some(idx) = in_state.var_index().get_index_by_binding(*var) {
+                    in_state.remove_by_idx(idx);
+                }
 
                 // Loop body is in separate basic blocks (handled by CFG)
             }
@@ -367,8 +562,10 @@ impl Transfer<Liveness> for LivenessTransfer {
                 collect_expr_vars(*collection, body, &mut in_state);
 
                 // Kill: loop variable
-                let binding = body.binding(*var);
-                in_state.remove(binding.name.as_str());
+                // Fast path: use pre-computed binding index (O(1), no allocation)
+                if let Some(idx) = in_state.var_index().get_index_by_binding(*var) {
+                    in_state.remove_by_idx(idx);
+                }
 
                 // Loop body is in separate basic blocks (handled by CFG)
             }
@@ -405,20 +602,114 @@ impl Transfer<Liveness> for LivenessTransfer {
         collect_expr_vars(expr_id, body, &mut in_state);
         in_state
     }
+
+    /// Optimized in-place transfer for a statement (no clone).
+    ///
+    /// Modifies state directly instead of returning a new Liveness.
+    fn transfer_stmt_in_place(&self, stmt_id: RawIdx, state: &mut Liveness, body: &Body) {
+        use hir_def::StmtId;
+
+        let stmt = body.stmt(StmtId::from_raw(stmt_id));
+
+        match stmt {
+            Stmt::VarDecl { bindings } => {
+                for &binding_id in bindings.iter() {
+                    if let Some(idx) = state.var_index().get_index_by_binding(binding_id) {
+                        state.remove_by_idx(idx);
+                    }
+                }
+            }
+
+            Stmt::Assign { target, value } => {
+                if matches!(body.expr(*target), Expr::Path(_)) {
+                    if let Some(idx) = state.var_index().get_index_by_expr(*target) {
+                        state.remove_by_idx(idx);
+                    }
+                } else {
+                    collect_expr_vars(*target, body, state);
+                }
+                collect_expr_vars(*value, body, state);
+            }
+
+            Stmt::Expr(expr_id) => {
+                collect_expr_vars(*expr_id, body, state);
+            }
+
+            Stmt::Return { value } => {
+                if let Some(expr_id) = value {
+                    collect_expr_vars(*expr_id, body, state);
+                }
+            }
+
+            Stmt::Raise { value } => {
+                if let Some(expr_id) = value {
+                    collect_expr_vars(*expr_id, body, state);
+                }
+            }
+
+            Stmt::If { condition, .. } => {
+                collect_expr_vars(*condition, body, state);
+            }
+
+            Stmt::While { condition, .. } => {
+                collect_expr_vars(*condition, body, state);
+            }
+
+            Stmt::For { var, from, to, .. } => {
+                collect_expr_vars(*from, body, state);
+                collect_expr_vars(*to, body, state);
+                if let Some(idx) = state.var_index().get_index_by_binding(*var) {
+                    state.remove_by_idx(idx);
+                }
+            }
+
+            Stmt::ForEach { var, collection, .. } => {
+                collect_expr_vars(*collection, body, state);
+                if let Some(idx) = state.var_index().get_index_by_binding(*var) {
+                    state.remove_by_idx(idx);
+                }
+            }
+
+            Stmt::Try { .. } => {}
+
+            Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Label(_) => {}
+
+            Stmt::Execute { expr } => {
+                collect_expr_vars(*expr, body, state);
+            }
+
+            Stmt::AddHandler { .. } | Stmt::RemoveHandler { .. } => {}
+        }
+    }
+
+    /// Optimized in-place transfer for an expression (no clone).
+    fn transfer_expr_in_place(&self, expr_id: hir_def::ExprId, state: &mut Liveness, body: &Body) {
+        collect_expr_vars(expr_id, body, state);
+    }
 }
 
 /// Recursively collect all variables used in an expression.
 ///
-/// Adds variable names to the liveness set using the variable index.
+/// Uses pre-computed expr_idx_cache for O(1) Path lookups without string allocation.
+/// Falls back to string-based lookup for expressions not in cache.
 fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
+    COLLECT_EXPR_CALLS.fetch_add(1, Ordering::Relaxed);
+
+    // Fast path: check expr_idx_cache first (O(1), no allocation)
+    if let Some(idx) = liveness.var_index().get_index_by_expr(expr_id) {
+        liveness.insert_by_idx(idx);
+        return;
+    }
+
     let expr = body.expr(expr_id);
 
     match expr {
         Expr::Missing => {}
 
-        Expr::Path(name) => {
-            // Variable reference: add to live set (uses var_index for O(1) lookup)
-            liveness.insert(name.as_str());
+        Expr::Path(_) => {
+            // Path not in expr_idx_cache means it's a non-local identifier
+            // (global variable, built-in function, method name, etc.)
+            // These are not tracked in liveness analysis - skip them
         }
 
         Expr::Literal(_) => {
@@ -486,6 +777,31 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
     }
 }
 
+/// Perform liveness analysis directly without going through Salsa queries.
+///
+/// This is an optimized path for batch processing multiple methods from the same file,
+/// avoiding repeated Salsa lookups for module_bodies and method_cfg.
+///
+/// # Arguments
+/// * `body` - HIR body of the method
+/// * `cfg` - Control Flow Graph (already built)
+/// * `var_index` - Variable index (already built)
+///
+/// # Returns
+/// DataflowResult with liveness information for each CFG block, or None if analysis fails.
+pub fn liveness_analysis_direct(
+    body: &hir_def::Body,
+    cfg: &cfg::ControlFlowGraph,
+    var_index: std::sync::Arc<VariableIndex>,
+) -> Option<crate::DataflowResult<Liveness>> {
+    let transfer = LivenessTransfer;
+    let mut solver =
+        crate::DataflowSolver::new(std::sync::Arc::new(cfg.clone()), body.clone(), transfer);
+    solver.set_direction(crate::Direction::Backward);
+    solver.set_bottom_factory(|| Liveness::new(var_index.clone()));
+    solver.solve()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,7 +820,12 @@ mod tests {
             }
         }
 
-        Arc::new(VariableIndex { name_to_idx, idx_to_name })
+        Arc::new(VariableIndex {
+            name_to_idx,
+            idx_to_name,
+            expr_idx_cache: FxHashMap::default(),
+            binding_idx_cache: FxHashMap::default(),
+        })
     }
 
     #[test]

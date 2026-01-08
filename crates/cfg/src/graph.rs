@@ -70,6 +70,7 @@ impl ControlFlowGraph {
     ///
     /// Maps to addVertex() in Java
     pub fn add_vertex(&mut self, vertex: CfgVertex) -> NodeIndex {
+        crate::CFG_ADD_VERTEX_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.graph.add_node(vertex)
     }
 
@@ -87,6 +88,7 @@ impl ControlFlowGraph {
             self.validate_outgoing_edge(source_vertex, edge_type)?;
         }
 
+        crate::CFG_ADD_EDGE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.graph.add_edge(source, target, edge_type);
         Ok(())
     }

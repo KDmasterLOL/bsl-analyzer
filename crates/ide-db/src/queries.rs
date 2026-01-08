@@ -19,7 +19,9 @@
 //! - [`reaching_definitions_query`] - Reaching definitions analysis (LRU: 256)
 //! - [`liveness_analysis_query`] - Liveness analysis for unused variables (LRU: 256)
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use base_db::FileIdInput;
 use hir_def::ModuleId;
@@ -28,6 +30,99 @@ use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 
 // Re-export query from metadata module
 pub use crate::metadata::load_configuration;
+
+// ============================================================================
+// Profiling counters for liveness_analysis_query breakdown
+// ============================================================================
+
+pub static LIVENESS_MODULE_BODIES_NS: AtomicU64 = AtomicU64::new(0);
+pub static LIVENESS_METHOD_CFG_NS: AtomicU64 = AtomicU64::new(0);
+pub static LIVENESS_VAR_INDEX_NS: AtomicU64 = AtomicU64::new(0);
+pub static LIVENESS_SOLVER_NS: AtomicU64 = AtomicU64::new(0);
+pub static LIVENESS_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
+
+// ============================================================================
+// Profiling counters for method_cfg_query breakdown
+// ============================================================================
+
+pub static CFG_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_METHOD_ID_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_MODULE_BODIES_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_BODY_LOOKUP_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_BUILD_CFG_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_ARC_ALLOC_NS: AtomicU64 = AtomicU64::new(0);
+pub static CFG_QUERY_NO_BODY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_liveness_query_counters() {
+    LIVENESS_MODULE_BODIES_NS.store(0, Ordering::Relaxed);
+    LIVENESS_METHOD_CFG_NS.store(0, Ordering::Relaxed);
+    LIVENESS_VAR_INDEX_NS.store(0, Ordering::Relaxed);
+    LIVENESS_SOLVER_NS.store(0, Ordering::Relaxed);
+    LIVENESS_QUERY_CALLS.store(0, Ordering::Relaxed);
+
+    // Reset CFG query counters too
+    CFG_QUERY_CALLS.store(0, Ordering::Relaxed);
+    CFG_QUERY_TOTAL_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_METHOD_ID_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_MODULE_BODIES_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_BODY_LOOKUP_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_BUILD_CFG_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_ARC_ALLOC_NS.store(0, Ordering::Relaxed);
+    CFG_QUERY_NO_BODY_COUNT.store(0, Ordering::Relaxed);
+}
+
+pub fn print_liveness_query_counters() {
+    let module_bodies_ms = LIVENESS_MODULE_BODIES_NS.load(Ordering::Relaxed) / 1_000_000;
+    let method_cfg_ms = LIVENESS_METHOD_CFG_NS.load(Ordering::Relaxed) / 1_000_000;
+    let var_index_ms = LIVENESS_VAR_INDEX_NS.load(Ordering::Relaxed) / 1_000_000;
+    let solver_ms = LIVENESS_SOLVER_NS.load(Ordering::Relaxed) / 1_000_000;
+    let calls = LIVENESS_QUERY_CALLS.load(Ordering::Relaxed);
+
+    eprintln!("\n=== Liveness Query Breakdown ===");
+    eprintln!("  query_calls:          {:>12}", calls);
+    eprintln!("  module_bodies_ms:     {:>12}", module_bodies_ms);
+    eprintln!("  method_cfg_ms:        {:>12}", method_cfg_ms);
+    eprintln!("  var_index_ms:         {:>12}", var_index_ms);
+    eprintln!("  solver_ms:            {:>12}", solver_ms);
+    eprintln!(
+        "  total_ms:             {:>12}",
+        module_bodies_ms + method_cfg_ms + var_index_ms + solver_ms
+    );
+
+    // Print CFG query breakdown
+    let cfg_calls = CFG_QUERY_CALLS.load(Ordering::Relaxed);
+    let cfg_total_ms = CFG_QUERY_TOTAL_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_method_id_ms = CFG_QUERY_METHOD_ID_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_module_bodies_ms = CFG_QUERY_MODULE_BODIES_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_body_lookup_ms = CFG_QUERY_BODY_LOOKUP_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_build_cfg_ms = CFG_QUERY_BUILD_CFG_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_arc_alloc_ms = CFG_QUERY_ARC_ALLOC_NS.load(Ordering::Relaxed) / 1_000_000;
+    let cfg_no_body = CFG_QUERY_NO_BODY_COUNT.load(Ordering::Relaxed);
+
+    eprintln!("\n=== method_cfg Query Breakdown ===");
+    eprintln!("  query_calls:          {:>12}", cfg_calls);
+    eprintln!("  no_body_count:        {:>12}", cfg_no_body);
+    eprintln!("  total_time_ms:        {:>12}", cfg_total_ms);
+    if cfg_calls > 0 {
+        eprintln!("  avg_time_per_call:    {:>12.2} ms", cfg_total_ms as f64 / cfg_calls as f64);
+    }
+    eprintln!("\n  --- Breakdown ---");
+    eprintln!("  method_id_resolve_ms: {:>12}", cfg_method_id_ms);
+    eprintln!("  module_bodies_ms:     {:>12}", cfg_module_bodies_ms);
+    eprintln!("  body_lookup_ms:       {:>12}", cfg_body_lookup_ms);
+    eprintln!("  build_cfg_ms:         {:>12}", cfg_build_cfg_ms);
+    eprintln!("  arc_alloc_ms:         {:>12}", cfg_arc_alloc_ms);
+    eprintln!(
+        "  salsa_overhead_ms:    {:>12}",
+        cfg_total_ms
+            - (cfg_method_id_ms
+                + cfg_module_bodies_ms
+                + cfg_body_lookup_ms
+                + cfg_build_cfg_ms
+                + cfg_arc_alloc_ms)
+    );
+}
 
 // Helper types for internal use
 type SdblInFile = Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>;
@@ -249,26 +344,54 @@ pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir_def::MethodIdInput<'db>,
 ) -> Arc<cfg::ControlFlowGraph> {
+    CFG_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let query_start = Instant::now();
+
     let _span = tracing::info_span!("method_cfg", ?method_id_input).entered();
+
+    // Step 1: Resolve MethodId from MethodIdInput
+    let t0 = Instant::now();
     let method_id = method_id_input.method_id(db);
     let module_id = hir_def::ModuleId::new(method_id.module.file_id);
+    CFG_QUERY_METHOD_ID_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Get module bodies (cached)
+    // Step 2: Get module bodies (Salsa query call)
+    let t1 = Instant::now();
     let module_bodies = db.module_bodies(module_id);
+    CFG_QUERY_MODULE_BODIES_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Get body for this method
+    // Step 3: Lookup body in ModuleBodies
+    let t2 = Instant::now();
     let body = match module_bodies.body(method_id.local_id) {
         Some(body) => body,
         None => {
             // Method has no body (forward declaration or error)
+            CFG_QUERY_NO_BODY_COUNT.fetch_add(1, Ordering::Relaxed);
+            CFG_QUERY_BODY_LOOKUP_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
             tracing::debug!("Method has no body: {:?}", method_id);
+
+            // Track total time even for no-body case
+            CFG_QUERY_TOTAL_NS
+                .fetch_add(query_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
             return Arc::new(cfg::ControlFlowGraph::new());
         }
     };
+    CFG_QUERY_BODY_LOOKUP_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Build CFG from HIR Body (Phase 6.2 - HIR-based CFG)
+    // Step 4: Build CFG from HIR Body
+    let t3 = Instant::now();
     let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, None);
-    Arc::new(cfg)
+    CFG_QUERY_BUILD_CFG_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    // Step 5: Arc allocation
+    let t4 = Instant::now();
+    let result = Arc::new(cfg);
+    CFG_QUERY_ARC_ALLOC_NS.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    // Track total time
+    CFG_QUERY_TOTAL_NS.fetch_add(query_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    result
 }
 
 /// Compute reaching definitions for a method using dataflow analysis.
@@ -381,35 +504,35 @@ pub fn liveness_analysis_query<'db>(
     method_id_input: hir_def::MethodIdInput<'db>,
 ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
     let _span = tracing::info_span!("liveness_analysis", ?method_id_input).entered();
+    LIVENESS_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+
     let method_id = method_id_input.method_id(db);
 
-    // Get module bodies (Salsa dependency tracked automatically)
+    // Get module bodies (Salsa dependency tracked automatically) - PROFILED
+    let t0 = Instant::now();
     let module_id = hir_def::ModuleId::new(method_id.module.file_id);
     let module_bodies = db.module_bodies(module_id);
-
-    // Get body for this method
     let body = module_bodies.body(method_id.local_id)?;
+    LIVENESS_MODULE_BODIES_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Get cached CFG (reuse across multiple analyses)
+    // Get cached CFG (reuse across multiple analyses) - PROFILED
+    let t1 = Instant::now();
     let cfg = db.method_cfg(method_id);
+    LIVENESS_METHOD_CFG_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Create variable index for BitSet-based liveness (maps variable names to indices)
+    // Create variable index for BitSet-based liveness - PROFILED
+    let t2 = Instant::now();
     let var_index = dataflow::liveness::VariableIndex::from_body(body);
+    LIVENESS_VAR_INDEX_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Run backward dataflow analysis for liveness
+    // Run backward dataflow analysis for liveness - PROFILED
+    let t3 = Instant::now();
     let transfer = dataflow::liveness::LivenessTransfer;
     let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-
-    // Configure solver for backward analysis
     solver.set_direction(dataflow::Direction::Backward);
-
-    // Initialize all blocks with BitSet-based bottom element (requires var_index)
     solver.set_bottom_factory(|| dataflow::liveness::Liveness::new(var_index.clone()));
-
-    // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
-
-    // Solve dataflow equations
     let dataflow_result = solver.solve()?;
+    LIVENESS_SOLVER_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     tracing::debug!("Liveness analysis converged");
     Some(Arc::new(dataflow_result))

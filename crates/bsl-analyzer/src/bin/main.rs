@@ -191,6 +191,14 @@ fn analyze(
 
     let _span = tracing::info_span!("cli_analyze").entered();
 
+    // Reset profiling counters at the start of analysis
+    hir_def::queries::reset_module_bodies_counters();
+    cfg::reset_cfg_counters();
+    dataflow::reset_solver_counters();
+    dataflow::liveness::reset_counters();
+    ide_db::queries::reset_liveness_query_counters();
+    ide_diagnostics::handlers::unused_local_variable::reset_profiling();
+
     tracing::info!("Analyzing project: {:?}", source_dir);
     tracing::info!("Reporters: {:?}", reporters);
     tracing::info!("Quiet mode: {}", quiet);
@@ -432,6 +440,14 @@ fn analyze(
     }
 
     tracing::info!("Analysis complete");
+
+    // Print profiling statistics
+    hir_def::queries::print_module_bodies_counters();
+    cfg::print_cfg_counters();
+    dataflow::print_solver_counters();
+    dataflow::liveness::print_counters();
+    ide_db::queries::print_liveness_query_counters();
+    ide_diagnostics::handlers::unused_local_variable::print_profiling();
 
     Ok(())
 }

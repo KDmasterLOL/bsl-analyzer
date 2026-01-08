@@ -45,7 +45,71 @@ use hir_def::body::Body;
 use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+
+// ============================================================================
+// Profiling counters for DataflowSolver
+// ============================================================================
+
+/// Number of solver calls (methods analyzed)
+pub static SOLVER_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Total iterations across all solver runs
+pub static SOLVER_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of join operations performed
+pub static SOLVER_JOIN_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of transfer operations performed
+pub static SOLVER_TRANSFER_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of lattice clones performed
+pub static SOLVER_CLONE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of methods that exceeded max_iterations
+pub static SOLVER_EXCEEDED_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// Total time spent in solver (nanoseconds)
+pub static SOLVER_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset all solver profiling counters.
+pub fn reset_solver_counters() {
+    SOLVER_CALLS.store(0, Ordering::Relaxed);
+    SOLVER_ITERATIONS.store(0, Ordering::Relaxed);
+    SOLVER_JOIN_CALLS.store(0, Ordering::Relaxed);
+    SOLVER_TRANSFER_CALLS.store(0, Ordering::Relaxed);
+    SOLVER_CLONE_CALLS.store(0, Ordering::Relaxed);
+    SOLVER_EXCEEDED_MAX.store(0, Ordering::Relaxed);
+    SOLVER_TIME_NS.store(0, Ordering::Relaxed);
+}
+
+/// Print solver profiling statistics.
+pub fn print_solver_counters() {
+    let calls = SOLVER_CALLS.load(Ordering::Relaxed);
+    let iterations = SOLVER_ITERATIONS.load(Ordering::Relaxed);
+    let joins = SOLVER_JOIN_CALLS.load(Ordering::Relaxed);
+    let transfers = SOLVER_TRANSFER_CALLS.load(Ordering::Relaxed);
+    let clones = SOLVER_CLONE_CALLS.load(Ordering::Relaxed);
+    let exceeded = SOLVER_EXCEEDED_MAX.load(Ordering::Relaxed);
+    let time_ms = SOLVER_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
+
+    let avg_iterations = if calls > 0 { iterations / calls } else { 0 };
+    let avg_time_us =
+        if calls > 0 { (SOLVER_TIME_NS.load(Ordering::Relaxed) / 1000) / calls } else { 0 };
+
+    eprintln!("\n=== DataflowSolver Profiling ===");
+    eprintln!("  solver_calls:         {:>12}", calls);
+    eprintln!("  total_iterations:     {:>12}", iterations);
+    eprintln!("  avg_iterations/call:  {:>12}", avg_iterations);
+    eprintln!("  join_calls:           {:>12}", joins);
+    eprintln!("  transfer_calls:       {:>12}", transfers);
+    eprintln!("  clone_calls:          {:>12}", clones);
+    eprintln!("  exceeded_max_iter:    {:>12}", exceeded);
+    eprintln!("  total_time_ms:        {:>12}", time_ms);
+    eprintln!("  avg_time_us/call:     {:>12}", avg_time_us);
+}
 
 /// Direction of dataflow analysis.
 ///
@@ -93,6 +157,14 @@ pub trait Lattice: Clone + PartialEq + Eq {
     /// Used at control flow merge points (e.g., after if/else).
     fn join(&self, other: &Self) -> Self;
 
+    /// In-place join operation - modifies self to be the join of self and other.
+    ///
+    /// This is an optimization to avoid unnecessary allocations.
+    /// Default implementation falls back to `join()`.
+    fn join_in_place(&mut self, other: &Self) {
+        *self = self.join(other);
+    }
+
     /// Check if self is more informative than other.
     ///
     /// Returns true if `self ⊑ other` (self is below or equal to other in lattice order).
@@ -138,6 +210,14 @@ pub trait Transfer<L: Lattice> {
     /// Output state (OUT set) after executing the statement.
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &L, body: &Body) -> L;
 
+    /// Apply transfer function in-place for a single statement.
+    ///
+    /// Optimized version that modifies state directly instead of returning a new one.
+    /// Default implementation falls back to `transfer_stmt()`.
+    fn transfer_stmt_in_place(&self, stmt_id: RawIdx, state: &mut L, body: &Body) {
+        *state = self.transfer_stmt(stmt_id, state, body);
+    }
+
     /// Apply transfer function for an expression (used in control flow vertices).
     ///
     /// This is called for expressions in control flow vertices like While conditions,
@@ -156,6 +236,14 @@ pub trait Transfer<L: Lattice> {
     /// Default implementation returns state unchanged.
     fn transfer_expr(&self, _expr_id: hir_def::ExprId, state: &L, _body: &Body) -> L {
         state.clone()
+    }
+
+    /// Apply transfer function in-place for an expression.
+    ///
+    /// Optimized version that modifies state directly.
+    /// Default implementation falls back to `transfer_expr()`.
+    fn transfer_expr_in_place(&self, expr_id: hir_def::ExprId, state: &mut L, body: &Body) {
+        *state = self.transfer_expr(expr_id, state, body);
     }
 }
 
@@ -358,23 +446,26 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 self.block_in.get(&block_idx).cloned().expect("block_in should be initialized")
             } else {
                 // Normal case: join from predecessors
-                // Start with current block's IN state (initialized by set_bottom_factory or previous iteration)
-                let mut state =
-                    self.block_in.get(&block_idx).cloned().expect("block_in should be initialized");
-                let mut first = true;
+                // Clone first predecessor's OUT state, then join_in_place with the rest
+                let mut state: Option<L> = None;
                 for (pred_idx, _edge) in self.cfg.incoming_edges(block_idx) {
                     if let Some(pred_out) = self.block_out.get(&pred_idx) {
-                        if first {
-                            // For first predecessor, just use its OUT state
-                            state = pred_out.clone();
-                            first = false;
-                        } else {
-                            // Join with subsequent predecessors
-                            state = state.join(pred_out);
+                        match &mut state {
+                            None => {
+                                // First predecessor: clone its OUT state as starting point
+                                state = Some(pred_out.clone());
+                            }
+                            Some(s) => {
+                                // Subsequent predecessors: join in-place (no clone!)
+                                s.join_in_place(pred_out);
+                            }
                         }
                     }
                 }
-                state
+                // If no predecessors had OUT state, use current block_in
+                state.unwrap_or_else(|| {
+                    self.block_in.get(&block_idx).cloned().expect("block_in should be initialized")
+                })
             };
 
             // Update IN[block]
@@ -424,6 +515,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     fn solve_backward(mut self) -> Option<DataflowResult<L>> {
         use std::collections::VecDeque;
 
+        // PROFILING: track solver calls and timing
+        SOLVER_CALLS.fetch_add(1, Ordering::Relaxed);
+        let solver_start = Instant::now();
+
         // Initialize all blocks to bottom (only if not already initialized by set_bottom_factory)
         let exit = self.cfg.exit_point();
         let num_blocks = self.cfg.vertices().count();
@@ -452,6 +547,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         while let Some(block_idx) = worklist.pop_front() {
             worklist_set.remove(&block_idx); // O(1)
             iterations += 1;
+            SOLVER_ITERATIONS.fetch_add(1, Ordering::Relaxed);
             *block_visit_count.entry(block_idx).or_insert(0) += 1;
 
             // Safety check: prevent infinite loops
@@ -478,6 +574,9 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                     }
                 }
 
+                // PROFILING: count exceeded max iterations
+                SOLVER_EXCEEDED_MAX.fetch_add(1, Ordering::Relaxed);
+
                 // Return partial solution instead of None - conservative but usable
                 break;
             }
@@ -489,36 +588,45 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
             let out_state = if is_exit && !has_successors {
                 // Exit block with no successors: preserve initial state (usually bottom)
+                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
                 self.block_out.get(&block_idx).cloned().expect("block_out should be initialized")
             } else {
                 // Normal case: join from successors
-                // Start with current block's OUT state (initialized by set_bottom_factory or previous iteration)
-                let mut state = self
-                    .block_out
-                    .get(&block_idx)
-                    .cloned()
-                    .expect("block_out should be initialized");
-                let mut first = true;
+                // Clone first successor's IN state, then join_in_place with the rest
+                let mut state: Option<L> = None;
                 for (succ_idx, _edge) in self.cfg.outgoing_edges(block_idx) {
                     if let Some(succ_in) = self.block_in.get(&succ_idx) {
-                        if first {
-                            // For first successor, just use its IN state
-                            state = succ_in.clone();
-                            first = false;
-                        } else {
-                            // Join with subsequent successors
-                            state = state.join(succ_in);
+                        match &mut state {
+                            None => {
+                                // First successor: clone its IN state as starting point
+                                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+                                state = Some(succ_in.clone());
+                            }
+                            Some(s) => {
+                                // Subsequent successors: join in-place (no clone!)
+                                SOLVER_JOIN_CALLS.fetch_add(1, Ordering::Relaxed);
+                                s.join_in_place(succ_in);
+                            }
                         }
                     }
                 }
-                state
+                // If no successors had IN state, use current block_out
+                state.unwrap_or_else(|| {
+                    SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+                    self.block_out
+                        .get(&block_idx)
+                        .cloned()
+                        .expect("block_out should be initialized")
+                })
             };
 
             // Update OUT[block]
+            SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
             self.block_out.insert(block_idx, out_state.clone());
 
             // Compute IN[block] = transfer(OUT[block], block)
             // Note: for backward analysis, transfer expects OUT and returns IN
+            SOLVER_TRANSFER_CALLS.fetch_add(1, Ordering::Relaxed);
             let in_state = self.transfer_block(block_idx, &out_state);
 
             // Check if IN[block] changed
@@ -562,6 +670,9 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             );
         }
 
+        // PROFILING: record total solver time
+        SOLVER_TIME_NS.fetch_add(solver_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
         Some(DataflowResult {
             block_in: self.block_in,
             block_out: self.block_out,
@@ -584,24 +695,44 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         match vertex {
             CfgVertex::BasicBlock(block) => {
                 // Apply transfer function to each statement in the block
-                // Phase 6.3: Re-enabled with HIR-based CFG (statements() returns &[StmtId])
+                // Clone once, then modify in-place for all statements
+                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
                 let mut state = in_state.clone();
                 for &stmt_id in block.statements() {
-                    state = self.transfer.transfer_stmt(stmt_id.into_raw(), &state, &self.body);
+                    // Use in-place transfer to avoid cloning for each statement
+                    self.transfer.transfer_stmt_in_place(
+                        stmt_id.into_raw(),
+                        &mut state,
+                        &self.body,
+                    );
                 }
                 state
             }
 
             CfgVertex::WhileLoop(while_vertex) => {
                 // While loop: process the condition expression
-                // The While statement's condition needs special handling because it's evaluated
-                // at the loop header (WhileLoop vertex), not in a BasicBlock.
-                self.transfer_control_expr(while_vertex.condition, in_state)
+                // Clone once, then modify in-place
+                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+                let mut state = in_state.clone();
+                self.transfer.transfer_expr_in_place(
+                    while_vertex.condition,
+                    &mut state,
+                    &self.body,
+                );
+                state
             }
 
             CfgVertex::Conditional(conditional_vertex) => {
                 // If statement: process the condition expression
-                self.transfer_control_expr(conditional_vertex.condition, in_state)
+                // Clone once, then modify in-place
+                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+                let mut state = in_state.clone();
+                self.transfer.transfer_expr_in_place(
+                    conditional_vertex.condition,
+                    &mut state,
+                    &self.body,
+                );
+                state
             }
 
             // ForLoop and ForEachLoop vertices don't need special handling here.
@@ -613,13 +744,6 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             // Other vertex types (Entry, Exit, etc.) don't have expressions to process
             _ => in_state.clone(),
         }
-    }
-
-    /// Helper to apply transfer for a control expression (condition, range bound, etc.).
-    ///
-    /// For backward analysis (liveness), this marks variables in the expression as used.
-    fn transfer_control_expr(&self, expr_id: hir_def::ExprId, in_state: &L) -> L {
-        self.transfer.transfer_expr(expr_id, in_state, &self.body)
     }
 }
 
