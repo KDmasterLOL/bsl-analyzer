@@ -144,7 +144,7 @@ fn check_method_direct(
     method_id: MethodId,
     module_bodies: &hir_def::ModuleBodies,
     body: &hir_def::Body,
-    _ctx: &DiagnosticsContext,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     METHODS_ANALYZED.fetch_add(1, Ordering::Relaxed);
     let mut diagnostics = Vec::new();
@@ -167,6 +167,7 @@ fn check_method_direct(
         body,
         &cfg,
         var_index.clone(), // Clone Arc (cheap - just ref count bump)
+        ctx.config.dataflow_max_iterations, // Configurable max iterations
     );
     let liveness_result = match liveness_result {
         Some(result) => result,

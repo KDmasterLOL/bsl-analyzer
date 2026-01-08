@@ -737,6 +737,13 @@ impl RootDatabase for RootDatabaseImpl {
    - Ignore variables with single assignment (no need to track)
    - **Impact**: 30-50% fewer definitions tracked
 
+4. **Convergence Limits** (configurable):
+   - Default: 3000 iterations (increased from 1000 in 2025-01-09)
+   - Configurable via `DiagnosticsConfig.dataflow_max_iterations`
+   - Set in `.bsl-language-server.json`: `"dataflow_max_iterations": 5000`
+   - **When to increase**: Very complex methods with deep nesting or many loops
+   - **Warning logged**: If analysis exceeds limit without convergence
+
 ## Testing Strategy
 
 ### Unit Tests (14 tests)

@@ -792,6 +792,7 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
 /// * `body` - HIR body of the method
 /// * `cfg` - Control Flow Graph (already built)
 /// * `var_index` - Variable index (already built)
+/// * `max_iterations` - Maximum iterations for convergence (from DiagnosticsConfig)
 ///
 /// # Returns
 /// DataflowResult with liveness information for each CFG block, or None if analysis fails.
@@ -799,11 +800,13 @@ pub fn liveness_analysis_direct(
     body: &hir_def::Body,
     cfg: &cfg::ControlFlowGraph,
     var_index: std::sync::Arc<VariableIndex>,
+    max_iterations: usize,
 ) -> Option<crate::DataflowResult<Liveness>> {
     let transfer = LivenessTransfer;
     let mut solver =
         crate::DataflowSolver::new(std::sync::Arc::new(cfg.clone()), body.clone(), transfer);
     solver.set_direction(crate::Direction::Backward);
+    solver.set_max_iterations(max_iterations);
     solver.set_bottom_factory(|| Liveness::new(var_index.clone()));
     solver.solve()
 }

@@ -331,11 +331,28 @@ pub struct TextEdit {
 }
 
 /// Configuration for diagnostics.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
     pub parameters: std::collections::HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
+    /// Maximum iterations for dataflow analysis (default: 3000)
+    ///
+    /// Controls convergence limit for liveness analysis and other dataflow algorithms.
+    /// Increase this for very complex methods with deep nesting or many loops.
+    /// Warning is logged if analysis exceeds this limit.
+    pub dataflow_max_iterations: usize,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            disabled: Vec::new(),
+            parameters: std::collections::HashMap::new(),
+            ordinary_app_support: false,
+            dataflow_max_iterations: 3000,
+        }
+    }
 }
 
 impl DiagnosticsConfig {
