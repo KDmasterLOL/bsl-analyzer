@@ -24,6 +24,189 @@ use super::preproc::{
 };
 use super::LoweringCtx;
 
+// ============================================================================
+// Profiling counters for statement lowering breakdown
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Time spent lowering ASSIGN_STMT
+pub static LOWER_ASSIGN_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_ASSIGN_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering CALL_STMT
+pub static LOWER_CALL_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_CALL_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering RETURN_STMT
+pub static LOWER_RETURN_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_RETURN_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering IF_STMT
+pub static LOWER_IF_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_IF_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering WHILE_STMT
+pub static LOWER_WHILE_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_WHILE_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering FOR_STMT
+pub static LOWER_FOR_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_FOR_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering FOR_EACH_STMT
+pub static LOWER_FOR_EACH_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_FOR_EACH_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering TRY_STMT
+pub static LOWER_TRY_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_TRY_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering VAR_DEF
+pub static LOWER_VAR_DEF_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_VAR_DEF_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering other statements (RAISE, BREAK, CONTINUE, etc.)
+pub static LOWER_OTHER_STMT_NS: AtomicU64 = AtomicU64::new(0);
+pub static LOWER_OTHER_STMT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_stmt_lowering_counters() {
+    LOWER_ASSIGN_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_ASSIGN_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_CALL_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_CALL_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_RETURN_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_RETURN_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_IF_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_IF_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_WHILE_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_WHILE_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_FOR_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_FOR_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_FOR_EACH_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_FOR_EACH_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_TRY_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_TRY_STMT_COUNT.store(0, Ordering::Relaxed);
+    LOWER_VAR_DEF_NS.store(0, Ordering::Relaxed);
+    LOWER_VAR_DEF_COUNT.store(0, Ordering::Relaxed);
+    LOWER_OTHER_STMT_NS.store(0, Ordering::Relaxed);
+    LOWER_OTHER_STMT_COUNT.store(0, Ordering::Relaxed);
+}
+
+pub fn print_stmt_lowering_counters() {
+    let assign_ms = LOWER_ASSIGN_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let assign_count = LOWER_ASSIGN_STMT_COUNT.load(Ordering::Relaxed);
+    let call_ms = LOWER_CALL_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let call_count = LOWER_CALL_STMT_COUNT.load(Ordering::Relaxed);
+    let return_ms = LOWER_RETURN_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let return_count = LOWER_RETURN_STMT_COUNT.load(Ordering::Relaxed);
+    let if_ms = LOWER_IF_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let if_count = LOWER_IF_STMT_COUNT.load(Ordering::Relaxed);
+    let while_ms = LOWER_WHILE_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let while_count = LOWER_WHILE_STMT_COUNT.load(Ordering::Relaxed);
+    let for_ms = LOWER_FOR_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let for_count = LOWER_FOR_STMT_COUNT.load(Ordering::Relaxed);
+    let foreach_ms = LOWER_FOR_EACH_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let foreach_count = LOWER_FOR_EACH_STMT_COUNT.load(Ordering::Relaxed);
+    let try_ms = LOWER_TRY_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let try_count = LOWER_TRY_STMT_COUNT.load(Ordering::Relaxed);
+    let vardef_ms = LOWER_VAR_DEF_NS.load(Ordering::Relaxed) / 1_000_000;
+    let vardef_count = LOWER_VAR_DEF_COUNT.load(Ordering::Relaxed);
+    let other_ms = LOWER_OTHER_STMT_NS.load(Ordering::Relaxed) / 1_000_000;
+    let other_count = LOWER_OTHER_STMT_COUNT.load(Ordering::Relaxed);
+
+    let total_ms = assign_ms
+        + call_ms
+        + return_ms
+        + if_ms
+        + while_ms
+        + for_ms
+        + foreach_ms
+        + try_ms
+        + vardef_ms
+        + other_ms;
+    let total_count = assign_count
+        + call_count
+        + return_count
+        + if_count
+        + while_count
+        + for_count
+        + foreach_count
+        + try_count
+        + vardef_count
+        + other_count;
+
+    eprintln!("\n=== Statement Lowering Breakdown ===");
+    eprintln!(
+        "  ASSIGN:    {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        assign_ms,
+        assign_count,
+        if assign_count > 0 { (assign_ms as f64 * 1000.0) / assign_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  CALL:      {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        call_ms,
+        call_count,
+        if call_count > 0 { (call_ms as f64 * 1000.0) / call_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  IF:        {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        if_ms,
+        if_count,
+        if if_count > 0 { (if_ms as f64 * 1000.0) / if_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  RETURN:    {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        return_ms,
+        return_count,
+        if return_count > 0 { (return_ms as f64 * 1000.0) / return_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  FOR_EACH:  {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        foreach_ms,
+        foreach_count,
+        if foreach_count > 0 { (foreach_ms as f64 * 1000.0) / foreach_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  TRY:       {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        try_ms,
+        try_count,
+        if try_count > 0 { (try_ms as f64 * 1000.0) / try_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  WHILE:     {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        while_ms,
+        while_count,
+        if while_count > 0 { (while_ms as f64 * 1000.0) / while_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  FOR:       {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        for_ms,
+        for_count,
+        if for_count > 0 { (for_ms as f64 * 1000.0) / for_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  VAR_DEF:   {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        vardef_ms,
+        vardef_count,
+        if vardef_count > 0 { (vardef_ms as f64 * 1000.0) / vardef_count as f64 } else { 0.0 }
+    );
+    eprintln!(
+        "  OTHER:     {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        other_ms,
+        other_count,
+        if other_count > 0 { (other_ms as f64 * 1000.0) / other_count as f64 } else { 0.0 }
+    );
+    eprintln!("  ---");
+    eprintln!(
+        "  TOTAL:     {:>8}ms  {:>8} stmts  {:>6.1} µs/stmt",
+        total_ms,
+        total_count,
+        if total_count > 0 { (total_ms as f64 * 1000.0) / total_count as f64 } else { 0.0 }
+    );
+}
+
 /// Find the range for IF/THEN header (from IF to THEN keyword).
 fn find_if_then_range(if_stmt: &SyntaxNode) -> TextRange {
     let mut start = None;
@@ -183,8 +366,10 @@ fn normalize_condition(condition: &str) -> String {
 /// Detects when an elsif condition is identical to a previous if/elsif condition.
 /// Reports diagnostics on duplicate occurrences (not the first one).
 fn check_duplicated_conditions(ctx: &mut LoweringCtx, condition_nodes: &[SyntaxNode]) {
-    if condition_nodes.len() < 2 {
-        return; // Need at least 2 conditions to compare
+    // Early exit: need at least 3 conditions (if + 2+ elsif) to have potential duplicates
+    // Simple if-else (1 condition in if, 1 in else) rarely have duplicates
+    if condition_nodes.len() < 3 {
+        return;
     }
 
     use std::collections::HashMap;
@@ -480,25 +665,87 @@ pub(super) fn lower_stmt_list_with_unreachable(
 /// Lower a single statement.
 pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<StmtId> {
     let range = node.text_range();
+    let kind = node.kind();
 
-    let stmt = match node.kind() {
-        SyntaxKind::ASSIGN_STMT => lower_assign_stmt(ctx, node),
-        SyntaxKind::CALL_STMT => lower_call_stmt(ctx, node),
-        SyntaxKind::RETURN_STMT => lower_return_stmt(ctx, node),
-        SyntaxKind::IF_STMT => lower_if_stmt(ctx, node),
-        SyntaxKind::WHILE_STMT => lower_while_stmt(ctx, node),
-        SyntaxKind::FOR_STMT => lower_for_stmt(ctx, node),
-        SyntaxKind::FOR_EACH_STMT => lower_for_each_stmt(ctx, node),
-        SyntaxKind::TRY_STMT => lower_try_stmt(ctx, node),
-        SyntaxKind::RAISE_STMT => lower_raise_stmt(ctx, node),
-        SyntaxKind::BREAK_STMT => Some(Stmt::Break),
-        SyntaxKind::CONTINUE_STMT => Some(Stmt::Continue),
-        SyntaxKind::GOTO_STMT => lower_goto_stmt(node),
-        SyntaxKind::LABEL_STMT => lower_label_stmt(node),
-        SyntaxKind::EXECUTE_STMT => lower_execute_stmt(ctx, node),
-        SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
-        SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
-        SyntaxKind::VAR_DEF => lower_var_decl(ctx, node),
+    let t0 = Instant::now();
+    let stmt = match kind {
+        SyntaxKind::ASSIGN_STMT => {
+            let result = lower_assign_stmt(ctx, node);
+            LOWER_ASSIGN_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_ASSIGN_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::CALL_STMT => {
+            let result = lower_call_stmt(ctx, node);
+            LOWER_CALL_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_CALL_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::RETURN_STMT => {
+            let result = lower_return_stmt(ctx, node);
+            LOWER_RETURN_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_RETURN_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::IF_STMT => {
+            let result = lower_if_stmt(ctx, node);
+            LOWER_IF_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_IF_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::WHILE_STMT => {
+            let result = lower_while_stmt(ctx, node);
+            LOWER_WHILE_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_WHILE_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::FOR_STMT => {
+            let result = lower_for_stmt(ctx, node);
+            LOWER_FOR_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_FOR_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::FOR_EACH_STMT => {
+            let result = lower_for_each_stmt(ctx, node);
+            LOWER_FOR_EACH_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_FOR_EACH_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::TRY_STMT => {
+            let result = lower_try_stmt(ctx, node);
+            LOWER_TRY_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_TRY_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::VAR_DEF => {
+            let result = lower_var_decl(ctx, node);
+            LOWER_VAR_DEF_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_VAR_DEF_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
+        SyntaxKind::RAISE_STMT
+        | SyntaxKind::BREAK_STMT
+        | SyntaxKind::CONTINUE_STMT
+        | SyntaxKind::GOTO_STMT
+        | SyntaxKind::LABEL_STMT
+        | SyntaxKind::EXECUTE_STMT
+        | SyntaxKind::ADD_HANDLER_STMT
+        | SyntaxKind::REMOVE_HANDLER_STMT => {
+            let result = match kind {
+                SyntaxKind::RAISE_STMT => lower_raise_stmt(ctx, node),
+                SyntaxKind::BREAK_STMT => Some(Stmt::Break),
+                SyntaxKind::CONTINUE_STMT => Some(Stmt::Continue),
+                SyntaxKind::GOTO_STMT => lower_goto_stmt(node),
+                SyntaxKind::LABEL_STMT => lower_label_stmt(node),
+                SyntaxKind::EXECUTE_STMT => lower_execute_stmt(ctx, node),
+                SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
+                SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
+                _ => unreachable!(),
+            };
+            LOWER_OTHER_STMT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            LOWER_OTHER_STMT_COUNT.fetch_add(1, Ordering::Relaxed);
+            result
+        }
         SyntaxKind::EMPTY_STMT => {
             // Check if parent or siblings contain ERROR nodes
             // (Java: !Trees.treeContainsErrors(previousNode))

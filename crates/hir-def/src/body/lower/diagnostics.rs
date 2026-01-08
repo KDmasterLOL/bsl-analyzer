@@ -23,7 +23,9 @@ use super::LoweringCtx;
 ///
 /// Compares all pairs of branches and emits diagnostics for identical blocks.
 pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: &[SyntaxNode]) {
-    if branch_nodes.len() < 2 {
+    // Early exit: need at least 3 branches to potentially have duplicates
+    // Most IFs are simple if-else (2 branches), skip them for performance
+    if branch_nodes.len() < 3 {
         return;
     }
 
@@ -37,17 +39,34 @@ pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: 
         }
 
         let current_block = &branch_nodes[i];
+        let current_text = normalize_code_block(current_block);
+        let current_count = count_statements(current_block);
+
+        // Skip empty blocks
+        if current_count == 0 {
+            continue;
+        }
 
         // Find all identical blocks after current one
         let mut has_duplicate = false;
-        for (j, other_block) in branch_nodes.iter().enumerate().skip(i + 1) {
-            // Skip empty blocks (both must be non-empty for comparison)
-            if is_empty_block(current_block) && is_empty_block(other_block) {
+        #[allow(clippy::needless_range_loop)] // Need index j for reported.insert(j)
+        for j in (i + 1)..branch_nodes.len() {
+            let other_block = &branch_nodes[j];
+            let other_count = count_statements(other_block);
+
+            // Skip empty blocks
+            if other_count == 0 {
                 continue;
             }
 
-            // Compare blocks structurally
-            if are_blocks_identical(current_block, other_block) {
+            // Quick check: same statement count
+            if current_count != other_count {
+                continue;
+            }
+
+            // Full check: compare normalized text
+            let other_text = normalize_code_block(other_block);
+            if current_text == other_text {
                 has_duplicate = true;
                 reported.insert(j);
             }
@@ -60,30 +79,6 @@ pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: 
             });
         }
     }
-}
-
-/// Check if a code block is empty (no children or only whitespace).
-fn is_empty_block(block: &SyntaxNode) -> bool {
-    block.children().next().is_none()
-}
-
-/// Compare two code blocks for structural equality.
-///
-/// Uses normalized text comparison (case-insensitive, whitespace-normalized).
-fn are_blocks_identical(block1: &SyntaxNode, block2: &SyntaxNode) -> bool {
-    // Normalize and compare text content
-    let text1 = normalize_code_block(block1);
-    let text2 = normalize_code_block(block2);
-
-    if text1 != text2 {
-        return false;
-    }
-
-    // Additional structural check: same number of statements
-    let stmt_count1 = count_statements(block1);
-    let stmt_count2 = count_statements(block2);
-
-    stmt_count1 == stmt_count2 && stmt_count1 > 0
 }
 
 /// Normalize code block for comparison.
@@ -580,27 +575,26 @@ fn is_async_method(name: &str) -> bool {
 
 /// Check for CodeAfterAsyncCall diagnostic in a method body.
 ///
-/// Finds all global async method calls and checks if there's executable code after them.
-pub(crate) fn check_code_after_async_call(ctx: &mut LoweringCtx, stmt_list: &SyntaxNode) {
-    // Find all async method calls in the statement list
-    for node in stmt_list.descendants() {
-        if node.kind() != SyntaxKind::CALL_STMT {
-            continue;
-        }
-
+/// Takes pre-collected CALL_STMT nodes from control flow analysis and checks
+/// if they are global async calls with code after them.
+///
+/// This version avoids a separate `descendants()` traversal by reusing nodes
+/// collected during combined control flow analysis.
+pub(crate) fn check_code_after_async_call(ctx: &mut LoweringCtx, call_stmts: &[SyntaxNode]) {
+    for node in call_stmts {
         // Check if this is a global async call
-        if !is_global_async_call(&node) {
+        if !is_global_async_call(node) {
             continue;
         }
 
         // Get method name for diagnostic message
-        let Some(method_name) = get_call_method_name(&node) else {
+        let Some(method_name) = get_call_method_name(node) else {
             continue;
         };
 
         // Check if there's code after this async call
-        if has_code_after_async(&node) {
-            let extended_range = extend_range_with_semicolon(&node, node.text_range());
+        if has_code_after_async(node) {
+            let extended_range = extend_range_with_semicolon(node, node.text_range());
             ctx.emit(BodyDiagnostic::CodeAfterAsyncCall { method_name, range: extended_range });
         }
     }

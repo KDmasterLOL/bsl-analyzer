@@ -6,9 +6,38 @@
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
-/// Check if a statement list contains at least one return statement.
-pub(crate) fn has_return_statement(stmt_list: &SyntaxNode) -> bool {
-    stmt_list.descendants().any(|n| n.kind() == SyntaxKind::RETURN_STMT)
+/// Result of combined control flow analysis.
+pub(crate) struct ControlFlowAnalysis {
+    /// Whether the statement list contains at least one return statement.
+    pub has_return: bool,
+    /// All CALL_STMT nodes found in the statement list (for async call checking).
+    pub call_stmts: Vec<SyntaxNode>,
+}
+
+/// Perform combined control flow analysis in a single AST traversal.
+///
+/// This function does a single `descendants()` pass to collect:
+/// - Whether any return statement exists (for FunctionShouldHaveReturn check)
+/// - All CALL_STMT nodes (for CodeAfterAsyncCall check)
+///
+/// This avoids two separate tree traversals.
+pub(crate) fn analyze_control_flow(stmt_list: &SyntaxNode) -> ControlFlowAnalysis {
+    let mut has_return = false;
+    let mut call_stmts = Vec::new();
+
+    for node in stmt_list.descendants() {
+        match node.kind() {
+            SyntaxKind::RETURN_STMT => {
+                has_return = true;
+            }
+            SyntaxKind::CALL_STMT => {
+                call_stmts.push(node);
+            }
+            _ => {}
+        }
+    }
+
+    ControlFlowAnalysis { has_return, call_stmts }
 }
 
 /// Check if function has missing return paths using CFG analysis.

@@ -43,6 +43,54 @@ use crate::Name;
 
 pub use control_flow::check_missing_return_paths;
 
+// Re-export profiling functions
+pub use stmt::{print_stmt_lowering_counters, reset_stmt_lowering_counters};
+
+// ============================================================================
+// Profiling counters for lower_method_with_externals breakdown
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Time spent checking annotations and client-only status
+pub static LOWER_METHOD_ANNOTATIONS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering parameters
+pub static LOWER_METHOD_PARAMS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent lowering statement list
+pub static LOWER_METHOD_STMTS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Time spent checking return statements and control flow
+pub static LOWER_METHOD_CONTROL_FLOW_NS: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_lower_method_counters() {
+    LOWER_METHOD_ANNOTATIONS_NS.store(0, Ordering::Relaxed);
+    LOWER_METHOD_PARAMS_NS.store(0, Ordering::Relaxed);
+    LOWER_METHOD_STMTS_NS.store(0, Ordering::Relaxed);
+    LOWER_METHOD_CONTROL_FLOW_NS.store(0, Ordering::Relaxed);
+}
+
+pub fn print_lower_method_counters() {
+    let annotations_ms = LOWER_METHOD_ANNOTATIONS_NS.load(Ordering::Relaxed) / 1_000_000;
+    let params_ms = LOWER_METHOD_PARAMS_NS.load(Ordering::Relaxed) / 1_000_000;
+    let stmts_ms = LOWER_METHOD_STMTS_NS.load(Ordering::Relaxed) / 1_000_000;
+    let control_flow_ms = LOWER_METHOD_CONTROL_FLOW_NS.load(Ordering::Relaxed) / 1_000_000;
+    let total_ms = annotations_ms + params_ms + stmts_ms + control_flow_ms;
+
+    eprintln!("\n=== lower_method_with_externals Breakdown ===");
+    eprintln!("  annotations_ms:       {:>12}", annotations_ms);
+    eprintln!("  params_ms:            {:>12}", params_ms);
+    eprintln!("  stmts_ms:             {:>12}", stmts_ms);
+    eprintln!("  control_flow_ms:      {:>12}", control_flow_ms);
+    eprintln!("  total_ms:             {:>12}", total_ms);
+
+    if total_ms > 0 {
+        eprintln!("  stmts_percent:        {:>11.1}%", (stmts_ms as f64 / total_ms as f64) * 100.0);
+    }
+}
+
 /// Lowering context.
 ///
 /// Holds state during AST → HIR conversion.
@@ -422,6 +470,9 @@ pub fn lower_method_with_externals(
 ) -> LowerResult {
     let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
 
+    // Phase 1: Check annotations and method name
+    let t0 = Instant::now();
+
     // Check if method is client-only (&НаКлиенте annotation ONLY)
     ctx.is_client_only = is_client_only_method(method_node);
 
@@ -472,21 +523,31 @@ pub fn lower_method_with_externals(
         }
     }
 
-    // Lower parameters
+    LOWER_METHOD_ANNOTATIONS_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+    // Phase 2: Lower parameters
+    let t1 = Instant::now();
     if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {
         let params = stmt::lower_params(&mut ctx, &param_list);
         ctx.body.params = params.into_boxed_slice();
     }
+    LOWER_METHOD_PARAMS_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-    // Lower body statements
+    // Phase 3: Lower body statements
+    let t2 = Instant::now();
     if let Some(stmt_list) = method_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
         let stmts = stmt::lower_stmt_list(&mut ctx, &stmt_list);
         ctx.body.body_stmts = stmts.into_boxed_slice();
+        LOWER_METHOD_STMTS_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        let has_return = control_flow::has_return_statement(&stmt_list);
+        // Phase 4: Control flow checks (combined single-pass analysis)
+        let t3 = Instant::now();
+
+        // Optimization: Single descendants() traversal for all control flow checks
+        let cf_analysis = control_flow::analyze_control_flow(&stmt_list);
 
         // Check for FunctionShouldHaveReturn (no return statement at all)
-        if is_function && !has_return {
+        if is_function && !cf_analysis.has_return {
             // Get function name range for diagnostic
             let name_range = method_node
                 .children_with_tokens()
@@ -500,7 +561,10 @@ pub fn lower_method_with_externals(
 
         // Check for MissingReturn (some paths don't return)
         // Only check if function has at least one return (otherwise FunctionShouldHaveReturn fires)
-        if is_function && has_return && control_flow::check_missing_return_paths(&stmt_list) {
+        if is_function
+            && cf_analysis.has_return
+            && control_flow::check_missing_return_paths(&stmt_list)
+        {
             // Get function name range for diagnostic
             let name_range = method_node
                 .children_with_tokens()
@@ -515,8 +579,13 @@ pub fn lower_method_with_externals(
         // NOTE: Empty function/procedure bodies are NOT checked by EmptyCodeBlock diagnostic.
         // They are handled by a separate diagnostic (if needed).
 
-        // Check for code after async calls
-        diagnostics::check_code_after_async_call(&mut ctx, &stmt_list);
+        // Check for code after async calls (using pre-collected call statements)
+        diagnostics::check_code_after_async_call(&mut ctx, &cf_analysis.call_stmts[..]);
+
+        LOWER_METHOD_CONTROL_FLOW_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    } else {
+        // No statement list - still record stmt lowering time as 0
+        LOWER_METHOD_STMTS_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     // Check for FunctionReturnsSamePrimitive
