@@ -14,11 +14,13 @@
 //! - Module variables from local variables
 //! - Builtin functions from user-defined (TODO)
 
+use either::Either;
 use ide_db::{
-    hir_def::{resolver::Resolver, ModuleId, Name},
+    hir_def::{resolver::Resolver, scope::ExprScopes, MethodId, ModuleId, Name},
     RootDatabase, TextRange,
 };
-
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use syntax::{
     ast::{self, AstNode},
     SyntaxKind, SyntaxNode, SyntaxToken,
@@ -131,33 +133,188 @@ pub struct HlRange {
     pub modifiers: HlMod,
 }
 
+/// Context for semantic highlighting that caches ExprScopes for methods.
+///
+/// This struct lives only during a single `highlight()` call and provides:
+/// - Cached ExprScopes for each method (avoids rebuilding for every token)
+/// - Database and file context
+struct HighlightContext<'db> {
+    db: &'db dyn RootDatabase,
+    module_id: ModuleId,
+    file_id: FileId,
+    /// Cache: method source_range -> (MethodId, ExprScopes, root ScopeId)
+    expr_scopes_cache: FxHashMap<TextRange, (MethodId, Arc<ExprScopes>)>,
+}
+
+impl<'db> HighlightContext<'db> {
+    fn new(db: &'db dyn RootDatabase, file_id: FileId) -> Self {
+        Self {
+            db,
+            module_id: ModuleId::new(file_id),
+            file_id,
+            expr_scopes_cache: FxHashMap::default(),
+        }
+    }
+
+    /// Get or build ExprScopes for a method.
+    ///
+    /// # Arguments
+    /// - `method_range` - source_range of the method definition
+    /// - `method_def` - AST node (ProcedureDef or FunctionDef)
+    /// - `method_id` - HIR MethodId
+    ///
+    /// # Returns
+    /// Cached or newly built ExprScopes for the method
+    fn get_expr_scopes(
+        &mut self,
+        method_range: TextRange,
+        method_def: Either<ast::ProcedureDef, ast::FunctionDef>,
+        method_id: MethodId,
+    ) -> Arc<ExprScopes> {
+        // Check cache
+        if let Some((_, scopes)) = self.expr_scopes_cache.get(&method_range) {
+            return scopes.clone();
+        }
+
+        // Build ExprScopes from AST
+        let scopes = match method_def {
+            Either::Left(proc) => ExprScopes::from_procedure(&proc),
+            Either::Right(func) => ExprScopes::from_function(&func),
+        };
+        let scopes = Arc::new(scopes);
+
+        // Cache for future tokens in the same method
+        self.expr_scopes_cache.insert(method_range, (method_id, scopes.clone()));
+        scopes
+    }
+}
+
+/// Find the method (procedure or function) containing this token.
+///
+/// # Algorithm
+/// 1. Walk up AST ancestors from token's parent
+/// 2. Find first ProcedureDef or FunctionDef node
+/// 3. Match its source_range in ItemTree to get MethodId
+///
+/// # Returns
+/// Some((MethodId, Either<ProcedureDef, FunctionDef>)) if token is inside a method
+fn find_method_for_token(
+    db: &dyn RootDatabase,
+    file_id: FileId,
+    token: &SyntaxToken,
+) -> Option<(MethodId, Either<ast::ProcedureDef, ast::FunctionDef>)> {
+    // Walk up ancestors to find containing method
+    for ancestor in token.parent()?.ancestors() {
+        if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
+            let method_id = find_method_id_by_range(db, file_id, proc.syntax().text_range())?;
+            return Some((method_id, Either::Left(proc)));
+        }
+        if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
+            let method_id = find_method_id_by_range(db, file_id, func.syntax().text_range())?;
+            return Some((method_id, Either::Right(func)));
+        }
+    }
+    None
+}
+
+/// Find MethodId by matching source_range in ItemTree.
+///
+/// # Algorithm
+/// 1. Get ItemTree for file
+/// 2. Iterate through top_level_items
+/// 3. Match source_range of each Procedure/Function with given range
+/// 4. Return MethodId with matched index
+///
+/// # Note
+/// This is O(M) where M = number of methods, typically 10-50 per file.
+fn find_method_id_by_range(
+    db: &dyn RootDatabase,
+    file_id: FileId,
+    range: TextRange,
+) -> Option<MethodId> {
+    let item_tree = db.item_tree(file_id);
+    let module_id = ModuleId::new(file_id);
+
+    for (idx, item) in item_tree.top_level_items().iter().enumerate() {
+        match item {
+            ide_db::hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                let proc = item_tree.procedure(*proc_idx);
+                if proc.source_range == range {
+                    return Some(MethodId { module: module_id, local_id: idx as u32 });
+                }
+            }
+            ide_db::hir_def::item_tree::ModItem::Function(func_idx) => {
+                let func = item_tree.function(*func_idx);
+                if func.source_range == range {
+                    return Some(MethodId { module: module_id, local_id: idx as u32 });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Highlight a local symbol (parameter or local variable) using ExprScopes.
+///
+/// # Algorithm
+/// 1. Find the containing method for this token
+/// 2. Get or build ExprScopes for that method (cached in context)
+/// 3. Resolve the name in the root scope
+/// 4. Map ScopeDef to HlTag (Parameter or Variable)
+///
+/// # Returns
+/// Some(HlRange) if the identifier resolves to a local symbol
+fn highlight_local_symbol(
+    ctx: &mut HighlightContext,
+    token: &SyntaxToken,
+    name: &Name,
+) -> Option<HlRange> {
+    // Find containing method
+    let (method_id, method_def) = find_method_for_token(ctx.db, ctx.file_id, token)?;
+    let method_range = match &method_def {
+        Either::Left(proc) => proc.syntax().text_range(),
+        Either::Right(func) => func.syntax().text_range(),
+    };
+
+    // Get or build ExprScopes (cached)
+    let scopes = ctx.get_expr_scopes(method_range, method_def, method_id);
+    let root_scope = scopes.root_scope();
+
+    // Resolve name in ExprScopes
+    let def = scopes.resolve_name(root_scope, name)?;
+
+    // Map ScopeDef to HlTag
+    let range = token.text_range();
+    let tag = match def {
+        ide_db::hir_def::scope::ScopeDef::Parameter => HlTag::Parameter,
+        ide_db::hir_def::scope::ScopeDef::LocalVariable => HlTag::Variable,
+    };
+
+    Some(HlRange { range, tag, modifiers: HlMod::new() })
+}
+
 /// Generates semantic highlighting for a file.
 pub fn highlight(db: &dyn RootDatabase, file_id: FileId) -> Vec<HlRange> {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let module_id = ModuleId::new(file_id);
-
+    let mut ctx = HighlightContext::new(db, file_id);
     let mut highlights = Vec::new();
-    traverse_node(db, module_id, file_id, &root, &mut highlights);
+
+    traverse_node(&mut ctx, &root, &mut highlights);
     highlights
 }
 
 /// Recursively traverse AST and collect highlights.
-fn traverse_node(
-    db: &dyn RootDatabase,
-    module_id: ModuleId,
-    file_id: FileId,
-    node: &SyntaxNode,
-    highlights: &mut Vec<HlRange>,
-) {
+fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut Vec<HlRange>) {
     // Highlight tokens based on their type
     for token in node.children_with_tokens() {
         match token {
             syntax::NodeOrToken::Token(token) => {
                 // Try semantic highlighting for IDENT tokens first
                 if token.kind() == SyntaxKind::IDENT {
-                    if let Some(hl) = highlight_ident_semantic(db, module_id, file_id, &token) {
+                    if let Some(hl) = highlight_ident_semantic(ctx, &token) {
                         highlights.push(hl);
                         continue;
                     }
@@ -173,7 +330,7 @@ fn traverse_node(
                 highlight_node(&node, highlights);
 
                 // Recurse into children
-                traverse_node(db, module_id, file_id, &node, highlights);
+                traverse_node(ctx, &node, highlights);
             }
         }
     }
@@ -182,34 +339,32 @@ fn traverse_node(
 /// Highlight an IDENT token using semantic analysis (name resolution).
 ///
 /// This function resolves the identifier to determine if it's a:
-/// - Function/procedure call
-/// - Parameter reference
-/// - Local variable reference
-/// - Module variable reference
-fn highlight_ident_semantic(
-    db: &dyn RootDatabase,
-    module_id: ModuleId,
-    _file_id: FileId,
-    token: &SyntaxToken,
-) -> Option<HlRange> {
+/// - Parameter reference (via ExprScopes)
+/// - Local variable reference (via ExprScopes)
+/// - Function/procedure call (via module-level Resolver)
+/// - Module variable reference (via module-level Resolver)
+///
+/// Resolution priority: Local -> Module
+fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
     let range = token.text_range();
     let name_text = token.text();
     let name = Name::new(name_text);
 
-    // Try module-level resolution first (methods and module variables)
-    let resolver = Resolver::for_module(module_id);
+    // Try local resolution FIRST (parameters and local variables)
+    if let Some(hl) = highlight_local_symbol(ctx, token, &name) {
+        return Some(hl);
+    }
 
-    if let Some(_method_id) = resolver.resolve_module_method(db, &name) {
+    // Fall back to module-level resolution (methods and module variables)
+    let resolver = Resolver::for_module(ctx.module_id);
+
+    if let Some(_method_id) = resolver.resolve_module_method(ctx.db, &name) {
         return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
     }
 
-    if let Some(_var_id) = resolver.resolve_module_variable(db, &name) {
+    if let Some(_var_id) = resolver.resolve_module_variable(ctx.db, &name) {
         return Some(HlRange { range, tag: HlTag::Variable, modifiers: HlMod::new() });
     }
-
-    // TODO: Resolve local variables and parameters
-    // This requires knowing which method we're inside and building ExprScopes
-    // For now, we don't highlight unresolved identifiers semantically
 
     None
 }
@@ -367,6 +522,26 @@ fn highlight_node(node: &SyntaxNode, highlights: &mut Vec<HlRange>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use vfs::{FileId, FileSet, VfsPath};
+
+    fn create_db_with_file(source: &str) -> (RootDatabaseImpl, FileId) {
+        let mut db = RootDatabaseImpl::default();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file contents
+        db.set_file_text(file_id, source);
+
+        (db, file_id)
+    }
 
     #[test]
     fn test_hl_tag_as_str() {
@@ -386,5 +561,171 @@ mod tests {
         let strings = mods.as_strings();
         assert!(strings.contains(&"defaultLibrary"));
         assert!(strings.contains(&"deprecated"));
+    }
+
+    #[test]
+    fn test_highlight_parameter() {
+        let code = r#"
+Функция Тест(Параметр1, Параметр2)
+    Результат = Параметр1 + Параметр2;
+    Возврат Результат;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Check that parameters are highlighted as Parameter
+        let param_highlights: Vec<_> =
+            highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).collect();
+
+        // Should find 4 parameter usages: 2 declarations + 2 usages
+        assert!(
+            param_highlights.len() >= 4,
+            "Expected at least 4 parameter highlights, got {}",
+            param_highlights.len()
+        );
+    }
+
+    #[test]
+    fn test_highlight_local_variable() {
+        let code = r#"
+Процедура Тест()
+    Перем ЛокальнаяПеременная;
+    ЛокальнаяПеременная = 42;
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Check that local variables are highlighted as Variable
+        let var_highlights: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable
+                    && (hl.modifiers.contains(HlMod::DECLARATION)
+                        || !hl.modifiers.contains(HlMod::DEFINITION))
+            })
+            .collect();
+
+        // Should find at least 2 variable highlights: 1 declaration + 1 usage
+        assert!(
+            var_highlights.len() >= 2,
+            "Expected at least 2 variable highlights, got {}",
+            var_highlights.len()
+        );
+    }
+
+    #[test]
+    fn test_highlight_parameter_vs_local_variable() {
+        let code = r#"
+Функция Тест(Параметр)
+    Перем ЛокальнаяПеременная;
+    ЛокальнаяПеременная = СокрЛП(Параметр);
+    Возврат ЛокальнаяПеременная;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Check parameters
+        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+
+        // Check local variables (excluding module-level)
+        let local_var_count = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable
+                    && (hl.modifiers.contains(HlMod::DECLARATION)
+                        || !hl.modifiers.contains(HlMod::DEFINITION))
+            })
+            .count();
+
+        // Should find 2 parameter usages and 3 local variable usages
+        assert!(param_count >= 2, "Expected at least 2 parameter highlights");
+        assert!(local_var_count >= 3, "Expected at least 3 local variable highlights");
+    }
+
+    #[test]
+    fn test_highlight_case_insensitive() {
+        let code = r#"
+Функция Тест(Параметр)
+    Результат = параметр + ПАРАМЕТР;
+    Возврат результат;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // All three variants of "Параметр" should be highlighted
+        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+
+        assert!(
+            param_count >= 3,
+            "Expected at least 3 parameter highlights (case-insensitive), got {}",
+            param_count
+        );
+    }
+
+    #[test]
+    fn test_highlight_module_variable_vs_local() {
+        let code = r#"
+Перем МодульнаяПеременная;
+
+Функция Тест()
+    Перем ЛокальнаяПеременная;
+    ЛокальнаяПеременная = МодульнаяПеременная;
+    Возврат ЛокальнаяПеременная;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Both module and local variables should be highlighted
+        let var_highlights: Vec<_> =
+            highlights.iter().filter(|hl| hl.tag == HlTag::Variable).collect();
+
+        // Should find at least 5 variable highlights:
+        // 1 module var declaration + 1 module var usage
+        // + 1 local var declaration + 2 local var usages
+        assert!(
+            var_highlights.len() >= 5,
+            "Expected at least 5 variable highlights (module + local), got {}",
+            var_highlights.len()
+        );
+    }
+
+    #[test]
+    fn test_highlight_multiple_methods() {
+        let code = r#"
+Функция Функция1(Параметр1)
+    Перем Локальная1;
+    Локальная1 = Параметр1;
+    Возврат Локальная1;
+КонецФункции
+
+Функция Функция2(Параметр2)
+    Перем Локальная2;
+    Локальная2 = Параметр2;
+    Возврат Локальная2;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Each method's parameters and locals should be independently highlighted
+        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+
+        let var_count = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable
+                    && (hl.modifiers.contains(HlMod::DECLARATION)
+                        || !hl.modifiers.contains(HlMod::DEFINITION))
+            })
+            .count();
+
+        // Should find 4 parameter usages (2 per method) and 6 variable usages (3 per method)
+        assert!(param_count >= 4, "Expected at least 4 parameter highlights");
+        assert!(var_count >= 6, "Expected at least 6 local variable highlights");
     }
 }

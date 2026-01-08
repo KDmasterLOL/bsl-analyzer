@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use base_db::SourceDatabase;
 use ide::DiagnosticsConfig;
 use line_index::LineIndex;
 use lsp_server::Notification;
@@ -29,25 +28,19 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
 
     let line_index = LineIndex::new(&text);
 
-    // Run diagnostics (may fail if source root is not set, e.g., in tests)
+    // Run diagnostics
     let config = DiagnosticsConfig::default();
     let analysis = state.analysis_host.analysis();
 
-    // Catch panic if source root is not set (happens in tests)
-    let ide_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        analysis.diagnostics(file_id, &config)
-    })) {
-        Ok(diags) => diags,
-        Err(_) => {
-            tracing::warn!(
-                "Diagnostics failed (source root not set?), returning empty diagnostics"
-            );
-            vec![]
-        }
-    };
+    let ide_diagnostics = analysis.diagnostics(file_id, &config);
+    tracing::info!(
+        "Diagnostics computed successfully: {} diagnostics found",
+        ide_diagnostics.len()
+    );
 
     // Convert to LSP diagnostics
     let lsp_diagnostics = crate::lsp::diagnostics(&line_index, &ide_diagnostics);
+    tracing::info!("Publishing {} diagnostics for {}", lsp_diagnostics.len(), uri);
 
     // Publish
     let params =
@@ -65,7 +58,8 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
 /// When a document is opened in the editor:
 /// 1. Store the full text in MemDocs
 /// 2. Add the file to VFS
-/// 3. Update the Salsa database with the file content
+/// 3. Initialize SourceRoot if needed
+/// 4. Update the Salsa database with the file content
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
 
@@ -88,8 +82,25 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Update Salsa database
-    state.analysis_host.raw_database_mut().set_file_text(file_id, &text);
+    // Update Salsa database with SourceRoot setup
+    {
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use vfs::FileSet;
+
+        let db = state.analysis_host.raw_database_mut();
+        let source_root_id = SourceRootId(0);
+
+        // Ensure SourceRoot exists (idempotent)
+        // We use an empty FileSet here as files are tracked independently
+        let source_root = SourceRoot::new_local(FileSet::new());
+        db.set_source_root(source_root_id, source_root);
+
+        // Associate file with SourceRoot
+        db.set_file_source_root(file_id, source_root_id);
+
+        // Set file content
+        db.set_file_text(file_id, &text);
+    }
 
     tracing::debug!("Document opened successfully: {} (FileId: {:?})", uri, file_id);
 
@@ -141,7 +152,18 @@ pub fn handle_did_change(
     }
 
     // Update Salsa database (this triggers incremental recomputation)
-    state.analysis_host.raw_database_mut().set_file_text(file_id, &text);
+    {
+        use base_db::{SourceDatabase, SourceRootId};
+
+        let db = state.analysis_host.raw_database_mut();
+        let source_root_id = SourceRootId(0);
+
+        // Ensure file is associated with SourceRoot (should be set by didOpen, but be defensive)
+        db.set_file_source_root(file_id, source_root_id);
+
+        // Set file content (triggers incremental recomputation)
+        db.set_file_text(file_id, &text);
+    }
 
     tracing::debug!("Document updated successfully: {} (FileId: {:?})", uri, file_id);
 

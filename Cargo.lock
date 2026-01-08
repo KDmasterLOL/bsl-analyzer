@@ -721,11 +721,13 @@ dependencies = [
 name = "ide"
 version = "0.1.0"
 dependencies = [
+ "either",
  "expect-test",
  "hir",
  "ide-assists",
  "ide-db",
  "ide-diagnostics",
+ "rustc-hash 2.1.1",
  "stdx",
  "syntax",
  "test-fixture",
