@@ -304,7 +304,7 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
         .filter_map(|el| el.into_token())
         .any(|tok| tok.kind() == SyntaxKind::KW_VAL);
 
-    // Register parameter name so it's not flagged as unused
+    // Register parameter name to distinguish from module names in qualified calls
     ctx.register_param(name_token.text());
 
     // Track by-ref parameters for FunctionOutParameter diagnostic
@@ -540,16 +540,6 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     };
     if let Some((ref name, range)) = target_name {
         let key = name.as_str().to_lowercase();
-        // Register implicit variable if not already declared.
-        // But don't register if it's a known external (module variable) or parameter.
-        if !ctx.local_vars.contains_key(&key)
-            && !ctx.is_known_external(name.as_str())
-            && !ctx.param_names.contains(&key)
-        {
-            ctx.register_local_var(name.clone(), range);
-        }
-        // Unmark from used - assignment is a write, not a read
-        ctx.unmark_var_used(name.as_str());
 
         // Emit potential CommonModuleAssign for later validation in from_hir().
         // This will be filtered by metadata check - only names matching CommonModule names
@@ -793,7 +783,6 @@ fn lower_for_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let range = var_token.text_range();
 
     // Register loop variable for unused variable tracking
-    ctx.register_local_var(name.clone(), range);
 
     let var = ctx.alloc_binding(Binding::var(name), range);
 
@@ -851,7 +840,6 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
     let range = var_token.text_range();
 
     // Register loop variable for unused variable tracking
-    ctx.register_local_var(name.clone(), range);
 
     let var = ctx.alloc_binding(Binding::var(name), range);
 
@@ -1018,7 +1006,7 @@ fn lower_var_decl(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         let name = Name::new(ident.text());
         let range = ident.text_range();
 
-        // Register for unused variable tracking
+        // Register local variable to distinguish from module names in qualified calls
         ctx.register_local_var(name.clone(), range);
 
         let binding_id = ctx.alloc_binding(Binding::var(name), range);

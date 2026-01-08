@@ -55,27 +55,17 @@ pub(crate) struct LoweringCtx {
     #[allow(dead_code)] // Will be used in Phase 2 for return path analysis
     pub(crate) is_function: bool,
 
-    /// Declared local variables: lowercase name -> (original name, declaration range)
-    /// Used for UnusedVariable diagnostic.
-    pub(crate) local_vars: FxHashMap<String, (Name, TextRange)>,
-
-    /// Used variable names (lowercase).
-    /// When a variable is referenced in an expression, its name is added here.
-    /// Note: This set is modified by `unmark_var_used()` for assignment targets.
-    pub(crate) used_vars: FxHashSet<String>,
-
-    /// Read variable names (lowercase) - never cleared.
-    /// Tracks variables that were ever read (not just written).
-    /// Used for UnusedVariable diagnostic to handle cases where variable is
-    /// read in loop condition but later assigned in loop body.
-    pub(crate) read_vars: FxHashSet<String>,
-
     /// Known external variable names (lowercase) - module variables, etc.
-    /// These should not be registered as implicit local variables.
+    /// Reserved for future use by diagnostics.
+    #[allow(dead_code)]
     pub(crate) known_externals: FxHashSet<String>,
 
+    /// Local variables (lowercase name -> (original name, declaration range)).
+    /// Used to distinguish local vars from module names in qualified call checks.
+    pub(crate) local_vars: FxHashMap<String, (Name, TextRange)>,
+
     /// Parameter names (lowercase).
-    /// Parameters should not trigger "unused variable" even if only assigned.
+    /// Used to distinguish params from module names in qualified call checks.
     pub(crate) param_names: FxHashSet<String>,
 
     /// By-reference parameter names (lowercase) - parameters without "Знач" keyword.
@@ -133,10 +123,8 @@ impl LoweringCtx {
             source_map: BodySourceMap::new(),
             diagnostics: Vec::new(),
             is_function,
-            local_vars: FxHashMap::default(),
-            used_vars: FxHashSet::default(),
-            read_vars: FxHashSet::default(),
             known_externals,
+            local_vars: FxHashMap::default(),
             param_names: FxHashSet::default(),
             by_ref_param_names: FxHashSet::default(),
             pending_sdbl: Vec::new(),
@@ -148,59 +136,23 @@ impl LoweringCtx {
         }
     }
 
-    /// Register a parameter name.
-    pub(crate) fn register_param(&mut self, name: &str) {
-        self.param_names.insert(name.to_lowercase());
-    }
-
-    /// Register a local variable declaration.
-    /// Called when processing VAR statements and loop variables.
-    pub(crate) fn register_local_var(&mut self, name: Name, range: TextRange) {
-        let key = name.as_str().to_lowercase();
-        self.local_vars.insert(key, (name, range));
-    }
-
-    /// Mark a variable as used (read).
-    /// Called when a variable is referenced in an expression.
-    pub(crate) fn mark_var_used(&mut self, name: &str) {
-        let lowercase = name.to_lowercase();
-        self.used_vars.insert(lowercase.clone());
-        self.read_vars.insert(lowercase);
-    }
-
-    /// Unmark a variable as used.
-    /// Called for assignment targets - they are written, not read.
-    pub(crate) fn unmark_var_used(&mut self, name: &str) {
-        self.used_vars.remove(&name.to_lowercase());
-    }
-
-    /// Emit diagnostics for unused local variables.
-    ///
-    /// **Status:** Currently disabled in favor of dataflow-based liveness analysis.
-    /// Will be removed after migration is stable.
-    #[allow(dead_code)]
-    pub(crate) fn check_unused_variables(&mut self) {
-        for (key, (name, range)) in &self.local_vars {
-            // Skip parameters - they're inputs and may be modified for output
-            if self.param_names.contains(key) {
-                continue;
-            }
-            if !self.used_vars.contains(key) {
-                self.diagnostics
-                    .push(BodyDiagnostic::UnusedVariable { name: name.to_string(), range: *range });
-            }
-        }
-    }
-
     /// Check if a name is a known external (module variable).
+    #[allow(dead_code)]
     pub(crate) fn is_known_external(&self, name: &str) -> bool {
         self.known_externals.contains(&name.to_lowercase())
     }
 
-    /// Get variables that were referenced but not locally declared.
-    /// These are potential module-level variable references.
-    pub(crate) fn referenced_externals(&self) -> FxHashSet<String> {
-        self.used_vars.iter().filter(|name| !self.local_vars.contains_key(*name)).cloned().collect()
+    /// Register a parameter name.
+    /// Used to distinguish params from module names in qualified call checks.
+    pub(crate) fn register_param(&mut self, name: &str) {
+        self.param_names.insert(name.to_lowercase());
+    }
+
+    /// Register a local variable.
+    /// Used to distinguish local vars from module names in qualified call checks.
+    pub(crate) fn register_local_var(&mut self, name: Name, range: TextRange) {
+        let key = name.as_str().to_lowercase();
+        self.local_vars.insert(key, (name, range));
     }
 
     /// Allocate an expression and record its source range.
@@ -572,17 +524,11 @@ pub fn lower_method_with_externals(
         check_function_returns_same_primitive(&mut ctx, method_node);
     }
 
-    // Check for unused local variables
-    // MIGRATED: UnusedLocalVariable now uses liveness analysis (ide-diagnostics)
-    // Old tracking via used_vars/read_vars had false positives (e.g., While loop control variables)
-    // TODO: Remove check_unused_variables() and related tracking after migration is stable
-    // ctx.check_unused_variables();
-
     // Check for magic numbers using HIR
     magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
 
-    // Collect referenced externals before consuming ctx
-    let referenced_externals = ctx.referenced_externals();
+    // Collect referenced externals (variables used but not declared locally)
+    let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {
         body: ctx.body,
@@ -665,13 +611,8 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
 
     ctx.body.body_stmts = stmts.into_boxed_slice();
 
-    // Check for unused local variables (implicit module-level variables)
-    // MIGRATED: UnusedLocalVariable now uses liveness analysis (ide-diagnostics)
-    // Module-level code support will be added in Phase 2
-    // TODO: Remove check_unused_variables() and related tracking after migration is stable
-    // ctx.check_unused_variables();
-
-    let referenced_externals = ctx.referenced_externals();
+    // Collect referenced externals (variables used but not declared locally)
+    let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {
         body: ctx.body,
@@ -679,4 +620,93 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
         diagnostics: ctx.diagnostics,
         referenced_externals,
     }
+}
+
+/// Collect variables that are referenced but not locally declared.
+///
+/// Scans all expressions in the body to find Path expressions,
+/// then filters out locally declared variables (parameters, VarDecl, For/ForEach).
+///
+/// Returns lowercase variable names for case-insensitive comparison.
+fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
+    let mut referenced = FxHashSet::default();
+    let mut declared = FxHashSet::default();
+
+    // Collect all declared variables
+    // 1. Parameters
+    for &param_id in body.params.iter() {
+        let binding = &body.bindings[param_id];
+        declared.insert(binding.name.as_str().to_lowercase());
+    }
+
+    // 2. VarDecl bindings, For/ForEach variables (recursively scan all statements)
+    fn collect_declared(body: &Body, stmt_id: StmtId, declared: &mut FxHashSet<String>) {
+        match &body.stmts[stmt_id] {
+            Stmt::VarDecl { bindings } => {
+                for &binding_id in bindings.iter() {
+                    let binding = &body.bindings[binding_id];
+                    declared.insert(binding.name.as_str().to_lowercase());
+                }
+            }
+            Stmt::For { var, body: loop_body, .. } => {
+                let binding = &body.bindings[*var];
+                declared.insert(binding.name.as_str().to_lowercase());
+                for &s in loop_body.iter() {
+                    collect_declared(body, s, declared);
+                }
+            }
+            Stmt::ForEach { var, body: loop_body, .. } => {
+                let binding = &body.bindings[*var];
+                declared.insert(binding.name.as_str().to_lowercase());
+                for &s in loop_body.iter() {
+                    collect_declared(body, s, declared);
+                }
+            }
+            Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
+                for &s in then_branch.iter() {
+                    collect_declared(body, s, declared);
+                }
+                for (_, branch) in elsif_branches.iter() {
+                    for &s in branch.iter() {
+                        collect_declared(body, s, declared);
+                    }
+                }
+                if let Some(else_stmts) = else_branch {
+                    for &s in else_stmts.iter() {
+                        collect_declared(body, s, declared);
+                    }
+                }
+            }
+            Stmt::While { body: loop_body, .. } => {
+                for &s in loop_body.iter() {
+                    collect_declared(body, s, declared);
+                }
+            }
+            Stmt::Try { body: try_body, except } => {
+                for &s in try_body.iter() {
+                    collect_declared(body, s, declared);
+                }
+                for &s in except.iter() {
+                    collect_declared(body, s, declared);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for &stmt_id in body.body_stmts.iter() {
+        collect_declared(body, stmt_id, &mut declared);
+    }
+
+    // Collect all Path expressions (simple approach: scan all expressions in arena)
+    for (_, expr) in body.exprs.iter() {
+        if let Expr::Path(name) = expr {
+            referenced.insert(name.as_str().to_lowercase());
+        }
+    }
+
+    // Filter out declared variables
+    referenced.retain(|name| !declared.contains(name));
+
+    referenced
 }

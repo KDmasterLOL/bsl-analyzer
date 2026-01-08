@@ -57,7 +57,6 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
         SyntaxKind::IDENT => {
             // Identifier - variable reference
             let text = node.text().to_string();
-            ctx.mark_var_used(&text);
             Expr::Path(Name::new(&text))
         }
         SyntaxKind::EXPR => {
@@ -75,7 +74,6 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
                 .filter_map(|el| el.into_token())
                 .find(|tok| tok.kind() == SyntaxKind::IDENT)
             {
-                ctx.mark_var_used(ident.text());
                 Expr::Path(Name::new(ident.text()))
             } else {
                 Expr::Missing
