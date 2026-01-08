@@ -69,7 +69,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         diagnostics.extend(check_method(ctx.db, method_id, ctx));
     }
 
-    // TODO: Check module-level code (Phase 2)
+    // Check module-level code for unused variables (Phase 2)
+    diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
+
+    // TODO_OLD: Check module-level code (Phase 2)
     // if let Some(module_code) = module_bodies.module_code() {
     //     diagnostics.extend(check_module_code(ctx.db, module_id, module_code, ctx));
     // }
@@ -209,6 +212,77 @@ fn check_method(
     // Check if implicit variables are unused
     // For implicit variables, we need to check if they're EVER live in ANY block,
     // not just at entry. An implicit variable is unused only if it's never read anywhere.
+    for (lowercase_name, (original_name, range)) in implicit_vars {
+        // Check if variable is live in any block (either IN or OUT state)
+        let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {
+            in_state.is_live(&lowercase_name) || out_state.is_live(&lowercase_name)
+        });
+
+        if !is_live_anywhere {
+            diagnostics.push(create_diagnostic(&original_name, range));
+        }
+    }
+
+    diagnostics
+}
+
+/// Check module-level code for unused variables.
+///
+/// Analyzes code outside procedures/functions (module initialization code).
+/// Uses liveness analysis to detect variables that are assigned but never read.
+fn check_module_level_code(
+    db: &dyn RootDatabase,
+    module_id: ModuleId,
+    _ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Get module bodies
+    let module_bodies = db.module_bodies(module_id);
+
+    // Get module-level code result (body + source_map)
+    let lower_result = match module_bodies.module_code_result() {
+        Some(result) => result,
+        None => return diagnostics, // No module-level code
+    };
+
+    let body = &lower_result.body;
+    let source_map = &lower_result.source_map;
+
+    // Run liveness analysis (cached by Salsa)
+    let liveness_result = match db.module_level_liveness_analysis(module_id) {
+        Some(result) => result,
+        None => {
+            tracing::warn!("Liveness analysis failed for module-level code: {:?}", module_id);
+            return diagnostics;
+        }
+    };
+
+    // Module-level code typically has implicit variables (no Перем declarations).
+    // We need to find all implicit variable assignments.
+    let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
+        rustc_hash::FxHashMap::default();
+
+    for stmt_id in body.body_stmts.iter() {
+        if let hir_def::hir::Stmt::Assign { target, .. } = &body.stmts[*stmt_id] {
+            // Check if target is a simple path (variable assignment)
+            if let hir_def::hir::Expr::Path(name) = &body.exprs[*target] {
+                let lowercase_name = name.as_str().to_lowercase();
+
+                // Save first assignment location for each variable
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    implicit_vars.entry(lowercase_name)
+                {
+                    if let Some(range) = source_map.expr_range(*target) {
+                        e.insert((name.as_str().to_string(), range));
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if implicit variables are unused
+    // For implicit variables, check if they're ever live in any block
     for (lowercase_name, (original_name, range)) in implicit_vars {
         // Check if variable is live in any block (either IN or OUT state)
         let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {

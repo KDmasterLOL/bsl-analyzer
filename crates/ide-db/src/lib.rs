@@ -154,6 +154,36 @@ pub trait RootDatabase:
     /// - `Arc<cfg::ControlFlowGraph>` with basic blocks, control flow edges, entry/exit points
     fn method_cfg(&self, method_id: hir_def::MethodId) -> Arc<cfg::ControlFlowGraph>;
 
+    /// Get Control Flow Graph (CFG) for module-level code.
+    ///
+    /// Constructs CFG from HIR Body for code outside procedures/functions.
+    /// Similar to method_cfg but for module initialization code.
+    ///
+    /// ## Performance
+    /// - Cached per module (LRU=128)
+    /// - Invalidated when module body changes
+    ///
+    /// ## Returns
+    /// - `Arc<cfg::ControlFlowGraph>` with CFG for module-level code, or empty CFG if none
+    fn module_level_cfg(&self, module_id: hir_def::ModuleId) -> Arc<cfg::ControlFlowGraph>;
+
+    /// Compute liveness analysis for module-level code.
+    ///
+    /// Performs backward dataflow analysis on code outside procedures/functions
+    /// to detect unused module-level variables.
+    ///
+    /// ## Performance
+    /// - Cached per module (LRU=128)
+    /// - Invalidated when module body changes
+    ///
+    /// ## Returns
+    /// - `Some(DataflowResult<Liveness>)` if analysis succeeds
+    /// - `None` if no module-level code or analysis doesn't converge
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
+
     /// Downcast to `Any` for accessing implementation-specific methods.
     ///
     /// Used by helper functions to access VFS and file system operations
@@ -485,6 +515,21 @@ impl RootDatabase for RootDatabaseImpl {
         // Call Salsa tracked query (Phase 6.6 - CFG caching & reuse)
         let method_id_input = hir_def::MethodIdInput::new(self, method_id);
         method_cfg_query(self, method_id_input)
+    }
+
+    fn module_level_cfg(&self, module_id: hir_def::ModuleId) -> Arc<cfg::ControlFlowGraph> {
+        // Call Salsa tracked query for module-level code CFG
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        queries::module_level_cfg_query(self, file_id_input)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+        // Call Salsa tracked query for module-level liveness analysis
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        queries::module_level_liveness_analysis_query(self, file_id_input)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

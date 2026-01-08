@@ -408,3 +408,97 @@ pub fn liveness_analysis_query<'db>(
     tracing::debug!("Liveness analysis converged");
     Some(Arc::new(dataflow_result))
 }
+
+/// Salsa tracked query for module-level code CFG construction.
+///
+/// Builds CFG from HIR Body for code outside procedures/functions.
+/// Used for dataflow analyses on module initialization code.
+///
+/// # Performance
+/// - LRU: 128 modules
+/// - Depends on: module_bodies (via FileIdInput)
+/// - Invalidation: Automatic when module body changes
+///
+/// # Returns
+/// Empty CFG if no module-level code exists, otherwise CFG for module code.
+#[salsa::tracked(lru = 128)]
+pub fn module_level_cfg_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<cfg::ControlFlowGraph> {
+    let _span = tracing::info_span!("module_level_cfg", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir_def::ModuleId::new(file_id);
+
+    // Get module bodies (cached)
+    let module_bodies = db.module_bodies(module_id);
+
+    // Get module-level code body
+    let body = match module_bodies.module_code() {
+        Some(body) => body,
+        None => {
+            // No module-level code
+            tracing::debug!("No module-level code in module: {:?}", module_id);
+            return Arc::new(cfg::ControlFlowGraph::new());
+        }
+    };
+
+    // Build CFG from HIR body
+    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, None);
+    tracing::debug!("Built module-level CFG: {} vertices", cfg.vertices().count());
+
+    Arc::new(cfg)
+}
+
+/// Salsa tracked query for module-level liveness analysis.
+///
+/// Performs backward dataflow analysis on code outside procedures/functions.
+/// Used to detect unused variables in module initialization code.
+///
+/// # Performance
+/// - LRU: 128 modules
+/// - Depends on: module_level_cfg, module_bodies
+/// - Invalidation: Automatic when module body changes
+///
+/// # Returns
+/// - `Some(DataflowResult<Liveness>)` if analysis succeeds
+/// - `None` if no module-level code or analysis doesn't converge
+#[salsa::tracked(lru = 128)]
+pub fn module_level_liveness_analysis_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+    let _span = tracing::info_span!("module_level_liveness", ?file_id_input).entered();
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir_def::ModuleId::new(file_id);
+
+    // Get module bodies (Salsa dependency tracked automatically)
+    let module_bodies = db.module_bodies(module_id);
+
+    // Get module-level code body
+    let body = match module_bodies.module_code() {
+        Some(body) => body,
+        None => {
+            // No module-level code
+            tracing::debug!("No module-level code for liveness analysis: {:?}", module_id);
+            return None;
+        }
+    };
+
+    // Get cached CFG (reuse across multiple analyses)
+    let cfg = db.module_level_cfg(module_id);
+
+    // Run backward dataflow analysis for liveness
+    let transfer = dataflow::liveness::LivenessTransfer;
+    let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+
+    // Configure solver for backward analysis
+    solver.set_max_iterations(100);
+    solver.set_direction(dataflow::Direction::Backward);
+
+    // Solve dataflow equations
+    let dataflow_result = solver.solve()?;
+
+    tracing::debug!("Module-level liveness analysis converged");
+    Some(Arc::new(dataflow_result))
+}
