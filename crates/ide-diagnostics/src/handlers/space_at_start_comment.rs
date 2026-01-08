@@ -9,8 +9,9 @@
 //!
 //! ## Implementation
 //!
-//! Hybrid diagnostic: uses tokens from parser to find comments (avoiding false positives
-//! on // inside strings), but uses text-based infrastructure for configuration and reporting.
+//! File-level token-based diagnostic: iterates through all tokens in the file once to find
+//! COMMENT tokens. This avoids false positives on // inside strings (lexer distinguishes them).
+//! Cannot use per-node check_node() API because comments are tokens, not nodes.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use once_cell::sync::Lazy;
