@@ -61,7 +61,14 @@ pub(crate) struct LoweringCtx {
 
     /// Used variable names (lowercase).
     /// When a variable is referenced in an expression, its name is added here.
+    /// Note: This set is modified by `unmark_var_used()` for assignment targets.
     pub(crate) used_vars: FxHashSet<String>,
+
+    /// Read variable names (lowercase) - never cleared.
+    /// Tracks variables that were ever read (not just written).
+    /// Used for UnusedVariable diagnostic to handle cases where variable is
+    /// read in loop condition but later assigned in loop body.
+    pub(crate) read_vars: FxHashSet<String>,
 
     /// Known external variable names (lowercase) - module variables, etc.
     /// These should not be registered as implicit local variables.
@@ -128,6 +135,7 @@ impl LoweringCtx {
             is_function,
             local_vars: FxHashMap::default(),
             used_vars: FxHashSet::default(),
+            read_vars: FxHashSet::default(),
             known_externals,
             param_names: FxHashSet::default(),
             by_ref_param_names: FxHashSet::default(),
@@ -155,7 +163,9 @@ impl LoweringCtx {
     /// Mark a variable as used (read).
     /// Called when a variable is referenced in an expression.
     pub(crate) fn mark_var_used(&mut self, name: &str) {
-        self.used_vars.insert(name.to_lowercase());
+        let lowercase = name.to_lowercase();
+        self.used_vars.insert(lowercase.clone());
+        self.read_vars.insert(lowercase);
     }
 
     /// Unmark a variable as used.

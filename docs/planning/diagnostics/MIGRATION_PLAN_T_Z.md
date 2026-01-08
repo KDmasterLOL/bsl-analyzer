@@ -653,11 +653,11 @@ All diagnostics support configuration via `.bsl-language-server.json`:
 For each diagnostic:
 
 1. **Copy test fixtures** from Java project to Rust:
-   - `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/XxxDiagnostic.bsl`
+   - `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/XxxDiagnostic.bsl`
    - Copy to: `crates/ide-diagnostics/test_data/xxx_diagnostic/`
 
 2. **Port test cases** from Java to Rust:
-   - `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/.../XxxDiagnosticTest.java`
+   - `~/src/lsp/bsl-language-server/src/test/java/.../XxxDiagnosticTest.java`
    - Port to: `crates/ide-diagnostics/src/diagnostics/xxx_diagnostic.rs`
 
 3. **Verify identical results:**

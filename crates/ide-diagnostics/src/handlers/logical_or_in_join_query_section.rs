@@ -41,7 +41,7 @@
 //! Ported from:
 //! - LogicalOrInJoinQuerySectionDiagnostic.java (bsl-language-server)
 //!
-//! Source: `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/LogicalOrInJoinQuerySectionDiagnostic.bsl`
+//! Source: `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/LogicalOrInJoinQuerySectionDiagnostic.bsl`
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};

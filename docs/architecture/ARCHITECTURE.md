@@ -54,7 +54,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 ### 1. Incremental Computation (Salsa)
 
 **Версия:** Salsa 0.25.2
-**Репозиторий:** `/Users/kiriller/src/lsp/salsa/`
+**Репозиторий:** `~/src/lsp/salsa/`
 **Статус:** ✅ Реализовано
 
 Salsa — фреймворк для инкрементальных вычислений, критично важный для производительности Language Server.

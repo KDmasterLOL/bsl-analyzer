@@ -52,7 +52,7 @@
 //! - FieldsFromJoinsWithoutIsNullDiagnostic.java (bsl-language-server)
 //! - Rust SDBL utilities (bsl-language-server-rust)
 //!
-//! Source: `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/FieldsFromJoinsWithoutIsNullDiagnostic.bsl`
+//! Source: `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/FieldsFromJoinsWithoutIsNullDiagnostic.bsl`
 
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};

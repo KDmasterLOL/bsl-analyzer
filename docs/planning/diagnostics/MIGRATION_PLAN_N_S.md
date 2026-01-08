@@ -219,9 +219,9 @@ This document contains the migration plan for diagnostics starting with letters 
 **Scope:** `ALL`
 
 **Sources:**
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/PublicMethodsDescriptionDiagnostic.java`
-- **Rust Reference:** ✅ `/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/public_methods_description.rs`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/public_methods_description.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/PublicMethodsDescriptionDiagnostic.java`
+- **Rust Reference:** ✅ `~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/public_methods_description.rs`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/public_methods_description.rs`
 
 **Requires:** AST (doc comment parsing for export methods)
 **Notes:** Check for missing doc comments on export methods

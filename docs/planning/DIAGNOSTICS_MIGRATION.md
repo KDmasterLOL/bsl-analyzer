@@ -442,7 +442,7 @@ fn test_canonical_spelling_keywords() {
 
 ## Источники
 
-**Java проект:** `/Users/kiriller/src/lsp/bsl-language-server/`
+**Java проект:** `~/src/lsp/bsl-language-server/`
 
 - **Код диагностик:** `src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/`
 - **Тесты:** `src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/`

@@ -379,6 +379,30 @@ mod tests {
         assert_diagnostic_range(code, unused_diags[0], 0, 0, 21);
     }
 
+    #[test]
+    fn test_var_used_in_while_condition() {
+        // Variable used in While condition should NOT trigger diagnostic
+        // Real-world case from user: loop control variable
+        let code = r#"Процедура ЗапускПроцессовДО()
+    ЕстьЗадания = Истина;
+    Пока ЕстьЗадания Цикл
+        ВыполнитьДействие();
+        ЕстьЗадания = ПроверитьУсловие();
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Variable used in While condition should not trigger diagnostic, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
     /// Full Java fixture test.
     ///
     /// Java test expects 5 diagnostics:

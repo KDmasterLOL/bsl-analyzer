@@ -240,8 +240,8 @@ cargo test --all
 - **Plan:** `/home/itrous/.claude/plans/floofy-hugging-cat.md`
 - **Baseline metrics:** `docs/performance/baseline_durability.md`
 - **Variant A comparison:** `docs/performance/variant_a_comparison.md`
-- **rust-analyzer source:** `/Users/kiriller/src/lsp/rust-analyzer/crates/base-db/src/change.rs`
-- **Salsa repository:** `/Users/kiriller/src/lsp/salsa/`
+- **rust-analyzer source:** `~/src/lsp/rust-analyzer/crates/base-db/src/change.rs`
+- **Salsa repository:** `~/src/lsp/salsa/`
 
 ---
 

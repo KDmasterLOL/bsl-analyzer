@@ -1,7 +1,7 @@
 #!/bin/bash
 # Map existing Rust diagnostics to Java diagnostics
 
-RUST_PROJECT="/Users/kiriller/src/lsp/bsl-language-server-rust"
+RUST_PROJECT="~/src/lsp/bsl-language-server-rust"
 RUST_DIAG_DIR="$RUST_PROJECT/crates/bsl-diagnostics/src/rules"
 
 echo "# Diagnostic Mapping: Java → Rust"

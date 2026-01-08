@@ -49,9 +49,9 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Sources:**
 
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AllFunctionPathMustHaveReturnDiagnostic.java`
-- **Rust Reference:** ✅ `/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/all_function_path_must_have_return.rs`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/all_function_path_must_have_return.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AllFunctionPathMustHaveReturnDiagnostic.java`
+- **Rust Reference:** ✅ `~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/all_function_path_must_have_return.rs`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/all_function_path_must_have_return.rs`
 
 **Infrastructure Requirements:**
 
@@ -62,8 +62,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AllFunctionPathMustHaveReturnDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/AllFunctionPathMustHaveReturnDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AllFunctionPathMustHaveReturnDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/AllFunctionPathMustHaveReturnDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -89,9 +89,9 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Sources:**
 
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AssignAliasFieldsInQueryDiagnostic.java`
-- **Rust Reference:** ✅ `/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/assign_alias_fields_in_query.rs`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/assign_alias_fields_in_query.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AssignAliasFieldsInQueryDiagnostic.java`
+- **Rust Reference:** ✅ `~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/assign_alias_fields_in_query.rs`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/assign_alias_fields_in_query.rs`
 
 **Infrastructure Requirements:**
 
@@ -102,8 +102,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AssignAliasFieldsInQueryDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/AssignAliasFieldsInQueryDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/AssignAliasFieldsInQueryDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/AssignAliasFieldsInQueryDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -128,9 +128,9 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Sources:**
 
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BadWordsDiagnostic.java`
-- **Rust Reference:** ✅ `/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/bad_words.rs`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/bad_words.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BadWordsDiagnostic.java`
+- **Rust Reference:** ✅ `~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/bad_words.rs`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/bad_words.rs`
 
 **Configuration Parameters:**
 
@@ -155,8 +155,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BadWordsDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/BadWordsDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BadWordsDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/BadWordsDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -188,8 +188,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BeginTransactionBeforeTryCatchDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/BeginTransactionBeforeTryCatchDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/BeginTransactionBeforeTryCatchDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/BeginTransactionBeforeTryCatchDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -220,8 +220,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CachedPublicDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CachedPublicDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CachedPublicDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CachedPublicDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -251,8 +251,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CanonicalSpellingKeywordsDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CanonicalSpellingKeywordsDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CanonicalSpellingKeywordsDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CanonicalSpellingKeywordsDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -284,8 +284,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeAfterAsyncCallDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeAfterAsyncCallDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeAfterAsyncCallDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeAfterAsyncCallDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -315,8 +315,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeBlockBeforeSubDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeBlockBeforeSubDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeBlockBeforeSubDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeBlockBeforeSubDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -346,8 +346,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeOutOfRegionDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeOutOfRegionDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CodeOutOfRegionDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CodeOutOfRegionDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -393,8 +393,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CognitiveComplexityDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CognitiveComplexityDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CognitiveComplexityDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CognitiveComplexityDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -424,8 +424,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommandModuleExportMethodsDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommandModuleExportMethodsDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommandModuleExportMethodsDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommandModuleExportMethodsDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -469,8 +469,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommentedCodeDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommentedCodeDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommentedCodeDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommentedCodeDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -501,8 +501,8 @@ Diagnostics can be configured via `.bsl-language-server.json`:
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommitTransactionOutsideTryCatchDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommitTransactionOutsideTryCatchDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CommitTransactionOutsideTryCatchDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CommitTransactionOutsideTryCatchDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -583,7 +583,7 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- All have corresponding test files in `/Users/kiriller/src/lsp/bsl-language-server/src/test/`
+- All have corresponding test files in `~/src/lsp/bsl-language-server/src/test/`
 
 **Implementation Strategy:**
 
@@ -614,8 +614,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CompilationDirectiveLostDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CompilationDirectiveLostDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CompilationDirectiveLostDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CompilationDirectiveLostDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -645,8 +645,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CompilationDirectiveNeedLessDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CompilationDirectiveNeedLessDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CompilationDirectiveNeedLessDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CompilationDirectiveNeedLessDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -689,8 +689,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/ConsecutiveEmptyLinesDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/ConsecutiveEmptyLinesDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/ConsecutiveEmptyLinesDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/ConsecutiveEmptyLinesDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -719,8 +719,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CrazyMultilineStringDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CrazyMultilineStringDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CrazyMultilineStringDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CrazyMultilineStringDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -751,8 +751,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CreateQueryInCycleDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CreateQueryInCycleDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CreateQueryInCycleDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CreateQueryInCycleDiagnostic.bsl`
 
 **Implementation Notes:**
 
@@ -798,8 +798,8 @@ All `CommonModule*` diagnostics require **Metadata Infrastructure** and will be 
 
 **Test Files (Java):**
 
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CyclomaticComplexityDiagnosticTest.java`
-- `/Users/kiriller/src/lsp/bsl-language-server/src/test/resources/diagnostics/CyclomaticComplexityDiagnostic.bsl`
+- `~/src/lsp/bsl-language-server/src/test/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/CyclomaticComplexityDiagnosticTest.java`
+- `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/CyclomaticComplexityDiagnostic.bsl`
 
 **Implementation Notes:**
 

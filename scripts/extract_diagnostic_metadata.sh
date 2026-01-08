@@ -1,7 +1,7 @@
 #!/bin/bash
 # Extract diagnostic metadata from Java source files
 
-BSL_LS_PATH="/Users/kiriller/src/lsp/bsl-language-server"
+BSL_LS_PATH="~/src/lsp/bsl-language-server"
 DIAG_PATH="$BSL_LS_PATH/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics"
 
 echo "# Diagnostic Metadata Extraction"

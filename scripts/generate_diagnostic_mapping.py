@@ -4,7 +4,7 @@
 import os
 import re
 
-RUST_DIR = "/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules"
+RUST_DIR = "~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules"
 
 # Get all Rust diagnostic files
 rust_files = {}

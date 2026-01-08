@@ -4,9 +4,9 @@
 import os
 import re
 
-RUST_DIR = "/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules"
-JAVA_DIR = "/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics"
-TARGET_DIR = "/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers"
+RUST_DIR = "~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules"
+JAVA_DIR = "~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics"
+TARGET_DIR = "~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers"
 
 # Get all Rust diagnostic files
 rust_files = {}
@@ -113,7 +113,7 @@ def process_file(filepath):
     print(f"✅ Done: {filepath}\n")
 
 def main():
-    plan_dir = "/Users/kiriller/src/lsp/bsl-analyzer/docs/planning/diagnostics"
+    plan_dir = "~/src/lsp/bsl-analyzer/docs/planning/diagnostics"
 
     files = [
         f"{plan_dir}/MIGRATION_PLAN_A_C.md",

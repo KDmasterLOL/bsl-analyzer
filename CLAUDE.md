@@ -215,12 +215,12 @@ Before using any external crate, consult its current documentation using the Con
 
 When implementing features, reference these source projects (see `docs/planning/SOURCES.md`):
 
-- **rust-analyzer** (`/Users/kiriller/src/lsp/rust-analyzer/`) - Architecture patterns, Rowan/Salsa usage
-- **bsl-language-server** (`/Users/kiriller/src/lsp/bsl-language-server/`) - Compatibility target (diagnostics, config, metadata)
-- **bsl-parser** (`/Users/kiriller/src/lsp/bsl-parser/`) - BSL/SDBL grammar (ANTLR4)
-- **tree-sitter-bsl** (`/Users/kiriller/src/lsp/tree-sitter-bsl/`) - Operator precedence, test cases
-- **bsl-language-server-rust** (`/Users/kiriller/src/lsp/bsl-language-server-rust/`) - Existing Rust components (diagnostics, metadata)
-- **salsa** (`/Users/kiriller/src/lsp/salsa/`) - Incremental computation framework (v0.25.2)
+- **rust-analyzer** (`~/src/lsp/rust-analyzer/`) - Architecture patterns, Rowan/Salsa usage
+- **bsl-language-server** (`~/src/lsp/bsl-language-server/`) - Compatibility target (diagnostics, config, metadata)
+- **bsl-parser** (`~/src/lsp/bsl-parser/`) - BSL/SDBL grammar (ANTLR4)
+- **tree-sitter-bsl** (`~/src/lsp/tree-sitter-bsl/`) - Operator precedence, test cases
+- **bsl-language-server-rust** (`~/src/lsp/bsl-language-server-rust/`) - Existing Rust components (diagnostics, metadata)
+- **salsa** (`~/src/lsp/salsa/`) - Incremental computation framework (v0.25.2)
 
 ### 3. Logging: Use tracing, Never println
 

@@ -285,7 +285,7 @@ These are high-severity errors that should be prioritized:
 
 All diagnostics are ported from:
 
-**Java Project:** `/Users/kiriller/src/lsp/bsl-language-server/`
+**Java Project:** `~/src/lsp/bsl-language-server/`
 
 **Diagnostics:** `src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/`
 

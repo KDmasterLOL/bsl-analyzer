@@ -24,9 +24,9 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 
 **Sources:**
 
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/DataExchangeLoadingDiagnostic.java`
-- **Rust Reference:** ✅ `/Users/kiriller/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/data_exchange_loading.rs`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/data_exchange_loading.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/DataExchangeLoadingDiagnostic.java`
+- **Rust Reference:** ✅ `~/src/lsp/bsl-language-server-rust/crates/bsl-diagnostics/src/rules/data_exchange_loading.rs`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/data_exchange_loading.rs`
 
 **Infrastructure Requirements:**
 
@@ -34,7 +34,7 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - Event handler detection (OnWrite, BeforeWrite, etc.)
 - DataExchange.Load check pattern
 
-**Test Files:** `/Users/kiriller/src/lsp/bsl-language-server/src/test/.../DataExchangeLoadingDiagnostic*`
+**Test Files:** `~/src/lsp/bsl-language-server/src/test/.../DataExchangeLoadingDiagnostic*`
 
 **Notes:** Check event handlers for missing `DataExchange.Load` check
 
@@ -54,8 +54,8 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 
 **Sources:**
 
-- **Java:** `/Users/kiriller/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/DenyIncompleteValuesDiagnostic.java`
-- **Target:** `/Users/kiriller/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/deny_incomplete_values.rs`
+- **Java:** `~/src/lsp/bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/DenyIncompleteValuesDiagnostic.java`
+- **Target:** `~/src/lsp/bsl-analyzer/crates/ide-diagnostics/src/handlers/deny_incomplete_values.rs`
 
 **Infrastructure Requirements:**
 
@@ -63,7 +63,7 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - ForEach loop analysis
 - Collection mutation detection (Delete, Remove)
 
-**Test Files:** `/Users/kiriller/src/lsp/bsl-language-server/src/test/.../DeletingCollectionItemDiagnostic*`
+**Test Files:** `~/src/lsp/bsl-language-server/src/test/.../DeletingCollectionItemDiagnostic*`
 
 **Notes:** Detect `Delete`/`Remove` calls inside ForEach over same collection
 
@@ -86,7 +86,7 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - ⚠️ Metadata (InformationRegister dimensions)
 - Dimension completeness check
 
-**Test Files:** `/Users/kiriller/src/lsp/bsl-language-server/src/test/.../DenyIncompleteValuesDiagnostic*`
+**Test Files:** `~/src/lsp/bsl-language-server/src/test/.../DenyIncompleteValuesDiagnostic*`
 
 **Notes:** **Defer to Iteration 19** (requires metadata)
 
@@ -174,7 +174,7 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - ✅ Parser, AST
 - Method call detection (`ОтключитьБезопасныйРежим`/`DisableSafeMode`)
 
-**Test Files:** `/Users/kiriller/src/lsp/bsl-language-server/src/test/.../DisableSafeModeDiagnostic*`
+**Test Files:** `~/src/lsp/bsl-language-server/src/test/.../DisableSafeModeDiagnostic*`
 
 **Notes:** Security diagnostic - flag any DisableSafeMode calls
 
@@ -197,7 +197,7 @@ Continuing alphabetical migration with infrastructure improvements as needed.
 - ✅ Parser, AST
 - Expression analysis (detect `Not Not`, `<> False`, etc.)
 
-**Test Files:** `/Users/kiriller/src/lsp/bsl-language-server/src/test/.../DoubleNegativesDiagnostic*`
+**Test Files:** `~/src/lsp/bsl-language-server/src/test/.../DoubleNegativesDiagnostic*`
 
 **Notes:** Detect double negation patterns: `Not Not X`, `X <> False`, `Not (X = False)`
 
