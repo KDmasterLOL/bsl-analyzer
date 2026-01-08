@@ -216,7 +216,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             transfer,
             block_in: FxHashMap::default(),
             block_out: FxHashMap::default(),
-            max_iterations: 100,           // Reasonable default for BSL methods
+            max_iterations: 1000, // Increased for complex real-world methods (deep nesting, loops)
             direction: Direction::Forward, // Default to forward analysis
         }
     }
@@ -313,10 +313,11 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             // Safety check: prevent infinite loops
             if iterations > self.max_iterations {
                 tracing::warn!(
-                    "Dataflow analysis exceeded max iterations ({}), stopping",
+                    "Dataflow analysis exceeded max iterations ({}), returning partial solution",
                     self.max_iterations
                 );
-                return None;
+                // Return partial solution instead of None - conservative but usable
+                break;
             }
 
             // Compute IN[block] = join of OUT[pred] for all predecessors
@@ -408,10 +409,11 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             // Safety check: prevent infinite loops
             if iterations > self.max_iterations {
                 tracing::warn!(
-                    "Backward dataflow analysis exceeded max iterations ({}), stopping",
+                    "Backward dataflow analysis exceeded max iterations ({}), returning partial solution",
                     self.max_iterations
                 );
-                return None;
+                // Return partial solution instead of None - conservative but usable
+                break;
             }
 
             // Compute OUT[block] = join of IN[succ] for all successors

@@ -398,9 +398,9 @@ pub fn liveness_analysis_query<'db>(
     let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
 
     // Configure solver for backward analysis
-    solver.set_max_iterations(100); // Reasonable limit for BSL methods
     solver.set_direction(dataflow::Direction::Backward);
     // No initial state needed - backward analysis starts from bottom (empty set)
+    // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
 
     // Solve dataflow equations
     let dataflow_result = solver.solve()?;
@@ -493,8 +493,8 @@ pub fn module_level_liveness_analysis_query<'db>(
     let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
 
     // Configure solver for backward analysis
-    solver.set_max_iterations(100);
     solver.set_direction(dataflow::Direction::Backward);
+    // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
 
     // Solve dataflow equations
     let dataflow_result = solver.solve()?;
