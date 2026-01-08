@@ -175,6 +175,10 @@ impl LoweringCtx {
     }
 
     /// Emit diagnostics for unused local variables.
+    ///
+    /// **Status:** Currently disabled in favor of dataflow-based liveness analysis.
+    /// Will be removed after migration is stable.
+    #[allow(dead_code)]
     pub(crate) fn check_unused_variables(&mut self) {
         for (key, (name, range)) in &self.local_vars {
             // Skip parameters - they're inputs and may be modified for output
@@ -569,7 +573,10 @@ pub fn lower_method_with_externals(
     }
 
     // Check for unused local variables
-    ctx.check_unused_variables();
+    // MIGRATED: UnusedLocalVariable now uses liveness analysis (ide-diagnostics)
+    // Old tracking via used_vars/read_vars had false positives (e.g., While loop control variables)
+    // TODO: Remove check_unused_variables() and related tracking after migration is stable
+    // ctx.check_unused_variables();
 
     // Check for magic numbers using HIR
     magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
@@ -659,7 +666,10 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
     ctx.body.body_stmts = stmts.into_boxed_slice();
 
     // Check for unused local variables (implicit module-level variables)
-    ctx.check_unused_variables();
+    // MIGRATED: UnusedLocalVariable now uses liveness analysis (ide-diagnostics)
+    // Module-level code support will be added in Phase 2
+    // TODO: Remove check_unused_variables() and related tracking after migration is stable
+    // ctx.check_unused_variables();
 
     let referenced_externals = ctx.referenced_externals();
 

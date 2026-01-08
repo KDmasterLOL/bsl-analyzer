@@ -264,6 +264,16 @@ impl Transfer<Liveness> for LivenessTransfer {
 
         in_state
     }
+
+    /// Apply transfer function for an expression (backward).
+    ///
+    /// For control flow expressions (While condition, For bounds, etc.),
+    /// marks all variables in the expression as live (GEN).
+    fn transfer_expr(&self, expr_id: hir_def::ExprId, state: &Liveness, body: &Body) -> Liveness {
+        let mut in_state = state.clone();
+        collect_expr_vars(expr_id, body, &mut in_state.live_vars);
+        in_state
+    }
 }
 
 /// Recursively collect all variables used in an expression.

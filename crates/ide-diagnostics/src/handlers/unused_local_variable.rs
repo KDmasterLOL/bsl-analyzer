@@ -124,12 +124,22 @@ fn check_method(
         }
     };
 
+    // Collect all declared variables (explicit VarDecl, For, ForEach) and parameters
+    let mut declared_vars = rustc_hash::FxHashSet::default();
+
+    // Add parameters
+    for &param_id in body.params.iter() {
+        let binding = &body.bindings[param_id];
+        declared_vars.insert(binding.name.as_str().to_lowercase());
+    }
+
     // Check each declared variable
     // 1. Check VarDecl bindings
     for stmt_id in body.body_stmts.iter() {
         if let hir_def::hir::Stmt::VarDecl { bindings } = &body.stmts[*stmt_id] {
             for &binding_id in bindings.iter() {
                 let binding = &body.bindings[binding_id];
+                declared_vars.insert(binding.name.as_str().to_lowercase());
 
                 // Variable is unused if it's not live at entry
                 if !live_at_entry.is_live(binding.name.as_str()) {
@@ -145,7 +155,9 @@ fn check_method(
     // 2. Check For loop variables
     for stmt_id in body.body_stmts.iter() {
         if let hir_def::hir::Stmt::For { var, .. } = &body.stmts[*stmt_id] {
-            let binding = &body.bindings[*var]; // Need to deref var to index Arena
+            let binding = &body.bindings[*var];
+            declared_vars.insert(binding.name.as_str().to_lowercase());
+
             if !live_at_entry.is_live(binding.name.as_str()) {
                 if let Some(range) = source_map.binding_range(*var) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range));
@@ -157,12 +169,54 @@ fn check_method(
     // 3. Check ForEach loop variables
     for stmt_id in body.body_stmts.iter() {
         if let hir_def::hir::Stmt::ForEach { var, .. } = &body.stmts[*stmt_id] {
-            let binding = &body.bindings[*var]; // Need to deref var to index Arena
+            let binding = &body.bindings[*var];
+            declared_vars.insert(binding.name.as_str().to_lowercase());
+
             if !live_at_entry.is_live(binding.name.as_str()) {
                 if let Some(range) = source_map.binding_range(*var) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range));
                 }
             }
+        }
+    }
+
+    // 4. Check implicit variables (assigned without Перем)
+    // These are variables in Assign statements that are not declared
+    let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
+        rustc_hash::FxHashMap::default();
+
+    for stmt_id in body.body_stmts.iter() {
+        if let hir_def::hir::Stmt::Assign { target, .. } = &body.stmts[*stmt_id] {
+            // Check if target is a simple path (variable assignment)
+            if let hir_def::hir::Expr::Path(name) = &body.exprs[*target] {
+                let lowercase_name = name.as_str().to_lowercase();
+
+                // Skip if already declared or is a parameter
+                if !declared_vars.contains(&lowercase_name) {
+                    // This is an implicit variable - save it with its first assignment location
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        implicit_vars.entry(lowercase_name)
+                    {
+                        if let Some(range) = source_map.expr_range(*target) {
+                            e.insert((name.as_str().to_string(), range));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if implicit variables are unused
+    // For implicit variables, we need to check if they're EVER live in ANY block,
+    // not just at entry. An implicit variable is unused only if it's never read anywhere.
+    for (lowercase_name, (original_name, range)) in implicit_vars {
+        // Check if variable is live in any block (either IN or OUT state)
+        let is_live_anywhere = liveness_result.blocks().any(|(_, in_state, out_state)| {
+            in_state.is_live(&lowercase_name) || out_state.is_live(&lowercase_name)
+        });
+
+        if !is_live_anywhere {
+            diagnostics.push(create_diagnostic(&original_name, range));
         }
     }
 

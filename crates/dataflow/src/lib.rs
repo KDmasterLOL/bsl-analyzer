@@ -104,7 +104,7 @@ pub trait Lattice: Clone + PartialEq + Eq {
 
 /// Transfer function trait.
 ///
-/// Defines how statements transform abstract state.
+/// Defines how statements and expressions transform abstract state.
 ///
 /// ## Forward Analysis
 ///
@@ -137,6 +137,26 @@ pub trait Transfer<L: Lattice> {
     ///
     /// Output state (OUT set) after executing the statement.
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &L, body: &Body) -> L;
+
+    /// Apply transfer function for an expression (used in control flow vertices).
+    ///
+    /// This is called for expressions in control flow vertices like While conditions,
+    /// For loop bounds, etc.
+    ///
+    /// ## Arguments
+    ///
+    /// - `expr_id`: HIR expression ID
+    /// - `state`: Input state
+    /// - `body`: HIR body for looking up expression details
+    ///
+    /// ## Returns
+    ///
+    /// Output state after processing the expression.
+    ///
+    /// Default implementation returns state unchanged.
+    fn transfer_expr(&self, _expr_id: hir_def::ExprId, state: &L, _body: &Body) -> L {
+        state.clone()
+    }
 }
 
 /// Dataflow solver using worklist algorithm.
@@ -453,6 +473,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     /// Apply transfer function to a basic block.
     ///
     /// Walks through all statements in the block and applies transfer function sequentially.
+    /// For special vertices (While, For, ForEach, If), processes the condition/control expression.
     fn transfer_block(&self, block_idx: NodeIndex, in_state: &L) -> L {
         use cfg::CfgVertex;
 
@@ -470,10 +491,35 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 }
                 state
             }
-            // Other vertex types (Conditional, Loop, etc.) don't contain statements
-            // They just represent control flow structure
+
+            CfgVertex::WhileLoop(while_vertex) => {
+                // While loop: process the condition expression
+                // The While statement's condition needs special handling because it's evaluated
+                // at the loop header (WhileLoop vertex), not in a BasicBlock.
+                self.transfer_control_expr(while_vertex.condition, in_state)
+            }
+
+            CfgVertex::Conditional(conditional_vertex) => {
+                // If statement: process the condition expression
+                self.transfer_control_expr(conditional_vertex.condition, in_state)
+            }
+
+            // ForLoop and ForEachLoop vertices don't need special handling here.
+            // The For/ForEach statements (which include from/to/collection expressions)
+            // are processed in BasicBlocks by transfer_stmt().
+            // The loop vertices only store the loop variable binding.
+            CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => in_state.clone(),
+
+            // Other vertex types (Entry, Exit, etc.) don't have expressions to process
             _ => in_state.clone(),
         }
+    }
+
+    /// Helper to apply transfer for a control expression (condition, range bound, etc.).
+    ///
+    /// For backward analysis (liveness), this marks variables in the expression as used.
+    fn transfer_control_expr(&self, expr_id: hir_def::ExprId, in_state: &L) -> L {
+        self.transfer.transfer_expr(expr_id, in_state, &self.body)
     }
 }
 

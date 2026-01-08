@@ -236,6 +236,9 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
         }
     }
 
+    // Run dataflow-based diagnostics (UnusedLocalVariable with liveness analysis)
+    diagnostics.extend(crate::handlers::unused_local_variable::check(&ctx));
+
     diagnostics
 }
 
