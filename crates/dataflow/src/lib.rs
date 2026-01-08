@@ -44,7 +44,7 @@ use cfg::ControlFlowGraph;
 use hir_def::body::Body;
 use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 /// Direction of dataflow analysis.
@@ -302,12 +302,18 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             self.block_in.entry(entry_block).or_insert(L::bottom());
         }
 
-        // Worklist: blocks that need reprocessing
-        let mut worklist: VecDeque<NodeIndex> = self.cfg.vertices().map(|(idx, _)| idx).collect();
+        // Worklist: blocks in reverse postorder (optimal for forward analysis)
+        // RPO minimizes iterations by visiting nodes in topological order
+        let rpo = self.cfg.reverse_postorder();
+        let mut worklist: VecDeque<NodeIndex> = rpo.into_iter().collect();
+
+        // Tracking set for O(1) contains check (instead of O(n) VecDeque::contains)
+        let mut worklist_set: FxHashSet<NodeIndex> = worklist.iter().copied().collect();
 
         let mut iterations = 0;
 
         while let Some(block_idx) = worklist.pop_front() {
+            worklist_set.remove(&block_idx); // O(1)
             iterations += 1;
 
             // Safety check: prevent infinite loops
@@ -356,9 +362,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 // Update OUT[block]
                 self.block_out.insert(block_idx, out_state);
 
-                // Add successors to worklist
+                // Add successors to worklist (O(1) check via worklist_set)
                 for (succ_idx, _edge) in self.cfg.outgoing_edges(block_idx) {
-                    if !worklist.contains(&succ_idx) {
+                    if worklist_set.insert(succ_idx) {
+                        // Returns true if newly inserted
                         worklist.push_back(succ_idx);
                     }
                 }
@@ -387,6 +394,8 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
         // Initialize all blocks to bottom
         let exit = self.cfg.exit_point();
+        let num_blocks = self.cfg.vertices().count();
+
         for (block_idx, _vertex) in self.cfg.vertices() {
             self.block_in.insert(block_idx, L::bottom());
             // Exit block might have initial state (though usually empty for liveness)
@@ -398,20 +407,47 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         // Ensure exit block has an OUT state (default to bottom if not set)
         self.block_out.entry(exit).or_insert(L::bottom());
 
-        // Worklist: blocks that need reprocessing (start from exit)
-        let mut worklist: VecDeque<NodeIndex> = self.cfg.vertices().map(|(idx, _)| idx).collect();
+        // Worklist: blocks in postorder from exit (optimal for backward analysis)
+        // Postorder minimizes iterations by visiting nodes in dependency order
+        let postorder = self.cfg.postorder_from_exit();
+        let mut worklist: VecDeque<NodeIndex> = postorder.into_iter().collect();
+
+        // Tracking set for O(1) contains check (instead of O(n) VecDeque::contains)
+        let mut worklist_set: FxHashSet<NodeIndex> = worklist.iter().copied().collect();
 
         let mut iterations = 0;
+        let mut block_visit_count: rustc_hash::FxHashMap<NodeIndex, usize> =
+            rustc_hash::FxHashMap::default();
 
         while let Some(block_idx) = worklist.pop_front() {
+            worklist_set.remove(&block_idx); // O(1)
             iterations += 1;
+            *block_visit_count.entry(block_idx).or_insert(0) += 1;
 
             // Safety check: prevent infinite loops
             if iterations > self.max_iterations {
+                let max_visits = block_visit_count.values().max().copied().unwrap_or(0);
+                let avg_visits = iterations as f64 / num_blocks as f64;
+
                 tracing::warn!(
-                    "Backward dataflow analysis exceeded max iterations ({}), returning partial solution",
-                    self.max_iterations
+                    "Backward dataflow analysis exceeded max iterations: {} iterations, {} blocks, max visits per block: {}, avg visits: {:.1}",
+                    iterations,
+                    num_blocks,
+                    max_visits,
+                    avg_visits
                 );
+
+                // Log most frequently visited blocks
+                let mut frequent_blocks: Vec<_> = block_visit_count.iter().collect();
+                frequent_blocks.sort_by_key(|(_, &count)| std::cmp::Reverse(count));
+
+                if !frequent_blocks.is_empty() {
+                    tracing::debug!("Top 5 most visited blocks:");
+                    for (idx, count) in frequent_blocks.iter().take(5) {
+                        tracing::debug!("  Block {:?}: {} visits", idx, count);
+                    }
+                }
+
                 // Return partial solution instead of None - conservative but usable
                 break;
             }
@@ -453,16 +489,35 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 // Update IN[block]
                 self.block_in.insert(block_idx, in_state);
 
-                // Add predecessors to worklist (backward propagation)
+                // Add predecessors to worklist (backward propagation, O(1) check via worklist_set)
                 for (pred_idx, _edge) in self.cfg.incoming_edges(block_idx) {
-                    if !worklist.contains(&pred_idx) {
+                    if worklist_set.insert(pred_idx) {
+                        // Returns true if newly inserted
                         worklist.push_back(pred_idx);
                     }
                 }
             }
         }
 
-        tracing::debug!("Backward dataflow analysis converged in {} iterations", iterations);
+        // Log convergence statistics
+        let max_visits = block_visit_count.values().max().copied().unwrap_or(0);
+        let avg_visits = if num_blocks > 0 { iterations as f64 / num_blocks as f64 } else { 0.0 };
+
+        if iterations > 100 {
+            tracing::info!(
+                "Backward dataflow analysis converged: {} iterations, {} blocks, max visits: {}, avg visits: {:.1}",
+                iterations,
+                num_blocks,
+                max_visits,
+                avg_visits
+            );
+        } else {
+            tracing::debug!(
+                "Backward dataflow analysis converged: {} iterations, {} blocks",
+                iterations,
+                num_blocks
+            );
+        }
 
         Some(DataflowResult {
             block_in: self.block_in,

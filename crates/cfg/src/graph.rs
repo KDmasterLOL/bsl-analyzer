@@ -6,7 +6,7 @@
 use crate::edge::CfgEdgeType;
 use crate::vertex::CfgVertex;
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{DfsPostOrder, EdgeRef, Reversed};
 use petgraph::Direction;
 
 /// Control Flow Graph for a BSL method/function
@@ -226,6 +226,61 @@ impl ControlFlowGraph {
         let target_name = self.vertex(target).map(|v| v.type_name()).unwrap_or("?");
         format!("{}[{:?}] -> {}[{:?}]", source_name, source, target_name, target)
     }
+
+    /// Compute reverse postorder traversal starting from entry point.
+    ///
+    /// RPO minimizes the number of worklist iterations by visiting nodes
+    /// in a topologically-sorted order (for forward dataflow analysis).
+    ///
+    /// For graphs with cycles (loops), RPO ensures that:
+    /// - Loop headers are visited before loop bodies
+    /// - Back edges are minimized in the worklist
+    ///
+    /// ## Returns
+    ///
+    /// Vector of node indices in reverse postorder. Empty if no entry point is set.
+    pub fn reverse_postorder(&self) -> Vec<NodeIndex> {
+        let entry = match self.entry_point {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        let mut postorder = Vec::with_capacity(self.vertex_count());
+        let mut dfs = DfsPostOrder::new(&self.graph, entry);
+
+        while let Some(node) = dfs.next(&self.graph) {
+            postorder.push(node);
+        }
+
+        postorder.reverse(); // Reverse to get RPO
+        postorder
+    }
+
+    /// Compute postorder traversal starting from exit point.
+    ///
+    /// For backward dataflow analysis (like liveness), postorder from exit
+    /// provides optimal worklist ordering.
+    ///
+    /// This traverses the graph in reverse direction (following incoming edges)
+    /// and returns nodes in postorder, which is the optimal order for backward analysis.
+    ///
+    /// ## Returns
+    ///
+    /// Vector of node indices in postorder from exit point.
+    pub fn postorder_from_exit(&self) -> Vec<NodeIndex> {
+        let exit = self.exit_point;
+
+        // Use reversed graph for backward traversal
+        let reversed = Reversed(&self.graph);
+        let mut postorder = Vec::with_capacity(self.vertex_count());
+        let mut dfs = DfsPostOrder::new(reversed, exit);
+
+        while let Some(node) = dfs.next(reversed) {
+            postorder.push(node);
+        }
+
+        postorder // Already in correct order for backward analysis
+    }
 }
 
 impl Default for ControlFlowGraph {
@@ -274,6 +329,76 @@ mod tests {
         cfg.set_entry_point(entry);
 
         assert_eq!(cfg.entry_point(), Some(entry));
+    }
+
+    #[test]
+    fn test_reverse_postorder() {
+        let mut cfg = ControlFlowGraph::new();
+        let b1 = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let b2 = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let b3 = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+
+        cfg.set_entry_point(b1);
+        cfg.add_edge(b1, b2, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(b2, b3, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(b3, cfg.exit_point(), CfgEdgeType::Direct).unwrap();
+
+        let rpo = cfg.reverse_postorder();
+
+        // RPO for linear graph should visit in order: entry, b2, b3, exit
+        assert!(rpo.len() >= 4);
+        assert_eq!(rpo[0], b1); // Entry first
+
+        // b1 should come before b2, b2 before b3 in RPO
+        let b1_pos = rpo.iter().position(|&n| n == b1).unwrap();
+        let b2_pos = rpo.iter().position(|&n| n == b2).unwrap();
+        let b3_pos = rpo.iter().position(|&n| n == b3).unwrap();
+        assert!(b1_pos < b2_pos);
+        assert!(b2_pos < b3_pos);
+    }
+
+    #[test]
+    fn test_postorder_from_exit() {
+        let mut cfg = ControlFlowGraph::new();
+        let b1 = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let b2 = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+
+        cfg.set_entry_point(b1);
+        cfg.add_edge(b1, b2, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(b2, cfg.exit_point(), CfgEdgeType::Direct).unwrap();
+
+        let postorder = cfg.postorder_from_exit();
+
+        // Postorder from exit should contain all reachable nodes
+        assert!(postorder.len() >= 3);
+        assert!(postorder.contains(&cfg.exit_point()));
+    }
+
+    #[test]
+    fn test_rpo_with_loop() {
+        // Test RPO with a cycle (while loop)
+        let mut cfg = ControlFlowGraph::new();
+        let entry = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let loop_header = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let loop_body = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+        let after_loop = cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+
+        cfg.set_entry_point(entry);
+        cfg.add_edge(entry, loop_header, CfgEdgeType::Direct).unwrap();
+        cfg.add_edge(loop_header, loop_body, CfgEdgeType::TrueBranch).unwrap();
+        cfg.add_edge(loop_header, after_loop, CfgEdgeType::FalseBranch).unwrap();
+        cfg.add_edge(loop_body, loop_header, CfgEdgeType::Direct).unwrap(); // back edge
+        cfg.add_edge(after_loop, cfg.exit_point(), CfgEdgeType::Direct).unwrap();
+
+        let rpo = cfg.reverse_postorder();
+
+        // Entry should be first
+        assert_eq!(rpo[0], entry);
+
+        // Loop header should come before loop body in RPO
+        let header_pos = rpo.iter().position(|&n| n == loop_header).unwrap();
+        let body_pos = rpo.iter().position(|&n| n == loop_body).unwrap();
+        assert!(header_pos < body_pos);
     }
 
     // Note: Conditional edge validation test removed - requires actual SyntaxNode
