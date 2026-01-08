@@ -706,10 +706,16 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
     match expr {
         Expr::Missing => {}
 
-        Expr::Path(_) => {
-            // Path not in expr_idx_cache means it's a non-local identifier
+        Expr::Path(name) => {
+            // Path not in expr_idx_cache - try string-based lookup as fallback
+            // This handles cases where same variable appears in multiple contexts
+            // (e.g., assigned in one place, used in ForEach collection in another)
+            //
+            // If not found by name either, it's a non-local identifier
             // (global variable, built-in function, method name, etc.)
-            // These are not tracked in liveness analysis - skip them
+            if let Some(idx) = liveness.var_index().get_index(name.as_str()) {
+                liveness.insert_by_idx(idx);
+            }
         }
 
         Expr::Literal(_) => {

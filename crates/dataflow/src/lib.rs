@@ -735,11 +735,24 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 state
             }
 
-            // ForLoop and ForEachLoop vertices don't need special handling here.
-            // The For/ForEach statements (which include from/to/collection expressions)
-            // are processed in BasicBlocks by transfer_stmt().
-            // The loop vertices only store the loop variable binding.
-            CfgVertex::ForLoop(_) | CfgVertex::ForEachLoop(_) => in_state.clone(),
+            CfgVertex::ForLoop(_) => {
+                // ForLoop: from/to expressions are processed via transfer_stmt
+                // when the For statement itself is in a BasicBlock
+                in_state.clone()
+            }
+
+            CfgVertex::ForEachLoop(foreach_vertex) => {
+                // ForEach loop: process the collection expression
+                // Clone once, then modify in-place
+                SOLVER_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
+                let mut state = in_state.clone();
+                self.transfer.transfer_expr_in_place(
+                    foreach_vertex.collection,
+                    &mut state,
+                    &self.body,
+                );
+                state
+            }
 
             // Other vertex types (Entry, Exit, etc.) don't have expressions to process
             _ => in_state.clone(),

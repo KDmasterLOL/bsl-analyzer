@@ -222,11 +222,13 @@ impl ForLoopVertex {
 pub struct ForEachLoopVertex {
     /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
+    /// Collection expression to iterate over
+    pub collection: ExprId,
 }
 
 impl ForEachLoopVertex {
-    pub fn new(loop_var: BindingId) -> Self {
-        Self { loop_var }
+    pub fn new(loop_var: BindingId, collection: ExprId) -> Self {
+        Self { loop_var, collection }
     }
 }
 

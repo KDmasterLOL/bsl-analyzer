@@ -930,10 +930,11 @@ impl CfgBuilder {
     fn walk_foreach_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
         use crate::vertex::ForEachLoopVertex;
 
-        if let Stmt::ForEach { var, collection: _, body: loop_body } = body.stmt(stmt_id) {
+        if let Stmt::ForEach { var, collection, body: loop_body } = body.stmt(stmt_id) {
             // Create foreach loop vertex (var is BindingId - no searching!)
-            let loop_vertex =
-                self.cfg.add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::new(*var)));
+            let loop_vertex = self
+                .cfg
+                .add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::new(*var, *collection)));
 
             // Connect current block to loop
             if let Some(current) = self.current_block {

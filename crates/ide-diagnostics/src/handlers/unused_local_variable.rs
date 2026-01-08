@@ -1106,4 +1106,44 @@ mod tests {
         // 5. hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
         assert_diagnostic_range(code, sorted_diags[4], 83, 0, 25);
     }
+
+    #[test]
+    fn test_foreach_collection_variable_is_used() {
+        // Regression test for: implicit variable used as ForEach collection
+        // should NOT trigger unused variable diagnostic
+        // Real-world example from user report
+        let code = r#"Процедура ОжидатьЗавершенияВыполненияЗадания(КлючЗадания)
+    Отбор = Новый Структура;
+    Отбор.Вставить("Ключ", КлючЗадания);
+    НайденныеФоновыеЗадания = ФоновыеЗадания.ПолучитьФоновыеЗадания(Отбор);
+
+    Для Каждого ФоновоеЗадание Из НайденныеФоновыеЗадания Цикл
+        Если ФоновоеЗадание.Состояние = СостояниеФоновогоЗадания.Активно
+            ИЛИ ФоновоеЗадание.Состояние <> СостояниеФоновогоЗадания.Завершено Тогда
+                ФоновоеЗадание.ОжидатьЗавершения();
+        КонецЕсли;
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        // Print diagnostics for debugging
+        if !unused_diags.is_empty() {
+            println!("Found {} UnusedLocalVariable diagnostics:", unused_diags.len());
+            for (i, diag) in unused_diags.iter().enumerate() {
+                println!("  {}: {}", i + 1, diag.message);
+            }
+        }
+
+        // НайденныеФоновыеЗадания is used in ForEach loop - should NOT trigger diagnostic
+        assert!(
+            !unused_diags.iter().any(|d| d.message.contains("НайденныеФоновыеЗадания")),
+            "НайденныеФоновыеЗадания is used in ForEach loop and should not be flagged as unused"
+        );
+
+        // All other implicit variables (Отбор, ФоновоеЗадание) are also used
+        assert_eq!(unused_diags.len(), 0, "No variables should be flagged as unused in this code");
+    }
 }
