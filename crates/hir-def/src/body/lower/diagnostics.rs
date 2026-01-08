@@ -23,9 +23,8 @@ use super::LoweringCtx;
 ///
 /// Compares all pairs of branches and emits diagnostics for identical blocks.
 pub(crate) fn check_duplicated_code_blocks(ctx: &mut LoweringCtx, branch_nodes: &[SyntaxNode]) {
-    // Early exit: need at least 3 branches to potentially have duplicates
-    // Most IFs are simple if-else (2 branches), skip them for performance
-    if branch_nodes.len() < 3 {
+    // Early exit: need at least 2 branches to potentially have duplicates
+    if branch_nodes.len() < 2 {
         return;
     }
 

@@ -366,9 +366,8 @@ fn normalize_condition(condition: &str) -> String {
 /// Detects when an elsif condition is identical to a previous if/elsif condition.
 /// Reports diagnostics on duplicate occurrences (not the first one).
 fn check_duplicated_conditions(ctx: &mut LoweringCtx, condition_nodes: &[SyntaxNode]) {
-    // Early exit: need at least 3 conditions (if + 2+ elsif) to have potential duplicates
-    // Simple if-else (1 condition in if, 1 in else) rarely have duplicates
-    if condition_nodes.len() < 3 {
+    // Early exit: need at least 2 conditions (if + elsif) to have potential duplicates
+    if condition_nodes.len() < 2 {
         return;
     }
 

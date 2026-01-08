@@ -42,7 +42,7 @@ use syntax::{extract_leading_comments, SyntaxNode};
 /// ```
 ///
 /// Parsed as:
-/// ```
+/// ```ignore
 /// MethodDocs {
 ///     raw: "// Вычисляет сумму...",
 ///     purpose: Some("Вычисляет сумму двух чисел."),
@@ -262,7 +262,7 @@ impl TypeDoc {
 ///
 /// ## Example
 ///
-/// ```rust
+/// ```ignore
 /// let docs = db.method_docs(method_id)?;
 /// println!("Purpose: {}", docs.purpose.unwrap_or_default());
 /// for param in &docs.parameters {
