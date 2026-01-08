@@ -44,7 +44,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 │ bsl-metadata │ 1C metadata (Configuration, CommonModule)    │
 │ module-graph │ Module dependency graph for incremental CI   │
 │ cfg          │ Control Flow Graph for diagnostics           │
-│ project-model│ Project structure (.bslls.json)              │
+│ project-model│ Project structure (.bsl-analyzer.json)       │
 │ intern/stdx  │ Utilities                                    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -759,7 +759,7 @@ impl MetadataDiagnostic for CommonModuleAssignDiagnostic {
 - Те же коды диагностик
 - Те же severity levels
 - Те же параметры конфигурации
-- Тот же формат .bslls.json
+- Тот же формат конфигурации (.bsl-analyzer.json, также поддерживает .bsl-language-server.json)
 
 ## Структура крейтов
 

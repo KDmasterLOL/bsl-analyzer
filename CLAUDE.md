@@ -196,7 +196,7 @@ bsl-analyzer (LSP Server)
 - **bsl-metadata** - 1C metadata (Configuration, CommonModule, etc.)
 - **module-graph** - Module dependency graph for incremental CI
 - **cfg** - Control Flow Graph for flow-sensitive analysis
-- **project-model** - Project configuration (.bslls.json support)
+- **project-model** - Project configuration (.bsl-analyzer.json support)
 - **intern** / **stdx** - Utilities
 - **profile** - Profiling utilities
 - **test-fixture** / **test-utils** - Testing infrastructure
@@ -290,6 +290,7 @@ assert_eq!(diagnostics[0].range, TextRange::new(42.into(), 156.into()));
 ```
 
 **Available helpers** (`crates/ide-diagnostics/src/test_utils.rs`):
+
 - `assert_diagnostic_range_multiline(code, diag, start_line, start_col, end_line, end_col)`
 - `assert_diagnostic_range(code, diag, line, start_col, end_col)` — single line
 - `check_hir_diagnostic(code)` — run HIR diagnostics on test code
@@ -318,7 +319,7 @@ let input = include_str!("fixtures/Module.bsl");
 **Wrong:**
 
 ```rust
-let path = "/Users/kiriller/src/lsp/bsl-parser/...";  // ❌
+let path = "~/src/lsp/bsl-parser/...";  // ❌
 ```
 
 ## BSL Language Specifics
@@ -384,5 +385,5 @@ Must maintain 100% compatibility with bsl-language-server:
 
 - Same diagnostic codes
 - Same severity levels
-- Same configuration format (`.bslls.json`)
+- Same configuration format (`.bsl-analyzer.json`, also supports `.bsl-language-server.json` for compatibility)
 - Same parameters for diagnostics

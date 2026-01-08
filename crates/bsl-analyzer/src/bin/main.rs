@@ -114,10 +114,18 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
+    use lsp_server::Connection;
+
     tracing::info!("Starting BSL Analyzer LSP server");
 
-    eprintln!("BSL Analyzer LSP server is not yet fully implemented.");
-    eprintln!("Please check the project roadmap for implementation status.");
+    // Create LSP connection over stdio
+    let (connection, io_threads) = Connection::stdio();
+
+    // Run the main loop
+    bsl_analyzer::main_loop(connection)?;
+
+    // Join IO threads
+    io_threads.join()?;
 
     Ok(())
 }

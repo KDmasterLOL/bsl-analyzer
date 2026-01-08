@@ -16,10 +16,12 @@ path = "src/bin/main.rs"
 ide.workspace = true
 ide-diagnostics.workspace = true
 ide-db.workspace = true
+ide-assists.workspace = true
 base-db.workspace = true
 bsl-metadata.workspace = true
 project-model.workspace = true
 vfs.workspace = true
+line-index.workspace = true
 stdx.workspace = true
 profile.workspace = true
 

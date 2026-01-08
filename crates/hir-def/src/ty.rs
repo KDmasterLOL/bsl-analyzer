@@ -3,7 +3,6 @@
 //! This module provides basic type information for BSL values and expressions.
 //! Full type inference is planned for later iterations (12+).
 
-pub mod builtin;
 pub mod doc_types;
 pub mod infer;
 
@@ -132,7 +131,7 @@ impl Ty {
     /// Infer type from a type name (e.g., "Массив", "Структура").
     ///
     /// Returns the corresponding type, or Unknown if not recognized.
-    fn from_type_name(name: &str) -> Self {
+    pub fn from_type_name(name: &str) -> Self {
         let name_lower = name.to_lowercase();
         match name_lower.as_str() {
             // Collection types
@@ -184,6 +183,35 @@ impl Ty {
             Ty::MetadataRef { .. } => "MetadataRef",
             Ty::Function { .. } => "Function",
         }
+    }
+}
+
+/// Function or procedure signature.
+///
+/// Contains parameter types and return type. For procedures, the return type is `Undefined`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionSignature {
+    /// Parameter types in declaration order.
+    pub params: Box<[Ty]>,
+
+    /// Return type (`Undefined` for procedures).
+    pub ret: Box<Ty>,
+}
+
+impl FunctionSignature {
+    /// Create a new function signature.
+    pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
+        Self { params: params.into_boxed_slice(), ret: Box::new(ret) }
+    }
+
+    /// Create a procedure signature (returns Undefined).
+    pub fn procedure(params: Vec<Ty>) -> Self {
+        Self::new(params, Ty::Undefined)
+    }
+
+    /// Create a function signature with known return type.
+    pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
+        Self::new(params, ret)
     }
 }
 

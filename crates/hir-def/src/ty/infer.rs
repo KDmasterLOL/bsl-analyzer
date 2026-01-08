@@ -22,7 +22,7 @@
 //! - Editing a comment doesn't trigger any inference
 //! - Cross-module calls reuse cached signatures
 
-use crate::ty::Ty;
+use crate::ty::{FunctionSignature, Ty};
 use crate::{DefDatabase, MethodId, ModuleId, VariableId};
 use rustc_hash::FxHashMap;
 use syntax::ast::{self, AstNode};
@@ -83,35 +83,6 @@ impl InferenceResult {
     #[allow(dead_code)]
     fn set_method_signature(&mut self, method_id: MethodId, sig: FunctionSignature) {
         self.method_signatures.insert(method_id, sig);
-    }
-}
-
-/// Function or procedure signature.
-///
-/// Contains parameter types and return type. For procedures, the return type is `Undefined`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FunctionSignature {
-    /// Parameter types in declaration order.
-    pub params: Box<[Ty]>,
-
-    /// Return type (`Undefined` for procedures).
-    pub ret: Box<Ty>,
-}
-
-impl FunctionSignature {
-    /// Create a new function signature.
-    pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
-        Self { params: params.into_boxed_slice(), ret: Box::new(ret) }
-    }
-
-    /// Create a procedure signature (returns Undefined).
-    pub fn procedure(params: Vec<Ty>) -> Self {
-        Self::new(params, Ty::Undefined)
-    }
-
-    /// Create a function signature with known return type.
-    pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
-        Self::new(params, ret)
     }
 }
 
@@ -540,11 +511,16 @@ impl<'a> InferenceContext<'a> {
     /// 2. Local module methods (TODO: Phase 2.4)
     /// 3. Variables (TODO: Phase 4)
     fn resolve_name(&self, name: &str) -> Ty {
+        // NOTE: Built-in function resolution moved to hir-ty in Phase 1
+        // This old AST-based inference is being replaced by HIR-based inference in hir-ty
+        // TODO: Remove this entire old inference code in Phase 2
+
         // Try built-in functions first
-        if let Some(sig) = crate::ty::builtin::builtin_functions().get(name) {
-            tracing::trace!("resolved {} to builtin function", name);
-            return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
-        }
+        // DISABLED: builtin module moved to hir-ty
+        // if let Some(sig) = hir_ty::builtin::builtin_functions().get(name) {
+        //     tracing::trace!("resolved {} to builtin function", name);
+        //     return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
+        // }
 
         // TODO: Try local module methods
         // TODO: Try variables
@@ -724,24 +700,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_builtin_function_resolution() {
-        // Test that we can resolve built-in function names
-        use crate::ty::builtin::builtin_functions;
-
-        let builtins = builtin_functions();
-
-        // СтрДлина should exist and return Number
-        let sig = builtins.get("стрдлина").unwrap();
-        assert_eq!(sig.params.len(), 1);
-        assert_eq!(sig.params[0], Ty::String);
-        assert_eq!(*sig.ret, Ty::Number);
-
-        // ТекущаяДата should exist and return Date
-        let sig = builtins.get("текущаядата").unwrap();
-        assert_eq!(sig.params.len(), 0);
-        assert_eq!(*sig.ret, Ty::Date);
-    }
+    // NOTE: builtin_function_resolution tests moved to hir-ty crate
+    // (builtin module was moved to hir-ty in Phase 1)
 
     #[test]
     fn test_apply_function() {

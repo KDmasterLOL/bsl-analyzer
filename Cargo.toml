@@ -29,6 +29,7 @@ ide-diagnostics = { path = "crates/ide-diagnostics" }
 ide-assists = { path = "crates/ide-assists" }
 hir = { path = "crates/hir" }
 hir-def = { path = "crates/hir-def" }
+hir-ty = { path = "crates/hir-ty" }
 sdbl-hir = { path = "crates/sdbl-hir" }
 module-graph = { path = "crates/module-graph" }
 vfs = { path = "crates/vfs" }

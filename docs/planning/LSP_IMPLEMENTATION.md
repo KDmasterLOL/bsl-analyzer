@@ -124,7 +124,7 @@ pub fn handle_goto_definition(
 
 ## Конфигурация
 
-### Формат .bslls.json (совместимость)
+### Формат .bsl-analyzer.json (совместимость)
 
 ```json
 {
@@ -232,7 +232,7 @@ bsl-analyzer
 bsl-analyzer analyze --project ./my-project --output report.json
 
 # Проверка конфигурации
-bsl-analyzer check-config --config .bslls.json
+bsl-analyzer check-config --config .bsl-analyzer.json
 
 # Версия
 bsl-analyzer --version

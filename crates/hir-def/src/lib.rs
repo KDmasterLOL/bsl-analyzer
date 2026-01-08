@@ -55,8 +55,8 @@ pub use name::Name;
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
-pub use ty::infer::{FunctionSignature, InferenceContext, InferenceResult};
-pub use ty::Ty;
+pub use ty::infer::{InferenceContext, InferenceResult};
+pub use ty::{FunctionSignature, Ty};
 pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 
 // Re-export all Salsa query functions from the queries module

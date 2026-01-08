@@ -4,10 +4,12 @@
 
 mod goto_definition;
 mod references;
+mod syntax_highlighting;
 
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+pub use syntax_highlighting::{highlight, HlMod, HlRange, HlTag};
 
 use std::sync::Arc;
 use syntax::TextSize;
@@ -39,9 +41,17 @@ impl Analysis {
     }
 
     /// Returns diagnostics for a file.
-    pub fn diagnostics(&self, _file_id: FileId, _config: &DiagnosticsConfig) -> Vec<Diagnostic> {
-        // TODO: Implement
-        Vec::new()
+    pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+        let ctx = ide_diagnostics::DiagnosticsContext {
+            db: self.db.as_ref(),
+            config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+        ide_diagnostics::diagnostics(&ctx)
     }
 
     /// Goes to the definition of the symbol at the position.
@@ -72,6 +82,11 @@ impl Analysis {
     pub fn code_actions(&self, _file_id: FileId, _range: TextRange) -> Vec<Assist> {
         // TODO: Implement
         Vec::new()
+    }
+
+    /// Returns semantic highlighting for a file.
+    pub fn highlight(&self, file_id: FileId) -> Vec<HlRange> {
+        syntax_highlighting::highlight(self.db.as_ref(), file_id)
     }
 }
 

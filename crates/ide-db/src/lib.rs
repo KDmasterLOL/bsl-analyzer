@@ -52,10 +52,12 @@ pub struct SymbolInfo {
 
 /// The root database for IDE operations.
 ///
-/// This database extends SourceDatabase, RootQueryDb, DefDatabase, and MetadataDb,
-/// providing full HIR functionality and metadata support with caching.
+/// This database extends SourceDatabase, RootQueryDb, DefDatabase, HirDatabase, and MetadataDb,
+/// providing full HIR functionality, type inference, and metadata support with caching.
 #[salsa::db]
-pub trait RootDatabase: SourceDatabase + RootQueryDb + DefDatabase + metadata::MetadataDb {
+pub trait RootDatabase:
+    SourceDatabase + RootQueryDb + DefDatabase + hir_ty::db::HirDatabase + metadata::MetadataDb
+{
     /// Get all SDBL queries in a file with their ExprId in BSL HIR.
     ///
     /// Reuses BSL HIR lowering - no separate AST traversal!
@@ -408,6 +410,19 @@ impl DefDatabase for RootDatabaseImpl {
         // NOTE: Not yet Salsa-tracked in Phase 2 MVP
         // TODO: Add proper Salsa tracking in future iteration
         hir_def::workspace_symbols_query(self, files)
+    }
+}
+
+#[salsa::db]
+impl hir_ty::db::HirDatabase for RootDatabaseImpl {
+    fn infer(&self, file_id: FileId) -> Arc<hir_ty::InferenceResult> {
+        // Call hir-ty query function
+        hir_ty::infer::infer_query(self, file_id)
+    }
+
+    fn type_of_expr(&self, file_id: FileId, expr: hir_def::ExprId) -> hir_ty::Ty {
+        // Call hir-ty query function
+        hir_ty::infer::type_of_expr_query(self, file_id, expr)
     }
 }
 

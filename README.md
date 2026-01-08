@@ -55,7 +55,7 @@ bsl-analyzer analyze --project ./my-project --output report.json
 
 ## Configuration
 
-Compatible with `.bslls.json` format from bsl-language-server.
+Uses `.bsl-analyzer.json` configuration format (also supports `.bsl-language-server.json` for compatibility with bsl-language-server).
 
 ```json
 {

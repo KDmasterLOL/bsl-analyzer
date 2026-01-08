@@ -143,9 +143,11 @@ dependencies = [
  "crossbeam-channel",
  "expect-test",
  "ide",
+ "ide-assists",
  "ide-db",
  "ide-diagnostics",
  "indicatif",
+ "line-index",
  "lsp-server",
  "lsp-types",
  "parking_lot",
@@ -617,6 +619,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hir-ty"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "expect-test",
+ "hir-def",
+ "intern",
+ "la-arena",
+ "rustc-hash 2.1.1",
+ "salsa",
+ "smol_str",
+ "stdx",
+ "syntax",
+ "tracing",
+ "vfs",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -739,6 +759,7 @@ dependencies = [
  "expect-test",
  "hir",
  "hir-def",
+ "hir-ty",
  "indexmap",
  "rustc-hash 2.1.1",
  "salsa",

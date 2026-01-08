@@ -37,7 +37,7 @@ Rust Language Server от команды rust-lang. Используем как 
 Java Language Server для BSL. Обеспечиваем 100% совместимость с:
 
 - 181 диагностикой (коды, сообщения, severity)
-- Конфигурацией (.bslls.json)
+- Конфигурацией (.bsl-analyzer.json)
 - LSP capabilities
 - Форматом отчётов (JSON, SARIF, Generic Issue)
 
