@@ -219,6 +219,8 @@ pub enum SyntaxKind {
     SDBL_SUBQUERY,      // Main query + UNIONs
     SDBL_UNION_CLAUSE,  // UNION [ALL] query
     SDBL_QUERY,         // Individual SELECT query
+    SDBL_LIMITATIONS,   // Query limitations (TOP, DISTINCT, ALLOWED)
+    SDBL_TOP_CLAUSE,    // TOP count clause
 
     // SELECT Components
     SDBL_SELECT_CLAUSE,  // SELECT clause with fields

@@ -6,11 +6,16 @@
 //!
 //! Between comment symbols "//" and comment text there should be a space.
 //! Exceptions are comment-annotations (starting with specific sequences like //@, //(c), //©).
+//!
+//! ## Implementation
+//!
+//! Hybrid diagnostic: uses tokens from parser to find comments (avoiding false positives
+//! on // inside strings), but uses text-based infrastructure for configuration and reporting.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{NodeOrToken, SyntaxKind};
 
 // Default comment annotations (same as Java)
 const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
@@ -20,60 +25,13 @@ const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
 // - First alternative: exactly // followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators like ////////)
 static GOOD_COMMENT_PATTERN_STRICT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(?://[ \t].*|/{2,}[ \t]*)$").expect("valid regex"));
+    Lazy::new(|| Regex::new(r"(?i)^//[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
 
 // Java GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
 // - First alternative: 2+ slashes followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators)
 static GOOD_COMMENT_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(?:/{2,}[ \t].*|/{2,}[ \t]*)$").expect("valid regex"));
-
-/// Check a single comment token for missing space (token-based API).
-fn check_comment_token(
-    token: &SyntaxToken,
-    acc: &mut Vec<Diagnostic>,
-    use_strict: bool,
-    comments_annotation: &[String],
-) {
-    let text = token.text();
-
-    // Check if comment matches good pattern
-    let good_pattern =
-        if use_strict { &GOOD_COMMENT_PATTERN_STRICT } else { &GOOD_COMMENT_PATTERN };
-
-    if good_pattern.is_match(text) {
-        return;
-    }
-
-    // Check if matches annotation patterns
-    if is_annotation(text, comments_annotation) {
-        return;
-    }
-
-    // Check if it's commented code (Java uses CodeRecognizer with 0.9 threshold)
-    // For now, skip this check - we'll implement it later if needed
-    // TODO: Port CodeRecognizer from Java
-
-    // If we got here, comment needs a space
-    acc.push(Diagnostic {
-        code: DiagnosticCode::SpaceAtStartComment,
-        message: "Comment should have space after //".to_string(),
-        severity: Severity::Information,
-        range: token.text_range(),
-        tags: vec![],
-        fixes: vec![],
-    });
-}
-
-/// Check a single syntax node for comments without space (node-based API).
-///
-/// This is called from collect_text_diagnostics() for each node in single AST pass.
-/// NOTE: This is not used for comments because comments are tokens, not nodes.
-/// Use the file-level check() function instead.
-pub fn check_node(_node: &SyntaxNode, _acc: &mut Vec<Diagnostic>, _ctx: &DiagnosticsContext) {
-    // Comments are tokens in Rowan, not nodes.
-    // This diagnostic uses file-level check() instead of node-based check_node().
-}
+    Lazy::new(|| Regex::new(r"(?i)^/{2,}[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
 
 /// Parse comma-separated annotation patterns
 fn parse_comments_annotation(config: &str) -> Vec<String> {
@@ -86,30 +44,76 @@ fn is_annotation(text: &str, annotations: &[String]) -> bool {
     annotations.iter().any(|ann| text_lower.starts_with(ann))
 }
 
+/// Check if comment is good according to pattern and configuration
+fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String]) -> bool {
+    // Empty comment (just // with nothing after, followed by newline or end of line)
+    // This is considered good (no diagnostic)
+    let trimmed = comment_text.trim_end();
+    if trimmed == "//" {
+        return true;
+    }
+
+    // Check if comment matches good pattern
+    let good_pattern =
+        if use_strict { &GOOD_COMMENT_PATTERN_STRICT } else { &GOOD_COMMENT_PATTERN };
+
+    if good_pattern.is_match(comment_text) {
+        return true;
+    }
+
+    // Check if matches annotation patterns
+    if is_annotation(comment_text, annotations) {
+        return true;
+    }
+
+    // Check if it's commented code (Java uses CodeRecognizer with 0.9 threshold)
+    // For now, skip this check - we'll implement it later if needed
+    // TODO: Port CodeRecognizer from Java
+
+    false
+}
+
 /// Main entry point for SpaceAtStartComment diagnostic.
 ///
-/// This is a file-level diagnostic because comments in Rowan are tokens, not nodes.
+/// Uses tokens from parser to correctly identify comments (avoiding false positives on // in strings).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let _span = tracing::debug_span!("SpaceAtStartComment::check").entered();
+
     if ctx.config.is_disabled(DiagnosticCode::SpaceAtStartComment) {
         return Vec::new();
     }
-
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
 
     // Get configuration (using defaults for now, TODO: support configuration)
     let use_strict = true; // Java default: USE_STRICT_VALIDATION = true
     let comments_annotation = parse_comments_annotation(DEFAULT_COMMENTS_ANNOTATION);
 
+    let parse = ctx.db.parse(ctx.file_id);
+    let root = parse.syntax_node();
+    let mut diagnostics = Vec::new();
+
     // Traverse all tokens in the file looking for COMMENT tokens
+    // This correctly handles strings vs comments (lexer already distinguished them)
     for element in root.descendants_with_tokens() {
         if let NodeOrToken::Token(token) = element {
             if token.kind() == SyntaxKind::COMMENT {
-                check_comment_token(&token, &mut diagnostics, use_strict, &comments_annotation);
+                let text = token.text();
+
+                // Check if comment is bad
+                if !is_good_comment(text, use_strict, &comments_annotation) {
+                    diagnostics.push(Diagnostic {
+                        code: DiagnosticCode::SpaceAtStartComment,
+                        message: "Comment should have space after //".to_string(),
+                        severity: Severity::Information,
+                        range: token.text_range(),
+                        tags: vec![],
+                        fixes: vec![],
+                    });
+                }
             }
         }
     }
+
+    tracing::debug!(count = diagnostics.len(), "SpaceAtStartComment diagnostics found");
 
     diagnostics
 }
@@ -223,5 +227,96 @@ mod tests {
 "#;
         let diagnostics = check_diagnostic(code);
         assert_eq!(diagnostics.len(), 3, "Expected 3 bad comments");
+    }
+
+    #[test]
+    fn test_empty_comment_lines() {
+        // Test case from user: empty comment lines should not trigger diagnostic
+        let code = r#"
+// Возвращает параметры запроса для ключа действия см. ПОЗКДействия()
+//  Если требуются дополнительные параметры, то необходимо добавить ваше действие в ПОЗКДействияСПараметрами()
+//  создать функцию с именем "Адаптер<ИмяКлюча>" которая содержит структуру дополнительных параметров
+//
+// Параметры:
+//  КлючДействия - Ключ структуры ПОЗКДействия()
+//
+// Возвращаемое значение:
+//   Тип.Структура - Параметры запроса для заданного ключа действия.
+//
+Функция ПараметрыЗапросаПОЗК(КлючДействия) Экспорт
+    Результат = Новый Структура;
+КонецФункции
+"#;
+        let diagnostics = check_diagnostic(code);
+        // Should have 0 diagnostics - all empty comment lines (just //) are valid
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Empty comment lines should not trigger diagnostic, got {} diagnostics",
+            diagnostics.len()
+        );
+    }
+
+    #[test]
+    fn test_empty_comment_variants() {
+        // Test different variants of empty comments
+        let code = r#"
+//
+//
+//
+// Хороший комментарий
+"#;
+        let diagnostics = check_diagnostic(code);
+        // All empty lines with // are good, last line with space is also good
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Empty comments with various whitespace should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_comment_with_text_no_space() {
+        // Ensure comments with text but no space still trigger diagnostic
+        let code = r#"
+//Плохо
+//Тоже плохо
+"#;
+        let diagnostics = check_diagnostic(code);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "Comments with text but no space should trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_comment_in_string_false_positive() {
+        // Test that we don't trigger on // inside strings
+        let code = r#"
+Процедура Тест()
+    URL = "http://example.com"; // Нормальный комментарий
+    Путь = "C://folder//file.txt"; // Еще комментарий
+    Текст = "Текст с // внутри строки"; // И еще
+КонецПроцедуры
+"#;
+        let diagnostics = check_diagnostic(code);
+        eprintln!("Found {} diagnostics:", diagnostics.len());
+        for (i, diag) in diagnostics.iter().enumerate() {
+            eprintln!("  {}: {:?}", i, diag.message);
+        }
+        // Should have 0 diagnostics - all comments have space after //
+        // If we get false positives on // inside strings, this test will fail
+        assert_eq!(diagnostics.len(), 0, "Should not detect // inside strings as comments");
+    }
+
+    #[test]
+    fn test_url_in_string() {
+        // Simple test with URL
+        let code = r#"
+URL = "http://example.com";
+"#;
+        let diagnostics = check_diagnostic(code);
+        assert_eq!(diagnostics.len(), 0, "URL inside string should not trigger diagnostic");
     }
 }

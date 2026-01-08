@@ -124,8 +124,11 @@ fn query(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Phase 2: Parse limitations (DISTINCT, TOP, ALLOWED)
-    // limitations(p);
+    // Parse limitations (DISTINCT, TOP, ALLOWED) if present
+    if is_limitation_keyword(p) {
+        limitations(p);
+        p.skip_trivia();
+    }
 
     // Selected fields (mandatory)
     selected_fields(p);
@@ -502,4 +505,57 @@ fn join_clause(p: &mut Parser) {
     expressions::logical_expression(p);
 
     m.complete(p, NodeKind::SdblJoinClause);
+}
+
+/// Check if current position starts a limitation keyword
+///
+/// Limitations: DISTINCT, TOP, ALLOWED
+fn is_limitation_keyword(p: &Parser) -> bool {
+    at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ")
+        || at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ")
+        || at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ")
+}
+
+/// Parse query limitations (DISTINCT, TOP, ALLOWED)
+///
+/// Grammar (simplified):
+/// ```text
+/// limitations: (DISTINCT | TOP count | ALLOWED)+
+/// ```
+///
+/// ANTLR grammar has all permutations, but we simplify by accepting keywords in any order.
+/// This accepts all valid combinations and some invalid ones (which is acceptable for error recovery).
+fn limitations(p: &mut Parser) {
+    let m = p.start();
+
+    // Parse keywords in any order until no more limitation keywords found
+    while is_limitation_keyword(p) {
+        if at_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ") {
+            eat_sdbl_keyword(p, "DISTINCT", "РАЗЛИЧНЫЕ");
+        } else if at_sdbl_keyword(p, "TOP", "ПЕРВЫЕ") {
+            top_clause(p);
+        } else if at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ") {
+            eat_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ");
+        }
+        p.skip_trivia();
+    }
+
+    m.complete(p, NodeKind::SdblLimitations);
+}
+
+/// Parse TOP clause
+///
+/// Grammar: `TOP count=DECIMAL`
+fn top_clause(p: &mut Parser) {
+    let m = p.start();
+
+    eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
+    p.skip_trivia();
+
+    // Expect a number (count)
+    if !p.expect(TokenKind::Decimal) {
+        // Error recovery: complete anyway
+    }
+
+    m.complete(p, NodeKind::SdblTopClause);
 }

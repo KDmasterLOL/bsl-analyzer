@@ -82,6 +82,8 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblSubquery => SK::SDBL_SUBQUERY,
         NodeKind::SdblUnionClause => SK::SDBL_UNION_CLAUSE,
         NodeKind::SdblQuery => SK::SDBL_QUERY,
+        NodeKind::SdblLimitations => SK::SDBL_LIMITATIONS,
+        NodeKind::SdblTopClause => SK::SDBL_TOP_CLAUSE,
         NodeKind::SdblSelectClause => SK::SDBL_SELECT_CLAUSE,
         NodeKind::SdblFieldList => SK::SDBL_FIELD_LIST,
         NodeKind::SdblSelectedField => SK::SDBL_SELECTED_FIELD,

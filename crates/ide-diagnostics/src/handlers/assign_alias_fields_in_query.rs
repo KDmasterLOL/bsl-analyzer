@@ -676,6 +676,127 @@ Query = "ВЫБРАТЬ
         );
     }
 
+    #[test]
+    fn test_top_clause_with_explicit_alias() {
+        // Test that ПЕРВЫЕ (TOP) clause doesn't cause false positives
+        // Field has explicit КАК keyword, should pass
+        let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
+Спр.Номенклатура КАК Номенклатура
+ИЗ
+Справочник.Номенклатура КАК Спр"#;
+
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "ПЕРВЫЕ clause with explicit alias should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_top_clause_parsing() {
+        // Verify that TOP clause is correctly parsed by the SDBL parser
+        use syntax::ast::{AstNode, SdblQueryPackage};
+        use syntax::SyntaxKind;
+
+        let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
+Спр.Номенклатура КАК Номенклатура
+ИЗ
+Справочник.Номенклатура КАК Спр"#;
+
+        let parse = parser::parse_sdbl(query);
+        assert!(!parse.has_errors(), "Parse should not have errors");
+
+        let root = parse.syntax_node();
+
+        // Check that SDBL_LIMITATIONS and SDBL_TOP_CLAUSE nodes are present
+        let has_limitations =
+            root.descendants().any(|node| node.kind() == SyntaxKind::SDBL_LIMITATIONS);
+        let has_top_clause =
+            root.descendants().any(|node| node.kind() == SyntaxKind::SDBL_TOP_CLAUSE);
+
+        assert!(has_limitations, "Should have SDBL_LIMITATIONS node");
+        assert!(has_top_clause, "Should have SDBL_TOP_CLAUSE node");
+
+        // Verify field is correctly parsed
+        if let Some(package) = SdblQueryPackage::cast(root) {
+            for select_query in package.queries() {
+                if let Some(subquery) = select_query.subquery() {
+                    if let Some(main_query) = subquery.main_query() {
+                        if let Some(field_list) = main_query.field_list() {
+                            let fields: Vec<_> = field_list.fields().collect();
+                            assert_eq!(fields.len(), 1, "Should have exactly 1 field");
+
+                            let field = &fields[0];
+                            assert!(!field.is_asterisk(), "Field should not be asterisk");
+                            assert!(field.alias().is_some(), "Field should have alias");
+                            assert!(
+                                field.alias().unwrap().has_as_keyword(),
+                                "Alias should have КАК keyword"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_top_clause_without_alias() {
+        // Test that ПЕРВЫЕ (TOP) clause still detects missing alias
+        let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
+Спр.Номенклатура
+ИЗ
+Справочник.Номенклатура КАК Спр"#;
+
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "ПЕРВЫЕ clause with missing alias should trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_top_clause_implicit_alias() {
+        // Test that ПЕРВЫЕ (TOP) clause detects implicit alias (without КАК)
+        let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
+Спр.Номенклатура Номенклатура
+ИЗ
+Справочник.Номенклатура КАК Спр"#;
+
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "ПЕРВЫЕ clause with implicit alias (no КАК) should trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_distinct_clause() {
+        // Test DISTINCT keyword
+        let query = "SELECT DISTINCT Name AS ProductName FROM Products";
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(diagnostics.len(), 0, "DISTINCT with explicit alias should pass");
+    }
+
+    #[test]
+    fn test_distinct_top_combination() {
+        // Test DISTINCT TOP combination
+        let query = "ВЫБРАТЬ РАЗЛИЧНЫЕ ПЕРВЫЕ 10 Код КАК К ИЗ Товары";
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(diagnostics.len(), 0, "DISTINCT TOP with explicit alias should pass");
+    }
+
+    #[test]
+    fn test_top_distinct_order() {
+        // Test TOP DISTINCT order (also valid)
+        let query = "SELECT TOP 50 DISTINCT Name AS N FROM Products";
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(diagnostics.len(), 0, "TOP DISTINCT with explicit alias should pass");
+    }
+
     /// Test from Java: AssignAliasFieldsInQueryDiagnosticTest.java
     ///
     /// Expected 5 diagnostics:

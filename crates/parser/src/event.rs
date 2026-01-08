@@ -90,6 +90,8 @@ pub enum NodeKind {
     SdblSubquery,
     SdblUnionClause,
     SdblQuery,
+    SdblLimitations,
+    SdblTopClause,
     SdblSelectClause,
     SdblFieldList,
     SdblSelectedField,
