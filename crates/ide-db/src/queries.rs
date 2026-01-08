@@ -393,13 +393,19 @@ pub fn liveness_analysis_query<'db>(
     // Get cached CFG (reuse across multiple analyses)
     let cfg = db.method_cfg(method_id);
 
+    // Create variable index for BitSet-based liveness (maps variable names to indices)
+    let var_index = dataflow::liveness::VariableIndex::from_body(body);
+
     // Run backward dataflow analysis for liveness
     let transfer = dataflow::liveness::LivenessTransfer;
     let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
 
     // Configure solver for backward analysis
     solver.set_direction(dataflow::Direction::Backward);
-    // No initial state needed - backward analysis starts from bottom (empty set)
+
+    // Initialize all blocks with BitSet-based bottom element (requires var_index)
+    solver.set_bottom_factory(|| dataflow::liveness::Liveness::new(var_index.clone()));
+
     // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
 
     // Solve dataflow equations
@@ -488,12 +494,19 @@ pub fn module_level_liveness_analysis_query<'db>(
     // Get cached CFG (reuse across multiple analyses)
     let cfg = db.module_level_cfg(module_id);
 
+    // Create variable index for BitSet-based liveness (maps variable names to indices)
+    let var_index = dataflow::liveness::VariableIndex::from_body(body);
+
     // Run backward dataflow analysis for liveness
     let transfer = dataflow::liveness::LivenessTransfer;
     let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
 
     // Configure solver for backward analysis
     solver.set_direction(dataflow::Direction::Backward);
+
+    // Initialize all blocks with BitSet-based bottom element (requires var_index)
+    solver.set_bottom_factory(|| dataflow::liveness::Liveness::new(var_index.clone()));
+
     // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
 
     // Solve dataflow equations

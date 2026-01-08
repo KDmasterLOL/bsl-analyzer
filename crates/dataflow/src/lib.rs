@@ -264,6 +264,30 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         }
     }
 
+    /// Initialize all blocks with a custom bottom element factory.
+    ///
+    /// This is useful when `L::bottom()` requires additional context that isn't
+    /// available at trait level (e.g., VariableIndex for BitSet-based Liveness).
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let var_index = VariableIndex::from_body(&body);
+    /// let mut solver = DataflowSolver::new(cfg, body, transfer);
+    /// solver.set_bottom_factory(|| Liveness::new(var_index.clone()));
+    /// let result = solver.solve();
+    /// ```
+    pub fn set_bottom_factory<F>(&mut self, factory: F)
+    where
+        F: Fn() -> L,
+    {
+        // Initialize all blocks with custom bottom element
+        for (block_idx, _vertex) in self.cfg.vertices() {
+            self.block_in.insert(block_idx, factory());
+            self.block_out.insert(block_idx, factory());
+        }
+    }
+
     /// Run dataflow analysis and return fixed-point solution.
     ///
     /// Uses worklist algorithm to compute IN and OUT sets for each block.
@@ -287,19 +311,17 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     fn solve_forward(mut self) -> Option<DataflowResult<L>> {
         use std::collections::VecDeque;
 
-        // Initialize all blocks to bottom (skip entry if already set via set_initial_state)
+        // Initialize all blocks to bottom (only if not already initialized by set_bottom_factory or set_initial_state)
         let entry = self.cfg.entry_point();
         for (block_idx, _vertex) in self.cfg.vertices() {
-            // Don't overwrite entry block if it has initial state
-            if Some(block_idx) != entry || !self.block_in.contains_key(&block_idx) {
-                self.block_in.insert(block_idx, L::bottom());
-            }
-            self.block_out.insert(block_idx, L::bottom());
+            // Use entry().or_insert_with() to avoid overwriting existing initialization
+            self.block_in.entry(block_idx).or_insert_with(L::bottom);
+            self.block_out.entry(block_idx).or_insert_with(L::bottom);
         }
 
-        // If entry block wasn't set via set_initial_state, initialize to bottom
+        // Ensure entry block has an IN state (default to bottom if not set)
         if let Some(entry_block) = entry {
-            self.block_in.entry(entry_block).or_insert(L::bottom());
+            self.block_in.entry(entry_block).or_insert_with(L::bottom);
         }
 
         // Worklist: blocks in reverse postorder (optimal for forward analysis)
@@ -333,13 +355,23 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
             let in_state = if is_entry && !has_predecessors {
                 // Entry block with no predecessors: preserve initial state
-                self.block_in.get(&block_idx).cloned().unwrap_or_else(L::bottom)
+                self.block_in.get(&block_idx).cloned().expect("block_in should be initialized")
             } else {
                 // Normal case: join from predecessors
-                let mut state = L::bottom();
+                // Start with current block's IN state (initialized by set_bottom_factory or previous iteration)
+                let mut state =
+                    self.block_in.get(&block_idx).cloned().expect("block_in should be initialized");
+                let mut first = true;
                 for (pred_idx, _edge) in self.cfg.incoming_edges(block_idx) {
                     if let Some(pred_out) = self.block_out.get(&pred_idx) {
-                        state = state.join(pred_out);
+                        if first {
+                            // For first predecessor, just use its OUT state
+                            state = pred_out.clone();
+                            first = false;
+                        } else {
+                            // Join with subsequent predecessors
+                            state = state.join(pred_out);
+                        }
                     }
                 }
                 state
@@ -392,20 +424,18 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     fn solve_backward(mut self) -> Option<DataflowResult<L>> {
         use std::collections::VecDeque;
 
-        // Initialize all blocks to bottom
+        // Initialize all blocks to bottom (only if not already initialized by set_bottom_factory)
         let exit = self.cfg.exit_point();
         let num_blocks = self.cfg.vertices().count();
 
         for (block_idx, _vertex) in self.cfg.vertices() {
-            self.block_in.insert(block_idx, L::bottom());
-            // Exit block might have initial state (though usually empty for liveness)
-            if block_idx != exit || !self.block_out.contains_key(&block_idx) {
-                self.block_out.insert(block_idx, L::bottom());
-            }
+            // Use entry().or_insert_with() to avoid overwriting existing initialization
+            self.block_in.entry(block_idx).or_insert_with(L::bottom);
+            self.block_out.entry(block_idx).or_insert_with(L::bottom);
         }
 
         // Ensure exit block has an OUT state (default to bottom if not set)
-        self.block_out.entry(exit).or_insert(L::bottom());
+        self.block_out.entry(exit).or_insert_with(L::bottom);
 
         // Worklist: blocks in postorder from exit (optimal for backward analysis)
         // Postorder minimizes iterations by visiting nodes in dependency order
@@ -459,13 +489,26 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
             let out_state = if is_exit && !has_successors {
                 // Exit block with no successors: preserve initial state (usually bottom)
-                self.block_out.get(&block_idx).cloned().unwrap_or_else(L::bottom)
+                self.block_out.get(&block_idx).cloned().expect("block_out should be initialized")
             } else {
                 // Normal case: join from successors
-                let mut state = L::bottom();
+                // Start with current block's OUT state (initialized by set_bottom_factory or previous iteration)
+                let mut state = self
+                    .block_out
+                    .get(&block_idx)
+                    .cloned()
+                    .expect("block_out should be initialized");
+                let mut first = true;
                 for (succ_idx, _edge) in self.cfg.outgoing_edges(block_idx) {
                     if let Some(succ_in) = self.block_in.get(&succ_idx) {
-                        state = state.join(succ_in);
+                        if first {
+                            // For first successor, just use its IN state
+                            state = succ_in.clone();
+                            first = false;
+                        } else {
+                            // Join with subsequent successors
+                            state = state.join(succ_in);
+                        }
                     }
                 }
                 state
