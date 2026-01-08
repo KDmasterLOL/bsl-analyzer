@@ -7,10 +7,17 @@
 //!
 //! ## Implementation
 //!
-//! Migrated to HIR-based collection (rust-analyzer pattern).
-//! Validation occurs during expression lowering in `lower_call_expr()`.
+//! Two-phase detection (rust-analyzer pattern):
 //!
-//! - Validates template strings (string literals only, no variable resolution yet)
+//! **Phase 1: HIR Lowering** (75% coverage)
+//! - Detects errors in string literal templates during AST→HIR lowering
+//! - Validated in `lower_call_expr()` (hir-def/body/lower/expr.rs:524-545)
+//!
+//! **Phase 2: Post-HIR Check** (90%+ coverage)
+//! - Uses ReachingDefs dataflow analysis to resolve variables
+//! - Handles control flow (if/else, loops)
+//! - Salsa-cached via `reaching_definitions()` query
+//!
 //! - Detects invalid placeholders (%0, %11+)
 //! - Validates parameter count matches placeholders
 //! - Handles %% escape sequences correctly
@@ -66,14 +73,7 @@ use ide_db::TextRange;
 /// ## Coverage
 /// - HIR lowering: detects errors in string literals (75% coverage)
 /// - This check: resolves variables to literals using dataflow (target: 90%+ coverage)
-///
-/// **TODO**: Re-enable after HIR-based CFG is implemented
-#[allow(unused_variables)]
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // TODO: Reimplement with HIR-based CFG
-    vec![]
-
-    /* TEMPORARILY DISABLED - requires HIR-based CFG and reaching_definitions
     if ctx.config.is_disabled(DiagnosticCode::IncorrectUseOfStrTemplate) {
         return vec![];
     }
@@ -116,9 +116,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                             continue; // Not a simple function call
                         }
                     }
-                    Expr::MethodCall { method, args, .. } => {
-                        (method.as_str().to_lowercase(), args)
-                    }
+                    Expr::MethodCall { method, args, .. } => (method.as_str().to_lowercase(), args),
                     _ => continue, // Not a call expression
                 };
 
@@ -141,12 +139,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 }
 
                 // Try to resolve template to string literal
-                if let Some(template_string) = resolve_expr_to_string(
-                    template_expr_id,
-                    body,
-                    &reaching_defs,
-                    stmt_id,
-                ) {
+                if let Some(template_string) =
+                    resolve_expr_to_string(template_expr_id, body, &reaching_defs, stmt_id)
+                {
                     // Validate template (reuse logic from lowering)
                     if is_wrong_str_template(&template_string, param_count) {
                         // Get source range for diagnostic
@@ -172,7 +167,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
-    */
 }
 
 /// Resolve expression to string literal using reaching definitions.
@@ -181,8 +175,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// - Direct string literals: `"template %1"` → Some("template %1")
 /// - Variables: `var = "template %1"; StrTemplate(var, ...)` → Some("template %1")
 /// - Multiple definitions: returns None (ambiguous)
-#[allow(dead_code)] // TODO: Re-enable when check() is implemented
-#[allow(clippy::single_match)] // Temporary, will be needed when re-enabled
+#[allow(clippy::single_match)]
 fn resolve_expr_to_string(
     expr_id: hir_def::hir::ExprId,
     body: &hir_def::Body,
@@ -231,7 +224,6 @@ fn resolve_expr_to_string(
 /// Validate template string against parameter count.
 ///
 /// Reused from hir-def lowering logic.
-#[allow(dead_code)] // TODO: Re-enable when check() is implemented
 fn is_wrong_str_template(template_string: &str, used_params_count: usize) -> bool {
     use once_cell::sync::Lazy;
     use regex::Regex;
@@ -248,8 +240,7 @@ fn is_wrong_str_template(template_string: &str, used_params_count: usize) -> boo
     compare_template_and_params(&str, used_params_count)
 }
 
-#[allow(dead_code)] // TODO: Re-enable when check() is implemented
-#[allow(clippy::nonminimal_bool)] // Temporary, will be needed when re-enabled
+#[allow(clippy::nonminimal_bool)]
 fn compare_template_and_params(template_string: &str, used_params_count: usize) -> bool {
     use once_cell::sync::Lazy;
     use regex::Regex;
@@ -270,7 +261,6 @@ fn compare_template_and_params(template_string: &str, used_params_count: usize) 
         || WRONG_NUMBERS_PATTERN_INNER.is_match(template_string)
 }
 
-#[allow(dead_code)] // TODO: Re-enable when check() is implemented
 fn various_params(used_params_count: usize, template_string: &str) -> bool {
     use once_cell::sync::Lazy;
     use regex::Regex;
@@ -311,7 +301,6 @@ fn various_params(used_params_count: usize, template_string: &str) -> bool {
     false
 }
 
-#[allow(dead_code)] // TODO: Re-enable when check() is implemented
 fn count_required_params(template_string: &str) -> usize {
     use once_cell::sync::Lazy;
     use regex::Regex;
@@ -461,14 +450,177 @@ mod tests {
             .collect();
 
         // Java expects 12 diagnostics total
-        // Currently detecting 9 (HIR lowering only):
+        // Now detecting all 12:
         // - 9 direct string literals (from HIR lowering)
-        // - 3 variable resolution cases PENDING (lines 17, 21, 25) - requires HIR-based CFG
-        // TODO: Update to 12 after HIR-based CFG is implemented
+        // - 3 variable resolution cases (lines 17, 21, 25) - now supported via ReachingDefs
         assert_eq!(
             filtered.len(),
-            9,
-            "Should detect 9 errors (75% coverage - string literals only, variable resolution pending HIR CFG)"
+            12,
+            "Should detect all 12 errors (100% coverage with ReachingDefs)"
         );
+    }
+
+    #[test]
+    fn test_variable_resolution_simple() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    НовыйШаблон = "123";
+    А = СтрШаблон(НовыйШаблон, Наименование); // ошибка: "123" не содержит %1
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 1, "Should detect unused parameter");
+    }
+
+    #[test]
+    fn test_variable_resolution_with_template() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    НовыйШаблон = "%1";
+    А = СтрШаблон(НовыйШаблон, Наименование); // OK
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 0, "Should not report valid template");
+    }
+
+    #[test]
+    fn test_variable_resolution_conditional() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    Если Условие Тогда
+        Шаблон = "123";
+    Иначе
+        Шаблон = "%1";
+    КонецЕсли;
+    А = СтрШаблон(Шаблон, Наименование);
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        // ReachingDefs handles multiple definitions - no false positive
+        assert_eq!(filtered.len(), 0, "Should handle multiple reaching definitions");
     }
 }

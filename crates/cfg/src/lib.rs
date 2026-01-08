@@ -37,6 +37,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod builder;
+pub mod collection;
 pub mod edge;
 pub mod graph;
 pub mod vertex;
@@ -143,6 +144,7 @@ pub fn print_cfg_counters() {
 
 // Re-export main types for convenience
 pub use builder::CfgBuilder;
+pub use collection::ModuleCfgs;
 pub use edge::CfgEdgeType;
 pub use graph::ControlFlowGraph;
 pub use vertex::{

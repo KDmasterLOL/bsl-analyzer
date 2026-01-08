@@ -21,7 +21,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use base_db::FileIdInput;
 use hir_def::ModuleId;
@@ -325,99 +324,169 @@ pub fn sdbl_hir_in_file_query<'db>(
     Arc::new(result)
 }
 
-/// Salsa tracked query for Control Flow Graph (CFG) construction.
+// ============================================================================
+// Module-Level Dataflow Queries (Batch Processing)
+// ============================================================================
+
+/// Build CFGs for all methods in a module at once (batch processing).
 ///
-/// Builds CFG from HIR Body for a single method. The CFG represents the flow of
-/// execution through the method, with nodes for basic blocks and control structures.
+/// This query builds CFGs for ALL methods in the module in one pass,
+/// which is much more efficient than calling method_cfg_query N times.
+///
+/// # Salsa caching
+/// - LRU: 128 (per-module CFG collections)
+/// - Invalidation: Automatic when module_bodies changes
+/// - Memory: ~10-50 KB per module (depends on method count)
 ///
 /// # Performance
-/// - LRU: 256 methods (CFG construction is relatively cheap)
-/// - Depends on: module_bodies (via MethodIdInput)
-/// - Invalidation: Automatic when method body changes
-/// - Construction time: ~1-2ms for typical 100-line method
+/// - Build all CFGs in batch: ~1-5ms for typical module (10-50 methods)
+/// - Much faster than N × method_cfg_query due to eliminated Salsa overhead
 ///
-/// # Caching Strategy
-/// CFG is cached separately from dataflow results to enable reuse across multiple
-/// analyses (reaching definitions, liveness, constant propagation, etc.).
+/// # Why module-level?
+/// When any method changes, module_bodies invalidates the entire module,
+/// which cascades to invalidate ALL per-method queries. Module-level
+/// granularity matches the actual invalidation granularity, eliminating
+/// wasted per-method Salsa overhead.
+#[salsa::tracked(lru = 128)]
+pub fn module_cfgs_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<cfg::ModuleCfgs> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir_def::ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_cfgs", ?module_id).entered();
+
+    // Get module bodies (Salsa dependency)
+    let module_bodies = db.module_bodies(module_id);
+
+    // Build CFG for each method
+    let mut cfgs = rustc_hash::FxHashMap::default();
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let source_map = module_bodies.source_map(local_id);
+        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, source_map);
+        cfgs.insert(local_id, Arc::new(cfg));
+    }
+
+    tracing::debug!(count = cfgs.len(), "Built module CFGs");
+    Arc::new(cfg::ModuleCfgs::new(cfgs))
+}
+
+/// Get CFG for a single method (backward compatible accessor).
+///
+/// **Note:** This is now a thin wrapper around module_cfgs_query for backward compatibility.
+/// Old code can continue using db.method_cfg(method_id), but under the hood it delegates
+/// to the module-level batch query for efficiency.
+///
+/// # Performance
+/// - LRU: 256 (per-method accessors, but delegates to module-level LRU=128)
+/// - First call: Triggers module_cfgs_query (builds all CFGs for the module)
+/// - Subsequent calls: Cheap HashMap lookup from cached module collection
+/// - Expected speedup: 3-5x due to eliminated per-method Salsa overhead
+///
+/// # Migration
+/// When a method changes, module_bodies invalidates, which cascades to module_cfgs.
+/// All per-method accessors automatically get updated results from the module collection.
 #[salsa::tracked(lru = 256)]
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir_def::MethodIdInput<'db>,
 ) -> Arc<cfg::ControlFlowGraph> {
-    CFG_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
-    let query_start = Instant::now();
+    let _span = tracing::info_span!("method_cfg_accessor", ?method_id_input).entered();
 
-    let _span = tracing::info_span!("method_cfg", ?method_id_input).entered();
-
-    // Step 1: Resolve MethodId from MethodIdInput
-    let t0 = Instant::now();
     let method_id = method_id_input.method_id(db);
-    let module_id = hir_def::ModuleId::new(method_id.module.file_id);
-    CFG_QUERY_METHOD_ID_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let file_id = method_id.module.file_id;
 
-    // Step 2: Get module bodies (Salsa query call)
-    let t1 = Instant::now();
-    let module_bodies = db.module_bodies(module_id);
-    CFG_QUERY_MODULE_BODIES_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    // Delegate to module-level query (Salsa caching!)
+    let file_id_input = base_db::FileIdInput::new(db, file_id);
+    let module_cfgs = db.module_cfgs(file_id_input);
 
-    // Step 3: Lookup body in ModuleBodies
-    let t2 = Instant::now();
-    let body = match module_bodies.body(method_id.local_id) {
-        Some(body) => body,
-        None => {
-            // Method has no body (forward declaration or error)
-            CFG_QUERY_NO_BODY_COUNT.fetch_add(1, Ordering::Relaxed);
-            CFG_QUERY_BODY_LOOKUP_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            tracing::debug!("Method has no body: {:?}", method_id);
-
-            // Track total time even for no-body case
-            CFG_QUERY_TOTAL_NS
-                .fetch_add(query_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            return Arc::new(cfg::ControlFlowGraph::new());
-        }
-    };
-    CFG_QUERY_BODY_LOOKUP_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    // Step 4: Build CFG from HIR Body
-    let t3 = Instant::now();
-    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, None);
-    CFG_QUERY_BUILD_CFG_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    // Step 5: Arc allocation
-    let t4 = Instant::now();
-    let result = Arc::new(cfg);
-    CFG_QUERY_ARC_ALLOC_NS.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    // Track total time
-    CFG_QUERY_TOTAL_NS.fetch_add(query_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    result
+    // HashMap lookup - cheap!
+    module_cfgs
+        .get(method_id.local_id)
+        .cloned() // Clone Arc (cheap - just ref count bump)
+        .unwrap_or_else(|| {
+            tracing::debug!("No CFG found for method: {:?}", method_id);
+            Arc::new(cfg::ControlFlowGraph::new())
+        })
 }
 
-/// Compute reaching definitions for a method using dataflow analysis.
+/// Compute reaching definitions for all methods in a module (batch processing).
 ///
-/// This Salsa tracked query performs reaching definitions analysis - tracking which
-/// variable definitions reach each program point.
+/// This query runs reaching definitions analysis for ALL methods in the module,
+/// reusing CFGs from module_cfgs_query. Much more efficient than N separate queries.
 ///
 /// # Salsa caching
-/// - LRU: 256 (per-method dataflow analysis)
-/// - Invalidation: Automatic when module_bodies changes (method code changed)
-/// - Memory: ~2-5 KB per method (definition sets at each CFG node)
-///
-/// # Dependencies tracked by Salsa
-/// - module_bodies (via DefDatabase) - gets method HIR body
-/// - Automatically invalidates when method code changes
-///
-/// # Algorithm
-/// 1. Build CFG from HIR body (Phase 6.2 HIR-based CFG)
-/// 2. Initialize with parameter definitions
-/// 3. Run dataflow analysis (Kildall's worklist algorithm)
-/// 4. Return ReachingDefsResult with in/out sets for each CFG node
+/// - LRU: 128 (per-module collections)
+/// - Invalidation: Automatic when module_bodies changes
+/// - Dependencies: module_cfgs (shared CFGs!), module_bodies
 ///
 /// # Performance
-/// - First call: ~5-20ms (CFG build + dataflow solve)
-/// - Cached: < 1ms
-/// - Convergence: Usually 3-10 iterations for typical BSL methods
+/// - Analyze all methods: ~5-20ms for typical module
+/// - CFGs reused from module_cfgs_query (no rebuild overhead)
+/// - Expected speedup: 3-5x vs per-method queries
+///
+/// # Max Iterations Fix
+/// Uses 10000 iterations (not 100!) to ensure convergence for complex methods.
+#[salsa::tracked(lru = 128)]
+pub fn module_reaching_definitions_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir_def::ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_reaching_definitions", ?module_id).entered();
+
+    // Get shared CFGs (Salsa cached!)
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_bodies = db.module_bodies(module_id);
+
+    // Run reaching defs for each method (reusing CFGs)
+    let mut results = rustc_hash::FxHashMap::default();
+
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let cfg = match module_cfgs.get(local_id) {
+            Some(cfg) => cfg.clone(), // Clone Arc (cheap)
+            None => continue,
+        };
+
+        // Initialize with parameters
+        let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new();
+        for &param_id in body.params.iter() {
+            let binding = body.binding(param_id);
+            let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
+            initial_defs.insert(def);
+        }
+
+        // Run dataflow analysis
+        let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
+        let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+        solver.set_max_iterations(10000); // ✅ Fixed! Was 100
+        solver.set_initial_state(initial_defs);
+
+        if let Some(dataflow_result) = solver.solve() {
+            let result = dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+            results.insert(local_id, Arc::new(result));
+        }
+    }
+
+    tracing::debug!(count = results.len(), "Analyzed reaching definitions");
+    Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
+}
+
+/// Get reaching definitions for a single method (backward compatible accessor).
+///
+/// **Note:** This is now a thin wrapper around module_reaching_definitions_query.
+/// Old code can continue using db.reaching_definitions(method_id), but under the hood
+/// it delegates to the module-level batch query for efficiency.
+///
+/// # Performance
+/// - LRU: 256 (per-method accessors, but delegates to module-level LRU=128)
+/// - First call: Triggers module_reaching_definitions_query (analyzes all methods in module with shared CFGs)
+/// - Subsequent calls: Cheap HashMap lookup from cached module collection
+/// - Expected speedup: 3-5x due to eliminated per-method Salsa overhead + max_iterations fix (10000 vs 100)
+///
+/// # Max Iterations Fix
+/// The module-level query uses 10000 iterations (not 100!), ensuring convergence for complex methods.
 ///
 /// # Returns
 /// None if analysis fails (malformed CFG, no convergence), Some(result) otherwise
@@ -426,75 +495,85 @@ pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir_def::MethodIdInput<'db>,
 ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
-    let _span = tracing::info_span!("reaching_definitions", ?method_id_input).entered();
+    let _span = tracing::info_span!("reaching_definitions_accessor", ?method_id_input).entered();
+
     let method_id = method_id_input.method_id(db);
+    let file_id = method_id.module.file_id;
 
-    // Get module bodies (Salsa dependency tracked automatically)
-    let module_id = hir_def::ModuleId::new(method_id.module.file_id);
-    let module_bodies = db.module_bodies(module_id);
+    // Delegate to module-level query (Salsa caching!)
+    let file_id_input = base_db::FileIdInput::new(db, file_id);
+    let module_reaching_defs = db.module_reaching_definitions(file_id_input);
 
-    // Get body for this method
-    let body = module_bodies.body(method_id.local_id)?;
-
-    // Get cached CFG (Phase 6.6 - CFG caching via Salsa)
-    // This replaces direct CFG construction, enabling reuse across multiple analyses
-    let cfg = db.method_cfg(method_id);
-
-    // Initialize reaching definitions with parameters
-    let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new();
-    for &param_id in body.params.iter() {
-        let binding = body.binding(param_id);
-        let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
-        initial_defs.insert(def);
-    }
-
-    // Run dataflow analysis
-    let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
-    let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-
-    // Configure solver
-    solver.set_max_iterations(100); // Reasonable limit for BSL methods
-    solver.set_initial_state(initial_defs);
-
-    // Solve dataflow equations
-    let dataflow_result = solver.solve()?;
-
-    // Wrap in high-level API
-    let result = Arc::new(dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result));
-
-    tracing::debug!("Dataflow analysis converged");
-    Some(result)
+    // HashMap lookup - cheap!
+    module_reaching_defs.get(method_id.local_id).cloned() // Clone Arc (cheap)
 }
 
-/// Compute liveness analysis for a method using backward dataflow.
+/// Compute liveness analysis for all methods in a module (batch processing).
 ///
-/// This Salsa tracked query performs liveness analysis - tracking which variables
-/// are "live" (may be read in the future) at each program point. Used to detect
-/// unused local variables.
+/// This query runs liveness analysis for ALL methods in the module,
+/// reusing CFGs from module_cfgs_query.
 ///
 /// # Salsa caching
-/// - LRU: 256 (per-method dataflow analysis)
-/// - Invalidation: Automatic when module_bodies changes (method code changed)
-/// - Memory: ~1-3 KB per method (live variable sets at each CFG node)
-///
-/// # Dependencies tracked by Salsa
-/// - method_cfg (via method_cfg_query) - gets cached CFG
-/// - module_bodies (via DefDatabase) - gets method HIR body
-/// - Automatically invalidates when method code changes
-///
-/// # Algorithm
-/// 1. Get cached CFG from method_cfg_query
-/// 2. Create Liveness lattice (set of live variables)
-/// 3. Run backward dataflow analysis (Kildall's algorithm)
-///    - Start from exit with empty set (no variables live after exit)
-///    - OUT[B] = join of IN[S] for all successors
-///    - IN[B] = USE[B] ∪ (OUT[B] - DEF[B])
-/// 4. Return DataflowResult<Liveness> with in/out sets for each CFG node
+/// - LRU: 128 (per-module collections)
+/// - Invalidation: Automatic when module_bodies changes
+/// - Dependencies: module_cfgs (shared CFGs!), module_bodies
 ///
 /// # Performance
-/// - First call: ~2-10ms (backward dataflow solve)
-/// - Cached: < 1ms
-/// - Convergence: Usually 2-8 iterations for typical BSL methods
+/// - Analyze all methods: ~5-20ms for typical module
+/// - CFGs reused from module_cfgs_query (no rebuild overhead)
+/// - Expected speedup: 3-5x vs per-method queries (based on unused_local_variable optimization)
+#[salsa::tracked(lru = 128)]
+pub fn module_liveness_analysis_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+) -> Arc<dataflow::liveness::ModuleLiveness> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = hir_def::ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_liveness", ?module_id).entered();
+
+    // Get shared CFGs (Salsa cached!)
+    let module_cfgs = db.module_cfgs(file_id_input);
+    let module_bodies = db.module_bodies(module_id);
+
+    // Run liveness for each method (reusing CFGs)
+    let mut results = rustc_hash::FxHashMap::default();
+
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let cfg = match module_cfgs.get(local_id) {
+            Some(cfg) => cfg,
+            None => continue,
+        };
+
+        // Build variable index
+        let var_index = dataflow::liveness::VariableIndex::from_body(body);
+
+        // Run liveness analysis
+        if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
+            body, cfg, var_index, 10000, // max_iterations
+        ) {
+            results.insert(local_id, Arc::new(liveness_result));
+        }
+    }
+
+    tracing::debug!(count = results.len(), "Analyzed liveness");
+    Arc::new(dataflow::liveness::ModuleLiveness::new(results))
+}
+
+/// Get liveness analysis for a single method (backward compatible accessor).
+///
+/// **Note:** This is now a thin wrapper around module_liveness_analysis_query.
+/// Old code can continue using db.liveness_analysis(method_id), but under the hood
+/// it delegates to the module-level batch query for efficiency.
+///
+/// # Performance
+/// - LRU: 256 (per-method accessors, but delegates to module-level LRU=128)
+/// - First call: Triggers module_liveness_analysis_query (analyzes all methods in module with shared CFGs)
+/// - Subsequent calls: Cheap HashMap lookup from cached module collection
+/// - Expected speedup: 3-5x due to eliminated per-method Salsa overhead (based on unused_local_variable optimization: 6.2x)
+///
+/// # Background
+/// This optimization is based on the successful unused_local_variable optimization (commit 069d5a3)
+/// which achieved 6.2x speedup by switching from per-method to batch processing.
 ///
 /// # Returns
 /// None if analysis fails (malformed CFG, no convergence), Some(result) otherwise
@@ -503,39 +582,17 @@ pub fn liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir_def::MethodIdInput<'db>,
 ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
-    let _span = tracing::info_span!("liveness_analysis", ?method_id_input).entered();
-    LIVENESS_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _span = tracing::info_span!("liveness_analysis_accessor", ?method_id_input).entered();
 
     let method_id = method_id_input.method_id(db);
+    let file_id = method_id.module.file_id;
 
-    // Get module bodies (Salsa dependency tracked automatically) - PROFILED
-    let t0 = Instant::now();
-    let module_id = hir_def::ModuleId::new(method_id.module.file_id);
-    let module_bodies = db.module_bodies(module_id);
-    let body = module_bodies.body(method_id.local_id)?;
-    LIVENESS_MODULE_BODIES_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    // Delegate to module-level query (Salsa caching!)
+    let file_id_input = base_db::FileIdInput::new(db, file_id);
+    let module_liveness = db.module_liveness_analysis(file_id_input);
 
-    // Get cached CFG (reuse across multiple analyses) - PROFILED
-    let t1 = Instant::now();
-    let cfg = db.method_cfg(method_id);
-    LIVENESS_METHOD_CFG_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    // Create variable index for BitSet-based liveness - PROFILED
-    let t2 = Instant::now();
-    let var_index = dataflow::liveness::VariableIndex::from_body(body);
-    LIVENESS_VAR_INDEX_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    // Run backward dataflow analysis for liveness - PROFILED
-    let t3 = Instant::now();
-    let transfer = dataflow::liveness::LivenessTransfer;
-    let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-    solver.set_direction(dataflow::Direction::Backward);
-    solver.set_bottom_factory(|| dataflow::liveness::Liveness::new(var_index.clone()));
-    let dataflow_result = solver.solve()?;
-    LIVENESS_SOLVER_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-    tracing::debug!("Liveness analysis converged");
-    Some(Arc::new(dataflow_result))
+    // HashMap lookup - cheap!
+    module_liveness.get(method_id.local_id).cloned() // Clone Arc (cheap)
 }
 
 /// Salsa tracked query for module-level code CFG construction.
