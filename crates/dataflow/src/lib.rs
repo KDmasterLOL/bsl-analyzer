@@ -296,7 +296,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     /// ## Default Settings
     ///
     /// - Direction: Forward
-    /// - Max iterations: 5000 (configurable via DiagnosticsConfig.dataflow_max_iterations)
+    /// - Max iterations: 10000 (configurable via DiagnosticsConfig.dataflow_max_iterations)
     pub fn new(cfg: Arc<ControlFlowGraph>, body: Body, transfer: T) -> Self {
         Self {
             cfg,
@@ -304,7 +304,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             transfer,
             block_in: FxHashMap::default(),
             block_out: FxHashMap::default(),
-            max_iterations: 5000, // Default for complex real-world methods (configurable)
+            max_iterations: 10000, // Default for complex real-world methods (configurable)
             direction: Direction::Forward, // Default to forward analysis
         }
     }

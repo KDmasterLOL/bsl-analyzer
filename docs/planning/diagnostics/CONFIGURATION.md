@@ -184,12 +184,12 @@ Each diagnostic can be:
 
 ### dataflow_max_iterations
 
-**Default:** 5000 iterations
+**Default:** 10000 iterations
 
 **Description:** Maximum iterations for dataflow analysis (liveness, reaching definitions, etc.).
 
 Controls convergence limit for dataflow algorithms used by diagnostics like `UnusedLocalVariable`.
-Increase this for very complex methods with deep nesting or many loops.
+Increase this for extremely complex methods with deep nesting or many loops.
 Warning is logged if analysis exceeds this limit.
 
 **Configuration:**
@@ -197,18 +197,18 @@ Warning is logged if analysis exceeds this limit.
 ```json
 {
   "diagnostics": {
-    "dataflow_max_iterations": 10000
+    "dataflow_max_iterations": 20000
   }
 }
 ```
 
 **When to increase:**
-- Methods with very deep nesting (>10 levels)
-- Methods with many loops (>20 loops)
-- Complex control flow (many `Если`/`Пока`/`Для` combinations)
+- Methods with extremely deep nesting (>15 levels)
+- Methods with very many loops (>30 loops)
+- Highly complex control flow (many nested `Если`/`Пока`/`Для` combinations)
 - Warning message: `WARN Backward dataflow analysis exceeded max iterations: N iterations`
 
-**Note:** Higher values increase analysis time but improve accuracy for complex code.
+**Note:** Higher values increase analysis time but improve accuracy for complex code. Default of 10000 handles most real-world code.
 
 ---
 
