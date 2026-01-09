@@ -19,14 +19,21 @@ pub(super) fn sdbl_completions(
     let file_id = position.file_id;
     let offset = position.offset;
 
+    tracing::info!("sdbl_completions called: file_id={:?}, offset={:?}", file_id, offset);
+
     // Get parsed file
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
     // Check if position is inside SDBL query string
-    let query_info = detect_sdbl_at_position(&root, offset)?;
+    let query_info = detect_sdbl_at_position(&root, offset);
+    if query_info.is_none() {
+        tracing::info!("detect_sdbl_at_position returned None - not inside SDBL query");
+        return None;
+    }
+    let query_info = query_info.unwrap();
 
-    tracing::debug!(
+    tracing::info!(
         query_len = query_info.query_text.len(),
         offset_in_query = u32::from(query_info.offset_in_query),
         "detected SDBL query"
@@ -37,11 +44,11 @@ pub(super) fn sdbl_completions(
 
     match context {
         SdblCompletionContext::AfterFromKeyword => {
-            tracing::debug!("completion context: AfterFromKeyword");
+            tracing::info!("completion context: AfterFromKeyword");
             Some(complete_mdo_types())
         }
         SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
-            tracing::debug!(
+            tracing::info!(
                 ?mdo_type,
                 prefix = %prefix,
                 "completion context: InsideMdoType"
@@ -50,7 +57,7 @@ pub(super) fn sdbl_completions(
             Some(complete_mdo_objects(&config, mdo_type, &prefix))
         }
         SdblCompletionContext::None => {
-            tracing::trace!("no completion context detected");
+            tracing::info!("no completion context detected");
             None
         }
     }
