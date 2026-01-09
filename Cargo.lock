@@ -778,6 +778,7 @@ dependencies = [
  "hir-def",
  "hir-ty",
  "indexmap",
+ "line-index",
  "rustc-hash 2.1.1",
  "salsa",
  "sdbl-hir",

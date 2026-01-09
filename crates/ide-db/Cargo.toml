@@ -21,6 +21,7 @@ indexmap.workspace = true
 tracing.workspace = true
 dataflow.workspace = true
 cfg.workspace = true
+line-index.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

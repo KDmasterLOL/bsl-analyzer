@@ -101,10 +101,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_id = ModuleId::new(ctx.file_id);
     let module_bodies = ctx.db.module_bodies(module_id);
 
-    // Build line index once - O(n)
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
-    let line_index = LineIndex::new(file_text.as_ref());
+    // Get line index (cached by Salsa, following rust-analyzer pattern)
+    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
+    let line_index = ctx.db.line_index(file_id_input);
 
     // Get parse tree for name token extraction
     let parse = ctx.db.parse(ctx.file_id);

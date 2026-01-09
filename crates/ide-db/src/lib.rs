@@ -29,8 +29,8 @@ pub mod queries;
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
-    all_sdbl_in_file_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
-    reaching_definitions_query, sdbl_hir_in_file_query,
+    all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
+    module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
 };
 
 /// Symbol kind (procedure, function, variable, etc).
@@ -244,6 +244,34 @@ pub trait RootDatabase:
         &self,
         module_id: hir_def::ModuleId,
     ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
+
+    // ========================================================================
+    // Line Index Query
+    // ========================================================================
+
+    /// Get line index for a file (converts byte offsets to line/column positions).
+    ///
+    /// LineIndex is used for:
+    /// - Diagnostics that check multiline conditions (e.g., allowOneliner config)
+    /// - LSP position conversions (TextRange → line/column)
+    /// - Line-based analysis (line length, empty lines, etc.)
+    ///
+    /// ## Architecture
+    /// Follows rust-analyzer pattern - LineIndex is cached through Salsa.
+    ///
+    /// ## Performance
+    /// - LRU: 256 files (most recently accessed)
+    /// - Construction: O(n) where n = file size (scans for newlines)
+    /// - Lookup: O(log n) binary search in line offsets
+    /// - Automatic invalidation when file_text changes
+    ///
+    /// ## Usage
+    /// ```ignore
+    /// let line_index = db.line_index(file_id_input);
+    /// let pos = line_index.line_col(range.start());
+    /// println!("Line: {}, Column: {}", pos.line, pos.col);
+    /// ```
+    fn line_index(&self, file_id_input: base_db::FileIdInput) -> Arc<line_index::LineIndex>;
 
     /// Downcast to `Any` for accessing implementation-specific methods.
     ///
@@ -623,6 +651,11 @@ impl RootDatabase for RootDatabaseImpl {
         // Call Salsa tracked query for module-level liveness analysis
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         queries::module_level_liveness_analysis_query(self, file_id_input)
+    }
+
+    fn line_index(&self, file_id_input: base_db::FileIdInput) -> Arc<line_index::LineIndex> {
+        // Call Salsa tracked query - cached per file
+        line_index_query(self, file_id_input)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

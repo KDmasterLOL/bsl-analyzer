@@ -101,8 +101,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let file_text = file_text_input.text(ctx.db);
     let file_text = file_text.as_ref();
 
-    // Build line index once - O(n)
-    let line_index = LineIndex::new(file_text);
+    // Get line index (cached by Salsa, following rust-analyzer pattern)
+    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
+    let line_index = ctx.db.line_index(file_id_input);
     let num_lines = line_index.len_lines();
 
     // Pre-allocate line info for all lines

@@ -35,8 +35,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Build line index once - O(n)
-    let line_index = LineIndex::new(&file_text);
+    // Get line index (cached by Salsa, following rust-analyzer pattern)
+    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
+    let line_index = ctx.db.line_index(file_id_input);
 
     scan_consecutive_empty_lines(&file_text, &line_index, allowed_empty_lines)
 }

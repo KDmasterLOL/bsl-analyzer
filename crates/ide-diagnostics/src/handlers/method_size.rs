@@ -67,11 +67,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let config = Config::from_context(ctx);
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
 
-    // Build LineIndex once - O(n), then all lookups are O(1)
-    let line_index = LineIndex::new(&file_text);
+    // Get line index (cached by Salsa, following rust-analyzer pattern)
+    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
+    let line_index = ctx.db.line_index(file_id_input);
 
     let mut diagnostics = Vec::new();
 
@@ -303,8 +302,9 @@ mod tests {
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let parse = db.parse(file_id);
         let root = parse.syntax_node();
-        let file_text = db.file_text_input(file_id).text(db.as_ref());
-        let line_index = LineIndex::new(&file_text);
+        let _file_text = db.file_text_input(file_id).text(db.as_ref());
+        let file_id_input = ide_db::base_db::FileIdInput::new(db.as_ref(), file_id);
+        let line_index = db.line_index(file_id_input);
 
         let procedure = root
             .descendants()

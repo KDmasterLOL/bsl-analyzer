@@ -18,6 +18,9 @@
 //! - [`method_cfg_query`] - Control Flow Graph for method (LRU: 256)
 //! - [`reaching_definitions_query`] - Reaching definitions analysis (LRU: 256)
 //! - [`liveness_analysis_query`] - Liveness analysis for unused variables (LRU: 256)
+//!
+//! **Line Index:**
+//! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -694,4 +697,45 @@ pub fn module_level_liveness_analysis_query<'db>(
 
     tracing::debug!("Module-level liveness analysis converged");
     Some(Arc::new(dataflow_result))
+}
+
+// ============================================================================
+// Line Index Query
+// ============================================================================
+
+/// Get line index for a file (cached Salsa query).
+///
+/// LineIndex converts byte offsets (TextRange) to line/column positions.
+/// This is needed for:
+/// - Diagnostics that check multiline conditions
+/// - LSP position conversions
+/// - Line-based analysis (line length, empty lines, etc.)
+///
+/// # Architecture
+/// Follows rust-analyzer pattern of caching LineIndex through Salsa.
+///
+/// # Performance
+/// - LRU: 256 files (most recently accessed)
+/// - Construction: O(n) where n = file size
+/// - Lookup: O(log n) binary search in line offsets
+/// - Invalidation: Automatic when file_text changes
+///
+/// # Usage
+/// ```ignore
+/// let line_index = db.line_index(file_id);
+/// let pos = line_index.line_col(range.start());
+/// println!("Line: {}, Column: {}", pos.line, pos.col);
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn line_index_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<line_index::LineIndex> {
+    let file_id = file_id_input.file_id(db);
+    let _span = tracing::info_span!("line_index", ?file_id).entered();
+
+    let file_text_input = db.file_text_input(file_id);
+    let file_text = file_text_input.text(db);
+
+    Arc::new(line_index::LineIndex::new(file_text.as_ref()))
 }
