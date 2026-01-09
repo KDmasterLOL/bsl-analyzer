@@ -87,7 +87,20 @@ impl<'a> LoweringContext<'a> {
         let (_metadata, resolved) = self.resolve_table(&parts, table_ref.syntax().text_range());
 
         // Get alias
-        let alias_name = alias.and_then(|a| a.name()).map(|s| Name::from(s.as_str()));
+        let alias_name = alias
+            .and_then(|a| {
+                // Record AS/КАК keyword in source map for semantic highlighting
+                if a.has_as_keyword() {
+                    self.record_keyword_by_text(
+                        a.syntax(),
+                        "AS",
+                        "КАК",
+                        crate::source_map::TokenCategory::SpecialKeyword,
+                    );
+                }
+                a.name()
+            })
+            .map(|s| Name::from(s.as_str()));
 
         TableRef {
             parts: parts.iter().map(|s| Name::from(s.as_str())).collect(),

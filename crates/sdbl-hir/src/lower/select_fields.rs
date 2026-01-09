@@ -115,7 +115,21 @@ impl<'a> LoweringContext<'a> {
         };
 
         // Get alias (name() returns Option<String>)
-        let alias = field.alias().and_then(|a| a.name()).map(|s| Name::from(s.as_str()));
+        let alias = field
+            .alias()
+            .and_then(|a| {
+                // Record AS/КАК keyword in source map for semantic highlighting
+                if a.has_as_keyword() {
+                    self.record_keyword_by_text(
+                        a.syntax(),
+                        "AS",
+                        "КАК",
+                        crate::source_map::TokenCategory::SpecialKeyword,
+                    );
+                }
+                a.name()
+            })
+            .map(|s| Name::from(s.as_str()));
 
         // Get type from expression
         let ty = expr.ty().clone();

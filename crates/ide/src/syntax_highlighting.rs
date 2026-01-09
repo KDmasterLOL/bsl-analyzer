@@ -906,4 +906,58 @@ mod tests {
         // Should have at least one string literal
         assert!(!string_highlights.is_empty(), "Short strings should remain as StringLiteral");
     }
+
+    #[test]
+    fn test_sdbl_as_keyword_highlighting() {
+        let code = r#"
+Функция Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Очередь.ОтметкаВремени КАК ОтметкаВремени,
+             |    Очередь.Попыток КАК Попыток
+             |ИЗ
+             |    РегистрСведений.ОчередьОбновленияКэширующихДанных КАК Очередь";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find all КАК (AS) keywords - should be highlighted as Keyword
+        let as_keywords: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Keyword && {
+                    let text = &code[hl.range.start().into()..hl.range.end().into()];
+                    text.contains("КАК")
+                }
+            })
+            .collect();
+
+        // Should find 3 КАК keywords (2 in field aliases + 1 in table alias)
+        assert_eq!(as_keywords.len(), 3, "Expected 3 КАК keywords, got {}", as_keywords.len());
+    }
+
+    #[test]
+    fn test_sdbl_as_keyword_english() {
+        let code = r#"
+Функция Тест()
+    Query = "SELECT Name AS ProductName FROM Products AS P";
+    Возврат Query;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find all AS keywords - should be highlighted as Keyword
+        let as_keywords: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Keyword
+                    && code[hl.range.start().into()..hl.range.end().into()] == *"AS"
+            })
+            .collect();
+
+        // Should find 2 AS keywords (1 in field alias + 1 in table alias)
+        assert_eq!(as_keywords.len(), 2, "Expected 2 AS keywords, got {}", as_keywords.len());
+    }
 }
