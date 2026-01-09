@@ -265,7 +265,28 @@ pub fn all_sdbl_in_file_query<'db>(
     // Sort by position in file for deterministic output
     result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
 
-    tracing::debug!(count = result.len(), "Collected SDBL from HIR");
+    tracing::info!(count = result.len(), "Collected SDBL from HIR");
+
+    // Log details about each SDBL query
+    for (i, (_expr_id, query_info)) in result.iter().enumerate() {
+        let has_ast = query_info.query_ast.is_some();
+        let has_errors = query_info.query_ast.as_ref().map(|ast| ast.has_errors()).unwrap_or(false);
+        let query_text_preview = if query_info.query_text.len() > 100 {
+            format!("{}...", &query_info.query_text[..100])
+        } else {
+            query_info.query_text.clone()
+        };
+
+        tracing::info!(
+            query_index = i,
+            has_ast = has_ast,
+            has_parse_errors = has_errors,
+            query_len = query_info.query_text.len(),
+            query_preview = %query_text_preview,
+            "SDBL query in file"
+        );
+    }
+
     Arc::new(result)
 }
 
@@ -302,6 +323,8 @@ pub fn sdbl_hir_in_file_query<'db>(
     // Get SDBL queries from BSL HIR (Salsa dependency tracked)
     let sdbl_queries = all_sdbl_in_file_query(db, file_id_input);
 
+    tracing::info!(sdbl_queries_count = sdbl_queries.len(), "sdbl_hir_in_file: starting lowering");
+
     // Try to load configuration for metadata-based type inference
     let configuration = crate::get_file_path_for_sdbl(db, file_id).and_then(|file_path| {
         crate::find_configuration_root_for_sdbl(db, &file_path).map(|config_root| {
@@ -312,18 +335,38 @@ pub fn sdbl_hir_in_file_query<'db>(
         })
     });
 
+    let has_metadata = configuration.is_some();
+    tracing::info!(has_metadata = has_metadata, "sdbl_hir_in_file: metadata availability");
+
     // Lower each SDBL query to HIR
     let config_ref = configuration.as_deref();
     let mut result = Vec::with_capacity(sdbl_queries.len());
+    let mut skipped = 0;
     for (expr_id, query_info) in sdbl_queries.iter() {
         // Only lower if we have a parsed AST
         if let Some(ref sdbl_ast) = query_info.query_ast {
             let sdbl_hir = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+
+            tracing::info!(
+                from_tables = sdbl_hir.hir.from.len(),
+                join_tables = sdbl_hir.hir.joins.len(),
+                diagnostics = sdbl_hir.hir.diagnostics.len(),
+                "sdbl_hir_in_file: lowered query to HIR"
+            );
+
             result.push((*expr_id, Arc::new(sdbl_hir)));
+        } else {
+            skipped += 1;
+            tracing::warn!("sdbl_hir_in_file: skipped query without AST");
         }
     }
 
-    tracing::debug!(count = result.len(), "Lowered SDBL to HIR");
+    tracing::info!(
+        lowered_count = result.len(),
+        skipped_count = skipped,
+        "sdbl_hir_in_file: finished lowering"
+    );
+
     Arc::new(result)
 }
 
