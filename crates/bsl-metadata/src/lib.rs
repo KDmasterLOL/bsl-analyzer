@@ -113,6 +113,9 @@ pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
 pub use loader::load_from_directory;
 pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
-pub use register::{AccumulationRegisterType, Register, RegisterBuilder, RegisterPeriodicity};
+pub use register::{
+    AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
+    RegisterResource,
+};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};

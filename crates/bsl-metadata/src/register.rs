@@ -10,6 +10,112 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use uuid::Uuid;
 
+/// Resource (ресурс) in AccumulationRegister
+///
+/// Resources are the numeric values that are accumulated in the register.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterResource {
+    /// UUID
+    uuid: Uuid,
+
+    /// Russian name
+    name: String,
+
+    /// English name (optional)
+    #[serde(default)]
+    name_en: Option<String>,
+
+    /// Type as string (simplified for now)
+    /// Example: "Number(15,2)", "String(100)"
+    #[serde(default)]
+    type_str: String,
+}
+
+impl RegisterResource {
+    /// Create a new resource with the given UUID and name.
+    pub fn new(uuid: Uuid, name: impl Into<String>) -> Self {
+        Self { uuid, name: name.into(), name_en: None, type_str: String::new() }
+    }
+
+    /// Get the UUID of the resource.
+    pub fn uuid(&self) -> &Uuid {
+        &self.uuid
+    }
+
+    /// Get the Russian name of the resource.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the English name of the resource.
+    pub fn name_en(&self) -> Option<&str> {
+        self.name_en.as_deref()
+    }
+
+    /// Get the type string of the resource.
+    pub fn type_str(&self) -> &str {
+        &self.type_str
+    }
+
+    /// Set the type string.
+    pub fn set_type_str(&mut self, type_str: String) {
+        self.type_str = type_str;
+    }
+}
+
+/// Attribute (реквизит) in InformationRegister
+///
+/// Attributes are additional data fields associated with register records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterAttribute {
+    /// UUID
+    uuid: Uuid,
+
+    /// Russian name
+    name: String,
+
+    /// English name (optional)
+    #[serde(default)]
+    name_en: Option<String>,
+
+    /// Type as string (simplified for now)
+    /// Example: "String(100)", "CatalogRef.Валюты"
+    #[serde(default)]
+    type_str: String,
+}
+
+impl RegisterAttribute {
+    /// Create a new attribute with the given UUID and name.
+    pub fn new(uuid: Uuid, name: impl Into<String>) -> Self {
+        Self { uuid, name: name.into(), name_en: None, type_str: String::new() }
+    }
+
+    /// Get the UUID of the attribute.
+    pub fn uuid(&self) -> &Uuid {
+        &self.uuid
+    }
+
+    /// Get the Russian name of the attribute.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the English name of the attribute.
+    pub fn name_en(&self) -> Option<&str> {
+        self.name_en.as_deref()
+    }
+
+    /// Get the type string of the attribute.
+    pub fn type_str(&self) -> &str {
+        &self.type_str
+    }
+
+    /// Set the type string.
+    pub fn set_type_str(&mut self, type_str: String) {
+        self.type_str = type_str;
+    }
+}
+
 /// Periodicity of an InformationRegister
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegisterPeriodicity {
@@ -63,6 +169,14 @@ pub struct Register {
     #[serde(rename = "dimensions", default)]
     dimensions: Vec<Dimension>,
 
+    /// Resources (for AccumulationRegister)
+    #[serde(rename = "resources", default)]
+    resources: Vec<RegisterResource>,
+
+    /// Attributes (for InformationRegister)
+    #[serde(rename = "attributes", default)]
+    attributes: Vec<RegisterAttribute>,
+
     /// Periodicity (for InformationRegister)
     #[serde(rename = "periodicity", default)]
     periodicity: Option<RegisterPeriodicity>,
@@ -104,6 +218,16 @@ impl Register {
     /// Get dimensions
     pub fn dimensions(&self) -> &[Dimension] {
         &self.dimensions
+    }
+
+    /// Get resources
+    pub fn resources(&self) -> &[RegisterResource] {
+        &self.resources
+    }
+
+    /// Get attributes
+    pub fn attributes(&self) -> &[RegisterAttribute] {
+        &self.attributes
     }
 
     /// Check if this is an InformationRegister
@@ -234,6 +358,8 @@ pub struct RegisterBuilder {
     name: Option<String>,
     mdo_type: Option<MdoType>,
     dimensions: Vec<Dimension>,
+    resources: Vec<RegisterResource>,
+    attributes: Vec<RegisterAttribute>,
     periodicity: Option<RegisterPeriodicity>,
     register_type: Option<AccumulationRegisterType>,
     enable_totals_slice_first: bool,
@@ -271,6 +397,30 @@ impl RegisterBuilder {
         self
     }
 
+    /// Add resource (for AccumulationRegister)
+    pub fn add_resource(mut self, resource: RegisterResource) -> Self {
+        self.resources.push(resource);
+        self
+    }
+
+    /// Set all resources at once (for AccumulationRegister)
+    pub fn resources(mut self, resources: Vec<RegisterResource>) -> Self {
+        self.resources = resources;
+        self
+    }
+
+    /// Add attribute (for InformationRegister)
+    pub fn add_attribute(mut self, attribute: RegisterAttribute) -> Self {
+        self.attributes.push(attribute);
+        self
+    }
+
+    /// Set all attributes at once (for InformationRegister)
+    pub fn attributes(mut self, attributes: Vec<RegisterAttribute>) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
     /// Set periodicity (for InformationRegister)
     pub fn periodicity(mut self, periodicity: Option<RegisterPeriodicity>) -> Self {
         self.periodicity = periodicity;
@@ -302,6 +452,8 @@ impl RegisterBuilder {
             name: self.name.unwrap_or_default(),
             mdo_type: self.mdo_type.unwrap_or(MdoType::InformationRegister),
             dimensions: self.dimensions,
+            resources: self.resources,
+            attributes: self.attributes,
             periodicity: self.periodicity,
             register_type: self.register_type,
             enable_totals_slice_first: self.enable_totals_slice_first,
