@@ -164,7 +164,10 @@ impl<'a> LoweringContext<'a> {
         parts: &[String],
         range: TextRange,
     ) -> (Option<MdoType>, Option<ResolvedTable>) {
+        tracing::debug!(parts = ?parts, "Resolving table");
+
         if parts.len() < 2 {
+            tracing::debug!("Table parts < 2, skipping resolution");
             return (None, None);
         }
 
@@ -172,6 +175,7 @@ impl<'a> LoweringContext<'a> {
         let mdo_type_str = &parts[0];
         let Ok(mdo_type) = mdo_type_str.parse::<MdoType>() else {
             // Not a standard MDO type - could be alias or virtual table
+            tracing::debug!(mdo_type_str = mdo_type_str, "Failed to parse MDO type");
             return (None, None);
         };
 
@@ -180,6 +184,11 @@ impl<'a> LoweringContext<'a> {
         // Check metadata if available
         if let Some(metadata) = self.metadata {
             if !metadata.has_metadata_object(mdo_type, object_name) {
+                tracing::warn!(
+                    mdo_type = ?mdo_type,
+                    object_name = object_name,
+                    "Table not found in metadata"
+                );
                 // Emit diagnostic: QueryToMissingMetadata
                 self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
                     table_name: parts.join("."),
@@ -187,15 +196,30 @@ impl<'a> LoweringContext<'a> {
                 });
                 return (Some(mdo_type), None);
             }
+        } else {
+            tracing::debug!("No metadata available for validation");
         }
 
         // Build resolved table with standard fields
         let mut fields = standard_fields_for_mdo(mdo_type);
+        tracing::debug!(
+            mdo_type = ?mdo_type,
+            object_name = object_name,
+            standard_fields = fields.len(),
+            "Built standard fields for table"
+        );
 
         // Add fields from metadata if available
         if let Some(_metadata) = self.metadata {
             self.add_metadata_fields(mdo_type, object_name, &mut fields);
         }
+
+        tracing::info!(
+            mdo_type = ?mdo_type,
+            object_name = object_name,
+            total_fields = fields.len(),
+            "Resolved table with fields"
+        );
 
         let resolved = ResolvedTable { mdo_type, name: object_name.clone(), fields };
 
@@ -209,7 +233,10 @@ impl<'a> LoweringContext<'a> {
         object_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
-        let Some(metadata) = self.metadata else { return };
+        let Some(metadata) = self.metadata else {
+            tracing::debug!("No metadata available for field resolution");
+            return;
+        };
 
         match mdo_type {
             // For registers, add dimensions, resources, and attributes
@@ -218,6 +245,8 @@ impl<'a> LoweringContext<'a> {
             | MdoType::AccountingRegister
             | MdoType::CalculationRegister => {
                 if let Some(register) = metadata.find_register(object_name) {
+                    let initial_count = fields.len();
+
                     // Add dimensions
                     for dimension in register.dimensions() {
                         fields.push(FieldDef::new(dimension.name(), SdblType::Unknown));
@@ -232,15 +261,49 @@ impl<'a> LoweringContext<'a> {
                     for attribute in register.attributes() {
                         fields.push(FieldDef::new(attribute.name(), SdblType::Unknown));
                     }
+
+                    tracing::info!(
+                        mdo_type = ?mdo_type,
+                        object_name = object_name,
+                        dimensions = register.dimensions().len(),
+                        resources = register.resources().len(),
+                        attributes = register.attributes().len(),
+                        fields_added = fields.len() - initial_count,
+                        total_fields = fields.len(),
+                        "Added metadata fields to register"
+                    );
+                } else {
+                    tracing::debug!(
+                        mdo_type = ?mdo_type,
+                        object_name = object_name,
+                        "Register not found in metadata"
+                    );
                 }
             }
 
             // For catalogs and documents, add attributes
             MdoType::Catalog | MdoType::Document => {
                 if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
+                    let initial_count = fields.len();
+
                     for attribute in &obj.attributes {
                         fields.push(FieldDef::new(attribute.name.clone(), SdblType::Unknown));
                     }
+
+                    tracing::info!(
+                        mdo_type = ?mdo_type,
+                        object_name = object_name,
+                        attributes = obj.attributes.len(),
+                        fields_added = fields.len() - initial_count,
+                        total_fields = fields.len(),
+                        "Added metadata fields to catalog/document"
+                    );
+                } else {
+                    tracing::debug!(
+                        mdo_type = ?mdo_type,
+                        object_name = object_name,
+                        "Catalog/Document not found in metadata"
+                    );
                 }
             }
 
