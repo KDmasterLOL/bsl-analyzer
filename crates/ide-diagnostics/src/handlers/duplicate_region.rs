@@ -48,6 +48,14 @@
 //! - Initialize / Инициализация
 //!
 //! ## Implementation
+//!
+//! **Uses AST-based checking (not HIR-based) because:**
+//! 1. Requires range of first line (`#Область Name`), not full block or name token only
+//! 2. HIR RegionTree provides: full block range or name token range, but not first line range
+//! 3. Calculating first line from RegionTree would still require parse + manual text processing
+//! 4. No code simplification from HIR migration - same complexity remains
+//! 5. AST approach is optimal: single parse query, minimal dependencies, direct access to needed data
+//!
 //! Ported from:
 //! - DuplicateRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - duplicate_region.rs (bsl-language-server-rust) - Rust reference (tree-sitter)
