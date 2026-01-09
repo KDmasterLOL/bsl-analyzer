@@ -44,6 +44,7 @@ mod diagnostics;
 mod hir;
 mod lower;
 mod scope;
+mod source_map;
 mod standard_fields;
 mod types;
 
@@ -52,6 +53,7 @@ pub use hir::{
     ExprHir, FieldDef, FieldHir, GroupByHir, JoinHir, JoinType, OrderByHir, ResolvedTable, SdblHir,
     SelectHir, TableRef, UnionHir,
 };
-pub use lower::lower_sdbl_to_hir;
+pub use lower::{lower_sdbl_to_hir, SdblLowerResult};
 pub use scope::Scope;
+pub use source_map::{SdblSourceMap, TokenCategory, TokenInfo};
 pub use types::{MdoRef, SdblType};

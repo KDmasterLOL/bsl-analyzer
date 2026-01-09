@@ -13,7 +13,9 @@ hir.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true
+sdbl-hir.workspace = true
 triomphe.workspace = true
+tracing.workspace = true
 either = "1.9"
 rustc-hash = "2.1"
 

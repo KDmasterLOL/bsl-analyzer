@@ -77,7 +77,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         );
 
         // Emit diagnostics from HIR
-        for hir_diag in &sdbl_hir.diagnostics {
+        for hir_diag in &sdbl_hir.hir.diagnostics {
             if let sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } = hir_diag {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 

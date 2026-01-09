@@ -288,7 +288,7 @@ pub fn all_sdbl_in_file_query<'db>(
 /// - Semantic diagnostics (unknown tables, type mismatches, etc.)
 ///
 /// # Returns
-/// Vec of (ExprId, Arc<SdblHir>) - one entry per successfully parsed SDBL query
+/// Vec of (ExprId, Arc<SdblLowerResult>) - one entry per successfully parsed SDBL query with source map
 #[salsa::tracked(lru = 64)]
 pub fn sdbl_hir_in_file_query<'db>(
     db: &'db dyn RootDatabase,

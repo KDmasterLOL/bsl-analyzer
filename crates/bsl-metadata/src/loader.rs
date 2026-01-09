@@ -336,11 +336,7 @@ mod tests {
     use super::*;
     use crate::traits::Module;
 
-    // Note: These tests require test fixtures to be copied
-    // See Step 1.4.1 in the plan
-
     #[test]
-    #[ignore = "requires test fixtures"]
     fn test_load_from_directory() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
         let config = load_from_directory(path).unwrap();

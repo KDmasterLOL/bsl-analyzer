@@ -1036,6 +1036,16 @@ impl SdblQuery {
     pub fn where_clause(&self) -> Option<SdblWhereClause> {
         self.0.children().find_map(SdblWhereClause::cast)
     }
+
+    /// Get the GROUP BY clause.
+    pub fn group_by_clause(&self) -> Option<SdblGroupClause> {
+        self.0.children().find_map(SdblGroupClause::cast)
+    }
+
+    /// Get the ORDER BY clause.
+    pub fn order_by_clause(&self) -> Option<SdblOrderClause> {
+        self.0.children().find_map(SdblOrderClause::cast)
+    }
 }
 
 /// SDBL field list.
@@ -1383,6 +1393,50 @@ pub struct SdblWhereClause(SyntaxNode);
 impl AstNode for SdblWhereClause {
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == SyntaxKind::SDBL_WHERE_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// SDBL GROUP BY clause.
+#[derive(Debug, Clone)]
+pub struct SdblGroupClause(SyntaxNode);
+
+impl AstNode for SdblGroupClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_GROUP_CLAUSE
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// SDBL ORDER BY clause.
+#[derive(Debug, Clone)]
+pub struct SdblOrderClause(SyntaxNode);
+
+impl AstNode for SdblOrderClause {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == SyntaxKind::SDBL_ORDER_CLAUSE
     }
 
     fn cast(node: SyntaxNode) -> Option<Self> {
