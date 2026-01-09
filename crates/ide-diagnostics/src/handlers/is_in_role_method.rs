@@ -41,44 +41,74 @@
 //! Ported from:
 //! - IsInRoleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
-//! Uses stateful traversal to track:
-//! - Variables containing `IsInRole()` results
-//! - Variables containing `PrivilegedMode()` results
-//! - If-statement expressions for protection checks
+//! **Architecture:** HIR-based diagnostic (migrated from AST).
+//!
+//! ### HIR approach
+//! - Two-pass analysis per method/module:
+//!   - Pass 1: Track variables containing `IsInRole()` or `PrivilegedMode()` results
+//!   - Pass 2: Check if-statements for unprotected usage
+//! - Uses `Stmt::Assign` for variable tracking
+//! - Uses `Expr::Call` for method call detection
+//! - Uses `Stmt::If` for condition checking
+//!
+//! ### Advantages over AST
+//! - Semantic analysis - operates on lowered HIR representation
+//! - Salsa caching - benefits from automatic invalidation
+//! - Cleaner code - no token-level parsing
+//! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir_def::{
+    hir::{Expr, ExprId, Stmt},
+    ModuleId,
+};
 use ide_db::TextRange;
 use std::collections::HashSet;
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
+/// HIR-based check for IsInRole() usage without PrivilegedMode() protection.
+///
+/// Processes each method and module-level code independently to maintain proper scoping.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::IsInRoleMethod) {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
     let mut all_diagnostics = Vec::new();
+    let module_id = ModuleId { file_id: ctx.file_id };
+    let module_bodies = ctx.db.module_bodies(module_id);
 
-    // Process each procedure/function independently to maintain proper scoping
-    // Variables in different procedures should not interfere with each other
-    for procedure in root.descendants() {
-        if !matches!(procedure.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF) {
-            continue;
-        }
-
+    // Check method bodies
+    for (_local_id, body, source_map) in module_bodies.method_bodies() {
         let mut checker = IsInRoleChecker {
             is_in_role_vars: HashSet::new(),
             privileged_mode_vars: HashSet::new(),
             diagnostics: Vec::new(),
+            body,
+            source_map,
         };
 
-        // Two-pass approach within each procedure:
+        // Two-pass approach within each method:
         // Pass 1: Process all assignments to build variable tracking
-        collect_variables(&procedure, &mut checker);
+        checker.collect_variables();
 
         // Pass 2: Check if-statements for diagnostics
-        check_node(&procedure, &mut checker);
+        checker.check_statements();
+
+        all_diagnostics.extend(checker.diagnostics);
+    }
+
+    // Check module-level code
+    if let Some(lower_result) = module_bodies.module_code_result() {
+        let mut checker = IsInRoleChecker {
+            is_in_role_vars: HashSet::new(),
+            privileged_mode_vars: HashSet::new(),
+            diagnostics: Vec::new(),
+            body: &lower_result.body,
+            source_map: &lower_result.source_map,
+        };
+
+        checker.collect_variables();
+        checker.check_statements();
 
         all_diagnostics.extend(checker.diagnostics);
     }
@@ -87,241 +117,192 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     all_diagnostics
 }
 
-struct IsInRoleChecker {
+struct IsInRoleChecker<'a> {
     is_in_role_vars: HashSet<String>,
     privileged_mode_vars: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
+    body: &'a hir_def::Body,
+    source_map: &'a hir_def::body::BodySourceMap,
 }
 
-fn collect_variables(node: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    if node.kind() == SyntaxKind::ASSIGN_STMT {
-        handle_assignment(node, checker);
-    }
-
-    for child in node.children() {
-        collect_variables(&child, checker);
-    }
-}
-
-fn check_node(node: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    if node.kind() == SyntaxKind::IF_STMT {
-        check_if_statement(node, checker);
-    }
-
-    for child in node.children() {
-        check_node(&child, checker);
-    }
-}
-
-fn handle_assignment(assign_stmt: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    let tokens: Vec<_> =
-        assign_stmt.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut var_name: Option<String> = None;
-    let mut eq_index: Option<usize> = None;
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT && var_name.is_none() {
-            var_name = Some(token.text().to_string());
-        }
-        if token.kind() == SyntaxKind::EQ {
-            eq_index = Some(i);
-            break;
-        }
-    }
-
-    // CRITICAL: Remove variable from BOTH sets (reassignment clears tracking)
-    if let Some(ref var) = var_name {
-        let var_lower = var.to_lowercase();
-        checker.is_in_role_vars.remove(&var_lower);
-        checker.privileged_mode_vars.remove(&var_lower);
-    }
-
-    if let Some(eq_idx) = eq_index {
-        let rhs_tokens = &tokens[eq_idx + 1..];
-
-        for (i, token) in rhs_tokens.iter().enumerate() {
-            if token.kind() == SyntaxKind::IDENT && is_is_in_role_method(token.text()) {
-                let next_is_lparen =
-                    rhs_tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-                if next_is_lparen {
-                    if let Some(ref var) = var_name {
-                        checker.is_in_role_vars.insert(var.to_lowercase());
-                    }
-                    break;
-                }
-            }
-        }
-
-        for (i, token) in rhs_tokens.iter().enumerate() {
-            if token.kind() == SyntaxKind::IDENT && is_privileged_mode_method(token.text()) {
-                let next_is_lparen =
-                    rhs_tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-                if next_is_lparen {
-                    if let Some(ref var) = var_name {
-                        checker.privileged_mode_vars.insert(var.to_lowercase());
-                    }
-                    break;
-                }
+impl<'a> IsInRoleChecker<'a> {
+    /// Pass 1: Collect variables containing IsInRole() or PrivilegedMode() results.
+    fn collect_variables(&mut self) {
+        for (_stmt_id, stmt) in self.body.stmts_iter() {
+            if let Stmt::Assign { target, value } = stmt {
+                self.handle_assignment(*target, *value);
             }
         }
     }
-}
 
-fn check_if_statement(if_stmt: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    if let Some(expr) = find_if_expression(if_stmt) {
-        check_expression(&expr, checker);
-    }
+    /// Pass 2: Check if-statements for unprotected IsInRole() usage.
+    fn check_statements(&mut self) {
+        for (_stmt_id, stmt) in self.body.stmts_iter() {
+            if let Stmt::If { condition, then_branch: _, elsif_branches, else_branch: _ } = stmt {
+                // Check main if condition
+                self.check_expression(*condition);
 
-    for child in if_stmt.children() {
-        if child.kind() == SyntaxKind::ELSIF_CLAUSE {
-            check_elsif_clause(&child, checker);
-        }
-    }
-}
-
-fn check_elsif_clause(elsif_clause: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    if let Some(expr) = find_elsif_expression(elsif_clause) {
-        check_expression(&expr, checker);
-    }
-}
-
-fn check_expression(expr: &SyntaxNode, checker: &mut IsInRoleChecker) {
-    let direct_call_ranges = find_is_in_role_calls(expr);
-    for range in direct_call_ranges {
-        if !has_privileged_mode_protection(expr, checker) {
-            checker.diagnostics.push(create_diagnostic(range));
-        }
-    }
-
-    // Exclude method calls (IDENT followed by LPAREN)
-    let tokens: Vec<_> = expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() != SyntaxKind::IDENT {
-            continue;
-        }
-
-        let next_is_lparen =
-            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-        if next_is_lparen {
-            continue;
-        }
-
-        let ident_text = token.text().to_lowercase();
-        if checker.is_in_role_vars.contains(&ident_text)
-            && !has_privileged_mode_protection(expr, checker)
-        {
-            checker.diagnostics.push(create_diagnostic(token.text_range()));
-        }
-    }
-}
-
-fn has_privileged_mode_protection(expr: &SyntaxNode, checker: &IsInRoleChecker) -> bool {
-    if contains_privileged_mode_call(expr) {
-        return true;
-    }
-
-    // Exclude method calls (IDENT followed by LPAREN)
-    let tokens: Vec<_> = expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() != SyntaxKind::IDENT {
-            continue;
-        }
-
-        let next_is_lparen =
-            tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-        if next_is_lparen {
-            continue;
-        }
-
-        let ident_text = token.text().to_lowercase();
-        if checker.privileged_mode_vars.contains(&ident_text) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_is_in_role_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "рольдоступна" | "isinrole")
-}
-
-fn is_privileged_mode_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "привилегированныйрежим" | "privilegedmode")
-}
-
-fn contains_privileged_mode_call(node: &SyntaxNode) -> bool {
-    let tokens: Vec<_> = node.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT && is_privileged_mode_method(token.text()) {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-            if next_is_lparen {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn find_is_in_role_calls(expr: &SyntaxNode) -> Vec<TextRange> {
-    let mut ranges = Vec::new();
-    let tokens: Vec<_> = expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT && is_is_in_role_method(token.text()) {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-            if next_is_lparen {
-                // Find the full call expression range (from IDENT to closing RPAREN)
-                if let Some(call_range) = find_call_expression_range(&tokens, i) {
-                    ranges.push(call_range);
-                } else {
-                    // Fallback to just the identifier if we can't find the full range
-                    ranges.push(token.text_range());
+                // Check elsif conditions
+                for (elsif_condition, _elsif_stmts) in elsif_branches.iter() {
+                    self.check_expression(*elsif_condition);
                 }
             }
         }
     }
 
-    ranges
-}
+    /// Handle assignment statement - track variables containing method call results.
+    fn handle_assignment(&mut self, target: ExprId, value: ExprId) {
+        // Get variable name from target
+        let var_name = if let Expr::Path(name) = self.body.expr(target) {
+            Some(name.as_str().to_lowercase())
+        } else {
+            None
+        };
 
-fn find_call_expression_range(tokens: &[SyntaxToken], ident_index: usize) -> Option<TextRange> {
-    let start_offset = tokens.get(ident_index)?.text_range().start();
+        // CRITICAL: Remove variable from BOTH sets (reassignment clears tracking)
+        if let Some(ref var) = var_name {
+            self.is_in_role_vars.remove(var);
+            self.privileged_mode_vars.remove(var);
+        }
 
-    let mut paren_depth = 0;
-    let mut end_offset = None;
+        // Check if RHS is IsInRole() or PrivilegedMode() call
+        if let Some(ref var) = var_name {
+            if self.is_is_in_role_call(value) {
+                self.is_in_role_vars.insert(var.clone());
+            } else if self.is_privileged_mode_call(value) {
+                self.privileged_mode_vars.insert(var.clone());
+            }
+        }
+    }
 
-    for token in tokens.iter().skip(ident_index + 1) {
-        match token.kind() {
-            SyntaxKind::L_PAREN => paren_depth += 1,
-            SyntaxKind::R_PAREN => {
-                if paren_depth == 1 {
-                    end_offset = Some(token.text_range().end());
-                    break;
+    /// Check expression for unprotected IsInRole() usage.
+    ///
+    /// This recursively scans the expression tree looking for IsInRole() calls or variables,
+    /// but protection check is done at the root level (if-condition).
+    fn check_expression(&mut self, root_expr_id: ExprId) {
+        // Protection is checked at root level (if-condition contains PrivilegedMode somewhere)
+        let has_protection = self.has_privileged_mode_protection(root_expr_id);
+
+        // Recursively find all IsInRole usages in the expression tree
+        self.find_is_in_role_usages(root_expr_id, has_protection);
+    }
+
+    /// Recursively find IsInRole() calls and variables in expression tree.
+    fn find_is_in_role_usages(&mut self, expr_id: ExprId, has_protection: bool) {
+        // Check for direct IsInRole() calls
+        if self.is_is_in_role_call(expr_id) && !has_protection {
+            if let Some(range) = self.source_map.expr_range(expr_id) {
+                self.diagnostics.push(create_diagnostic(range));
+            }
+        }
+
+        // Check for variable references to IsInRole() results
+        if let Expr::Path(name) = self.body.expr(expr_id) {
+            let var_name = name.as_str().to_lowercase();
+            if self.is_in_role_vars.contains(&var_name) && !has_protection {
+                if let Some(range) = self.source_map.expr_range(expr_id) {
+                    self.diagnostics.push(create_diagnostic(range));
                 }
-                paren_depth -= 1;
+            }
+        }
+
+        // Recursively check subexpressions
+        match self.body.expr(expr_id) {
+            Expr::BinaryOp { lhs, rhs, .. } => {
+                self.find_is_in_role_usages(*lhs, has_protection);
+                self.find_is_in_role_usages(*rhs, has_protection);
+            }
+            Expr::UnaryOp { expr, .. } => {
+                self.find_is_in_role_usages(*expr, has_protection);
+            }
+            Expr::Ternary { condition, then_expr, else_expr } => {
+                self.find_is_in_role_usages(*condition, has_protection);
+                self.find_is_in_role_usages(*then_expr, has_protection);
+                self.find_is_in_role_usages(*else_expr, has_protection);
             }
             _ => {}
         }
     }
 
-    end_offset.map(|end| TextRange::new(start_offset, end))
+    /// Check if expression is a call to IsInRole() / РольДоступна().
+    fn is_is_in_role_call(&self, expr_id: ExprId) -> bool {
+        if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
+            if let Expr::Path(name) = self.body.expr(*callee) {
+                return is_is_in_role_method(name.as_str());
+            }
+        }
+        false
+    }
+
+    /// Check if expression is a call to PrivilegedMode() / ПривилегированныйРежим().
+    fn is_privileged_mode_call(&self, expr_id: ExprId) -> bool {
+        if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
+            if let Expr::Path(name) = self.body.expr(*callee) {
+                return is_privileged_mode_method(name.as_str());
+            }
+        }
+        false
+    }
+
+    /// Check if expression has PrivilegedMode() protection.
+    ///
+    /// Protection means the expression contains:
+    /// - Direct call to PrivilegedMode()
+    /// - Variable reference to PrivilegedMode() result
+    /// - OR operator with PrivilegedMode() in either operand
+    fn has_privileged_mode_protection(&self, expr_id: ExprId) -> bool {
+        self.contains_privileged_mode(expr_id)
+    }
+
+    /// Recursively check if expression contains PrivilegedMode() call or variable.
+    fn contains_privileged_mode(&self, expr_id: ExprId) -> bool {
+        match self.body.expr(expr_id) {
+            // Direct PrivilegedMode() call
+            Expr::Call { callee, .. } => {
+                if let Expr::Path(name) = self.body.expr(*callee) {
+                    if is_privileged_mode_method(name.as_str()) {
+                        return true;
+                    }
+                }
+                false
+            }
+
+            // Variable reference to PrivilegedMode() result
+            Expr::Path(name) => {
+                let var_name = name.as_str().to_lowercase();
+                self.privileged_mode_vars.contains(&var_name)
+            }
+
+            // Binary operations - recursively check both sides
+            Expr::BinaryOp { lhs, rhs, .. } => {
+                self.contains_privileged_mode(*lhs) || self.contains_privileged_mode(*rhs)
+            }
+
+            // Unary operations
+            Expr::UnaryOp { expr, .. } => self.contains_privileged_mode(*expr),
+
+            // Ternary operations
+            Expr::Ternary { condition, then_expr, else_expr } => {
+                self.contains_privileged_mode(*condition)
+                    || self.contains_privileged_mode(*then_expr)
+                    || self.contains_privileged_mode(*else_expr)
+            }
+
+            _ => false,
+        }
+    }
 }
 
-fn find_if_expression(if_stmt: &SyntaxNode) -> Option<SyntaxNode> {
-    if_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)
+/// Check if method name is IsInRole() / РольДоступна().
+fn is_is_in_role_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "рольдоступна" | "isinrole")
 }
 
-fn find_elsif_expression(elsif_clause: &SyntaxNode) -> Option<SyntaxNode> {
-    elsif_clause.children().find(|n| n.kind() == SyntaxKind::EXPR)
+/// Check if method name is PrivilegedMode() / ПривилегированныйРежим().
+fn is_privileged_mode_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "привилегированныйрежим" | "privilegedmode")
 }
 
 fn create_diagnostic(range: TextRange) -> Diagnostic {
@@ -352,6 +333,18 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for HIR-based diagnostics
+        use ide_db::base_db::{SourceRoot, SourceRootId};
+        use vfs::VfsPath;
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file content
         let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
