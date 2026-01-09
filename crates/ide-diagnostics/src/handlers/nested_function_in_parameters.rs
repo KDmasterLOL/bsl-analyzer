@@ -32,15 +32,20 @@
 //! Ported from:
 //! - NestedFunctionInParametersDiagnostic.java (bsl-language-server)
 //!
-//! Note: The parser doesn't create CALL_EXPR nodes. Instead, it creates:
-//! - CALL_STMT for call statements containing IDENT(s) + ARG_LIST
-//! - NEW_EXPR for constructor calls containing KW_NEW + IDENT + ARG_LIST
+//! **HIR-based implementation** using semantic analysis instead of AST traversal.
 //!
-//! We detect method calls by finding ARG_LIST nodes and analyzing their context.
+//! Migrated from AST to HIR for:
+//! - Type-safe expression handling via Expr enum
+//! - Automatic distinction between Call, MethodCall, and New expressions
+//! - Simplified recursive checking via ExprId references
+//! - Automatic Salsa caching via module_bodies()
+//! - Module-level code coverage (not just methods)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use line_index::{LineIndex, TextSize};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use hir::ModuleId;
+use hir_def::{Body, BodySourceMap, Expr, ExprId, Name};
+use line_index::LineIndex;
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 const DEFAULT_ALLOW_ONELINER: bool = true;
 const DEFAULT_ALLOWED_METHOD_NAMES: &str = "НСтр,NStr,ПредопределенноеЗначение,PredefinedValue";
@@ -84,142 +89,164 @@ impl Config {
     }
 }
 
-/// Represents a detected call (method call or constructor)
-#[derive(Debug)]
-struct CallInfo {
-    /// The name token (method name for calls, type name for constructors)
-    name_token: SyntaxToken,
-    /// The ARG_LIST node containing the arguments
-    arg_list: SyntaxNode,
-    /// The full call expression range (for line number calculation)
-    call_range_start: u32,
-    call_range_end: u32,
-    /// Whether this is a constructor (NEW_EXPR)
-    is_constructor: bool,
-}
-
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::NestedFunctionInParameters) {
         return Vec::new();
     }
 
     let config = Config::from_context(ctx);
+    let mut diagnostics = Vec::new();
+
+    // Get module bodies from HIR (cached by Salsa)
+    let module_id = ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
+
+    // Build line index once - O(n)
+    let file_text_input = ctx.db.file_text_input(ctx.file_id);
+    let file_text = file_text_input.text(ctx.db);
+    let line_index = LineIndex::new(file_text.as_ref());
+
+    // Get parse tree for name token extraction
     let parse = ctx.db.parse(ctx.file_id);
     let root = parse.syntax_node();
 
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
+    // Check module-level code (code outside procedures/functions)
+    if let Some(module_code) = module_bodies.module_code_result() {
+        check_body(
+            &module_code.body,
+            &module_code.source_map,
+            &mut diagnostics,
+            &config,
+            &line_index,
+            &root,
+        );
+    }
 
-    // Build line index once - O(n)
-    let line_index = LineIndex::new(file_text.as_ref());
+    // Check all method bodies (procedures and functions)
+    for (_, body, source_map) in module_bodies.method_bodies() {
+        check_body(body, source_map, &mut diagnostics, &config, &line_index, &root);
+    }
 
-    let mut diagnostics = Vec::new();
+    // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
-    // Find all calls by looking for ARG_LIST nodes
+    diagnostics
+}
+
+/// Check a single Body for nested function calls in parameters.
+///
+/// HIR-based approach: iterates over expressions and checks calls semantically.
+fn check_body(
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<Diagnostic>,
+    config: &Config,
+    line_index: &LineIndex,
+    root: &SyntaxNode,
+) {
+    // Walk all expressions in the body
+    for (expr_id, expr) in body.exprs.iter() {
+        // Check all three types of calls: Call, MethodCall, New
+        match expr {
+            Expr::Call { callee, args } => {
+                check_call_expr(
+                    expr_id,
+                    callee,
+                    args,
+                    body,
+                    source_map,
+                    diagnostics,
+                    config,
+                    line_index,
+                    root,
+                );
+            }
+            Expr::MethodCall { receiver: _, method, args } => {
+                check_method_call_expr(
+                    expr_id,
+                    method,
+                    args,
+                    body,
+                    source_map,
+                    diagnostics,
+                    config,
+                    line_index,
+                    root,
+                );
+            }
+            Expr::New { type_name, args } => {
+                check_new_expr(
+                    expr_id,
+                    type_name,
+                    args,
+                    body,
+                    source_map,
+                    diagnostics,
+                    config,
+                    line_index,
+                    root,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Find the name token range in a call/method call/new expression (hybrid AST approach).
+///
+/// Returns the text range of the method/constructor name token.
+fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange {
+    // Strategy: Find the ARG_LIST whose end matches this expression's end
+    // For chained calls like Obj.Method1().Method2(), the outermost ARG_LIST ends at expr_range.end()
+
+    let end_offset = expr_range.end();
+
+    // Find ARG_LIST whose end matches our expression end
     for node in root.descendants() {
-        if node.kind() == SyntaxKind::ARG_LIST {
-            if let Some(call_info) = analyze_call_context(&node) {
-                if let Some(diagnostic) = check_call(&call_info, &config, &line_index) {
-                    diagnostics.push(diagnostic);
+        if node.kind() != SyntaxKind::ARG_LIST {
+            continue;
+        }
+
+        // Check if this ARG_LIST ends at the same position as our expression
+        if node.text_range().end() == end_offset {
+            // Found the ARG_LIST that belongs to this expression
+            if let Some(parent) = node.parent() {
+                match parent.kind() {
+                    SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
+                        if let Some(name_token) = find_last_ident_before_arg_list(&parent) {
+                            return name_token.text_range();
+                        }
+                    }
+                    SyntaxKind::NEW_EXPR => {
+                        if let Some(name_token) = find_type_name_or_new_keyword(&parent) {
+                            return name_token.text_range();
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
-    diagnostics
-}
-
-/// Analyze the context of an ARG_LIST to determine the call type and get the method name
-fn analyze_call_context(arg_list: &SyntaxNode) -> Option<CallInfo> {
-    let parent = arg_list.parent()?;
-
-    match parent.kind() {
-        SyntaxKind::NEW_EXPR => {
-            // Constructor call: NEW_EXPR contains KW_NEW, [IDENT], ARG_LIST
-            // Two cases:
-            // 1. Новый Тип(...) - has type name (IDENT)
-            // 2. Новый(...) or Новый(Тип(...)) - no type name, type passed as parameter
-            let type_name = find_type_name_in_new_expr(&parent);
-
-            // Use type name if available, otherwise use "Новый" keyword token
-            // Java: lines 98-108 handle both cases
-            let name_token = if let Some(tn) = type_name {
-                tn
-            } else {
-                // Find KW_NEW token to use for diagnostic
-                find_new_keyword(&parent)?
-            };
-
-            Some(CallInfo {
-                name_token,
-                arg_list: arg_list.clone(),
-                call_range_start: parent.text_range().start().into(),
-                call_range_end: parent.text_range().end().into(),
-                is_constructor: true,
-            })
-        }
-        SyntaxKind::CALL_STMT | SyntaxKind::EXPR | SyntaxKind::CALL_EXPR => {
-            // Method call: parent contains IDENT(s), DOT(s), ARG_LIST
-            // With new AST: CALL_EXPR > IDENT(node) or FIELD_EXPR > ARG_LIST
-            // Find the method name (the IDENT right before ARG_LIST)
-            let method_name = find_method_name_before_arg_list(&parent, arg_list)?;
-
-            // Find the full call range by looking at preceding siblings
-            let call_start = find_call_start(&parent, arg_list);
-
-            Some(CallInfo {
-                name_token: method_name,
-                arg_list: arg_list.clone(),
-                call_range_start: call_start,
-                call_range_end: arg_list.text_range().end().into(),
-                is_constructor: false,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Find the type name token in a NEW_EXPR
-/// Returns Some(token) if type name is explicitly specified: Новый Тип(...)
-/// Returns None for: Новый(...) or Новый(Тип(...))
-fn find_type_name_in_new_expr(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
-    let mut found_new = false;
-    for child in new_expr.children_with_tokens() {
-        if let Some(token) = child.into_token() {
-            if token.kind() == SyntaxKind::KW_NEW {
-                found_new = true;
-                continue;
-            }
-            if found_new && token.kind() == SyntaxKind::IDENT {
-                return Some(token);
-            }
+    // Fallback: use first IDENT in expression range
+    let start_offset = expr_range.start();
+    for token in root.token_at_offset(start_offset) {
+        if token.kind() == SyntaxKind::IDENT {
+            return token.text_range();
         }
     }
-    None
+
+    // Ultimate fallback
+    expr_range
 }
 
-/// Find the KW_NEW token in a NEW_EXPR (for diagnostics when type name is missing)
-fn find_new_keyword(new_expr: &SyntaxNode) -> Option<SyntaxToken> {
-    for child in new_expr.children_with_tokens() {
-        if let Some(token) = child.into_token() {
-            if token.kind() == SyntaxKind::KW_NEW {
-                return Some(token);
-            }
-        }
-    }
-    None
-}
-
-/// Find the method name token that appears right before the ARG_LIST
-fn find_method_name_before_arg_list(
-    parent: &SyntaxNode,
-    arg_list: &SyntaxNode,
-) -> Option<SyntaxToken> {
-    let mut last_ident: Option<SyntaxToken> = None;
+/// Find the last IDENT token before ARG_LIST in a call expression.
+fn find_last_ident_before_arg_list(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let arg_list = node.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)?;
     let arg_list_start = arg_list.text_range().start();
 
-    // Use descendants_with_tokens to handle nested IDENT(node) > IDENT(token) and FIELD_EXPR
-    for child in parent.descendants_with_tokens() {
+    let mut last_ident: Option<SyntaxToken> = None;
+    for child in node.descendants_with_tokens() {
         if let syntax::NodeOrToken::Token(token) = child {
             if token.text_range().start() >= arg_list_start {
                 break;
@@ -229,322 +256,270 @@ fn find_method_name_before_arg_list(
             }
         }
     }
-
     last_ident
 }
 
-/// Find the start position of the call expression
-fn find_call_start(parent: &SyntaxNode, arg_list: &SyntaxNode) -> u32 {
-    let arg_list_start = arg_list.text_range().start();
+/// Find type name IDENT or KW_NEW token in NEW_EXPR.
+fn find_type_name_or_new_keyword(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let mut found_new = false;
+    let mut new_keyword: Option<SyntaxToken> = None;
 
-    // Look for the first IDENT or the first non-trivia token before ARG_LIST
-    for child in parent.children_with_tokens() {
-        let child_range = match &child {
-            syntax::NodeOrToken::Node(n) => n.text_range(),
-            syntax::NodeOrToken::Token(t) => t.text_range(),
-        };
-
-        if child_range.start() >= arg_list_start {
-            break;
-        }
-
-        match child {
-            syntax::NodeOrToken::Node(node) => {
-                if node.kind() == SyntaxKind::IDENT {
-                    return node.text_range().start().into();
-                }
+    for child in node.children_with_tokens() {
+        if let Some(token) = child.into_token() {
+            if token.kind() == SyntaxKind::KW_NEW {
+                found_new = true;
+                new_keyword = Some(token.clone());
+                continue;
             }
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::IDENT {
-                    return token.text_range().start().into();
-                }
+            if found_new && token.kind() == SyntaxKind::IDENT {
+                return Some(token); // Type name found
             }
         }
     }
 
-    parent.text_range().start().into()
+    // No type name - return KW_NEW
+    new_keyword
 }
 
-fn check_call(call_info: &CallInfo, config: &Config, line_index: &LineIndex) -> Option<Diagnostic> {
-    let start_line = line_index.line_col(TextSize::from(call_info.call_range_start)).line;
-    let end_line = line_index.line_col(TextSize::from(call_info.call_range_end)).line;
+/// Check a Call expression for nested function calls in parameters.
+#[allow(clippy::too_many_arguments)]
+fn check_call_expr(
+    expr_id: ExprId,
+    callee: &ExprId,
+    args: &[ExprId],
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<Diagnostic>,
+    config: &Config,
+    line_index: &LineIndex,
+    root: &SyntaxNode,
+) {
+    // Empty args - skip
+    if args.is_empty() {
+        return;
+    }
+
+    // Get expr range for line check
+    let Some(range) = source_map.expr_range(expr_id) else {
+        return;
+    };
 
     // ALWAYS skip single-line calls (matching Java behavior)
-    // Java: "однострочники пропускаем сразу" - line 116-118 in NestedFunctionInParametersDiagnostic.java
+    let start_line = line_index.line_col(range.start()).line;
+    let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
-        return None;
+        return;
     }
 
-    // Check if ARG_LIST is empty
-    if is_empty_arg_list(&call_info.arg_list) {
-        return None;
-    }
-
-    // Check for nested forbidden calls first
-    if !contains_forbidden_call(&call_info.arg_list, config) {
-        return None;
+    // Check if any argument contains forbidden nested calls
+    if !has_forbidden_nested_call(args, body, config) {
+        return;
     }
 
     // Check multiline param condition
     // allowOneliner=true: requires at least one param spanning multiple lines
     // allowOneliner=false: any nested call in multiline call is an error
-    if config.allow_oneliner && !has_multiline_param(&call_info.arg_list, line_index) {
-        return None;
+    if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
+        return;
     }
 
-    let message = if call_info.is_constructor {
-        format!(
-            "Убрать инициализацию параметров конструктора '{}' вложенными методами",
-            call_info.name_token.text()
-        )
-    } else {
-        format!(
-            "Убрать инициализацию параметров метода '{}' вложенными методами",
-            call_info.name_token.text()
-        )
+    // Get method name from callee
+    let method_name = match body.expr(*callee) {
+        Expr::Path(name) => name.as_str(),
+        _ => "метод", // fallback
     };
 
-    Some(Diagnostic {
+    // Get precise range for method name token (hybrid AST approach)
+    let name_range = find_name_token_range(range, root);
+
+    diagnostics.push(Diagnostic {
         code: DiagnosticCode::NestedFunctionInParameters,
-        message,
+        message: format!(
+            "Убрать инициализацию параметров метода '{}' вложенными методами",
+            method_name
+        ),
         severity: Severity::Warning,
-        range: call_info.name_token.text_range(),
+        range: name_range,
         tags: vec![],
         fixes: vec![],
-    })
+    });
 }
 
-fn is_empty_arg_list(arg_list: &SyntaxNode) -> bool {
-    !arg_list.children().any(|c| c.kind() == SyntaxKind::EXPR)
-}
-
-fn has_multiline_param(arg_list: &SyntaxNode, line_index: &LineIndex) -> bool {
-    for child in arg_list.children() {
-        if child.kind() == SyntaxKind::EXPR {
-            // Get the actual content range excluding trailing trivia (newlines, whitespace)
-            let start = child.text_range().start();
-            let end = get_content_end(&child);
-
-            let start_line = line_index.line_col(start).line;
-            let end_line = line_index.line_col(TextSize::from(end)).line;
-            if end_line > start_line {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Get the end position of actual content in a node, excluding trailing trivia
-fn get_content_end(node: &SyntaxNode) -> u32 {
-    // Find the last non-trivia token
-    let mut last_content_end = node.text_range().start().into();
-
-    for child in node.children_with_tokens() {
-        match child {
-            syntax::NodeOrToken::Token(token) => {
-                match token.kind() {
-                    SyntaxKind::NEWLINE | SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => {
-                        // Skip trivia
-                    }
-                    _ => {
-                        last_content_end = token.text_range().end().into();
-                    }
-                }
-            }
-            syntax::NodeOrToken::Node(n) => {
-                // Recursively find content end in child nodes
-                let child_end = get_content_end(&n);
-                if child_end > last_content_end {
-                    last_content_end = child_end;
-                }
-            }
-        }
-    }
-
-    last_content_end
-}
-
-/// Check if ARG_LIST contains any forbidden nested calls
-/// This does a proper tree traversal that stops at allowed global methods
-fn contains_forbidden_call(arg_list: &SyntaxNode, config: &Config) -> bool {
-    // Check each EXPR child (parameter) of the ARG_LIST
-    for child in arg_list.children() {
-        if child.kind() == SyntaxKind::EXPR && check_expr_for_forbidden_call(&child, config) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Recursively check an expression for forbidden calls
-fn check_expr_for_forbidden_call(expr: &SyntaxNode, config: &Config) -> bool {
-    // Look for ARG_LIST or CALL_EXPR in this expression (indicates a call)
-    for child in expr.children() {
-        if child.kind() == SyntaxKind::ARG_LIST {
-            // Found a call - determine if it's forbidden
-            let call_result = analyze_nested_call(expr, &child, config);
-            match call_result {
-                NestedCallResult::Forbidden => return true,
-                NestedCallResult::AllowedGlobal => {
-                    // Don't recurse into allowed global methods
-                    continue;
-                }
-                NestedCallResult::NotACall => {
-                    // Continue checking children
-                }
-            }
-        } else if child.kind() == SyntaxKind::CALL_EXPR {
-            // New AST: CALL_EXPR > (IDENT/FIELD_EXPR) + ARG_LIST
-            if let Some(nested_arg_list) =
-                child.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)
-            {
-                let call_result = analyze_nested_call(&child, &nested_arg_list, config);
-                match call_result {
-                    NestedCallResult::Forbidden => return true,
-                    NestedCallResult::AllowedGlobal => continue,
-                    NestedCallResult::NotACall => {}
-                }
-            }
-            // Recurse into CALL_EXPR children
-            if check_expr_for_forbidden_call(&child, config) {
-                return true;
-            }
-        } else if child.kind() == SyntaxKind::NEW_EXPR {
-            // Check if constructor has parameters
-            // Java: line 152-153 checks if newExpression has non-empty parameter list
-            if let Some(nested_arg_list) =
-                child.children().find(|c| c.kind() == SyntaxKind::ARG_LIST)
-            {
-                if !is_empty_arg_list(&nested_arg_list) {
-                    return true;
-                }
-            }
-        } else if child.kind() == SyntaxKind::FIELD_EXPR {
-            // Field access expression (Object.Field or Object.Method())
-            // Need to recursively check for calls inside field expressions
-            // e.g., Object.Method1().Method2() or Object.Field.Method()
-            if check_expr_for_forbidden_call(&child, config) {
-                return true;
-            }
-        } else if child.kind() == SyntaxKind::EXPR {
-            // Recurse into nested expressions
-            if check_expr_for_forbidden_call(&child, config) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-#[derive(Debug)]
-enum NestedCallResult {
-    Forbidden,
-    AllowedGlobal,
-    NotACall,
-}
-
-/// Analyze a nested call to determine if it's forbidden
-fn analyze_nested_call(
-    expr: &SyntaxNode,
-    arg_list: &SyntaxNode,
+/// Check a MethodCall expression for nested function calls in parameters.
+#[allow(clippy::too_many_arguments)]
+fn check_method_call_expr(
+    expr_id: ExprId,
+    method: &Name,
+    args: &[ExprId],
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<Diagnostic>,
     config: &Config,
-) -> NestedCallResult {
-    // Check if this is a constructor call (inside NEW_EXPR)
-    if expr.kind() == SyntaxKind::NEW_EXPR {
-        if !is_empty_arg_list(arg_list) {
-            return NestedCallResult::Forbidden;
-        }
-        return NestedCallResult::NotACall;
+    line_index: &LineIndex,
+    root: &SyntaxNode,
+) {
+    // Empty args - skip
+    if args.is_empty() {
+        return;
     }
 
-    // Find the method name
-    let Some(method_name) = find_method_name_in_expr(expr, arg_list) else {
-        // Can't determine method name - treat as potentially forbidden
-        return NestedCallResult::NotACall;
+    // Get expr range for line check
+    let Some(range) = source_map.expr_range(expr_id) else {
+        return;
     };
 
-    // Check if there's a DOT before the method name (method call vs global call)
-    if has_dot_before_method(expr, arg_list) {
-        // Method call (with DOT) - always forbidden
-        return NestedCallResult::Forbidden;
+    // ALWAYS skip single-line calls (matching Java behavior)
+    let start_line = line_index.line_col(range.start()).line;
+    let end_line = line_index.line_col(range.end()).line;
+    if start_line == end_line {
+        return;
     }
 
-    // Global call - check if in allowed list
-    if config.is_allowed_method(&method_name) {
-        NestedCallResult::AllowedGlobal
-    } else {
-        NestedCallResult::Forbidden
+    // Check if any argument contains forbidden nested calls
+    if !has_forbidden_nested_call(args, body, config) {
+        return;
     }
+
+    // Check multiline param condition
+    if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
+        return;
+    }
+
+    // Get precise range for method name token (hybrid AST approach)
+    let name_range = find_name_token_range(range, root);
+
+    diagnostics.push(Diagnostic {
+        code: DiagnosticCode::NestedFunctionInParameters,
+        message: format!(
+            "Убрать инициализацию параметров метода '{}' вложенными методами",
+            method.as_str()
+        ),
+        severity: Severity::Warning,
+        range: name_range,
+        tags: vec![],
+        fixes: vec![],
+    });
 }
 
-/// Find method name in an expression containing a call
-fn find_method_name_in_expr(expr: &SyntaxNode, arg_list: &SyntaxNode) -> Option<String> {
-    let arg_list_start = arg_list.text_range().start();
-    let mut last_ident: Option<String> = None;
+/// Check a New expression for nested function calls in parameters.
+#[allow(clippy::too_many_arguments)]
+fn check_new_expr(
+    expr_id: ExprId,
+    type_name: &Option<Name>,
+    args: &[ExprId],
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<Diagnostic>,
+    config: &Config,
+    line_index: &LineIndex,
+    root: &SyntaxNode,
+) {
+    // Empty args - skip
+    if args.is_empty() {
+        return;
+    }
 
-    // Use descendants to handle nested IDENT(node) > IDENT(token) and FIELD_EXPR structures
-    for token in expr.descendants_with_tokens() {
-        if let syntax::NodeOrToken::Token(t) = token {
-            if t.text_range().start() >= arg_list_start {
-                break;
+    // Get expr range for line check
+    let Some(range) = source_map.expr_range(expr_id) else {
+        return;
+    };
+
+    // ALWAYS skip single-line calls (matching Java behavior)
+    let start_line = line_index.line_col(range.start()).line;
+    let end_line = line_index.line_col(range.end()).line;
+    if start_line == end_line {
+        return;
+    }
+
+    // Check if any argument contains forbidden nested calls
+    if !has_forbidden_nested_call(args, body, config) {
+        return;
+    }
+
+    // Check multiline param condition
+    if config.allow_oneliner && !has_multiline_param_hir(args, body, source_map, line_index) {
+        return;
+    }
+
+    let display_name = type_name.as_ref().map(|n| n.as_str()).unwrap_or("Новый");
+
+    // Get precise range for constructor name token (hybrid AST approach)
+    let name_range = find_name_token_range(range, root);
+
+    diagnostics.push(Diagnostic {
+        code: DiagnosticCode::NestedFunctionInParameters,
+        message: format!(
+            "Убрать инициализацию параметров конструктора '{}' вложенными методами",
+            display_name
+        ),
+        severity: Severity::Warning,
+        range: name_range,
+        tags: vec![],
+        fixes: vec![],
+    });
+}
+
+/// Check if any argument has forbidden nested calls (HIR-based).
+fn has_forbidden_nested_call(args: &[ExprId], body: &Body, config: &Config) -> bool {
+    args.iter().any(|&arg_id| is_forbidden_call(arg_id, body, config))
+}
+
+/// Recursively check if an expression is or contains a forbidden call (HIR-based).
+fn is_forbidden_call(expr_id: ExprId, body: &Body, config: &Config) -> bool {
+    match body.expr(expr_id) {
+        Expr::Call { callee, .. } => {
+            // Global call - check if it's allowed
+            if let Expr::Path(name) = body.expr(*callee) {
+                if config.is_allowed_method(name.as_str()) {
+                    // Allowed global method - don't recurse into its arguments
+                    return false;
+                }
             }
-            if t.kind() == SyntaxKind::IDENT {
-                last_ident = Some(t.text().to_string());
-            }
+            // Forbidden global call OR has nested calls in its arguments
+            true
         }
+        Expr::MethodCall { .. } => {
+            // Method call (with DOT) - always forbidden
+            true
+        }
+        Expr::New { args, .. } => {
+            // Constructor with parameters - forbidden
+            !args.is_empty()
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            // Check both operands
+            is_forbidden_call(*lhs, body, config) || is_forbidden_call(*rhs, body, config)
+        }
+        Expr::UnaryOp { expr, .. } => is_forbidden_call(*expr, body, config),
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            is_forbidden_call(*condition, body, config)
+                || is_forbidden_call(*then_expr, body, config)
+                || is_forbidden_call(*else_expr, body, config)
+        }
+        Expr::Index { base, index } => {
+            is_forbidden_call(*base, body, config) || is_forbidden_call(*index, body, config)
+        }
+        Expr::Field { base, .. } => is_forbidden_call(*base, body, config),
+        _ => false,
     }
-
-    last_ident
 }
 
-/// Check if there's a DOT before the method name in the expression
-fn has_dot_before_method(expr: &SyntaxNode, arg_list: &SyntaxNode) -> bool {
-    let arg_list_start = arg_list.text_range().start();
-
-    for child in expr.children_with_tokens() {
-        let child_start = match &child {
-            syntax::NodeOrToken::Node(n) => n.text_range().start(),
-            syntax::NodeOrToken::Token(t) => t.text_range().start(),
+/// Check if any argument spans multiple lines (HIR-based).
+fn has_multiline_param_hir(
+    args: &[ExprId],
+    _body: &Body,
+    source_map: &BodySourceMap,
+    line_index: &LineIndex,
+) -> bool {
+    for &arg_id in args {
+        let Some(range) = source_map.expr_range(arg_id) else {
+            continue;
         };
 
-        if child_start >= arg_list_start {
-            break;
-        }
-
-        match child {
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::DOT {
-                    return true;
-                }
-            }
-            syntax::NodeOrToken::Node(node) => {
-                if node.kind() == SyntaxKind::EXPR {
-                    // Check recursively in nested EXPR
-                    if expr_contains_dot(&node) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Check if an expression contains a DOT token
-fn expr_contains_dot(expr: &SyntaxNode) -> bool {
-    for child in expr.children_with_tokens() {
-        match child {
-            syntax::NodeOrToken::Token(token) => {
-                if token.kind() == SyntaxKind::DOT {
-                    return true;
-                }
-            }
-            syntax::NodeOrToken::Node(node) => {
-                if node.kind() == SyntaxKind::EXPR && expr_contains_dot(&node) {
-                    return true;
-                }
-            }
+        let start_line = line_index.line_col(range.start()).line;
+        let end_line = line_index.line_col(range.end()).line;
+        if end_line > start_line {
+            return true;
         }
     }
     false
@@ -561,11 +536,22 @@ mod tests {
     use test_fixture::Fixture;
 
     fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
+        use ide_db::base_db::{SourceRoot, SourceRootId};
+        use vfs::{FileSet, VfsPath};
+
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().expect("fixture should have a file");
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for HIR (module_bodies) to work
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
         let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
