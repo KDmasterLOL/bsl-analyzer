@@ -332,11 +332,18 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         query_text
     };
 
+    // Safely get last ~100 chars for logging (find char boundary)
+    let log_start = text_before_cursor.len().saturating_sub(200); // ~100 chars in UTF-8
+    let log_start = (log_start..=text_before_cursor.len())
+        .find(|&i| text_before_cursor.is_char_boundary(i))
+        .unwrap_or(0);
+    let text_before_sample = &text_before_cursor[log_start..];
+
     tracing::info!(
         query_len = query_text.len(),
         offset = offset_usize,
         text_before_len = text_before_cursor.len(),
-        text_before_last_100 = %&text_before_cursor[text_before_cursor.len().saturating_sub(100)..],
+        text_before_sample = %text_before_sample,
         "detect_context"
     );
 
