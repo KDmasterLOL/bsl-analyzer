@@ -61,7 +61,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use ide_db::hir_def::{ModuleId, Name};
-use syntax::TextRange;
+use ide_db::TextRange;
 use vfs::FileId;
 
 /// Main entry point for MissingEventSubscriptionHandler diagnostic.

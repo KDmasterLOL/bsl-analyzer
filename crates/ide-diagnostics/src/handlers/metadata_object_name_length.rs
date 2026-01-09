@@ -8,7 +8,7 @@ use crate::metadata_diagnostic::MetadataDiagnostic;
 use crate::rules::metadata_object_name_length::MetadataObjectNameLength;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::traits::{MdObject, Module};
-use syntax::TextRange;
+use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::MetadataObjectNameLength) {

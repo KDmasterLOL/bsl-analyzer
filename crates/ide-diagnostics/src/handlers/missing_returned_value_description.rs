@@ -47,7 +47,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir::Method;
-use syntax::TextRange;
+use ide_db::TextRange;
 
 /// Run the MissingReturnedValueDescription diagnostic.
 ///
