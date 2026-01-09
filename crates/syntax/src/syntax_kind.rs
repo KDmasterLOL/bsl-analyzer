@@ -243,6 +243,8 @@ pub enum SyntaxKind {
     SDBL_COMPARISON_EXPR,     // Comparison operators (=, <>, <, >, etc.)
     SDBL_IN_EXPR,             // IN predicate (IN (values) or IN (subquery))
     SDBL_IS_NULL_EXPR,        // IS NULL / IS NOT NULL predicate
+    SDBL_BETWEEN_EXPR,        // BETWEEN predicate (expr BETWEEN low AND high)
+    SDBL_LIKE_EXPR,           // LIKE predicate (expr LIKE pattern [ESCAPE char])
     SDBL_ADDITIVE_EXPR,       // Additive operators (+, -)
     SDBL_MULTIPLICATIVE_EXPR, // Multiplicative operators (*, /, MOD)
     SDBL_UNARY_EXPR,          // Unary operators (+, -, NOT)
@@ -252,6 +254,8 @@ pub enum SyntaxKind {
     // Primary Expressions
     SDBL_COLUMN_REF,    // Column reference
     SDBL_FUNCTION_CALL, // Function call
+    SDBL_CASE_EXPR,     // CASE expression (CASE [expr] WHEN ... THEN ... [ELSE ...] END)
+    SDBL_WHEN_CLAUSE,   // WHEN clause in CASE expression
     SDBL_LITERAL,       // Literal value (number, string, boolean, null)
     SDBL_MULTI_STRING,  // Multiple string tokens or string with newlines (multiString: STR+)
     SDBL_PARAMETER,     // Parameter reference (&Parameter)

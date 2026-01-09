@@ -156,11 +156,24 @@ fn query(p: &mut Parser) {
         where_clause(p);
     }
 
-    // Phase 2: GROUP BY, HAVING, FOR UPDATE, INDEX BY
-    // if p.at(TokenKind::KwGroup) { group_by_clause(p); }
-    // if p.at(TokenKind::KwHaving) { having_clause(p); }
-    // if p.at(TokenKind::KwFor) { for_update_clause(p); }
-    // if p.at(TokenKind::KwIndex) { index_by_clause(p); }
+    // GROUP BY clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ") {
+        group_by_clause(p);
+    }
+
+    // HAVING clause (optional)
+    // TODO: Implement HAVING support
+    // p.skip_trivia();
+    // if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
+    //     having_clause(p);
+    // }
+
+    // ORDER BY clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
+        order_by_clause(p);
+    }
 
     m.complete(p, NodeKind::SdblQuery);
 }
@@ -558,4 +571,83 @@ fn top_clause(p: &mut Parser) {
     }
 
     m.complete(p, NodeKind::SdblTopClause);
+}
+
+/// Parse GROUP BY clause
+///
+/// Grammar: `GROUP BY expression (, expression)*`
+fn group_by_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // GROUP/СГРУППИРОВАТЬ keyword
+    eat_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ");
+    p.skip_trivia();
+
+    // BY/ПО keyword
+    if !at_sdbl_keyword(p, "BY", "ПО") {
+        // Error recovery: expected BY after GROUP
+        m.complete(p, NodeKind::SdblGroupClause);
+        return;
+    }
+    eat_sdbl_keyword(p, "BY", "ПО");
+    p.skip_trivia();
+
+    // Parse expressions (comma-separated list)
+    super::expressions::expression(p);
+
+    while p.eat(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.skip_trivia();
+        super::expressions::expression(p);
+    }
+
+    m.complete(p, NodeKind::SdblGroupClause);
+}
+
+/// Parse ORDER BY clause
+///
+/// Grammar: `ORDER BY orderByItem (, orderByItem)*`
+/// orderByItem: expression (ASC | DESC)?
+fn order_by_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // ORDER/УПОРЯДОЧИТЬ keyword
+    eat_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ");
+    p.skip_trivia();
+
+    // BY/ПО keyword
+    if !at_sdbl_keyword(p, "BY", "ПО") {
+        // Error recovery: expected BY after ORDER
+        m.complete(p, NodeKind::SdblOrderClause);
+        return;
+    }
+    eat_sdbl_keyword(p, "BY", "ПО");
+    p.skip_trivia();
+
+    // Parse order by items (comma-separated list)
+    order_by_item(p);
+
+    while p.eat(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.skip_trivia();
+        order_by_item(p);
+    }
+
+    m.complete(p, NodeKind::SdblOrderClause);
+}
+
+/// Parse single ORDER BY item
+///
+/// Grammar: `expression (ASC | DESC | ВОЗР | УБЫВ)?`
+fn order_by_item(p: &mut Parser) {
+    // Parse expression
+    super::expressions::expression(p);
+    p.skip_trivia();
+
+    // Optional ASC/DESC/ВОЗР/УБЫВ modifier
+    if p.at_keyword("ASC") || p.at_keyword("ВОЗР") || p.at_keyword("DESC") || p.at_keyword("УБЫВ")
+    {
+        p.bump(); // Consume ASC/DESC
+        p.skip_trivia();
+    }
 }

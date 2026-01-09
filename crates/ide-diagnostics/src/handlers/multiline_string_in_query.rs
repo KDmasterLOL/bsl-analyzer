@@ -96,7 +96,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         );
 
         // Extract diagnostics recursively (including UNION subqueries)
-        extract_diagnostics(sdbl_hir, &mapper, &query_info.query_text, &mut diagnostics);
+        extract_diagnostics(&sdbl_hir.hir, &mapper, &query_info.query_text, &mut diagnostics);
     }
 
     debug!(

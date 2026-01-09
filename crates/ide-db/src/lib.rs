@@ -21,8 +21,8 @@ pub use vfs;
 
 /// Type alias for SDBL HIR entries in a file.
 ///
-/// Maps ExprId (from BSL HIR) to the corresponding SDBL HIR.
-pub type SdblHirEntries = Arc<Vec<(hir_def::ExprId, Arc<sdbl_hir::SdblHir>)>>;
+/// Maps ExprId (from BSL HIR) to the corresponding SDBL HIR and source map.
+pub type SdblHirEntries = Arc<Vec<(hir_def::ExprId, Arc<sdbl_hir::SdblLowerResult>)>>;
 
 pub mod metadata;
 pub mod queries;
@@ -1272,8 +1272,8 @@ mod tests {
 
         // Verify HIR structure
         let (_, sdbl_hir) = &hirs[0];
-        assert!(!sdbl_hir.from.is_empty(), "Should have FROM clause");
-        assert_eq!(sdbl_hir.from[0].full_name, "Справочник.Товары");
+        assert!(!sdbl_hir.hir.from.is_empty(), "Should have FROM clause");
+        assert_eq!(sdbl_hir.hir.from[0].full_name, "Справочник.Товары");
     }
 
     #[test]
@@ -1302,10 +1302,10 @@ mod tests {
         assert_eq!(hirs.len(), 2, "Should have 2 SDBL HIRs");
 
         // Verify first query
-        assert_eq!(hirs[0].1.from[0].full_name, "Справочник.Товары");
+        assert_eq!(hirs[0].1.hir.from[0].full_name, "Справочник.Товары");
 
         // Verify second query
-        assert_eq!(hirs[1].1.from[0].full_name, "Документ.РасходнаяНакладная");
+        assert_eq!(hirs[1].1.hir.from[0].full_name, "Документ.РасходнаяНакладная");
     }
 
     #[test]
@@ -1358,7 +1358,7 @@ mod tests {
 КонецПроцедуры"#,
         );
         let hirs1 = db.sdbl_hir_in_file(file_id);
-        assert_eq!(hirs1[0].1.from[0].full_name, "Справочник.Товары");
+        assert_eq!(hirs1[0].1.hir.from[0].full_name, "Справочник.Товары");
 
         // Change query
         db.set_file_text(
@@ -1373,6 +1373,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&hirs1, &hirs2), "Should invalidate cache on file change");
 
         // Should have new content
-        assert_eq!(hirs2[0].1.from[0].full_name, "Документ.Продажа");
+        assert_eq!(hirs2[0].1.hir.from[0].full_name, "Документ.Продажа");
     }
 }

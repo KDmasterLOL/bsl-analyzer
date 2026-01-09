@@ -124,6 +124,13 @@ fn predicate_expr(p: &mut Parser) {
 
     p.skip_trivia();
 
+    // Check for optional NOT before predicates (NOT IN, NOT BETWEEN, NOT LIKE)
+    // The NOT token is recorded in the predicate node and processed during lowering
+    if p.at(TokenKind::KwNot) {
+        p.bump(); // NOT / НЕ
+        p.skip_trivia();
+    }
+
     // Check for IN predicate
     if p.at(TokenKind::KwIn) {
         p.bump(); // IN / В
@@ -172,6 +179,47 @@ fn predicate_expr(p: &mut Parser) {
         p.bump(); // NULL
 
         m.complete(p, NodeKind::SdblIsNullExpr);
+    }
+    // Check for BETWEEN predicate
+    else if p.at_keyword("BETWEEN") || p.at_keyword("МЕЖДУ") {
+        p.bump(); // BETWEEN / МЕЖДУ
+        p.skip_trivia();
+
+        // Parse low expression
+        additive_expr(p);
+        p.skip_trivia();
+
+        // Expect AND keyword
+        if !p.at(TokenKind::KwAnd) {
+            // Error recovery: expected AND in BETWEEN
+            m.complete(p, NodeKind::SdblBetweenExpr);
+            return;
+        }
+        p.bump(); // AND / И
+        p.skip_trivia();
+
+        // Parse high expression
+        additive_expr(p);
+
+        m.complete(p, NodeKind::SdblBetweenExpr);
+    }
+    // Check for LIKE predicate
+    else if p.at_keyword("LIKE") || p.at_keyword("ПОДОБНО") {
+        p.bump(); // LIKE / ПОДОБНО
+        p.skip_trivia();
+
+        // Parse pattern expression
+        additive_expr(p);
+        p.skip_trivia();
+
+        // Optional ESCAPE clause
+        if p.at_keyword("ESCAPE") || p.at_keyword("СПЕЦСИМВОЛ") {
+            p.bump(); // ESCAPE / СПЕЦСИМВОЛ
+            p.skip_trivia();
+            additive_expr(p);
+        }
+
+        m.complete(p, NodeKind::SdblLikeExpr);
     }
     // Check for comparison operators
     else if matches!(
@@ -249,10 +297,16 @@ fn unary_expr(p: &mut Parser) {
     }
 }
 
-/// Parse primary expression (literals, columns, functions, parenthesized expressions)
+/// Parse primary expression (literals, columns, functions, parenthesized expressions, CASE)
 ///
-/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN`
+/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression`
 fn primary_expr(p: &mut Parser) {
+    // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
+    if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
+        case_expr(p);
+        return;
+    }
+
     match p.current() {
         Some(TokenKind::LParen) => paren_or_subquery_expr(p),
         Some(TokenKind::Ident) => column_or_function(p),
@@ -413,4 +467,94 @@ fn column_or_function(p: &mut Parser) {
         // Simple column reference (no DOT, no LPAREN)
         m.complete(p, NodeKind::SdblColumnRef);
     }
+}
+
+/// Parse CASE expression
+///
+/// Grammar:
+/// ```text
+/// caseExpression:
+///     CASE [operand]
+///     (WHEN condition THEN result)+
+///     [ELSE elseResult]
+///     END
+/// ```
+///
+/// Two forms:
+/// - Simple CASE: `CASE operand WHEN value THEN result ...`
+/// - Searched CASE: `CASE WHEN condition THEN result ...`
+fn case_expr(p: &mut Parser) {
+    let m = p.start();
+
+    p.bump(); // CASE / ВЫБОР
+    p.skip_trivia();
+
+    // Check if this is a simple CASE (has operand) or searched CASE (no operand)
+    // Lookahead: if next token is WHEN, it's searched CASE
+    let is_searched_case = p.at_keyword("WHEN") || p.at_keyword("КОГДА");
+
+    if !is_searched_case {
+        // Simple CASE: parse operand expression
+        expression(p);
+        p.skip_trivia();
+    }
+
+    // Parse one or more WHEN clauses
+    let mut has_when = false;
+    while p.at_keyword("WHEN") || p.at_keyword("КОГДА") {
+        has_when = true;
+        when_clause(p);
+        p.skip_trivia();
+    }
+
+    if !has_when {
+        // Error recovery: CASE without WHEN clauses
+        p.error();
+    }
+
+    // Optional ELSE clause
+    if p.at_keyword("ELSE") || p.at_keyword("ИНАЧЕ") {
+        p.bump(); // ELSE / ИНАЧЕ
+        p.skip_trivia();
+        expression(p);
+        p.skip_trivia();
+    }
+
+    // Required END keyword
+    if !p.at_keyword("END") && !p.at_keyword("КОНЕЦ") {
+        // Error recovery: expected END after CASE
+        p.error();
+    } else {
+        p.bump(); // END / КОНЕЦ
+    }
+
+    m.complete(p, NodeKind::SdblCaseExpr);
+}
+
+/// Parse WHEN clause in CASE expression
+///
+/// Grammar: `WHEN condition THEN result`
+fn when_clause(p: &mut Parser) {
+    let m = p.start();
+
+    p.bump(); // WHEN / КОГДА
+    p.skip_trivia();
+
+    // Parse condition expression
+    expression(p);
+    p.skip_trivia();
+
+    // Expect THEN keyword
+    if !p.at_keyword("THEN") && !p.at_keyword("ТОГДА") {
+        // Error recovery: expected THEN after WHEN condition
+        m.complete(p, NodeKind::SdblWhenClause);
+        return;
+    }
+    p.bump(); // THEN / ТОГДА
+    p.skip_trivia();
+
+    // Parse result expression
+    expression(p);
+
+    m.complete(p, NodeKind::SdblWhenClause);
 }
