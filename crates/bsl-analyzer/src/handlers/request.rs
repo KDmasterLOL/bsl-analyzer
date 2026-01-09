@@ -146,6 +146,22 @@ pub fn handle_completion(
 
     let line_index = LineIndex::new(&text);
 
+    // Log the actual line content for debugging
+    let line_num = position.line as usize;
+    let lines: Vec<&str> = text.lines().collect();
+    if line_num < lines.len() {
+        let line_text = lines[line_num];
+        tracing::info!(
+            "Line {} content (first 100 chars): {:?}",
+            line_num,
+            &line_text.chars().take(100).collect::<String>()
+        );
+        tracing::info!(
+            "Position.character={} (UTF-16 code units from line start)",
+            position.character
+        );
+    }
+
     // Convert position to offset
     let offset = crate::lsp::offset(&line_index, position)?;
     tracing::info!("Converted position to offset: {:?}", offset);
