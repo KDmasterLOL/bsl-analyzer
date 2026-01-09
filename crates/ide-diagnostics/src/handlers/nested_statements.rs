@@ -1,3 +1,59 @@
+//! NestedStatements diagnostic.
+//!
+//! Detects control flow statements (IF, WHILE, FOR, TRY) nested too deeply.
+//!
+//! ## Why?
+//! Deeply nested control structures make code hard to read, understand, and test.
+//! They often indicate poor decomposition and lack of abstraction.
+//!
+//! ## Bad practice
+//! ```bsl
+//! Если условие1 Тогда
+//!     Если условие2 Тогда
+//!         Если условие3 Тогда
+//!             Если условие4 Тогда
+//!                 Если условие5 Тогда  // 5 levels - violation!
+//!                     // deep nested logic
+//!                 КонецЕсли;
+//!             КонецЕсли;
+//!         КонецЕсли;
+//!     КонецЕсли;
+//! КонецЕсли;
+//! ```
+//!
+//! ## Good practice
+//! Extract logic into separate functions or use early returns:
+//! ```bsl
+//! Если НЕ условие1 Тогда
+//!     Возврат;
+//! КонецЕсли;
+//!
+//! Если НЕ условие2 Тогда
+//!     Возврат;
+//! КонецЕсли;
+//!
+//! // main logic here (flat structure)
+//! ```
+//!
+//! ## Configuration
+//! - **maxAllowedLevel** (default: 4) - Maximum allowed nesting depth
+//! - **Enabled by default:** Yes
+//! - **Severity:** CRITICAL
+//! - **Tags:** BRAINOVERLOAD (concept)
+//! - **Minutes to fix:** 30
+//!
+//! ## Implementation
+//! Ported from: NestedStatementsDiagnostic.java (bsl-language-server)
+//!
+//! Algorithm:
+//! - Recursive AST traversal with depth tracking
+//! - Counts nesting levels for IF, WHILE, FOR, FOR_EACH, TRY statements
+//! - Reports the deepest (leaf) statement that exceeds threshold
+//!
+//! ## Note
+//! This diagnostic uses AST (not HIR) because it checks structural properties only.
+//! AST tree traversal is simpler and more efficient for this use case.
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
