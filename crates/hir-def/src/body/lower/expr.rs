@@ -931,6 +931,20 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         if let Some(qualified_path) = qualified_path_opt {
             // This is a qualified call - create Call with QualifiedPath as callee
             // Example: Module.Method(args) → Call { callee: QualifiedPath([Module, Method]), args }
+
+            // Emit MissingCommonModuleMethod diagnostic for two-level calls (Module.Method)
+            // Resolution and export validation will happen in from_hir() handler with ctx.db
+            if qualified_path.len() == 2 {
+                let module = qualified_path.first().as_str().to_string();
+                let method = qualified_path.last().as_str().to_string();
+
+                ctx.diagnostics.push(BodyDiagnostic::MissingCommonModuleMethod {
+                    module,
+                    method,
+                    range: node.text_range(),
+                });
+            }
+
             let callee = ctx.alloc_expr(Expr::QualifiedPath(qualified_path), node.text_range());
             Expr::Call { callee, args: args.into_boxed_slice() }
         } else {

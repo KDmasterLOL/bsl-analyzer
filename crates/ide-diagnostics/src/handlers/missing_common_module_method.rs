@@ -61,57 +61,7 @@ use ide_db::hir_def::{ModuleId, Name, PathResolution, QualifiedName};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
-/// Creates diagnostic from HIR BodyDiagnostic (new HIR-based approach).
-///
-/// This is a temporary function during refactoring. Once Phase 4-5 are complete,
-/// this will become the only `from_hir()` function.
-///
-/// # Arguments
-///
-/// * `module` - CommonModule name
-/// * `method` - Method name
-/// * `reason` - Error reason (MethodNotFound, NonExportMethod, ModuleNotFound)
-/// * `range` - Source range for diagnostic
-/// * `ctx` - Diagnostics context
-pub fn from_hir_new(
-    module: &str,
-    method: &str,
-    reason: &hir_def::CommonModuleMethodError,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MissingCommonModuleMethod) {
-        return None;
-    }
-
-    use hir_def::CommonModuleMethodError;
-
-    let message = match reason {
-        CommonModuleMethodError::MethodNotFound => {
-            format!("Метод {} общего модуля {} не существует", method, module)
-        }
-        CommonModuleMethodError::NonExportMethod => {
-            format!(
-                "Исправьте обращение к закрытому, неэкспортному методу {} общего модуля {}",
-                method, module
-            )
-        }
-        CommonModuleMethodError::ModuleNotFound => {
-            format!("Общий модуль {} не найден", module)
-        }
-    };
-
-    Some(Diagnostic {
-        code: DiagnosticCode::MissingCommonModuleMethod,
-        message,
-        severity: Severity::Blocker,
-        range,
-        tags: vec![],
-        fixes: vec![],
-    })
-}
-
-/// Creates diagnostic from HIR BodyDiagnostic (old approach - to be removed).
+/// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::MissingCommonModuleMethod` is encountered.
 ///

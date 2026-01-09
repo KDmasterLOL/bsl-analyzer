@@ -46,10 +46,7 @@ use std::sync::Arc;
 
 use vfs::FileId;
 
-pub use body::{
-    lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, CommonModuleMethodError,
-    LowerResult,
-};
+pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, LowerResult};
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules

@@ -329,21 +329,18 @@ pub enum BodyDiagnostic {
 
     /// Missing or non-export method call in CommonModule.
     ///
-    /// Collected during HIR lowering when qualified path resolution fails
-    /// or method is not exported.
+    /// Collected during HIR lowering when encountering qualified calls (Module.Method).
+    /// The actual validation (resolution + export check) happens in from_hir() handler
+    /// with access to ctx.db.
     ///
     /// Examples:
-    /// - `CommonModule.NonExistentMethod()` → MethodNotFound
-    /// - `CommonModule.PrivateMethod()` → NonExportMethod
+    /// - `CommonModule.NonExistentMethod()`
+    /// - `CommonModule.PrivateMethod()`
+    /// - `NonExistentModule.Method()`
     ///
-    /// This diagnostic is created by the resolver during path resolution and
-    /// represents all cases where a CommonModule method call cannot succeed.
-    MissingCommonModuleMethod {
-        module: String,
-        method: String,
-        reason: CommonModuleMethodError,
-        range: TextRange,
-    },
+    /// The diagnostic handler will determine the specific error type (MethodNotFound,
+    /// NonExportMethod, ModuleNotFound) using workspace symbols and SymbolTree.
+    MissingCommonModuleMethod { module: String, method: String, range: TextRange },
 
     /// Overwrite of byValue parameter without prior use.
     /// Emitted during lowering when a parameter marked with Знач/ByValue is assigned to.
@@ -466,30 +463,6 @@ pub enum BodyDiagnostic {
     /// Detected when template string has mismatched parameter count, invalid placeholders, or wrong numbers.
     /// Checks: %1-%10 valid, %0/%11+ invalid, parameter count matches placeholders.
     IncorrectUseOfStrTemplate { range: TextRange },
-}
-
-/// Error types for MissingCommonModuleMethod diagnostic.
-///
-/// Represents different reasons why a CommonModule method call cannot succeed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommonModuleMethodError {
-    /// Method does not exist in the referenced CommonModule.
-    ///
-    /// Example: `CommonModule.NonExistentMethod()`
-    MethodNotFound,
-
-    /// Method exists but lacks `Экспорт` (Export) keyword.
-    ///
-    /// Example: `CommonModule.PrivateMethod()` where PrivateMethod exists but is not exported
-    NonExportMethod,
-
-    /// CommonModule not found in metadata.
-    ///
-    /// This can happen if:
-    /// - Module name is misspelled
-    /// - Metadata is not loaded
-    /// - Module exists but file is not in VFS
-    ModuleNotFound,
 }
 
 /// Category of deprecated attribute (8.3.12).
