@@ -327,6 +327,14 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let literal_start = literal_node.text_range().start();
     let offset_in_literal = offset - literal_start;
 
+    tracing::info!(
+        "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}",
+        offset,
+        literal_start,
+        offset_in_literal,
+        literal_text.len()
+    );
+
     // Extract query text by removing quotes and | prefixes
     let query_text = extract_query_text(&literal_text);
 
