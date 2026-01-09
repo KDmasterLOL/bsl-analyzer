@@ -329,3 +329,66 @@ fn test_if_else_duplicated_range_correct() {
         assert!(text.contains("А = 1"), "Range should cover the duplicated statement");
     }
 }
+
+#[test]
+fn test_preprocessor_split_expressions() {
+    // Test from IdenticalExpressionsDiagnostic.bsl fixture
+    let mut db = RootDatabaseImpl::new();
+    let file_id = FileId::from_raw(0);
+    let code = r#"
+// Split expression with region
+Результат = Истина
+#Область ЕщеОднаОбласть
+ ИЛИ Истина;
+#КонецОбласти
+
+// Split expression with preprocessor
+Результат2 = Истина
+#Если ВебКлиент Тогда
+ ИЛИ Ложь
+#Иначе
+ ИЛИ ЗначениеВыражения()
+#КонецЕсли
+ ИЛИ Истина;
+"#;
+
+    db.set_file_text(file_id, code);
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+
+    println!("=== PARSE ERRORS ===");
+    for error in parse.errors() {
+        println!("{:?}", error);
+    }
+
+    println!("\n=== SYNTAX TREE ===");
+    println!("{:#?}", root);
+
+    let result = super::super::lower_module_code(&root);
+
+    println!("\n=== HIR LOWERING ===");
+    println!("Body stmts: {}", result.body.body_stmts.len());
+    for (idx, stmt_id) in result.body.body_stmts.iter().enumerate() {
+        println!("  Stmt {}: {:?}", idx, result.body.stmts[*stmt_id]);
+    }
+
+    println!("\nBody exprs: {}", result.body.exprs.len());
+    for (expr_id, expr) in result.body.exprs.iter() {
+        println!("  {:?}: {:?}", expr_id, expr);
+    }
+
+    println!("\nDiagnostics: {}", result.diagnostics.len());
+    for diag in &result.diagnostics {
+        println!("  {:?}", diag);
+    }
+
+    // Key questions to answer:
+    // 1. How many statements are lowered?
+    // 2. Are the split expressions represented in HIR?
+    // 3. Are there ERROR nodes in the parse tree?
+
+    // The fixture shows this should work, so we expect:
+    // - 2 statements (both assignments)
+    // - Split expressions should be represented in HIR
+    // We're just inspecting for now - assertions will come after we understand the behavior
+}
