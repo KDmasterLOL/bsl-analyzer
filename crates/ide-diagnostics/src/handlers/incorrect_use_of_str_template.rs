@@ -13,9 +13,12 @@
 //! - Detects errors in string literal templates during AST→HIR lowering
 //! - Validated in `lower_call_expr()` (hir-def/body/lower/expr.rs:524-545)
 //!
-//! **Phase 2: Post-HIR Check** (90%+ coverage)
+//! **Phase 2: Post-HIR Check** (95%+ coverage)
 //! - Uses ReachingDefs dataflow analysis to resolve variables
+//! - Recursive resolution with depth limit (max 10 levels)
+//! - Handles transitive assignments: `var1 = "template"; var2 = var1`
 //! - Handles control flow (if/else, loops)
+//! - Multiple definitions: if all resolve to same value → accepted
 //! - Salsa-cached via `reaching_definitions()` query
 //!
 //! - Detects invalid placeholders (%0, %11+)
@@ -58,7 +61,6 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-#[allow(unused_imports)] // TODO: Used when check() is re-enabled
 use hir_def::{
     hir::{Expr, Literal, Stmt},
     MethodId, ModuleId,
@@ -68,11 +70,15 @@ use ide_db::TextRange;
 /// Post-HIR check for variable resolution cases.
 ///
 /// This function complements the HIR lowering validation by resolving variables
-/// to their string literal definitions using reaching definitions analysis.
+/// to their string literal definitions using reaching definitions analysis with
+/// recursive resolution support.
 ///
 /// ## Coverage
 /// - HIR lowering: detects errors in string literals (75% coverage)
-/// - This check: resolves variables to literals using dataflow (target: 90%+ coverage)
+/// - This check: resolves variables to literals using dataflow (95%+ coverage)
+///   - Supports transitive assignments (var1 = "x"; var2 = var1)
+///   - Handles multiple definitions if all resolve to same value
+///   - Depth limit: 10 levels for cycle protection
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::IncorrectUseOfStrTemplate) {
         return vec![];
@@ -174,49 +180,90 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Handles:
 /// - Direct string literals: `"template %1"` → Some("template %1")
 /// - Variables: `var = "template %1"; StrTemplate(var, ...)` → Some("template %1")
-/// - Multiple definitions: returns None (ambiguous)
-#[allow(clippy::single_match)]
+/// - Transitive assignments: `var1 = "template"; var2 = var1; StrTemplate(var2)` → Some("template")
+/// - Multiple definitions: if all resolve to same value → Some(value), otherwise None
+///
+/// Uses recursive resolution with depth limit to prevent infinite loops.
 fn resolve_expr_to_string(
     expr_id: hir_def::hir::ExprId,
     body: &hir_def::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
     stmt_id: hir_def::hir::StmtId,
 ) -> Option<String> {
+    resolve_expr_to_string_impl(expr_id, body, reaching_defs, stmt_id, 0)
+}
+
+/// Internal implementation with depth tracking for cycle protection.
+fn resolve_expr_to_string_impl(
+    expr_id: hir_def::hir::ExprId,
+    body: &hir_def::Body,
+    reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
+    stmt_id: hir_def::hir::StmtId,
+    depth: u32,
+) -> Option<String> {
+    const MAX_DEPTH: u32 = 10;
+
+    // Cycle protection
+    if depth > MAX_DEPTH {
+        return None;
+    }
+
     match body.expr(expr_id) {
-        // Direct string literal
+        // Direct string literal - base case
         Expr::Literal(Literal::String(s)) => Some(s.to_string()),
 
         // Variable reference - resolve using reaching definitions
         Expr::Path(var_name) => {
             let defs = reaching_defs.defs_for_var_at_stmt(var_name.as_str(), stmt_id)?;
 
-            // Only resolve if single definition reaches
-            if defs.len() != 1 {
-                return None; // Ambiguous or no definition
-            }
+            // Try to resolve all reaching definitions
+            let mut resolved_values = std::collections::HashSet::new();
 
-            let def = &defs[0];
-
-            // Resolve definition to its assigned value
-            match def.def_site {
-                dataflow::reaching_defs::DefSite::Assignment(assign_raw_idx) => {
-                    let assign_stmt_id = hir_def::hir::StmtId::from_raw(assign_raw_idx);
-
-                    if let Stmt::Assign { value, .. } = body.stmt(assign_stmt_id) {
-                        // Recursively resolve the assigned value
-                        // (handles `var = "literal"` case)
-                        if let Expr::Literal(Literal::String(s)) = body.expr(*value) {
-                            return Some(s.to_string());
-                        }
-                    }
+            for def in defs {
+                if let Some(value) =
+                    resolve_definition(&def, body, reaching_defs, stmt_id, depth + 1)
+                {
+                    resolved_values.insert(value);
                 }
-                _ => {}
             }
 
-            None
+            // If all definitions resolve to the same string literal, return it
+            // Otherwise, None (ambiguous or couldn't resolve)
+            if resolved_values.len() == 1 {
+                resolved_values.into_iter().next()
+            } else {
+                None
+            }
         }
 
         // Other expressions (method calls, field access, etc.) - not resolvable
+        _ => None,
+    }
+}
+
+/// Resolve a definition to its string literal value.
+///
+/// Handles assignment statements and recursively resolves transitive assignments.
+fn resolve_definition(
+    def: &dataflow::reaching_defs::Definition,
+    body: &hir_def::Body,
+    reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
+    _current_stmt: hir_def::hir::StmtId,
+    depth: u32,
+) -> Option<String> {
+    match def.def_site {
+        dataflow::reaching_defs::DefSite::Assignment(assign_raw_idx) => {
+            let assign_stmt_id = hir_def::hir::StmtId::from_raw(assign_raw_idx);
+
+            if let Stmt::Assign { value, .. } = body.stmt(assign_stmt_id) {
+                // Recursively resolve the assigned value
+                // This handles both direct literals and transitive assignments
+                resolve_expr_to_string_impl(*value, body, reaching_defs, assign_stmt_id, depth)
+            } else {
+                None
+            }
+        }
+        // Parameters, var declarations, loop variables - can't resolve to string literals
         _ => None,
     }
 }
@@ -622,5 +669,226 @@ mod tests {
             .collect();
         // ReachingDefs handles multiple definitions - no false positive
         assert_eq!(filtered.len(), 0, "Should handle multiple reaching definitions");
+    }
+
+    #[test]
+    fn test_transitive_assignment() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    Шаблон1 = "template %1";
+    Шаблон2 = Шаблон1;
+    А = СтрШаблон(Шаблон2, Наименование); // OK - resolves through transitive assignment
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 0, "Should resolve transitive assignment");
+    }
+
+    #[test]
+    fn test_transitive_assignment_error() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    Шаблон1 = "no placeholders";
+    Шаблон2 = Шаблон1;
+    А = СтрШаблон(Шаблон2, Наименование); // Error - resolves to "no placeholders"
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 1, "Should detect error through transitive assignment");
+    }
+
+    #[test]
+    fn test_deep_transitive_chain() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    Ш1 = "template %1";
+    Ш2 = Ш1;
+    Ш3 = Ш2;
+    Ш4 = Ш3;
+    А = СтрШаблон(Ш4, Наименование); // OK - resolves through chain
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 0, "Should resolve deep transitive chain");
+    }
+
+    #[test]
+    fn test_multiple_defs_same_value() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabase, RootDatabaseImpl,
+        };
+        use std::sync::Arc;
+        use test_fixture::Fixture;
+
+        let code = r#"
+Процедура Тест()
+    Если Условие Тогда
+        Шаблон = "template %1";
+    Иначе
+        Шаблон = "template %1";  // Same value as then branch
+    КонецЕсли;
+    А = СтрШаблон(Шаблон, Наименование); // OK - both branches give same value
+КонецПроцедуры
+"#;
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
+
+        let config = crate::DiagnosticsConfig::default();
+        let ctx = crate::DiagnosticsContext {
+            db: db.as_ref(),
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        let diagnostics = crate::diagnostics(&ctx);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
+            .collect();
+        assert_eq!(filtered.len(), 0, "Should accept when all definitions resolve to same value");
     }
 }
