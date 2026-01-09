@@ -54,12 +54,26 @@
 //! Ported from:
 //! - InternetAccessDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
-//! Adapted to use Rowan SyntaxNode.
-//! Follows the pattern from file_system_access.rs.
+//! **Architecture:** HIR-based diagnostic (migrated from AST).
+//!
+//! ### HIR approach
+//! - Scans `Expr::New { type_name, args }` in method bodies and module-level code
+//! - Supports both named constructors (`Новый HTTPСоединение(...)`) and string constructors (`Новый("HTTPСоединение")`)
+//! - Case-insensitive matching against 18 internet access patterns
+//! - Uses `ModuleBodies` and `BodySourceMap` for accurate source locations
+//!
+//! ### Advantages over AST
+//! - Semantic analysis - operates on lowered HIR representation
+//! - Salsa caching - benefits from automatic invalidation
+//! - Consistent with other diagnostics - same pattern as identical_expressions, incorrect_use_of_str_template
+//! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir_def::{
+    hir::{Expr, Literal},
+    ModuleId,
+};
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode};
 
 /// Constructor types that indicate internet access.
 ///
@@ -86,28 +100,31 @@ const NEW_EXPRESSION_PATTERNS: &[&str] = &[
     "internetproxy",
 ];
 
+/// HIR-based check for internet access operations.
+///
+/// Scans all method bodies and module-level code for NEW expressions
+/// that create internet access types (HTTP, FTP, Mail, etc.).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::InternetAccess) {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
-    let mut seen_ranges = std::collections::HashSet::new();
+    let module_id = ModuleId { file_id: ctx.file_id };
+    let module_bodies = ctx.db.module_bodies(module_id);
 
-    // ✅ OPTIMIZATION: Collect nodes ONCE instead of O(N²) nested tree traversal
-    let all_nodes: Vec<_> = root.descendants().collect();
+    // Check method bodies
+    for (_local_id, body, source_map) in module_bodies.method_bodies() {
+        check_body_for_internet_access(body, source_map, &mut diagnostics);
+    }
 
-    // Check NEW_EXPR nodes for internet access types
-    for node in all_nodes.iter() {
-        if node.kind() == SyntaxKind::NEW_EXPR {
-            if let Some(range) = extract_new_expr_range(node) {
-                if seen_ranges.insert(range) {
-                    diagnostics.push(create_diagnostic(range));
-                }
-            }
-        }
+    // Check module-level code
+    if let Some(lower_result) = module_bodies.module_code_result() {
+        check_body_for_internet_access(
+            &lower_result.body,
+            &lower_result.source_map,
+            &mut diagnostics,
+        );
     }
 
     diagnostics.sort_by_key(|d| d.range.start());
@@ -125,62 +142,44 @@ fn create_diagnostic(range: TextRange) -> Diagnostic {
     }
 }
 
-/// Extract range of internet access type from NEW_EXPR node.
+/// Check a single body (method or module-level code) for internet access operations.
 ///
-/// Returns the range of the entire NEW_EXPR node if it matches internet access patterns.
-/// This matches Java bsl-language-server behavior.
-///
-/// Examples:
-/// - `Новый HTTPСоединение(...)` → range of entire "Новый HTTPСоединение(...)"
-/// - `Новый FTPConnection` → range of entire "Новый FTPConnection"
-/// - `Новый("InternetMail")` → range of entire "Новый("InternetMail")"
-fn extract_new_expr_range(node: &SyntaxNode) -> Option<TextRange> {
-    // NEW_EXPR pattern: KW_NEW IDENT [LPAREN ...]
-    // or: KW_NEW LPAREN STRING RPAREN
-    let mut found_new_kw = false;
+/// Scans all expressions in the body looking for NEW expressions that match
+/// internet access patterns.
+fn check_body_for_internet_access(
+    body: &hir_def::Body,
+    source_map: &hir_def::body::BodySourceMap,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (expr_id, expr) in body.exprs.iter() {
+        if let Expr::New { type_name, args } = expr {
+            let mut detected = false;
 
-    // Check immediate children
-    for element in node.children_with_tokens() {
-        if let Some(token) = element.as_token() {
-            if token.kind() == SyntaxKind::KW_NEW {
-                found_new_kw = true;
-                continue;
-            }
-
-            // Pattern 1: Новый IDENT
-            if found_new_kw && token.kind() == SyntaxKind::IDENT {
-                let type_name = token.text().to_lowercase();
-
-                if NEW_EXPRESSION_PATTERNS.contains(&type_name.as_str()) {
-                    // Return range of entire NEW_EXPR node
-                    return Some(node.text_range());
+            // Pattern 1: Новый HTTPСоединение(...)
+            if let Some(name) = type_name {
+                let type_text = name.as_str().to_lowercase();
+                if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
+                    detected = true;
                 }
-
-                break;
-            }
-        }
-    }
-
-    // Pattern 2: Новый(STRING) - STRING may be inside EXPR child node
-    // Check all descendant STRING tokens
-    if found_new_kw {
-        for token in node.descendants_with_tokens() {
-            if let Some(token) = token.as_token() {
-                if token.kind() == SyntaxKind::STRING {
-                    let text = token.text();
-                    if text.len() > 2 {
-                        let type_name = text[1..text.len() - 1].to_lowercase();
-                        if NEW_EXPRESSION_PATTERNS.contains(&type_name.as_str()) {
-                            // Return range of entire NEW_EXPR node
-                            return Some(node.text_range());
+            } else {
+                // Pattern 2: Новый("HTTPСоединение")
+                if !args.is_empty() {
+                    if let Expr::Literal(Literal::String(s)) = body.expr(args[0]) {
+                        let type_text = s.to_lowercase();
+                        if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
+                            detected = true;
                         }
                     }
                 }
             }
+
+            if detected {
+                if let Some(range) = source_map.expr_range(expr_id) {
+                    diagnostics.push(create_diagnostic(range));
+                }
+            }
         }
     }
-
-    None
 }
 
 #[cfg(test)]
@@ -198,6 +197,18 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for HIR-based diagnostics
+        use ide_db::base_db::{SourceRoot, SourceRootId};
+        use vfs::VfsPath;
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file content
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
         }
