@@ -226,17 +226,73 @@ impl MdoType {
 pub struct MetadataObject {
     /// Object type
     pub mdo_type: MdoType,
-    /// Object name
+    /// Object name (Russian)
     pub name: String,
+    /// English name (optional, for bilingual completion)
+    #[serde(default)]
+    pub name_en: Option<String>,
+    /// Custom attributes (fields) for this object
+    #[serde(default)]
+    pub attributes: Vec<Attribute>,
     /// Child objects (e.g., Cubes for ExternalDataSource, DimensionTables for Cube)
     #[serde(default)]
     pub children: Vec<MetadataObject>,
 }
 
+/// Metadata object attribute (custom field).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attribute {
+    /// Russian name
+    pub name: String,
+    /// English name (optional)
+    #[serde(default)]
+    pub name_en: Option<String>,
+    /// Attribute type
+    pub attr_type: AttributeType,
+}
+
+/// Attribute type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttributeType {
+    /// String with optional length
+    String {
+        /// Maximum string length
+        length: Option<u32>,
+    },
+    /// Number with precision and scale
+    Number {
+        /// Total number of digits
+        precision: u8,
+        /// Number of digits after decimal point
+        scale: u8,
+    },
+    /// Boolean
+    Boolean,
+    /// Date (without time)
+    Date,
+    /// DateTime (with time)
+    DateTime,
+    /// Reference to another metadata object
+    Ref {
+        /// Referenced metadata object type
+        mdo_type: MdoType,
+        /// Referenced metadata object name
+        name: String,
+    },
+    /// Unknown or unsupported type
+    Unknown,
+}
+
 impl MetadataObject {
     /// Create new metadata object
     pub fn new(mdo_type: MdoType, name: impl Into<String>) -> Self {
-        Self { mdo_type, name: name.into(), children: Vec::new() }
+        Self {
+            mdo_type,
+            name: name.into(),
+            name_en: None,
+            attributes: Vec::new(),
+            children: Vec::new(),
+        }
     }
 
     /// Create with children
@@ -245,12 +301,27 @@ impl MetadataObject {
         name: impl Into<String>,
         children: Vec<MetadataObject>,
     ) -> Self {
-        Self { mdo_type, name: name.into(), children }
+        Self { mdo_type, name: name.into(), name_en: None, attributes: Vec::new(), children }
+    }
+
+    /// Create with full details
+    pub fn with_details(
+        mdo_type: MdoType,
+        name: impl Into<String>,
+        name_en: Option<String>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self { mdo_type, name: name.into(), name_en, attributes, children: Vec::new() }
     }
 
     /// Add child object
     pub fn add_child(&mut self, child: MetadataObject) {
         self.children.push(child);
+    }
+
+    /// Add attribute
+    pub fn add_attribute(&mut self, attribute: Attribute) {
+        self.attributes.push(attribute);
     }
 
     /// Find child by name (case-insensitive)
@@ -262,6 +333,12 @@ impl MetadataObject {
     /// Check if has child with given name (case-insensitive)
     pub fn has_child(&self, name: &str) -> bool {
         self.find_child(name).is_some()
+    }
+
+    /// Find attribute by name (case-insensitive)
+    pub fn find_attribute(&self, name: &str) -> Option<&Attribute> {
+        let name_lower = name.to_lowercase();
+        self.attributes.iter().find(|attr| attr.name.to_lowercase() == name_lower)
     }
 }
 
@@ -323,5 +400,97 @@ mod tests {
         // Invalid input
         assert_eq!(MdoType::from_plural("InvalidType"), None);
         assert_eq!(MdoType::from_plural(""), None);
+    }
+
+    #[test]
+    fn test_metadata_object_with_attributes() {
+        let mut obj = MetadataObject::new(MdoType::Catalog, "Валюты");
+
+        assert_eq!(obj.name, "Валюты");
+        assert_eq!(obj.name_en, None);
+        assert!(obj.attributes.is_empty());
+
+        // Add attributes
+        obj.add_attribute(Attribute {
+            name: "Код".to_string(),
+            name_en: Some("Code".to_string()),
+            attr_type: AttributeType::String { length: Some(10) },
+        });
+
+        obj.add_attribute(Attribute {
+            name: "Курс".to_string(),
+            name_en: Some("Rate".to_string()),
+            attr_type: AttributeType::Number { precision: 15, scale: 4 },
+        });
+
+        assert_eq!(obj.attributes.len(), 2);
+
+        // Find attribute by Russian name (case-insensitive)
+        let code_attr = obj.find_attribute("Код").unwrap();
+        assert_eq!(code_attr.name, "Код");
+        assert_eq!(code_attr.name_en, Some("Code".to_string()));
+        assert_eq!(code_attr.attr_type, AttributeType::String { length: Some(10) });
+
+        // Find by Russian name (case-insensitive)
+        let rate_attr = obj.find_attribute("курс").unwrap();
+        assert_eq!(rate_attr.name, "Курс");
+
+        // Not found
+        assert!(obj.find_attribute("НесуществующееПоле").is_none());
+    }
+
+    #[test]
+    fn test_metadata_object_with_details() {
+        let attributes = vec![
+            Attribute {
+                name: "Активен".to_string(),
+                name_en: Some("Active".to_string()),
+                attr_type: AttributeType::Boolean,
+            },
+            Attribute {
+                name: "Дата".to_string(),
+                name_en: Some("Date".to_string()),
+                attr_type: AttributeType::Date,
+            },
+        ];
+
+        let obj = MetadataObject::with_details(
+            MdoType::Document,
+            "ПриходнаяНакладная",
+            Some("GoodsReceipt".to_string()),
+            attributes,
+        );
+
+        assert_eq!(obj.name, "ПриходнаяНакладная");
+        assert_eq!(obj.name_en, Some("GoodsReceipt".to_string()));
+        assert_eq!(obj.attributes.len(), 2);
+    }
+
+    #[test]
+    fn test_attribute_types() {
+        let attr_string = AttributeType::String { length: Some(100) };
+        assert_eq!(attr_string, AttributeType::String { length: Some(100) });
+
+        let attr_number = AttributeType::Number { precision: 10, scale: 2 };
+        assert_eq!(attr_number, AttributeType::Number { precision: 10, scale: 2 });
+
+        let attr_ref =
+            AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".to_string() };
+        assert_eq!(
+            attr_ref,
+            AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".to_string() }
+        );
+
+        let attr_boolean = AttributeType::Boolean;
+        assert_eq!(attr_boolean, AttributeType::Boolean);
+
+        let attr_date = AttributeType::Date;
+        assert_eq!(attr_date, AttributeType::Date);
+
+        let attr_datetime = AttributeType::DateTime;
+        assert_eq!(attr_datetime, AttributeType::DateTime);
+
+        let attr_unknown = AttributeType::Unknown;
+        assert_eq!(attr_unknown, AttributeType::Unknown);
     }
 }

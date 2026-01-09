@@ -14,8 +14,10 @@ syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true
 sdbl-hir.workspace = true
+bsl-metadata.workspace = true
 triomphe.workspace = true
 tracing.workspace = true
+serde_json.workspace = true
 either = "1.9"
 rustc-hash = "2.1"
 

@@ -441,6 +441,325 @@ pub fn parse_event_subscription_xml(xml: &str) -> Result<EventSubscription> {
     Ok(subscription)
 }
 
+/// Root XML structure for Catalog
+///
+/// Designer format structure:
+/// ```xml
+/// <MetaDataObject xmlns="...">
+///   <Catalog uuid="...">
+///     <Properties>
+///       <Name>...</Name>
+///     </Properties>
+///     <ChildObjects>
+///       <Attribute uuid="...">
+///         <Properties>
+///           <Name>...</Name>
+///           <Type>...</Type>
+///         </Properties>
+///       </Attribute>
+///     </ChildObjects>
+///   </Catalog>
+/// </MetaDataObject>
+/// ```
+#[derive(Debug, Deserialize)]
+struct CatalogRoot {
+    #[serde(rename = "Catalog")]
+    catalog: MetadataObjectXml,
+}
+
+/// Root XML structure for Document
+#[derive(Debug, Deserialize)]
+struct DocumentRoot {
+    #[serde(rename = "Document")]
+    document: MetadataObjectXml,
+}
+
+/// Generic metadata object XML structure (Catalog, Document, etc.)
+#[derive(Debug, Deserialize)]
+struct MetadataObjectXml {
+    #[serde(rename = "@uuid")]
+    _uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: MetadataObjectProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    child_objects: Option<MetadataChildObjects>,
+}
+
+/// Metadata object properties
+#[derive(Debug, Deserialize)]
+struct MetadataObjectProperties {
+    #[serde(rename = "Name")]
+    name: String,
+}
+
+/// Child objects container (attributes, tabular sections, etc.)
+#[derive(Debug, Deserialize)]
+struct MetadataChildObjects {
+    #[serde(rename = "Attribute", default)]
+    attributes: Vec<AttributeXml>,
+
+    // For InformationRegisters
+    #[serde(rename = "Resource", default)]
+    resources: Vec<AttributeXml>,
+
+    // For InformationRegisters
+    #[serde(rename = "Dimension", default)]
+    dimensions_as_attributes: Vec<AttributeXml>,
+}
+
+/// Attribute XML structure
+#[derive(Debug, Deserialize)]
+struct AttributeXml {
+    #[serde(rename = "@uuid")]
+    _uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: AttributeProperties,
+}
+
+/// Attribute properties
+#[derive(Debug, Deserialize)]
+struct AttributeProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "Type")]
+    attr_type: TypeXml,
+}
+
+/// Type XML structure
+///
+/// Handles multiple type variants:
+/// - `<v8:Type>xs:boolean</v8:Type>`
+/// - `<v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>100</v8:Length>...`
+/// - `<v8:Type>xs:decimal</v8:Type><v8:NumberQualifiers><v8:Digits>10</v8:Digits>...`
+/// - `<v8:Type>cfg:CatalogRef.Name</v8:Type>`
+#[derive(Debug, Deserialize)]
+struct TypeXml {
+    /// Type value (can be multiple)
+    #[serde(rename = "Type", default)]
+    types: Vec<String>,
+
+    /// String qualifiers (for xs:string)
+    #[serde(rename = "StringQualifiers", default)]
+    string_qualifiers: Option<StringQualifiers>,
+
+    /// Number qualifiers (for xs:decimal)
+    #[serde(rename = "NumberQualifiers", default)]
+    number_qualifiers: Option<NumberQualifiers>,
+
+    /// Date qualifiers (for xs:dateTime)
+    #[serde(rename = "DateQualifiers", default)]
+    date_qualifiers: Option<DateQualifiers>,
+}
+
+/// String qualifiers
+#[derive(Debug, Deserialize)]
+struct StringQualifiers {
+    #[serde(rename = "Length", default)]
+    length: Option<u32>,
+}
+
+/// Number qualifiers
+#[derive(Debug, Deserialize)]
+struct NumberQualifiers {
+    #[serde(rename = "Digits", default)]
+    digits: Option<u8>,
+
+    #[serde(rename = "FractionDigits", default)]
+    fraction_digits: Option<u8>,
+}
+
+/// Date qualifiers
+#[derive(Debug, Deserialize)]
+struct DateQualifiers {
+    #[serde(rename = "DateFractions", default)]
+    date_fractions: Option<String>,
+}
+
+/// Parse Catalog XML from Designer format
+///
+/// # Arguments
+///
+/// * `xml` - XML content as string
+///
+/// # Returns
+///
+/// Parsed `MetadataObject` structure with attributes
+///
+/// # Example
+///
+/// ```no_run
+/// # use bsl_metadata::xml_parser::parse_catalog_xml;
+/// let xml = std::fs::read_to_string("Catalogs/Валюты.xml")?;
+/// let catalog = parse_catalog_xml(&xml)?;
+/// # Ok::<(), bsl_metadata::MetadataError>(())
+/// ```
+pub fn parse_catalog_xml(xml: &str) -> Result<crate::metadata_object::MetadataObject> {
+    let _span = tracing::debug_span!("parse_catalog_xml").entered();
+
+    let root: CatalogRoot = quick_xml::de::from_str(xml)?;
+
+    parse_metadata_object(root.catalog, MdoType::Catalog)
+}
+
+/// Parse Document XML from Designer format
+pub fn parse_document_xml(xml: &str) -> Result<crate::metadata_object::MetadataObject> {
+    let _span = tracing::debug_span!("parse_document_xml").entered();
+
+    let root: DocumentRoot = quick_xml::de::from_str(xml)?;
+
+    parse_metadata_object(root.document, MdoType::Document)
+}
+
+/// Internal helper to parse metadata object XML
+fn parse_metadata_object(
+    obj_xml: MetadataObjectXml,
+    mdo_type: MdoType,
+) -> Result<crate::metadata_object::MetadataObject> {
+    use crate::metadata_object::MetadataObject;
+
+    let mut attributes = Vec::new();
+
+    if let Some(child_objects) = obj_xml.child_objects {
+        // Parse regular Attributes (for Catalog, Document)
+        for attr_xml in child_objects.attributes {
+            let attr = parse_attribute(attr_xml)?;
+            attributes.push(attr);
+        }
+
+        // Parse Resources (for InformationRegister - treated as attributes)
+        for resource_xml in child_objects.resources {
+            let attr = parse_attribute(resource_xml)?;
+            attributes.push(attr);
+        }
+
+        // Parse Dimensions (for InformationRegister - treated as attributes)
+        for dim_xml in child_objects.dimensions_as_attributes {
+            let attr = parse_attribute(dim_xml)?;
+            attributes.push(attr);
+        }
+    }
+
+    let mut mdo = MetadataObject::new(mdo_type, obj_xml.properties.name);
+    for attr in attributes {
+        mdo.add_attribute(attr);
+    }
+
+    tracing::debug!(
+        mdo_name = %mdo.name,
+        mdo_type = ?mdo.mdo_type,
+        attributes = mdo.attributes.len(),
+        "parsed metadata object"
+    );
+
+    Ok(mdo)
+}
+
+/// Parse single attribute from XML
+fn parse_attribute(attr_xml: AttributeXml) -> Result<crate::metadata_object::Attribute> {
+    use crate::metadata_object::Attribute;
+
+    let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
+
+    Ok(Attribute { name: attr_xml.properties.name, name_en: None, attr_type })
+}
+
+/// Parse Type XML into AttributeType
+fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::AttributeType> {
+    use crate::metadata_object::AttributeType;
+
+    // If no types specified, return Unknown
+    if type_xml.types.is_empty() {
+        return Ok(AttributeType::Unknown);
+    }
+
+    // Take first type (1C can have multiple, we'll use first for now)
+    let type_str = &type_xml.types[0];
+
+    // Parse type string
+    match type_str.as_str() {
+        "xs:boolean" => Ok(AttributeType::Boolean),
+
+        "xs:string" => {
+            let length = type_xml.string_qualifiers.as_ref().and_then(|q| q.length);
+            Ok(AttributeType::String { length })
+        }
+
+        "xs:decimal" => {
+            let precision =
+                type_xml.number_qualifiers.as_ref().and_then(|q| q.digits).unwrap_or(10);
+            let scale =
+                type_xml.number_qualifiers.as_ref().and_then(|q| q.fraction_digits).unwrap_or(0);
+            Ok(AttributeType::Number { precision, scale })
+        }
+
+        "xs:dateTime" => {
+            // Check if DateTime or Date
+            let is_datetime = type_xml
+                .date_qualifiers
+                .as_ref()
+                .and_then(|q| q.date_fractions.as_deref())
+                .map(|df| df.eq_ignore_ascii_case("DateTime"))
+                .unwrap_or(false);
+
+            if is_datetime {
+                Ok(AttributeType::DateTime)
+            } else {
+                Ok(AttributeType::Date)
+            }
+        }
+
+        // Reference types: "cfg:CatalogRef.Name", "cfg:DocumentRef.Name"
+        type_str if type_str.starts_with("cfg:") => parse_reference_type(type_str),
+
+        // UUID, ValueStorage, etc.
+        "v8:UUID" | "v8:ValueStorage" => Ok(AttributeType::Unknown),
+
+        _ => {
+            tracing::warn!(type_str = %type_str, "unknown type");
+            Ok(AttributeType::Unknown)
+        }
+    }
+}
+
+/// Parse reference type string like "cfg:CatalogRef.Валюты"
+fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::AttributeType> {
+    use crate::metadata_object::AttributeType;
+
+    // Format: "cfg:CatalogRef.Name" or "cfg:DocumentRef.Name" or "cfg:EnumRef.Name"
+    let parts: Vec<&str> = type_str.split('.').collect();
+    if parts.len() != 2 {
+        tracing::warn!(type_str = %type_str, "invalid reference type format");
+        return Ok(AttributeType::Unknown);
+    }
+
+    let ref_type = parts[0];
+    let name = parts[1].to_string();
+
+    let mdo_type = if ref_type == "cfg:CatalogRef" {
+        MdoType::Catalog
+    } else if ref_type == "cfg:DocumentRef" {
+        MdoType::Document
+    } else if ref_type == "cfg:InformationRegisterRef" {
+        MdoType::InformationRegister
+    } else if ref_type == "cfg:AccumulationRegisterRef" {
+        MdoType::AccumulationRegister
+    } else if ref_type == "cfg:AccountingRegisterRef" {
+        MdoType::AccountingRegister
+    } else if ref_type == "cfg:CalculationRegisterRef" {
+        MdoType::CalculationRegister
+    } else {
+        // EnumRef, ChartOfCharacteristicTypesRef, etc. - not yet supported
+        tracing::warn!(ref_type = %ref_type, "unsupported reference type");
+        return Ok(AttributeType::Unknown);
+    };
+
+    Ok(AttributeType::Ref { mdo_type, name })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,5 +1095,335 @@ mod tests {
         let handler = subscription.parse_handler().unwrap();
         assert_eq!(handler.module_name, "ОбщийПодпискиНаСобытия");
         assert_eq!(handler.method_name, "");
+    }
+
+    #[test]
+    fn test_parse_catalog_xml_with_attributes() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <Catalog uuid="1d6b8425-360c-4ab1-9bab-cc9a3b590bb2">
+        <Properties>
+            <Name>Валюты</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="9f67d228-79aa-44e6-8dc7-fae4fbdfef2a">
+                <Properties>
+                    <Name>ЗагружаетсяИзИнтернета</Name>
+                    <Type>
+                        <v8:Type>xs:boolean</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="231d3950-f363-4e63-83cd-8ddb81507c27">
+                <Properties>
+                    <Name>НаименованиеПолное</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                        <v8:StringQualifiers>
+                            <v8:Length>50</v8:Length>
+                        </v8:StringQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="87429f11-bf95-4013-bf13-da904570f88d">
+                <Properties>
+                    <Name>Наценка</Name>
+                    <Type>
+                        <v8:Type>xs:decimal</v8:Type>
+                        <v8:NumberQualifiers>
+                            <v8:Digits>10</v8:Digits>
+                            <v8:FractionDigits>2</v8:FractionDigits>
+                        </v8:NumberQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="6173cab2-e0f5-40c1-8e74-4f41fc8bd68f">
+                <Properties>
+                    <Name>ОсновнаяВалюта</Name>
+                    <Type>
+                        <v8:Type>cfg:CatalogRef.Валюты</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        assert_eq!(catalog.name, "Валюты");
+        assert_eq!(catalog.attributes.len(), 4);
+
+        // Check Boolean attribute
+        let attr1 = catalog.find_attribute("ЗагружаетсяИзИнтернета").unwrap();
+        assert_eq!(attr1.name, "ЗагружаетсяИзИнтернета");
+        assert_eq!(attr1.attr_type, AttributeType::Boolean);
+
+        // Check String attribute with length
+        let attr2 = catalog.find_attribute("НаименованиеПолное").unwrap();
+        assert_eq!(attr2.name, "НаименованиеПолное");
+        assert_eq!(attr2.attr_type, AttributeType::String { length: Some(50) });
+
+        // Check Number attribute
+        let attr3 = catalog.find_attribute("Наценка").unwrap();
+        assert_eq!(attr3.name, "Наценка");
+        assert_eq!(attr3.attr_type, AttributeType::Number { precision: 10, scale: 2 });
+
+        // Check Reference attribute
+        let attr4 = catalog.find_attribute("ОсновнаяВалюта").unwrap();
+        assert_eq!(attr4.name, "ОсновнаяВалюта");
+        assert_eq!(
+            attr4.attr_type,
+            AttributeType::Ref { mdo_type: MdoType::Catalog, name: "Валюты".to_string() }
+        );
+    }
+
+    #[test]
+    fn test_parse_catalog_xml_no_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+        <Properties>
+            <Name>ПростойСправочник</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        assert_eq!(catalog.name, "ПростойСправочник");
+        assert_eq!(catalog.attributes.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_document_xml_with_attributes() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <Document uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+        <Properties>
+            <Name>ЗаказПокупателя</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="cccccccc-cccc-cccc-cccc-cccccccccccc">
+                <Properties>
+                    <Name>Контрагент</Name>
+                    <Type>
+                        <v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="dddddddd-dddd-dddd-dddd-dddddddddddd">
+                <Properties>
+                    <Name>Дата</Name>
+                    <Type>
+                        <v8:Type>xs:dateTime</v8:Type>
+                        <v8:DateQualifiers>
+                            <v8:DateFractions>DateTime</v8:DateFractions>
+                        </v8:DateQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Document>
+</MetaDataObject>"#;
+
+        let document = parse_document_xml(xml).unwrap();
+
+        assert_eq!(document.name, "ЗаказПокупателя");
+        assert_eq!(document.attributes.len(), 2);
+
+        // Check Reference attribute
+        let attr1 = document.find_attribute("Контрагент").unwrap();
+        assert_eq!(attr1.name, "Контрагент");
+        assert_eq!(
+            attr1.attr_type,
+            AttributeType::Ref {
+                mdo_type: MdoType::Catalog, name: "Контрагенты".to_string()
+            }
+        );
+
+        // Check DateTime attribute
+        let attr2 = document.find_attribute("Дата").unwrap();
+        assert_eq!(attr2.name, "Дата");
+        assert_eq!(attr2.attr_type, AttributeType::DateTime);
+    }
+
+    #[test]
+    fn test_parse_type_xml_date() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <Catalog uuid="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee">
+        <Properties>
+            <Name>Тест</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="ffffffff-ffff-ffff-ffff-ffffffffffff">
+                <Properties>
+                    <Name>ДатаБезВремени</Name>
+                    <Type>
+                        <v8:Type>xs:dateTime</v8:Type>
+                        <v8:DateQualifiers>
+                            <v8:DateFractions>Date</v8:DateFractions>
+                        </v8:DateQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        let attr = catalog.find_attribute("ДатаБезВремени").unwrap();
+        assert_eq!(attr.attr_type, AttributeType::Date);
+    }
+
+    #[test]
+    fn test_parse_type_xml_unknown_types() {
+        use crate::metadata_object::AttributeType;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <Catalog uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+        <Properties>
+            <Name>Тест</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+                <Properties>
+                    <Name>УникальныйИдентификатор</Name>
+                    <Type>
+                        <v8:Type>v8:UUID</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="cccccccc-cccc-cccc-cccc-cccccccccccc">
+                <Properties>
+                    <Name>Хранилище</Name>
+                    <Type>
+                        <v8:Type>v8:ValueStorage</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="dddddddd-dddd-dddd-dddd-dddddddddddd">
+                <Properties>
+                    <Name>Перечисление</Name>
+                    <Type>
+                        <v8:Type>cfg:EnumRef.Статусы</v8:Type>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // UUID -> Unknown
+        let attr1 = catalog.find_attribute("УникальныйИдентификатор").unwrap();
+        assert_eq!(attr1.attr_type, AttributeType::Unknown);
+
+        // ValueStorage -> Unknown
+        let attr2 = catalog.find_attribute("Хранилище").unwrap();
+        assert_eq!(attr2.attr_type, AttributeType::Unknown);
+
+        // EnumRef -> Unknown (not yet supported)
+        let attr3 = catalog.find_attribute("Перечисление").unwrap();
+        assert_eq!(attr3.attr_type, AttributeType::Unknown);
+    }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_parse_real_catalog_from_doc3() {
+        use crate::metadata_object::AttributeType;
+
+        // This test uses a real Catalog from the doc3 benchmark project
+        let xml_path = concat!(env!("HOME"), "/src/doc3/src/cf/Catalogs/Валюты.xml");
+
+        // Skip if file doesn't exist
+        if !std::path::Path::new(xml_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", xml_path);
+            return;
+        }
+
+        let xml = std::fs::read_to_string(xml_path).expect("Failed to read XML file");
+        let catalog = parse_catalog_xml(&xml).expect("Failed to parse catalog XML");
+
+        // Verify basic properties
+        assert_eq!(catalog.name, "Валюты");
+
+        // Should have multiple attributes (from doc3)
+        assert!(
+            catalog.attributes.len() >= 6,
+            "Expected at least 6 attributes, got {}",
+            catalog.attributes.len()
+        );
+
+        // Verify specific attributes we know exist in doc3
+        let attr_bool = catalog.find_attribute("ЗагружаетсяИзИнтернета");
+        assert!(attr_bool.is_some(), "Expected ЗагружаетсяИзИнтернета attribute");
+        assert_eq!(attr_bool.unwrap().attr_type, AttributeType::Boolean);
+
+        let attr_string = catalog.find_attribute("НаименованиеПолное");
+        assert!(attr_string.is_some(), "Expected НаименованиеПолное attribute");
+        assert!(matches!(attr_string.unwrap().attr_type, AttributeType::String { .. }));
+
+        let attr_number = catalog.find_attribute("Наценка");
+        assert!(attr_number.is_some(), "Expected Наценка attribute");
+        assert!(matches!(attr_number.unwrap().attr_type, AttributeType::Number { .. }));
+
+        let attr_ref = catalog.find_attribute("ОсновнаяВалюта");
+        assert!(attr_ref.is_some(), "Expected ОсновнаяВалюта attribute");
+        assert!(matches!(attr_ref.unwrap().attr_type, AttributeType::Ref { .. }));
+    }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_load_from_directory_with_attributes() {
+        use crate::loader::load_from_directory;
+
+        // This test loads the full doc3 configuration and verifies attributes are loaded
+        let config_path = concat!(env!("HOME"), "/src/doc3/src/cf");
+
+        // Skip if directory doesn't exist
+        if !std::path::Path::new(config_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", config_path);
+            return;
+        }
+
+        let config = load_from_directory(config_path).expect("Failed to load configuration");
+
+        // Should have loaded catalogs with attributes
+        assert!(!config.metadata_objects().is_empty(), "Expected some metadata objects");
+
+        // Find Валюты catalog
+        let currency_catalog = config.metadata_objects().iter().find(|obj| obj.name == "Валюты");
+
+        if let Some(catalog) = currency_catalog {
+            // Should have attributes loaded
+            assert!(
+                !catalog.attributes.is_empty(),
+                "Expected Валюты catalog to have attributes loaded"
+            );
+            assert!(
+                catalog.attributes.len() >= 6,
+                "Expected at least 6 attributes in Валюты, got {}",
+                catalog.attributes.len()
+            );
+
+            tracing::info!(
+                catalog = %catalog.name,
+                attributes = catalog.attributes.len(),
+                "Successfully loaded catalog with attributes from doc3"
+            );
+        } else {
+            panic!("Валюты catalog not found in metadata objects");
+        }
     }
 }

@@ -2,15 +2,19 @@
 //!
 //! This crate provides the high-level API for IDE features.
 
+mod completion;
+pub mod config_finder;
 mod goto_definition;
 mod references;
 mod syntax_highlighting;
 
+pub use completion::{CompletionItem, CompletionItemKind};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
 pub use syntax_highlighting::{highlight, HlMod, HlRange, HlTag};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use syntax::TextSize;
 use vfs::FileId;
@@ -64,6 +68,29 @@ impl Analysis {
     pub fn find_references(&self, file_id: FileId, offset: u32) -> Vec<Location> {
         let offset = TextSize::from(offset);
         references::find_references(self.db.as_ref(), file_id, offset)
+    }
+
+    /// Returns code completions at the position.
+    ///
+    /// Provides context-aware completion suggestions including:
+    /// - SDBL query completion (FROM clause, metadata objects)
+    /// - BSL keyword completion (future)
+    /// - Symbol completion (future)
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File identifier
+    /// * `offset` - Byte offset in the file
+    /// * `workspace_root` - Workspace root for metadata loading
+    pub fn completions(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        workspace_root: Option<PathBuf>,
+    ) -> Vec<CompletionItem> {
+        let offset = TextSize::from(offset);
+        let position = completion::CompletionPosition { file_id, offset, workspace_root };
+        completion::completions(self.db.as_ref(), position)
     }
 
     /// Returns hover information at the position.

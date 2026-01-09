@@ -111,6 +111,6 @@ pub use enums::{ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant};
 pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
 pub use loader::load_from_directory;
-pub use metadata_object::{MdoType, MetadataObject};
+pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
 pub use register::{Register, RegisterBuilder};
 pub use traits::{MdObject, Module};

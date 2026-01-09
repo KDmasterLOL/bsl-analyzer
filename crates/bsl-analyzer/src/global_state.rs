@@ -3,6 +3,7 @@
 //! This module defines the main state structures for the bsl-analyzer LSP server,
 //! following the rust-analyzer architecture pattern.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -12,6 +13,7 @@ use ide_db::RootDatabaseImpl;
 use lsp_server::{Message, ReqQueue, Response};
 use lsp_types::Url;
 use parking_lot::RwLock;
+use project_model::Project;
 use vfs::{FileId, Vfs, VfsPath};
 
 use crate::mem_docs::MemDocs;
@@ -45,6 +47,12 @@ pub struct GlobalState {
     /// In-memory tracking of opened documents.
     pub mem_docs: MemDocs,
 
+    /// Workspace root directory (from LSP initialize).
+    pub workspace_root: Option<PathBuf>,
+
+    /// Project configuration (loaded from .bsl-analyzer.json or .bsl-language-server.json).
+    pub project: Option<Project>,
+
     /// Whether shutdown has been requested.
     pub shutdown_requested: bool,
 }
@@ -58,8 +66,26 @@ impl GlobalState {
             analysis_host: AnalysisHost::default(),
             vfs: Arc::new(RwLock::new(Vfs::default())),
             mem_docs: MemDocs::default(),
+            workspace_root: None,
+            project: None,
             shutdown_requested: false,
         }
+    }
+
+    /// Sets the workspace root and loads project configuration.
+    pub fn set_workspace_root(&mut self, root: PathBuf) {
+        tracing::info!(?root, "setting workspace root");
+
+        // Load project configuration from workspace root
+        let project = Project::new(&root);
+
+        tracing::info!(
+            configuration_root = ?project.config.configuration_root,
+            "loaded project configuration"
+        );
+
+        self.workspace_root = Some(root);
+        self.project = Some(project);
     }
 
     /// Creates an immutable snapshot for thread-safe access.
@@ -71,6 +97,8 @@ impl GlobalState {
             analysis: self.analysis_host.analysis(),
             vfs: Arc::clone(&self.vfs),
             mem_docs: self.mem_docs.clone(),
+            workspace_root: self.workspace_root.clone(),
+            project: self.project.clone(),
         }
     }
 
@@ -133,6 +161,12 @@ pub struct GlobalStateSnapshot {
 
     /// In-memory document tracking (clone).
     pub mem_docs: MemDocs,
+
+    /// Workspace root directory.
+    pub workspace_root: Option<PathBuf>,
+
+    /// Project configuration.
+    pub project: Option<Project>,
 }
 
 impl GlobalStateSnapshot {

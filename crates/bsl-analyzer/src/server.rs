@@ -61,6 +61,20 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     // Create global state
     let mut state = GlobalState::new(connection.sender);
 
+    // Set workspace root from initialize params
+    #[allow(deprecated)]
+    if let Some(root_uri) = initialize_params.root_uri {
+        if let Ok(root_path) = root_uri.to_file_path() {
+            state.set_workspace_root(root_path);
+        } else {
+            tracing::warn!("Failed to convert root_uri to path: {}", root_uri);
+        }
+    } else if let Some(root_path) = initialize_params.root_path {
+        state.set_workspace_root(root_path.into());
+    } else {
+        tracing::warn!("No workspace root provided by client");
+    }
+
     // Run event loop
     run_event_loop(&mut state, &connection.receiver)?;
 
@@ -103,7 +117,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
-    use lsp_types::request::{GotoDefinition, References, SemanticTokensFullRequest};
+    use lsp_types::request::{Completion, GotoDefinition, References, SemanticTokensFullRequest};
 
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
@@ -112,6 +126,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         })
         .on_sync::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_sync::<References>(crate::handlers::handle_find_references)
+        .on_sync::<Completion>(crate::handlers::handle_completion)
         .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
         .finish();
 
@@ -157,6 +172,15 @@ fn server_capabilities() -> ServerCapabilities {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
 
+        // Code completion
+        completion_provider: Some(lsp_types::CompletionOptions {
+            resolve_provider: None,
+            trigger_characters: Some(vec![".".to_string()]),
+            all_commit_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+            completion_item: None,
+        }),
+
         // Semantic tokens (syntax highlighting)
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
@@ -169,7 +193,6 @@ fn server_capabilities() -> ServerCapabilities {
 
         // Future capabilities will be added here:
         // - hover_provider
-        // - completion_provider
         // - diagnostic_provider
         ..Default::default()
     }

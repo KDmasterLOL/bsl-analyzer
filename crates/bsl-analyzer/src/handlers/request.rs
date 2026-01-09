@@ -7,8 +7,9 @@ use anyhow::Result;
 use ide::Location as IdeLocation;
 use line_index::LineIndex;
 use lsp_types::{
-    GotoDefinitionParams, GotoDefinitionResponse, Location, ReferenceParams, SemanticTokens,
-    SemanticTokensParams, SemanticTokensResult,
+    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, Location, ReferenceParams, SemanticTokens, SemanticTokensParams,
+    SemanticTokensResult,
 };
 
 use crate::global_state::GlobalStateSnapshot;
@@ -112,6 +113,49 @@ pub fn handle_find_references(
     }
 }
 
+/// Handles textDocument/completion request.
+///
+/// Returns code completion suggestions at the cursor position.
+pub fn handle_completion(
+    snap: GlobalStateSnapshot,
+    params: CompletionParams,
+) -> Result<Option<CompletionResponse>> {
+    let _p = tracing::info_span!(
+        "handle_completion",
+        uri = %params.text_document_position.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Convert position to offset
+    let offset = crate::lsp::offset(&line_index, position)?;
+
+    // Call IDE API with workspace root
+    let items = snap.analysis.completions(file_id, offset.into(), snap.workspace_root.clone());
+
+    // Convert results
+    if items.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_items: Vec<CompletionItem> = items.into_iter().map(convert_completion_item).collect();
+
+    Ok(Some(CompletionResponse::Array(lsp_items)))
+}
+
 /// Handles textDocument/semanticTokens/full request.
 ///
 /// Returns semantic highlighting for the entire document.
@@ -159,6 +203,29 @@ fn convert_location(
 ) -> Option<Location> {
     let range = crate::lsp::range(line_index, text, ide_loc.range)?;
     Some(Location { uri: uri.clone(), range })
+}
+
+/// Convert IDE CompletionItem to LSP CompletionItem.
+fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
+    CompletionItem {
+        label: item.label,
+        detail: item.detail,
+        kind: Some(convert_completion_kind(item.kind)),
+        insert_text: Some(item.insert_text),
+        documentation: item.documentation.map(lsp_types::Documentation::String),
+        ..Default::default()
+    }
+}
+
+/// Convert IDE CompletionItemKind to LSP CompletionItemKind.
+fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind {
+    match kind {
+        ide::CompletionItemKind::MdoType => CompletionItemKind::CLASS,
+        ide::CompletionItemKind::MdoObject => CompletionItemKind::MODULE,
+        ide::CompletionItemKind::Field => CompletionItemKind::FIELD,
+        ide::CompletionItemKind::Function => CompletionItemKind::FUNCTION,
+        ide::CompletionItemKind::Keyword => CompletionItemKind::KEYWORD,
+    }
 }
 
 #[cfg(test)]

@@ -32,7 +32,6 @@
 
 use crate::configuration::Configuration;
 use crate::error::Result;
-use crate::metadata_object::{MdoType, MetadataObject};
 use crate::traits::MdObject;
 use crate::xml_parser;
 use std::fs;
@@ -185,10 +184,17 @@ fn load_catalogs(dir: &Path, config: &mut Configuration) -> Result<()> {
                 let xml_path = dir.join(format!("{}.xml", name));
 
                 if xml_path.exists() {
-                    let obj = MetadataObject::new(MdoType::Catalog, name);
-                    config.add_metadata_object(obj);
+                    // Parse XML to get catalog with attributes
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let catalog = xml_parser::parse_catalog_xml(&xml)?;
 
-                    tracing::debug!(catalog = %name, "loaded catalog");
+                    tracing::debug!(
+                        catalog = %name,
+                        attributes = catalog.attributes.len(),
+                        "loaded catalog"
+                    );
+
+                    config.add_metadata_object(catalog);
                 }
             }
         }
@@ -220,10 +226,17 @@ fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
                 let xml_path = dir.join(format!("{}.xml", name));
 
                 if xml_path.exists() {
-                    let obj = MetadataObject::new(MdoType::Document, name);
-                    config.add_metadata_object(obj);
+                    // Parse XML to get document with attributes
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let document = xml_parser::parse_document_xml(&xml)?;
 
-                    tracing::debug!(document = %name, "loaded document");
+                    tracing::debug!(
+                        document = %name,
+                        attributes = document.attributes.len(),
+                        "loaded document"
+                    );
+
+                    config.add_metadata_object(document);
                 }
             }
         }
