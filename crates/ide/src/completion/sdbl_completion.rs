@@ -235,8 +235,8 @@ mod tests {
         let items = complete_mdo_types();
 
         // Should have both Russian and English for each MDO type
-        // MdoType::all() returns 19 types, so we should have 38 items (19 * 2)
-        assert_eq!(items.len(), 38);
+        // MdoType::all() returns 20 types, so we should have 40 items (20 * 2)
+        assert_eq!(items.len(), 40);
 
         // Check for specific types
         assert!(items.iter().any(|i| i.label == "Справочник"));
