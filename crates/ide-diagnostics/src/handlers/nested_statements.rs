@@ -48,7 +48,13 @@
 //! Algorithm:
 //! - Recursive AST traversal with depth tracking
 //! - Counts nesting levels for IF, WHILE, FOR, FOR_EACH, TRY statements
+//! - Uses boolean flag propagation to identify leaf statements efficiently
 //! - Reports the deepest (leaf) statement that exceeds threshold
+//!
+//! ## Performance
+//! - **Time complexity:** O(n) where n = number of AST nodes (single pass)
+//! - **Optimization:** Returns boolean flag from recursion instead of calling `node.descendants()`
+//! - Avoids O(n²) complexity by propagating "has nested child" information bottom-up
 //!
 //! ## Note
 //! This diagnostic uses AST (not HIR) because it checks structural properties only.
@@ -76,6 +82,8 @@ impl Config {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let _span = tracing::debug_span!("NestedStatements::check").entered();
+
     if ctx.config.is_disabled(DiagnosticCode::NestedStatements) {
         return Vec::new();
     }
@@ -86,6 +94,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
     traverse_recursive(&root, 0, config.max_allowed_level, &mut diagnostics);
+
+    tracing::debug!(count = diagnostics.len(), "NestedStatements diagnostics found");
 
     diagnostics
 }
@@ -101,35 +111,42 @@ fn is_nesting_statement(kind: SyntaxKind) -> bool {
     )
 }
 
+/// Traverse AST recursively, tracking nesting depth.
+///
+/// Returns `true` if this subtree contains nesting statements (IF, WHILE, FOR, TRY).
+/// This flag propagation eliminates the need for `node.descendants()` calls,
+/// reducing complexity from O(n²) to O(n).
 fn traverse_recursive(
     node: &SyntaxNode,
     current_depth: usize,
     max_level: usize,
     diagnostics: &mut Vec<Diagnostic>,
-) {
-    let new_depth =
-        if is_nesting_statement(node.kind()) { current_depth + 1 } else { current_depth };
+) -> bool {
+    let is_nesting = is_nesting_statement(node.kind());
+    let new_depth = if is_nesting { current_depth + 1 } else { current_depth };
 
-    if is_nesting_statement(node.kind()) {
-        let has_nested_child = node.descendants().skip(1).any(|n| is_nesting_statement(n.kind()));
-
-        if !has_nested_child && new_depth > max_level {
-            let keyword_range = get_first_keyword_range(node);
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::NestedStatements,
-                message: "Управляющие конструкции не должны быть вложены слишком глубоко"
-                    .to_string(),
-                severity: Severity::Critical,
-                range: keyword_range,
-                tags: vec![],
-                fixes: vec![],
-            });
-        }
-    }
-
+    // Recursively check all children, tracking if any contain nesting statements
+    let mut has_nested_child = false;
     for child in node.children() {
-        traverse_recursive(&child, new_depth, max_level, diagnostics);
+        let child_has_nesting = traverse_recursive(&child, new_depth, max_level, diagnostics);
+        has_nested_child = has_nested_child || child_has_nesting;
     }
+
+    // Report diagnostic if this is a leaf nesting statement exceeding threshold
+    if is_nesting && !has_nested_child && new_depth > max_level {
+        let keyword_range = get_first_keyword_range(node);
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::NestedStatements,
+            message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
+            severity: Severity::Critical,
+            range: keyword_range,
+            tags: vec![],
+            fixes: vec![],
+        });
+    }
+
+    // Propagate up: this node or its children contain nesting statements
+    is_nesting || has_nested_child
 }
 
 fn get_first_keyword_range(node: &SyntaxNode) -> TextRange {
