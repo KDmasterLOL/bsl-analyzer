@@ -32,6 +32,7 @@
 
 use crate::configuration::Configuration;
 use crate::error::Result;
+use crate::metadata_object::{MdoType, MetadataObject};
 use crate::traits::MdObject;
 use crate::xml_parser;
 use std::fs;
@@ -78,6 +79,36 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
 
     // Load EventSubscriptions
     load_event_subscriptions(&path.join("EventSubscriptions"), &mut config)?;
+
+    // Load other metadata types (simplified - name only, for SDBL completion)
+    load_simple_metadata_objects(
+        &path.join("ChartsOfCharacteristicTypes"),
+        &mut config,
+        MdoType::ChartOfCharacteristicTypes,
+    )?;
+    load_simple_metadata_objects(&path.join("ExchangePlans"), &mut config, MdoType::ExchangePlan)?;
+    load_simple_metadata_objects(
+        &path.join("BusinessProcesses"),
+        &mut config,
+        MdoType::BusinessProcess,
+    )?;
+    load_simple_metadata_objects(&path.join("Enums"), &mut config, MdoType::Enum)?;
+    load_simple_metadata_objects(&path.join("Tasks"), &mut config, MdoType::Task)?;
+    load_simple_metadata_objects(
+        &path.join("ChartsOfAccounts"),
+        &mut config,
+        MdoType::ChartOfAccounts,
+    )?;
+    load_simple_metadata_objects(
+        &path.join("ChartsOfCalculationTypes"),
+        &mut config,
+        MdoType::ChartOfCalculationTypes,
+    )?;
+    load_simple_metadata_objects(
+        &path.join("ExternalDataSources"),
+        &mut config,
+        MdoType::ExternalDataSource,
+    )?;
 
     tracing::info!(
         common_modules = config.common_modules().len(),
@@ -338,6 +369,55 @@ fn load_event_subscriptions(dir: &Path, config: &mut Configuration) -> Result<()
             );
 
             config.add_event_subscription(subscription);
+        }
+    }
+
+    Ok(())
+}
+
+/// Load metadata objects of any type (simplified - name only)
+///
+/// This is a generic loader for metadata types that don't have full parsers yet.
+/// It simply reads directory names and creates MetadataObject with name only.
+/// This is sufficient for SDBL completion to work.
+///
+/// Designer format structure:
+/// - XML: `<Type>/<Name>.xml` (next to folder)
+/// - Folder: `<Type>/<Name>/` (may have Ext/ inside)
+fn load_simple_metadata_objects(
+    dir: &Path,
+    config: &mut Configuration,
+    mdo_type: MdoType,
+) -> Result<()> {
+    let _span = tracing::debug_span!("load_simple_metadata_objects", ?dir, ?mdo_type).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let object_dir = entry.path();
+
+        // Look for directories
+        if object_dir.is_dir() {
+            if let Some(name) = object_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                // Only add if corresponding XML exists (standard Designer format)
+                if xml_path.exists() {
+                    let metadata_obj = MetadataObject::new(mdo_type, name);
+
+                    tracing::debug!(
+                        mdo_type = ?mdo_type,
+                        name = %name,
+                        "loaded metadata object (simplified)"
+                    );
+
+                    config.add_metadata_object(metadata_obj);
+                }
+            }
         }
     }
 
