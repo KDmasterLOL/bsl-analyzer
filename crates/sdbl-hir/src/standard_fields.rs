@@ -22,6 +22,7 @@ pub fn standard_fields_for_mdo(mdo_type: MdoType) -> Vec<FieldDef> {
         MdoType::BusinessProcess => business_process_standard_fields(),
         MdoType::Task => task_standard_fields(),
         MdoType::Enum => enum_standard_fields(),
+        MdoType::ExchangePlan => exchange_plan_standard_fields(),
         MdoType::ExternalDataSource => Vec::new(), // External sources define their own fields
         MdoType::Cube => Vec::new(),
         MdoType::DimensionTable => Vec::new(),
@@ -178,7 +179,19 @@ fn enum_standard_fields() -> Vec<FieldDef> {
     ]
 }
 
-/// Standard fields for Константа (Constant).
+/// Standard fields for ПланОбмена (ExchangePlan).
+fn exchange_plan_standard_fields() -> Vec<FieldDef> {
+    vec![
+        FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
+        FieldDef::standard("Код", "Code", SdblType::String),
+        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
+        FieldDef::standard("Предопределенный", "Predefined", SdblType::Boolean),
+        FieldDef::standard("ЭтотУзел", "ThisNode", SdblType::Boolean),
+    ]
+}
+
+/// Standard fields для Константа (Constant).
 fn constant_standard_fields() -> Vec<FieldDef> {
     vec![FieldDef::standard("Значение", "Value", SdblType::Unknown)]
 }

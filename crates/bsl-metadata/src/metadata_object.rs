@@ -34,6 +34,8 @@ pub enum MdoType {
     Task,
     /// Перечисление / Enum
     Enum,
+    /// План обмена / ExchangePlan
+    ExchangePlan,
     /// Внешний источник данных / ExternalDataSource
     ExternalDataSource,
     /// Куб внешнего источника данных / Cube (nested in ExternalDataSource)
@@ -78,6 +80,7 @@ impl FromStr for MdoType {
             "бизнеспроцесс" | "businessprocess" => Ok(Self::BusinessProcess),
             "задача" | "task" => Ok(Self::Task),
             "перечисление" | "enum" => Ok(Self::Enum),
+            "планобмена" | "exchangeplan" => Ok(Self::ExchangePlan),
             "внешнийисточникданных" | "externaldatasource" => {
                 Ok(Self::ExternalDataSource)
             }
@@ -108,6 +111,7 @@ impl MdoType {
             Self::BusinessProcess => "БизнесПроцесс",
             Self::Task => "Задача",
             Self::Enum => "Перечисление",
+            Self::ExchangePlan => "ПланОбмена",
             Self::ExternalDataSource => "ВнешнийИсточникДанных",
             Self::Cube => "Куб",
             Self::DimensionTable => "ТаблицаИзмерения",
@@ -133,6 +137,7 @@ impl MdoType {
             Self::BusinessProcess => "BusinessProcess",
             Self::Task => "Task",
             Self::Enum => "Enum",
+            Self::ExchangePlan => "ExchangePlan",
             Self::ExternalDataSource => "ExternalDataSource",
             Self::Cube => "Cube",
             Self::DimensionTable => "DimensionTable",
@@ -158,6 +163,7 @@ impl MdoType {
             Self::BusinessProcess,
             Self::Task,
             Self::Enum,
+            Self::ExchangePlan,
             Self::ExternalDataSource,
             Self::Cube,
             Self::DimensionTable,
@@ -207,6 +213,7 @@ impl MdoType {
             "бизнеспроцессы" | "businessprocesses" => Some(Self::BusinessProcess),
             "задачи" | "tasks" => Some(Self::Task),
             "перечисления" | "enums" => Some(Self::Enum),
+            "планыобмена" | "exchangeplans" => Some(Self::ExchangePlan),
             "внешниеисточникиданных" | "externaldatasources" => {
                 Some(Self::ExternalDataSource)
             }

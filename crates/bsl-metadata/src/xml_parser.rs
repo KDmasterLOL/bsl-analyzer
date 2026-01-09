@@ -739,22 +739,24 @@ fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::Attrib
     let ref_type = parts[0];
     let name = parts[1].to_string();
 
-    let mdo_type = if ref_type == "cfg:CatalogRef" {
-        MdoType::Catalog
-    } else if ref_type == "cfg:DocumentRef" {
-        MdoType::Document
-    } else if ref_type == "cfg:InformationRegisterRef" {
-        MdoType::InformationRegister
-    } else if ref_type == "cfg:AccumulationRegisterRef" {
-        MdoType::AccumulationRegister
-    } else if ref_type == "cfg:AccountingRegisterRef" {
-        MdoType::AccountingRegister
-    } else if ref_type == "cfg:CalculationRegisterRef" {
-        MdoType::CalculationRegister
-    } else {
-        // EnumRef, ChartOfCharacteristicTypesRef, etc. - not yet supported
-        tracing::warn!(ref_type = %ref_type, "unsupported reference type");
-        return Ok(AttributeType::Unknown);
+    let mdo_type = match ref_type {
+        "cfg:CatalogRef" => MdoType::Catalog,
+        "cfg:DocumentRef" => MdoType::Document,
+        "cfg:InformationRegisterRef" => MdoType::InformationRegister,
+        "cfg:AccumulationRegisterRef" => MdoType::AccumulationRegister,
+        "cfg:AccountingRegisterRef" => MdoType::AccountingRegister,
+        "cfg:CalculationRegisterRef" => MdoType::CalculationRegister,
+        "cfg:EnumRef" => MdoType::Enum,
+        "cfg:TaskRef" => MdoType::Task,
+        "cfg:ExchangePlanRef" => MdoType::ExchangePlan,
+        "cfg:BusinessProcessRef" => MdoType::BusinessProcess,
+        "cfg:ChartOfCharacteristicTypesRef" => MdoType::ChartOfCharacteristicTypes,
+        "cfg:ChartOfAccountsRef" => MdoType::ChartOfAccounts,
+        "cfg:ChartOfCalculationTypesRef" => MdoType::ChartOfCalculationTypes,
+        _ => {
+            tracing::warn!(ref_type = %ref_type, "unsupported reference type");
+            return Ok(AttributeType::Unknown);
+        }
     };
 
     Ok(AttributeType::Ref { mdo_type, name })
@@ -1333,9 +1335,12 @@ mod tests {
         let attr2 = catalog.find_attribute("Хранилище").unwrap();
         assert_eq!(attr2.attr_type, AttributeType::Unknown);
 
-        // EnumRef -> Unknown (not yet supported)
+        // EnumRef -> now supported
         let attr3 = catalog.find_attribute("Перечисление").unwrap();
-        assert_eq!(attr3.attr_type, AttributeType::Unknown);
+        assert_eq!(
+            attr3.attr_type,
+            AttributeType::Ref { mdo_type: MdoType::Enum, name: "Статусы".to_string() }
+        );
     }
 
     #[test]
