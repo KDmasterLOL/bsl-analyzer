@@ -462,6 +462,11 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::IncorrectUseOfStrTemplate { range } => {
             handlers::incorrect_use_of_str_template::from_hir(*range, ctx)
         }
+        BodyDiagnostic::MissingCommonModuleMethod { module, method, reason, range } => {
+            handlers::missing_common_module_method::from_hir_new(
+                module, method, reason, *range, ctx,
+            )
+        }
     }
 }
 

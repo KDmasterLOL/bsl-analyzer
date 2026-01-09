@@ -327,6 +327,24 @@ pub enum BodyDiagnostic {
     /// Validation against metadata happens in from_hir().
     CommonModuleAssign { variable_name: String, range: TextRange },
 
+    /// Missing or non-export method call in CommonModule.
+    ///
+    /// Collected during HIR lowering when qualified path resolution fails
+    /// or method is not exported.
+    ///
+    /// Examples:
+    /// - `CommonModule.NonExistentMethod()` → MethodNotFound
+    /// - `CommonModule.PrivateMethod()` → NonExportMethod
+    ///
+    /// This diagnostic is created by the resolver during path resolution and
+    /// represents all cases where a CommonModule method call cannot succeed.
+    MissingCommonModuleMethod {
+        module: String,
+        method: String,
+        reason: CommonModuleMethodError,
+        range: TextRange,
+    },
+
     /// Overwrite of byValue parameter without prior use.
     /// Emitted during lowering when a parameter marked with Знач/ByValue is assigned to.
     /// Validation using reaching definitions happens in from_hir() to check if parameter
@@ -450,6 +468,30 @@ pub enum BodyDiagnostic {
     IncorrectUseOfStrTemplate { range: TextRange },
 }
 
+/// Error types for MissingCommonModuleMethod diagnostic.
+///
+/// Represents different reasons why a CommonModule method call cannot succeed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommonModuleMethodError {
+    /// Method does not exist in the referenced CommonModule.
+    ///
+    /// Example: `CommonModule.NonExistentMethod()`
+    MethodNotFound,
+
+    /// Method exists but lacks `Экспорт` (Export) keyword.
+    ///
+    /// Example: `CommonModule.PrivateMethod()` where PrivateMethod exists but is not exported
+    NonExportMethod,
+
+    /// CommonModule not found in metadata.
+    ///
+    /// This can happen if:
+    /// - Module name is misspelled
+    /// - Metadata is not loaded
+    /// - Module exists but file is not in VFS
+    ModuleNotFound,
+}
+
 /// Category of deprecated attribute (8.3.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeprecatedKind8312 {
@@ -488,6 +530,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
+            BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
             BodyDiagnostic::RewriteMethodParameter { range, .. } => *range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
