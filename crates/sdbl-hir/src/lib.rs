@@ -138,12 +138,28 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
     // First extract the query text to validate char boundaries
     let query_text = extract_query_text(literal_text);
 
+    tracing::info!(
+        "map_offset_to_query: offset_in_literal={}, query_text_len={}",
+        offset_usize,
+        query_text.len()
+    );
+
     let mut literal_pos = 0;
     let mut query_pos = 0;
     let mut first_line = true;
+    let mut line_num = 0;
 
     for line in literal_text.lines() {
         let line_len = line.len();
+        line_num += 1;
+
+        tracing::info!(
+            "  line {}: literal_pos={}, line_len={}, line_text={:?}",
+            line_num,
+            literal_pos,
+            line_len,
+            line
+        );
 
         if literal_pos + line_len >= offset_usize {
             // Cursor is on this line
@@ -155,6 +171,12 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                 if offset_in_line > skip {
                     query_pos += offset_in_line - skip;
                 }
+                tracing::info!(
+                    "  -> FOUND on first line: offset_in_line={}, skip={}, final query_pos={}",
+                    offset_in_line,
+                    skip,
+                    query_pos
+                );
             } else {
                 // Continuation line: skip whitespace + | prefix
                 let trimmed = line.trim_start();
@@ -168,10 +190,19 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                 if offset_in_line > skip {
                     query_pos += offset_in_line - skip;
                 }
+                tracing::info!(
+                    "  -> FOUND on continuation line: offset_in_line={}, skip_ws={}, skip_pipe={}, final query_pos={}",
+                    offset_in_line,
+                    skip_whitespace,
+                    skip_pipe,
+                    query_pos
+                );
             }
 
             // Ensure we're on a char boundary in the extracted query text
-            return ensure_char_boundary(&query_text, query_pos);
+            let result = ensure_char_boundary(&query_text, query_pos);
+            tracing::info!("  -> after ensure_char_boundary: {:?}", result);
+            return result;
         }
 
         // Move to next line
