@@ -162,6 +162,9 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                 let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
                 let skip = skip_whitespace + skip_pipe;
 
+                // Add newline before this line's content
+                query_pos += 1;
+
                 if offset_in_line > skip {
                     query_pos += offset_in_line - skip;
                 }
@@ -329,16 +332,27 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         query_text
     };
 
+    tracing::debug!(
+        query_len = query_text.len(),
+        offset = offset_usize,
+        text_before_len = text_before_cursor.len(),
+        text_before = %text_before_cursor,
+        "detect_context"
+    );
+
     // Check for "FROM " or "ИЗ " keyword immediately before cursor
     if is_after_from_keyword(text_before_cursor) {
+        tracing::debug!("detected AfterFromKeyword");
         return SdblCompletionContext::AfterFromKeyword;
     }
 
     // Check for MDO type pattern: "Справочник." or "Catalog."
     if let Some((mdo_type, prefix)) = parse_inside_mdo_type(text_before_cursor) {
+        tracing::debug!(?mdo_type, prefix = %prefix, "detected InsideMdoType");
         return SdblCompletionContext::InsideMdoType { mdo_type, prefix };
     }
 
+    tracing::debug!("no context detected");
     SdblCompletionContext::None
 }
 
@@ -364,24 +378,45 @@ fn parse_inside_mdo_type(text_before: &str) -> Option<(bsl_metadata::MdoType, St
     let words: Vec<&str> = text_before.split_whitespace().collect();
     let last_word = words.last()?;
 
+    tracing::debug!(
+        last_word = %last_word,
+        total_words = words.len(),
+        "parse_inside_mdo_type"
+    );
+
     // Check if last word contains a dot (MDO type separator)
     if !last_word.contains('.') {
+        tracing::debug!("last word doesn't contain dot");
         return None;
     }
 
     // Split by dot
     let parts: Vec<&str> = last_word.split('.').collect();
     if parts.len() < 2 {
+        tracing::debug!("not enough parts after split by dot");
         return None;
     }
 
     let mdo_type_str = parts[0];
     let prefix = parts[1..].join(".");
 
-    // Try to parse MDO type (both Russian and English)
-    let mdo_type = mdo_type_str.parse::<bsl_metadata::MdoType>().ok()?;
+    tracing::debug!(
+        mdo_type_str = %mdo_type_str,
+        prefix = %prefix,
+        "attempting to parse MDO type"
+    );
 
-    Some((mdo_type, prefix))
+    // Try to parse MDO type (both Russian and English)
+    match mdo_type_str.parse::<bsl_metadata::MdoType>() {
+        Ok(mdo_type) => {
+            tracing::debug!(?mdo_type, "successfully parsed MDO type");
+            Some((mdo_type, prefix))
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to parse MDO type");
+            None
+        }
+    }
 }
 
 /// Check if a string contains SDBL keywords.
@@ -658,6 +693,49 @@ mod tests {
                 assert_eq!(prefix, "Settings");
             }
             _ => panic!("Expected InsideMdoType, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_completion_after_mdo_type_in_multiline_query() {
+        let code = r#"Функция ЕстьОчередьОбновленияКэширующихДанных()
+    Запрос = Новый Запрос(
+        "ВЫБРАТЬ ПЕРВЫЕ 500
+        |    Очередь.ОтметкаВремени КАК ОтметкаВремени,
+        |ИЗ
+        |    РегистрСведений. КАК Очередь
+        |ГДЕ
+        |    Очередь.Попыток < 3");
+    Возврат НЕ Запрос.Выполнить().Пустой();
+КонецФункции"#;
+
+        let root = parse_bsl(code);
+
+        // Find offset after "РегистрСведений." (should be around the dot)
+        let offset_after_dot = code.find("РегистрСведений.").unwrap() + "РегистрСведений.".len();
+        let offset = TextSize::from(offset_after_dot as u32);
+
+        // Detect SDBL query
+        let query_info = detect_sdbl_at_position(&root, offset);
+
+        match query_info {
+            Some(info) => {
+                // Detect context
+                let context = detect_context(&info.query_text, info.offset_in_query);
+
+                // Should be InsideMdoType with InformationRegister
+                match context {
+                    SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
+                        use bsl_metadata::MdoType;
+                        assert_eq!(mdo_type, MdoType::InformationRegister);
+                        assert_eq!(prefix, "");
+                    }
+                    _ => panic!("Expected InsideMdoType, got {:?}", context),
+                }
+            }
+            None => {
+                panic!("SDBL query not detected at offset {:?}", offset);
+            }
         }
     }
 }
