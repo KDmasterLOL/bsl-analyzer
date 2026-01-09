@@ -332,27 +332,27 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         query_text
     };
 
-    tracing::debug!(
+    tracing::info!(
         query_len = query_text.len(),
         offset = offset_usize,
         text_before_len = text_before_cursor.len(),
-        text_before = %text_before_cursor,
+        text_before_last_100 = %&text_before_cursor[text_before_cursor.len().saturating_sub(100)..],
         "detect_context"
     );
 
     // Check for "FROM " or "ИЗ " keyword immediately before cursor
     if is_after_from_keyword(text_before_cursor) {
-        tracing::debug!("detected AfterFromKeyword");
+        tracing::info!("detected AfterFromKeyword");
         return SdblCompletionContext::AfterFromKeyword;
     }
 
     // Check for MDO type pattern: "Справочник." or "Catalog."
     if let Some((mdo_type, prefix)) = parse_inside_mdo_type(text_before_cursor) {
-        tracing::debug!(?mdo_type, prefix = %prefix, "detected InsideMdoType");
+        tracing::info!(?mdo_type, prefix = %prefix, "detected InsideMdoType");
         return SdblCompletionContext::InsideMdoType { mdo_type, prefix };
     }
 
-    tracing::debug!("no context detected");
+    tracing::info!("no context detected");
     SdblCompletionContext::None
 }
 
