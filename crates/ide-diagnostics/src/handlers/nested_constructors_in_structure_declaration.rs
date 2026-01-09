@@ -32,162 +32,103 @@
 //! Ported from:
 //! - NestedConstructorsInStructureDeclarationDiagnostic.java (bsl-language-server)
 //!
-//! Adapted to use Rowan SyntaxNode.
+//! **HIR-based implementation** using semantic analysis instead of AST traversal.
+//!
+//! Migrated from AST to HIR for:
+//! - Type-safe expression handling via Expr enum
+//! - Automatic Salsa caching via module_bodies()
+//! - Module-level code coverage (not just methods)
+//! - Cleaner recursive checking via ExprId references
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode};
+use hir::ModuleId;
+use hir_def::{Body, BodySourceMap, Expr, Name};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::NestedConstructorsInStructureDeclaration) {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::NEW_EXPR {
-            continue;
-        }
+    // Get module bodies from HIR (cached by Salsa)
+    let module_id = ModuleId::new(ctx.file_id);
+    let module_bodies = ctx.db.module_bodies(module_id);
 
-        if let Some(diagnostic) = check_new_expr(&node) {
-            diagnostics.push(diagnostic);
-        }
+    // Check module-level code (code outside procedures/functions)
+    if let Some(module_code) = module_bodies.module_code_result() {
+        check_body(&module_code.body, &module_code.source_map, &mut diagnostics);
     }
+
+    // Check all method bodies (procedures and functions)
+    for (_, body, source_map) in module_bodies.method_bodies() {
+        check_body(body, source_map, &mut diagnostics);
+    }
+
+    // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
 
     diagnostics
 }
 
-fn check_new_expr(node: &SyntaxNode) -> Option<Diagnostic> {
-    if !is_structure_or_fixed_structure(node) {
-        return None;
-    }
+/// Check a single Body for nested constructors in structure declarations.
+///
+/// HIR-based approach: iterates over expressions and checks New expressions semantically.
+fn check_body(body: &Body, source_map: &BodySourceMap, diagnostics: &mut Vec<Diagnostic>) {
+    // Walk all expressions in the body
+    for (expr_id, expr) in body.exprs.iter() {
+        // Only check New expressions
+        let Expr::New { type_name, args } = expr else {
+            continue;
+        };
 
-    let params = get_call_params(node);
-    if params.len() <= 1 {
-        return None;
-    }
-
-    let nested_with_params: Vec<&SyntaxNode> =
-        params.iter().filter(|p| is_new_expr_with_params(p)).collect();
-
-    if !nested_with_params.is_empty() {
-        return Some(make_diagnostic(node));
-    }
-
-    None
-}
-
-fn is_structure_or_fixed_structure(node: &SyntaxNode) -> bool {
-    let tokens: Vec<_> = node.children_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    let mut found_new = false;
-    for token in &tokens {
-        if token.kind() == SyntaxKind::KW_NEW {
-            found_new = true;
+        // Check if this is Structure or FixedStructure constructor
+        if !is_structure_or_fixed_structure(type_name) {
             continue;
         }
 
-        if found_new && token.kind() == SyntaxKind::IDENT {
-            let text = token.text().to_lowercase();
-            return matches!(
-                text.as_str(),
-                "структура" | "structure" | "фиксированнаяструктура" | "fixedstructure"
-            );
+        // Must have more than 1 argument to potentially have nested constructors
+        if args.len() <= 1 {
+            continue;
         }
-    }
 
-    false
+        // Check if any argument is a New expression with non-empty parameters
+        let has_nested_constructor_with_params = args.iter().any(|&arg_id| {
+            matches!(
+                body.expr(arg_id),
+                Expr::New { args: nested_args, .. } if !nested_args.is_empty()
+            )
+        });
+
+        if !has_nested_constructor_with_params {
+            continue;
+        }
+
+        // Get range from source map
+        let Some(range) = source_map.expr_range(expr_id) else {
+            continue;
+        };
+
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            message: "Не используйте конструкторы с параметрами при объявлении структуры"
+                .to_string(),
+            severity: Severity::Warning,
+            range,
+            tags: vec![],
+            fixes: vec![],
+        });
+    }
 }
 
-fn get_call_params(node: &SyntaxNode) -> Vec<SyntaxNode> {
-    let mut params = Vec::new();
-
-    for child in node.children() {
-        if child.kind() == SyntaxKind::ARG_LIST {
-            // Children of ARG_LIST are EXPR nodes separated by COMMA tokens
-            for arg in child.children() {
-                if arg.kind() == SyntaxKind::EXPR {
-                    params.push(arg);
-                }
-            }
-            break;
-        }
-    }
-
-    params
-}
-
-fn is_new_expr_with_params(arg: &SyntaxNode) -> bool {
-    // Java logic: filter params that START with NEW keyword
-    // This excludes cases like FillStructure(New FixedStructure(...))
-    // where the param starts with IDENT, not NEW
-
-    // Get the first significant token in this argument
-    let first_token = arg
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| !t.kind().is_trivia());
-
-    // Must start with KW_NEW
-    let Some(first) = first_token else {
+/// Check if type name is Structure or FixedStructure (case-insensitive, bilingual).
+fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
+    let Some(name) = type_name else {
         return false;
     };
 
-    if first.kind() != SyntaxKind::KW_NEW {
-        return false;
-    }
-
-    // Now find the first NEW_EXPR in this argument and check if it has non-empty params
-    for descendant in arg.descendants() {
-        if descendant.kind() == SyntaxKind::NEW_EXPR {
-            if has_non_empty_params(&descendant) {
-                return true;
-            }
-            // Only check the first NEW_EXPR (matches Java behavior)
-            break;
-        }
-    }
-
-    false
-}
-
-fn has_non_empty_params(new_expr: &SyntaxNode) -> bool {
-    for child in new_expr.children() {
-        if child.kind() == SyntaxKind::ARG_LIST {
-            // Children of ARG_LIST are EXPR nodes
-            for arg in child.children() {
-                if arg.kind() == SyntaxKind::EXPR {
-                    let has_content = arg.descendants_with_tokens().any(|el| {
-                        matches!(
-                            el.kind(),
-                            SyntaxKind::IDENT
-                                | SyntaxKind::STRING
-                                | SyntaxKind::DECIMAL
-                                | SyntaxKind::FLOAT
-                        )
-                    });
-                    if has_content {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-fn make_diagnostic(node: &SyntaxNode) -> Diagnostic {
-    Diagnostic {
-        code: DiagnosticCode::NestedConstructorsInStructureDeclaration,
-        message: "Не используйте конструкторы с параметрами при объявлении структуры".to_string(),
-        severity: Severity::Warning,
-        range: node.text_range(),
-        tags: vec![],
-        fixes: vec![],
-    }
+    let text = name.as_str().to_lowercase();
+    matches!(text.as_str(), "структура" | "structure" | "фиксированнаяструктура" | "fixedstructure")
 }
 
 #[cfg(test)]
@@ -197,15 +138,26 @@ mod tests {
     use crate::DiagnosticsConfig;
     use ide_db::base_db::SourceDatabase;
     use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
+    use std::sync::Arc;
     use test_fixture::Fixture;
 
     fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
+        use ide_db::base_db::{SourceRoot, SourceRootId};
+        use vfs::{FileSet, VfsPath};
+
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for HIR (module_bodies) to work
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
         let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
@@ -214,7 +166,8 @@ mod tests {
             }
         }
 
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+        #[allow(clippy::arc_with_non_send_sync)]
+        let db = Arc::new(db) as Arc<dyn RootDatabase>;
         let config = DiagnosticsConfig::default();
         let ctx = DiagnosticsContext {
             db: db.as_ref(),
