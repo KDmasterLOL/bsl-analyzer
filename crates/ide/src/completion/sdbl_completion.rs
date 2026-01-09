@@ -308,7 +308,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
 
     // Log scope state for debugging
     let all_tables: Vec<_> = scope.all_tables().collect();
-    tracing::debug!(
+    tracing::info!(
         alias = %alias,
         prefix = %prefix,
         tables_in_scope = all_tables.len(),
@@ -316,7 +316,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
     );
 
     for (i, table) in all_tables.iter().enumerate() {
-        tracing::debug!(
+        tracing::info!(
             table_index = i,
             full_name = %table.full_name,
             alias = ?table.alias,
@@ -327,7 +327,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
     // Get column completions from scope for the specified alias
     let columns = scope.column_completions(Some(alias));
 
-    tracing::debug!(
+    tracing::info!(
         alias = %alias,
         columns_before_filter = columns.len(),
         "column_completions returned"
@@ -342,7 +342,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
             let type_desc = format!("{:?}", col.ty);
             let standard_marker = if col.is_standard { " (стандартный)" } else { "" };
 
-            tracing::debug!(
+            tracing::info!(
                 field_name = %field_name,
                 table_name = %col.table_name.as_str(),
                 "including field in completion"
@@ -362,7 +362,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
         })
         .collect();
 
-    tracing::debug!(
+    tracing::info!(
         alias = %alias,
         results_after_filter = results.len(),
         "complete_fields_by_alias returning"
