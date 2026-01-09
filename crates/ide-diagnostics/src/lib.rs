@@ -924,15 +924,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::metadata_object_name_length::check,
     ));
-    // NOTE: MissingCommonModuleMethod uses AST-based collection with path resolution (Phase 4)
-    // After Phase 4, we use AST-based check() which validates qualified calls via
-    // workspace symbol index and path resolution instead of during HIR lowering.
-    // This provides more accurate diagnostics using the workspace symbols from Phase 2.
-    result.extend(run_diagnostic(
-        "MissingCommonModuleMethod",
-        ctx,
-        handlers::missing_common_module_method::check,
-    ));
+    // NOTE: MissingCommonModuleMethod is now collected via HIR lowering (Phase 5 complete)
+    // Diagnostics are created in expr.rs during qualified call lowering and validated
+    // in from_hir() handler using workspace symbols and path resolution.
     result.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
