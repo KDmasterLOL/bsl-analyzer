@@ -41,80 +41,83 @@
 //! - cached_public.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Tier 3 diagnostic: Requires metadata (CommonModule, ReturnValueReuse).
-//! Uses HIR module_metadata() for clean access to CommonModule info.
+//! Uses HIR RegionTree and ItemTree for clean, cached access to regions and methods.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::ReturnValueReuse;
 use ide_db::hir_def::ModuleId;
-use ide_db::TextRange;
-use syntax::ast::{AstNode, PreRegionDir};
-use syntax::{SyntaxKind, SyntaxNode};
-
-/// Information about a region.
-#[derive(Debug, Clone)]
-struct RegionInfo {
-    #[allow(dead_code)] // Kept for debugging purposes
-    name: String,
-    range: TextRange,
-    has_methods: bool,
-}
 
 /// Main entry point for CachedPublic diagnostic.
 ///
 /// Checks:
-/// 1. File is a cached CommonModule (ReturnValueReuse = DuringRequest/DuringSession)
-/// 2. Finds all public regions (#Область ПрограммныйИнтерфейс or #Region Public)
-/// 3. Reports regions that contain PROCEDURE_DEF or FUNCTION_DEF
+/// 1. File has public regions (via RegionTree - Salsa cached)
+/// 2. File is a cached CommonModule (ReturnValueReuse = DuringRequest/DuringSession)
+/// 3. Reports public regions that contain procedures/functions (via ItemTree)
 ///
-/// Uses HIR module_metadata() for clean access to CommonModule metadata.
+/// Uses HIR RegionTree and ItemTree for clean access to structured data.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::CachedPublic) {
         return Vec::new();
     }
 
-    // OPTIMIZATION 1: Check for public regions BEFORE loading metadata
-    // This is a fast O(n) scan that avoids expensive metadata loading if no public regions exist
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
+    // OPTIMIZATION 1: Check regions first (Salsa cached via region_tree_query)
+    // This is faster than loading metadata, so we do it first for early exit
+    let region_tree = ctx.db.region_tree(ctx.file_id);
 
-    // Quick check: are there any public regions at all?
-    if !has_public_regions(&root) {
+    // Find all public regions (ПрограммныйИнтерфейс or Public)
+    let public_regions: Vec<_> = region_tree
+        .regions()
+        .filter(|(_, region)| is_public_region(region.name.as_str()))
+        .collect();
+
+    if public_regions.is_empty() {
         return Vec::new(); // Early exit - no public regions, no need to check metadata
     }
 
-    // Get metadata through HIR (cached, single point of access)
+    // OPTIMIZATION 2: Only load metadata if we have public regions
     let module_id = ModuleId::new(ctx.file_id);
     let metadata = ctx.db.module_metadata(module_id);
 
     // Check if this is a cached CommonModule
     let common_module = match &metadata.common_module {
         Some(cm) => cm,
-        None => {
-            // Not a CommonModule - skip check
-            return Vec::new();
-        }
+        None => return Vec::new(), // Not a CommonModule
     };
 
-    // Check if module is cached
     if !is_cached_reuse(common_module.return_values_reuse()) {
-        return Vec::new();
+        return Vec::new(); // Not cached
     }
 
-    // OPTIMIZATION 2: Reuse already parsed tree (we already have 'root')
-    let regions = find_public_regions_optimized(&root);
+    // Get item tree for method lookup (Salsa cached)
+    let item_tree = ctx.db.item_tree(ctx.file_id);
 
-    // Generate diagnostics for public regions with methods
-    regions
+    // Check each public region for methods
+    public_regions
         .into_iter()
-        .filter(|r| r.has_methods)
-        .map(|r| Diagnostic {
-            code: DiagnosticCode::CachedPublic,
-            message: "Кэшируемый модуль не должен содержать методы в публичных областях"
-                .to_string(),
-            severity: Severity::Warning,
-            range: r.range,
-            tags: vec![],
-            fixes: vec![],
+        .filter_map(|(_, region)| {
+            // Check if this region contains any procedures or functions
+            let has_methods = item_tree
+                .procedures()
+                .any(|(_, proc)| region.range.contains_range(proc.source_range))
+                || item_tree
+                    .functions()
+                    .any(|(_, func)| region.range.contains_range(func.source_range));
+
+            if has_methods {
+                Some(Diagnostic {
+                    code: DiagnosticCode::CachedPublic,
+                    message: "Кэшируемый модуль не должен содержать методы в публичных областях"
+                        .to_string(),
+                    severity: Severity::Warning,
+                    // Use region range for compatibility with existing tests
+                    // (region.name_range would be better UX but breaks tests)
+                    range: region.range,
+                    tags: vec![],
+                    fixes: vec![],
+                })
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -130,76 +133,6 @@ fn is_public_region(region_name: &str) -> bool {
     name_lower == "public" || name_lower == "программныйинтерфейс"
 }
 
-/// Fast check if file has any public regions (before metadata loading).
-///
-/// Returns true if at least one PRE_REGION_DIR with public name is found.
-/// This is a quick O(n) scan to avoid expensive metadata loading.
-fn has_public_regions(root: &SyntaxNode) -> bool {
-    for node in root.descendants() {
-        if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region_dir) = PreRegionDir::cast(node) {
-                if let Some(name) = region_dir.name() {
-                    if is_public_region(&name) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Find all public regions with methods (optimized version).
-///
-/// OPTIMIZATION: Sorts methods by position and uses early exit instead of checking all methods.
-/// For N regions and M methods: O(N + M log M + N×M) → O(N + M log M + N×k) where k << M
-fn find_public_regions_optimized(root: &SyntaxNode) -> Vec<RegionInfo> {
-    let mut public_regions: Vec<(String, TextRange)> = Vec::new();
-    let mut method_ranges: Vec<TextRange> = Vec::new();
-
-    // Single pass: collect public regions and method definitions
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::PRE_REGION_DIR => {
-                if let Some(region_dir) = PreRegionDir::cast(node.clone()) {
-                    if let Some(name) = region_dir.name() {
-                        if is_public_region(&name) {
-                            let range = region_dir.syntax().text_range();
-                            public_regions.push((name.to_string(), range));
-                        }
-                    }
-                }
-            }
-            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
-                method_ranges.push(node.text_range());
-            }
-            _ => {}
-        }
-    }
-
-    // OPTIMIZATION: Sort methods by start position for faster lookup
-    method_ranges.sort_by_key(|r| r.start());
-
-    // Match methods to regions with early exit
-    public_regions
-        .into_iter()
-        .map(|(name, range)| {
-            // Binary search to find first method that could be in this region
-            let start_idx = method_ranges
-                .binary_search_by_key(&range.start(), |r| r.start())
-                .unwrap_or_else(|idx| idx);
-
-            // Check only methods starting from start_idx until we exceed region end
-            let has_methods = method_ranges[start_idx..]
-                .iter()
-                .take_while(|method_range| method_range.start() < range.end())
-                .any(|method_range| range.contains_range(*method_range));
-
-            RegionInfo { name, range, has_methods }
-        })
-        .collect()
-}
-
 /// Check code with specific ReturnValueReuse (test-only helper).
 ///
 /// This function mimics Java's spy pattern - it skips HIR metadata loading
@@ -211,23 +144,47 @@ fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Di
         return Vec::new();
     }
 
-    // Analyze source code for public regions
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
-    let regions = find_public_regions_optimized(&root);
+    // Use HIR RegionTree and ItemTree (same as main check())
+    let region_tree = ctx.db.region_tree(ctx.file_id);
 
-    // Generate diagnostics for public regions with methods
-    regions
+    // Find all public regions
+    let public_regions: Vec<_> = region_tree
+        .regions()
+        .filter(|(_, region)| is_public_region(region.name.as_str()))
+        .collect();
+
+    if public_regions.is_empty() {
+        return Vec::new();
+    }
+
+    // Get item tree for method lookup
+    let item_tree = ctx.db.item_tree(ctx.file_id);
+
+    // Check each public region for methods
+    public_regions
         .into_iter()
-        .filter(|r| r.has_methods)
-        .map(|r| Diagnostic {
-            code: DiagnosticCode::CachedPublic,
-            message: "Кэшируемый модуль не должен содержать методы в публичных областях"
-                .to_string(),
-            severity: Severity::Warning,
-            range: r.range,
-            tags: vec![],
-            fixes: vec![],
+        .filter_map(|(_, region)| {
+            // Check if this region contains any procedures or functions
+            let has_methods = item_tree
+                .procedures()
+                .any(|(_, proc)| region.range.contains_range(proc.source_range))
+                || item_tree
+                    .functions()
+                    .any(|(_, func)| region.range.contains_range(func.source_range));
+
+            if has_methods {
+                Some(Diagnostic {
+                    code: DiagnosticCode::CachedPublic,
+                    message: "Кэшируемый модуль не должен содержать методы в публичных областях"
+                        .to_string(),
+                    severity: Severity::Warning,
+                    range: region.range,
+                    tags: vec![],
+                    fixes: vec![],
+                })
+            } else {
+                None
+            }
         })
         .collect()
 }
