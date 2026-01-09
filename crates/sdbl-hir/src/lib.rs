@@ -178,23 +178,35 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                     query_pos
                 );
             } else {
-                // Continuation line: skip whitespace + | prefix
+                // Continuation line: skip whitespace + | prefix + whitespace after |
                 let trimmed = line.trim_start();
-                let skip_whitespace = line.len() - trimmed.len();
-                let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
-                let skip = skip_whitespace + skip_pipe;
+                let skip_whitespace_before = line.len() - trimmed.len();
+
+                let (skip_pipe, after_pipe) = if let Some(stripped) = trimmed.strip_prefix('|') {
+                    (1, stripped)
+                } else {
+                    (0, trimmed)
+                };
+
+                // Skip whitespace AFTER the pipe
+                let content = after_pipe.trim_start();
+                let skip_whitespace_after = after_pipe.len() - content.len();
+
+                let skip_total = skip_whitespace_before + skip_pipe + skip_whitespace_after;
 
                 // Add newline before this line's content
                 query_pos += 1;
 
-                if offset_in_line > skip {
-                    query_pos += offset_in_line - skip;
+                if offset_in_line > skip_total {
+                    query_pos += offset_in_line - skip_total;
                 }
                 tracing::info!(
-                    "  -> FOUND on continuation line: offset_in_line={}, skip_ws={}, skip_pipe={}, final query_pos={}",
+                    "  -> FOUND on continuation line: offset_in_line={}, skip_ws_before={}, skip_pipe={}, skip_ws_after={}, skip_total={}, final query_pos={}",
                     offset_in_line,
-                    skip_whitespace,
+                    skip_whitespace_before,
                     skip_pipe,
+                    skip_whitespace_after,
+                    skip_total,
                     query_pos
                 );
             }
@@ -215,9 +227,20 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
         } else {
             query_pos += 1; // newline
             let trimmed = line.trim_start();
-            let skip_whitespace = line.len() - trimmed.len();
-            let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
-            query_pos += line_len - skip_whitespace - skip_pipe;
+            let skip_whitespace_before = line.len() - trimmed.len();
+
+            let (skip_pipe, after_pipe) = if let Some(stripped) = trimmed.strip_prefix('|') {
+                (1, stripped)
+            } else {
+                (0, trimmed)
+            };
+
+            // Skip whitespace AFTER the pipe
+            let content = after_pipe.trim_start();
+            let skip_whitespace_after = after_pipe.len() - content.len();
+
+            let skip_total = skip_whitespace_before + skip_pipe + skip_whitespace_after;
+            query_pos += line_len - skip_total;
         }
     }
 
