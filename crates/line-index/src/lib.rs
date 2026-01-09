@@ -207,6 +207,59 @@ impl LineIndex {
         text[line_start..col_end].encode_utf16().count() as u32
     }
 
+    /// Converts a UTF-16 code unit offset to byte offset within a line.
+    ///
+    /// This is the inverse of `utf16_col()`. It's needed for converting LSP positions
+    /// (which use UTF-16) to byte offsets for Rust string operations.
+    ///
+    /// Returns `None` if:
+    /// - The line doesn't exist
+    /// - The UTF-16 offset exceeds the line length
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use line_index::{LineIndex, LineIndexExt};
+    ///
+    /// // Cyrillic: "Процедура" = 9 chars, 18 bytes UTF-8, 9 UTF-16 code units
+    /// let text = "Процедура Тест";
+    /// let index = LineIndex::new(text);
+    ///
+    /// // UTF-16 position 9 (space after "Процедура") → byte offset 18
+    /// assert_eq!(index.utf16_col_to_byte_col(text, 0, 9), Some(18));
+    /// ```
+    pub fn utf16_col_to_byte_col(&self, text: &str, line: u32, utf16_col: u32) -> Option<u32> {
+        let line_range = self.line_range(line)?;
+        let line_start: usize = line_range.start().into();
+        let line_end: usize = line_range.end().into();
+        let line_text = &text[line_start..line_end.min(text.len())];
+
+        // Iterate through characters, counting UTF-16 code units until we reach utf16_col
+        let mut utf16_offset = 0u32;
+        let mut byte_offset = 0usize;
+
+        for ch in line_text.chars() {
+            if utf16_offset >= utf16_col {
+                return Some(byte_offset as u32);
+            }
+
+            // Count UTF-16 code units for this character
+            // BMP characters (including Cyrillic, Latin, most symbols): 1 code unit
+            // Supplementary characters (emoji, rare CJK): 2 code units (surrogate pair)
+            let utf16_len = ch.len_utf16() as u32;
+            utf16_offset += utf16_len;
+            byte_offset += ch.len_utf8();
+        }
+
+        // utf16_col is at or past end of line
+        if utf16_offset >= utf16_col {
+            Some(byte_offset as u32)
+        } else {
+            // UTF-16 offset exceeds line length
+            None
+        }
+    }
+
     /// Iterates over all lines, yielding (line_number, line_range) pairs.
     pub fn lines(&self) -> impl Iterator<Item = (u32, TextRange)> + '_ {
         (0..self.len_lines()).filter_map(|line| self.line_range(line).map(|range| (line, range)))
@@ -515,5 +568,112 @@ mod tests {
         let len = LineIndex::utf16_len(text, invalid_range);
         // Should return 1 (just 'П'), since 3 rounds down to 2
         assert_eq!(len, 1, "Should handle invalid range endpoint");
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_ascii() {
+        // ASCII: 1 byte = 1 UTF-16 code unit
+        let text = "hello world";
+        let index = LineIndex::new(text);
+
+        // Position 0 → byte 0
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 0), Some(0));
+        // Position 6 (space) → byte 6
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 6), Some(6));
+        // Position 11 (end) → byte 11
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 11), Some(11));
+        // Position 12 (past end) → None
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 12), None);
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_cyrillic() {
+        // Cyrillic: 2 bytes UTF-8 = 1 UTF-16 code unit
+        // "Процедура Тест" = 14 chars, 27 bytes UTF-8, 14 UTF-16 code units
+        let text = "Процедура Тест";
+        let index = LineIndex::new(text);
+
+        // Position 0 → byte 0
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 0), Some(0));
+        // Position 1 ('р' after 'П') → byte 2
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 1), Some(2));
+        // Position 9 (space after "Процедура") → byte 18
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 9), Some(18));
+        // Position 10 ('Т' in "Тест") → byte 19 (start of 'Т')
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 10), Some(19));
+        // Position 14 (end) → byte 27
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 14), Some(27));
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_mixed() {
+        // Mixed ASCII and Cyrillic
+        // "Функция Test" = "Функция" (14 bytes, 7 chars) + " Test" (5 bytes, 5 chars)
+        let text = "Функция Test";
+        let index = LineIndex::new(text);
+
+        // Position 0 → byte 0
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 0), Some(0));
+        // Position 7 (space after "Функция") → byte 14
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 7), Some(14));
+        // Position 8 ('T') → byte 15
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 8), Some(15));
+        // Position 12 (end) → byte 19
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 12), Some(19));
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_multiline() {
+        // Test with multiple lines
+        let text = "Процедура\nТест()";
+        let index = LineIndex::new(text);
+
+        // Line 0: "Процедура" = 9 UTF-16 code units, 18 bytes
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 0), Some(0));
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 9), Some(18));
+
+        // Line 1: "Тест()" = 6 UTF-16 code units (4 Cyrillic + 2 ASCII), 10 bytes
+        assert_eq!(index.utf16_col_to_byte_col(text, 1, 0), Some(0));
+        assert_eq!(index.utf16_col_to_byte_col(text, 1, 4), Some(8)); // after "Тест"
+        assert_eq!(index.utf16_col_to_byte_col(text, 1, 6), Some(10)); // after "()"
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_emoji() {
+        // Emoji: 4 bytes UTF-8 = 2 UTF-16 code units (surrogate pair)
+        let text = "hello😀world";
+        let index = LineIndex::new(text);
+
+        // Position 0 → byte 0
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 0), Some(0));
+        // Position 5 (before emoji) → byte 5
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 5), Some(5));
+        // Position 7 (after emoji, 2 UTF-16 code units) → byte 9 (5 + 4)
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 7), Some(9));
+        // Position 12 (end) → byte 14
+        assert_eq!(index.utf16_col_to_byte_col(text, 0, 12), Some(14));
+    }
+
+    #[test]
+    fn test_utf16_col_to_byte_col_roundtrip() {
+        // Verify roundtrip: byte col → UTF-16 col → byte col
+        // IMPORTANT: Only test on valid char boundaries!
+        let text = "Процедура Тест";
+        let index = LineIndex::new(text);
+
+        // Valid char boundaries: 0, 2, 4, 6, 8, 10, 12, 14, 16, 18 (П,р,о,ц,е,д,у,р,а, )
+        // and 19, 21, 23, 25, 27 (Т,е,с,т,end)
+        for byte_col in [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 19, 21, 23, 25, 27] {
+            let utf16_col = index.utf16_col(text, 0, byte_col);
+            let recovered = index.utf16_col_to_byte_col(text, 0, utf16_col);
+            assert_eq!(
+                recovered,
+                Some(byte_col),
+                "roundtrip failed for byte_col {}: utf16_col={}, recovered={:?}",
+                byte_col,
+                utf16_col,
+                recovered
+            );
+        }
     }
 }

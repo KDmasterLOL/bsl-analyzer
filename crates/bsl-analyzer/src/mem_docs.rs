@@ -62,14 +62,35 @@ impl MemDocs {
             for change in changes {
                 if let Some(range) = change.range {
                     // Incremental change
+                    // CRITICAL: LSP uses UTF-16 code units for positions, not byte offsets!
+                    // Must convert UTF-16 → byte offsets before using with Rust strings.
+                    //
+                    // For Cyrillic: "Процедура" = 9 UTF-16 code units, but 18 bytes UTF-8
+                    // If we use UTF-16 positions directly, we'll try to split a multibyte char → panic
+
+                    // Convert UTF-16 positions to byte offsets
+                    let start_byte_col = data
+                        .line_index
+                        .utf16_col_to_byte_col(&data.text, range.start.line, range.start.character)
+                        .unwrap_or(0);
+
+                    let end_byte_col = data
+                        .line_index
+                        .utf16_col_to_byte_col(&data.text, range.end.line, range.end.character)
+                        .unwrap_or_else(|| {
+                            // Fallback: use line length if UTF-16 offset is out of bounds
+                            data.line_index.line_len(range.end.line).unwrap_or(0)
+                        });
+
+                    // Convert line/col to absolute byte offsets
                     let start_offset = data
                         .line_index
-                        .offset(LineCol { line: range.start.line, col: range.start.character })
+                        .offset(LineCol { line: range.start.line, col: start_byte_col })
                         .unwrap_or(TextSize::from(0));
 
                     let end_offset = data
                         .line_index
-                        .offset(LineCol { line: range.end.line, col: range.end.character })
+                        .offset(LineCol { line: range.end.line, col: end_byte_col })
                         .unwrap_or(TextSize::from(data.text.len() as u32));
 
                     let start = usize::from(start_offset);
@@ -214,5 +235,87 @@ mod tests {
         // Test line_col for offset 6 ('l' in "line2")
         let pos = line_index.line_col(TextSize::from(6));
         assert_eq!(pos, LineCol { line: 1, col: 0 });
+    }
+
+    #[test]
+    fn test_update_incremental_cyrillic() {
+        // Regression test for panic with Cyrillic text:
+        // LSP sends positions in UTF-16 code units, which must be converted to byte offsets.
+        // For Cyrillic, 1 char = 2 bytes UTF-8 but 1 UTF-16 code unit.
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+
+        // Initial text: "Процедура Тест()\nКонецПроцедуры"
+        // "Процедура" = 9 chars, 18 bytes UTF-8, 9 UTF-16 code units
+        mem_docs.insert(uri.clone(), "Процедура Тест()\nКонецПроцедуры".to_string(), 1);
+
+        // Incremental change: Insert "Новая" at position (0, 10) in UTF-16 code units
+        // Position 10 = after "Процедура " (space), before "Тест"
+        // In bytes: "Процедура " = 18 + 1 = 19 bytes
+        // In UTF-16: "Процедура " = 9 + 1 = 10 code units
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position { line: 0, character: 10 },
+                end: lsp_types::Position { line: 0, character: 10 },
+            }),
+            range_length: Some(0),
+            text: "Новая".to_string(),
+        }];
+
+        mem_docs.update(&uri, changes);
+
+        // Expected: "Процедура НоваяТест()\nКонецПроцедуры"
+        assert_eq!(mem_docs.get(&uri), Some("Процедура НоваяТест()\nКонецПроцедуры".to_string()));
+        assert_eq!(mem_docs.get_version(&uri), Some(2));
+    }
+
+    #[test]
+    fn test_update_incremental_replace_cyrillic() {
+        // Test replacing Cyrillic text
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+
+        mem_docs.insert(uri.clone(), "Функция Старый()\nКонецФункции".to_string(), 1);
+
+        // Replace "Старый" with "Новый"
+        // "Функция " = 7 UTF-16 code units (14 bytes)
+        // "Старый" = 6 UTF-16 code units (12 bytes), at position 7..13 in UTF-16
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position { line: 0, character: 8 },
+                end: lsp_types::Position { line: 0, character: 14 },
+            }),
+            range_length: Some(6),
+            text: "Новый".to_string(),
+        }];
+
+        mem_docs.update(&uri, changes);
+
+        assert_eq!(mem_docs.get(&uri), Some("Функция Новый()\nКонецФункции".to_string()));
+    }
+
+    #[test]
+    fn test_update_incremental_multiline_cyrillic() {
+        // Test change spanning multiple lines with Cyrillic
+        let mut mem_docs = MemDocs::new();
+        let uri = Url::parse("file:///test.bsl").unwrap();
+
+        mem_docs.insert(uri.clone(), "Процедура\nТест()\nКонецПроцедуры".to_string(), 1);
+
+        // Replace from end of line 0 to start of line 1
+        // Line 0: "Процедура" = 9 UTF-16 code units
+        // Replace: position (0,9) to (1,0) with " "
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position { line: 0, character: 9 },
+                end: lsp_types::Position { line: 1, character: 0 },
+            }),
+            range_length: Some(1),
+            text: " ".to_string(),
+        }];
+
+        mem_docs.update(&uri, changes);
+
+        assert_eq!(mem_docs.get(&uri), Some("Процедура Тест()\nКонецПроцедуры".to_string()));
     }
 }
