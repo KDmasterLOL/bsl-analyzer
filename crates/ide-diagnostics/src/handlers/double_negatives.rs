@@ -11,6 +11,14 @@
 //! - `НЕ (НЕ X)` → `X`
 //! - `НЕ (X <> Y)` → `X = Y`
 //! - `(НЕ X) <> Y` → `X = Y`
+//!
+//! ## Implementation
+//!
+//! **Uses AST-based checking (not HIR-based) because:**
+//! 1. Must check entire file including module-level expressions and variable initializations
+//! 2. HIR Body only covers method bodies, missing module-level code
+//! 3. No CFG/dataflow needed - pure structural pattern matching on expression trees
+//! 4. Single-pass AST traversal is optimal for this syntactic check
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::TextRange;
