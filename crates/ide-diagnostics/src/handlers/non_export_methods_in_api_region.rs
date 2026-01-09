@@ -1,11 +1,84 @@
+//! NonExportMethodsInApiRegion diagnostic.
+//!
+//! Detects non-export methods inside API regions (ПрограммныйИнтерфейс/Public).
+//!
+//! ## Why?
+//! API regions should contain only exported methods that form the module's public interface.
+//! Non-export methods in API regions:
+//! - Pollute the public API surface
+//! - Create confusion about what's truly public
+//! - Make code organization unclear
+//!
+//! ## Bad practice
+//! ```bsl
+//! #Область ПрограммныйИнтерфейс
+//!
+//! // ❌ Non-export method in API region
+//! Процедура ВнутренняяПроцедура()
+//!     // implementation
+//! КонецПроцедуры
+//!
+//! #КонецОбласти
+//! ```
+//!
+//! ## Good practice
+//! Move non-export methods to service regions:
+//! ```bsl
+//! #Область ПрограммныйИнтерфейс
+//!
+//! // ✅ Export method in API region
+//! Процедура ПубличнаяПроцедура() Экспорт
+//!     ВнутренняяПроцедура();
+//! КонецПроцедуры
+//!
+//! #КонецОбласти
+//!
+//! #Область СлужебныеПроцедурыИФункции
+//!
+//! // ✅ Non-export method in service region
+//! Процедура ВнутренняяПроцедура()
+//!     // implementation
+//! КонецПроцедуры
+//!
+//! #КонецОбласти
+//! ```
+//!
+//! ## Configuration
+//! - **skipAnnotatedMethods** (boolean, default: false) - Skip methods with built-in annotations
+//!   - Built-in: &НаКлиенте, &НаСервере, &Вместо, &До, &После
+//!   - Custom annotations (like &MyAnnotation) are always checked
+//! - **Enabled by default:** Yes
+//! - **Severity:** MAJOR
+//! - **Tags:** STANDARD (concept)
+//! - **Minutes to fix:** 5
+//!
+//! ## Implementation
+//! Ported from: NonExportMethodsInApiRegionDiagnostic.java (bsl-language-server)
+//!
+//! Uses HIR infrastructure:
+//! - **ItemTree** - method signatures (is_export, annotations, name_range)
+//! - **RegionTree** - region hierarchy and API region detection
+//! - Both cached via Salsa queries for performance
+//!
+//! ## API Regions
+//! Detected as top-level regions with names:
+//! - Russian: ПрограммныйИнтерфейс, СлужебныйПрограммныйИнтерфейс
+//! - English: Public, Internal
+//!
+//! ## Note on Annotations
+//! ItemTree only stores built-in annotations during lowering. Custom annotations
+//! (like &MyAnnotation) are filtered out in `item_tree::lower::lower_annotations()`.
+//! This allows `has_builtin_annotations()` to work by checking if annotations array is non-empty.
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::item_tree::Annotation;
+use hir_def::{item_tree::Annotation, region_tree::RegionTree, Name};
+use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
+    let _span = tracing::debug_span!("NonExportMethodsInApiRegion::check").entered();
 
     if ctx.config.is_disabled(DiagnosticCode::NonExportMethodsInApiRegion) {
-        return diagnostics;
+        return Vec::new();
     }
 
     let skip_annotated_methods = ctx
@@ -13,62 +86,103 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::NonExportMethodsInApiRegion, "skipAnnotatedMethods")
         .unwrap_or(false);
 
+    // Get HIR structures (both cached via Salsa)
     let region_tree = ctx.db.region_tree(ctx.file_id);
     let item_tree = ctx.db.item_tree(ctx.file_id);
 
+    let mut diagnostics = Vec::new();
+
+    // Check procedures
     for (_, proc) in item_tree.procedures() {
-        if !proc.is_export {
-            if let Some(region_name) = region_tree.root_api_region_for_range(proc.source_range) {
-                if skip_annotated_methods && has_builtin_annotations(&proc.annotations) {
-                    continue;
-                }
-
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::NonExportMethodsInApiRegion,
-                    message: format!(
-                        "Move non export method \"{}\" from \"{}\" region",
-                        proc.name.as_str(),
-                        region_name
-                    ),
-                    severity: Severity::Major,
-                    range: proc.name_range,
-                    tags: vec![],
-                    fixes: vec![],
-                });
-            }
-        }
+        check_method(
+            proc.is_export,
+            &proc.name,
+            proc.name_range,
+            proc.source_range,
+            &proc.annotations,
+            skip_annotated_methods,
+            &region_tree,
+            &mut diagnostics,
+        );
     }
 
+    // Check functions
     for (_, func) in item_tree.functions() {
-        if !func.is_export {
-            if let Some(region_name) = region_tree.root_api_region_for_range(func.source_range) {
-                if skip_annotated_methods && has_builtin_annotations(&func.annotations) {
-                    continue;
-                }
-
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::NonExportMethodsInApiRegion,
-                    message: format!(
-                        "Move non export method \"{}\" from \"{}\" region",
-                        func.name.as_str(),
-                        region_name
-                    ),
-                    severity: Severity::Major,
-                    range: func.name_range,
-                    tags: vec![],
-                    fixes: vec![],
-                });
-            }
-        }
+        check_method(
+            func.is_export,
+            &func.name,
+            func.name_range,
+            func.source_range,
+            &func.annotations,
+            skip_annotated_methods,
+            &region_tree,
+            &mut diagnostics,
+        );
     }
+
+    tracing::debug!(count = diagnostics.len(), "NonExportMethodsInApiRegion diagnostics found");
 
     diagnostics
 }
 
-/// Check if annotations contain any built-in (non-custom) annotations.
+/// Check a single method (procedure or function) for non-export in API region.
+#[allow(clippy::too_many_arguments)]
+fn check_method(
+    is_export: bool,
+    name: &Name,
+    name_range: TextRange,
+    source_range: TextRange,
+    annotations: &[Annotation],
+    skip_annotated_methods: bool,
+    region_tree: &RegionTree,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    // Skip exported methods - they're allowed in API regions
+    if is_export {
+        return;
+    }
+
+    // Check if method is inside an API region
+    let Some(region_name) = region_tree.root_api_region_for_range(source_range) else {
+        return; // Not in API region - ok
+    };
+
+    // Optionally skip methods with built-in annotations
+    if skip_annotated_methods && has_builtin_annotations(annotations) {
+        return;
+    }
+
+    // Report diagnostic
+    diagnostics.push(Diagnostic {
+        code: DiagnosticCode::NonExportMethodsInApiRegion,
+        message: format!(
+            "Move non export method \"{}\" from \"{}\" region",
+            name.as_str(),
+            region_name
+        ),
+        severity: Severity::Major,
+        range: name_range,
+        tags: vec![],
+        fixes: vec![],
+    });
+}
+
+/// Check if method has any built-in annotations.
 ///
-/// Built-in annotations are: &НаКлиенте, &НаСервере, &НаКлиентеНаСервере, etc.
-/// Custom annotations (like &Кастом) are not considered built-in.
+/// **Built-in annotations:**
+/// - Execution context: &НаКлиенте, &НаСервере, &НаКлиентеНаСервере, &НаСервереБезКонтекста
+/// - Extension methods: &До, &После, &Вместо
+///
+/// **Why this works:**
+/// ItemTree only stores built-in annotations during lowering (see `item_tree::lower::lower_annotations()`).
+/// Custom annotations (like &MyAnnotation) are filtered out and don't appear in the annotations array.
+/// Therefore:
+/// - `!annotations.is_empty()` → has built-in annotations
+/// - `annotations.is_empty()` → no built-in annotations (might have custom ones, but we can't detect them)
+///
+/// **skipAnnotatedMethods behavior:**
+/// - `true` → skip methods with built-in annotations (&Вместо, &НаКлиенте, etc.)
+/// - `false` → check all non-export methods regardless of annotations
 fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
     !annotations.is_empty()
 }
