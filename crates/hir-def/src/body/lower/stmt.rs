@@ -497,7 +497,14 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
     }
 
     let binding = Binding::new(Name::new(name_token.text()), is_val);
-    Some(ctx.alloc_binding(binding, name_token.text_range()))
+    let binding_id = ctx.alloc_binding(binding, name_token.text_range());
+
+    // Track by-value parameters for RewriteMethodParameter diagnostic
+    if is_val {
+        ctx.by_value_params.insert(name_token.text().to_lowercase(), binding_id);
+    }
+
+    Some(binding_id)
 }
 
 /// Lower a statement list.
@@ -801,6 +808,18 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             ctx.emit(BodyDiagnostic::FunctionOutParameter {
                 name: name.as_str().to_string(),
                 range,
+            });
+        }
+
+        // Check for RewriteMethodParameter diagnostic
+        // Emit for assignments to byValue parameters - validation with reaching defs happens in from_hir()
+        if let Some(&param_id) = ctx.by_value_params.get(&key) {
+            // Use full statement range for BodySourceMap lookup
+            // (identifier range is used for displaying diagnostic to user)
+            ctx.emit(BodyDiagnostic::RewriteMethodParameter {
+                param_id,
+                stmt_id: StmtId::from_raw(la_arena::RawIdx::from(0)), // Placeholder - will find via range in handler
+                range: node.text_range(), // Full statement range for lookup
             });
         }
     }

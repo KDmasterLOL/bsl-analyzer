@@ -120,6 +120,10 @@ pub(crate) struct LoweringCtx {
     /// Used for FunctionOutParameter diagnostic.
     pub(crate) by_ref_param_names: FxHashSet<String>,
 
+    /// By-value parameter mapping: lowercase name -> BindingId.
+    /// Used for RewriteMethodParameter diagnostic to detect overwrites of byValue params.
+    pub(crate) by_value_params: FxHashMap<String, BindingId>,
+
     /// Pending SDBL queries (before ExprId allocation).
     pub(crate) pending_sdbl: Vec<(String, syntax::SdblQueryInfo)>,
 
@@ -175,6 +179,7 @@ impl LoweringCtx {
             local_vars: FxHashMap::default(),
             param_names: FxHashSet::default(),
             by_ref_param_names: FxHashSet::default(),
+            by_value_params: FxHashMap::default(),
             pending_sdbl: Vec::new(),
             loop_depth: 0,
             query_vars: FxHashMap::default(),

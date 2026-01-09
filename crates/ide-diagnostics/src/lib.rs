@@ -1109,6 +1109,9 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
             handlers::common_module_assign::from_hir(variable_name, *range, ctx)
         }
+        BodyDiagnostic::RewriteMethodParameter { param_id, stmt_id, range } => {
+            handlers::rewrite_method_parameter::from_hir(*param_id, *stmt_id, *range, ctx)
+        }
         BodyDiagnostic::CreateQueryInCycle { range } => {
             handlers::create_query_in_cycle::from_hir(*range, ctx)
         }

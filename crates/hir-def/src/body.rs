@@ -327,6 +327,16 @@ pub enum BodyDiagnostic {
     /// Validation against metadata happens in from_hir().
     CommonModuleAssign { variable_name: String, range: TextRange },
 
+    /// Overwrite of byValue parameter without prior use.
+    /// Emitted during lowering when a parameter marked with Знач/ByValue is assigned to.
+    /// Validation using reaching definitions happens in from_hir() to check if parameter
+    /// was used before the assignment.
+    RewriteMethodParameter {
+        param_id: BindingId, // Parameter being overwritten
+        stmt_id: StmtId,     // Assignment statement for CFG analysis
+        range: TextRange,    // Range of the assignment for diagnostic
+    },
+
     /// Query/QueryBuilder/ReportBuilder Execute() call inside a loop.
     /// Detects when Execute() is called on Query-like objects inside loops,
     /// which causes severe performance degradation.
@@ -478,6 +488,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CodeAfterAsyncCall { range, .. } => *range,
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
+            BodyDiagnostic::RewriteMethodParameter { range, .. } => *range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
