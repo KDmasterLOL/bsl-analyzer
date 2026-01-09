@@ -306,17 +306,47 @@ fn complete_alias_suggestion(suggestion: Option<String>) -> Vec<CompletionItem> 
 fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<CompletionItem> {
     let prefix_lower = prefix.to_lowercase();
 
+    // Log scope state for debugging
+    let all_tables: Vec<_> = scope.all_tables().collect();
+    tracing::debug!(
+        alias = %alias,
+        prefix = %prefix,
+        tables_in_scope = all_tables.len(),
+        "complete_fields_by_alias called"
+    );
+
+    for (i, table) in all_tables.iter().enumerate() {
+        tracing::debug!(
+            table_index = i,
+            full_name = %table.full_name,
+            alias = ?table.alias,
+            "table in scope"
+        );
+    }
+
     // Get column completions from scope for the specified alias
     let columns = scope.column_completions(Some(alias));
 
+    tracing::debug!(
+        alias = %alias,
+        columns_before_filter = columns.len(),
+        "column_completions returned"
+    );
+
     // Convert to CompletionItem and filter by prefix
-    columns
+    let results: Vec<CompletionItem> = columns
         .into_iter()
         .filter(|col| col.column_name.as_str().to_lowercase().starts_with(&prefix_lower))
         .map(|col| {
             let field_name = col.column_name.as_str().to_string();
             let type_desc = format!("{:?}", col.ty);
             let standard_marker = if col.is_standard { " (стандартный)" } else { "" };
+
+            tracing::debug!(
+                field_name = %field_name,
+                table_name = %col.table_name.as_str(),
+                "including field in completion"
+            );
 
             CompletionItem {
                 label: field_name.clone(),
@@ -330,7 +360,15 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
                 )),
             }
         })
-        .collect()
+        .collect();
+
+    tracing::debug!(
+        alias = %alias,
+        results_after_filter = results.len(),
+        "complete_fields_by_alias returning"
+    );
+
+    results
 }
 
 /// Complete SDBL keywords.
