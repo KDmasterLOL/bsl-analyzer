@@ -710,20 +710,20 @@ fn is_mdo_type(s: &str) -> bool {
 
 /// Parse table alias and field name from "alias.field" pattern.
 ///
-/// Distinguishes between table aliases (short, e.g., "Т", "Т1") and MDO types (e.g., "Справочник").
+/// Distinguishes between table aliases (e.g., "Т", "Т1", "Очередь") and MDO types (e.g., "Справочник").
 ///
 /// # Heuristics
 ///
 /// A word before dot is considered an alias if:
-/// - Length is 1-3 characters
-/// - Starts with uppercase letter (Т, Т1, Т2)
-/// - NOT an MDO type keyword
+/// - Length is 1-20 characters (reasonable for typical aliases)
+/// - Starts with uppercase letter (Т, Т1, Очередь, Items)
+/// - NOT an MDO type keyword (Справочник, Документ, etc.)
 ///
 /// # Examples
 ///
 /// ```ignore
 /// parse_table_alias_field("ВЫБРАТЬ Т.Код") -> Some(("Т", "Код"))
-/// parse_table_alias_field("ВЫБРАТЬ Т.") -> Some(("Т", ""))
+/// parse_table_alias_field("ВЫБРАТЬ Очередь.") -> Some(("Очередь", ""))
 /// parse_table_alias_field("ВЫБРАТЬ Справочник.Валюты") -> None (MDO type, not alias)
 /// ```
 fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
@@ -748,10 +748,11 @@ fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
     let field_prefix = parts[1];
 
     // Check heuristics for table alias:
-    // 1. Short identifier (1-3 characters) - typical for aliases
-    // 2. Starts with uppercase (Т, Т1, Т2)
-    // 3. NOT an MDO type keyword
-    if potential_alias.len() <= 3
+    // 1. Reasonable identifier length (1-20 characters) - covers both short (Т, Т1) and long (Очередь) aliases
+    // 2. Starts with uppercase (Т, Т1, Т2, Очередь, Items)
+    // 3. NOT an MDO type keyword (Справочник, Документ, etc.)
+    if !potential_alias.is_empty()
+        && potential_alias.len() <= 20
         && potential_alias.chars().next()?.is_uppercase()
         && !is_mdo_type(potential_alias)
     {
@@ -1512,6 +1513,37 @@ mod tests {
                 assert_eq!(prefix, "");
             }
             _ => panic!("Expected AfterTableAlias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_long_alias() {
+        // Test for longer alias names (e.g., "Очередь", "Items")
+        let query = "ВЫБРАТЬ Очередь.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "Очередь");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterTableAlias for long alias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_long_alias_with_prefix() {
+        let query = "ВЫБРАТЬ Очередь.Поп";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "Очередь");
+                assert_eq!(prefix, "Поп");
+            }
+            _ => panic!("Expected AfterTableAlias for long alias with prefix, got {:?}", context),
         }
     }
 
