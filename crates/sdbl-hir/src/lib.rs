@@ -99,6 +99,13 @@ pub enum SdblCompletionContext {
         prefix: String,
     },
 
+    /// General SDBL keywords - suggest SQL keywords (SELECT, WHERE, JOIN, etc.)
+    /// Example: "ВЫБРАТЬ * $0" -> suggest FROM, WHERE, etc.
+    SdblKeywords {
+        /// Prefix already typed (for filtering)
+        prefix: String,
+    },
+
     /// No specific completion context detected
     None,
 }
@@ -458,8 +465,13 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         }
     }
 
-    tracing::info!("no context detected");
-    SdblCompletionContext::None
+    // Default: suggest SDBL keywords
+    // Extract last word as prefix for filtering
+    let words: Vec<&str> = text_before_cursor.split_whitespace().collect();
+    let prefix = words.last().map(|s| s.to_string()).unwrap_or_default();
+
+    tracing::info!(prefix = %prefix, "detected SdblKeywords context");
+    SdblCompletionContext::SdblKeywords { prefix }
 }
 
 /// Check if cursor is after FROM/ИЗ keyword.
@@ -747,22 +759,33 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_context_none_in_select() {
+    fn test_detect_context_keywords_in_select() {
         let query = "ВЫБРАТЬ * ";
         let offset = TextSize::from(query.len() as u32);
         let context = detect_context(query, offset);
 
-        assert_eq!(context, SdblCompletionContext::None);
+        // Now returns SdblKeywords instead of None
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "*");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
     }
 
     #[test]
-    fn test_detect_context_none_inside_word() {
+    fn test_detect_context_keywords_inside_word() {
         let query = "ВЫБРАТЬ * ИЗ Спр";
         let offset = TextSize::from(query.len() as u32);
         let context = detect_context(query, offset);
 
-        // "Спр" without dot is not a complete MDO type pattern
-        assert_eq!(context, SdblCompletionContext::None);
+        // "Спр" without dot - suggest keywords
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "Спр");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
     }
 
     #[test]
@@ -912,5 +935,63 @@ mod tests {
         // No dots - should return None
         let parts = parse_dot_path("SELECT * FROM NoDots");
         assert_eq!(parts, None);
+    }
+
+    // --- SdblKeywords context tests ---
+
+    #[test]
+    fn test_detect_context_sdbl_keywords_simple() {
+        let query = "ВЫБРАТЬ * ";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "*");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_sdbl_keywords_partial_word() {
+        let query = "ГДЕ";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "ГДЕ");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_sdbl_keywords_empty() {
+        let query = "";
+        let offset = TextSize::from(0);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_sdbl_keywords_after_space() {
+        let query = "ВЫБРАТЬ * ИЗ Справочник.Валюты ГД";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::SdblKeywords { prefix } => {
+                assert_eq!(prefix, "ГД");
+            }
+            _ => panic!("Expected SdblKeywords, got {:?}", context),
+        }
     }
 }

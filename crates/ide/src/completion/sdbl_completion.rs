@@ -66,6 +66,10 @@ pub(super) fn sdbl_completions(
             let config = get_configuration(db, position.workspace_root.as_deref());
             Some(complete_nested_elements(&config, mdo_type, &object_name, &prefix))
         }
+        SdblCompletionContext::SdblKeywords { prefix } => {
+            tracing::info!(prefix = %prefix, "completion context: SdblKeywords");
+            Some(complete_sdbl_keywords(&prefix))
+        }
         SdblCompletionContext::None => {
             tracing::info!("no completion context detected");
             None
@@ -100,6 +104,86 @@ fn complete_mdo_types() -> Vec<CompletionItem> {
     }
 
     tracing::debug!(count = items.len(), "generated MDO type completions");
+    items
+}
+
+/// Complete SDBL keywords.
+///
+/// Returns common SDBL/SQL keywords filtered by prefix (case-insensitive).
+///
+/// # Arguments
+///
+/// * `prefix` - Filter prefix (case-insensitive)
+fn complete_sdbl_keywords(prefix: &str) -> Vec<CompletionItem> {
+    // Common SDBL keywords (Russian and English)
+    let keywords = vec![
+        // Query structure
+        ("ВЫБРАТЬ", "SELECT", "Выбрать данные из таблицы"),
+        ("ИЗ", "FROM", "Указать источник данных"),
+        ("ГДЕ", "WHERE", "Условие фильтрации"),
+        ("СГРУППИРОВАТЬ", "GROUP", "Группировка данных"),
+        ("УПОРЯДОЧИТЬ", "ORDER", "Сортировка результатов"),
+        ("ПО", "BY", "Указать поля для группировки/сортировки"),
+        // Joins
+        ("СОЕДИНЕНИЕ", "JOIN", "Соединение таблиц"),
+        ("ЛЕВОЕ", "LEFT", "Левое внешнее соединение"),
+        ("ПРАВОЕ", "RIGHT", "Правое внешнее соединение"),
+        ("ПОЛНОЕ", "FULL", "Полное внешнее соединение"),
+        ("ВНУТРЕННЕЕ", "INNER", "Внутреннее соединение"),
+        // Other keywords
+        ("КАК", "AS", "Псевдоним для поля или таблицы"),
+        ("И", "AND", "Логическое И"),
+        ("ИЛИ", "OR", "Логическое ИЛИ"),
+        ("НЕ", "NOT", "Логическое НЕ"),
+        ("МЕЖДУ", "BETWEEN", "Проверка вхождения в диапазон"),
+        ("В", "IN", "Проверка вхождения в список"),
+        ("ЕСТЬ", "IS", "Проверка на NULL"),
+        ("NULL", "NULL", "Значение NULL"),
+        ("ПОДОБНО", "LIKE", "Поиск по шаблону"),
+        ("ПЕРВЫЕ", "TOP", "Ограничение количества строк"),
+        ("РАЗЛИЧНЫЕ", "DISTINCT", "Уникальные значения"),
+        ("ОБЪЕДИНИТЬ", "UNION", "Объединение результатов запросов"),
+        ("ВСЕ", "ALL", "Все строки (для UNION)"),
+        ("ИМЕЮЩИЕ", "HAVING", "Фильтрация после группировки"),
+        ("ВЫРАЗИТЬ", "CAST", "Преобразование типа"),
+        ("ЗНАЧЕНИЕ", "VALUE", "Литеральное значение"),
+        ("ИСТИНА", "TRUE", "Логическое истина"),
+        ("ЛОЖЬ", "FALSE", "Логическое ложь"),
+    ];
+
+    let prefix_lower = prefix.to_lowercase();
+
+    let mut items = Vec::new();
+
+    for (russian, english, description) in &keywords {
+        // Add Russian variant if matches
+        if russian.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
+            items.push(CompletionItem {
+                label: russian.to_string(),
+                detail: Some(format!("Ключевое слово SDBL ({})", english)),
+                kind: CompletionItemKind::Keyword,
+                insert_text: russian.to_string(),
+                documentation: Some(description.to_string()),
+            });
+        }
+
+        // Add English variant if matches
+        if english.to_lowercase().starts_with(&prefix_lower) || prefix.is_empty() {
+            items.push(CompletionItem {
+                label: english.to_string(),
+                detail: Some(format!("SDBL keyword ({})", russian)),
+                kind: CompletionItemKind::Keyword,
+                insert_text: english.to_string(),
+                documentation: Some(description.to_string()),
+            });
+        }
+    }
+
+    tracing::debug!(
+        count = items.len(),
+        total_keywords = keywords.len(),
+        "generated SDBL keyword completions"
+    );
     items
 }
 
@@ -833,5 +917,70 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Остатки");
+    }
+
+    // --- Tests for SDBL keywords completion ---
+
+    #[test]
+    fn test_complete_sdbl_keywords_all() {
+        let items = complete_sdbl_keywords("");
+
+        // Should return all keywords (both Russian and English variants)
+        assert!(!items.is_empty(), "Should return some keywords");
+
+        // Check for specific keywords
+        assert!(items.iter().any(|i| i.label == "ВЫБРАТЬ"), "Should contain ВЫБРАТЬ");
+        assert!(items.iter().any(|i| i.label == "SELECT"), "Should contain SELECT");
+        assert!(items.iter().any(|i| i.label == "ИЗ"), "Should contain ИЗ");
+        assert!(items.iter().any(|i| i.label == "FROM"), "Should contain FROM");
+        assert!(items.iter().any(|i| i.label == "ГДЕ"), "Should contain ГДЕ");
+        assert!(items.iter().any(|i| i.label == "WHERE"), "Should contain WHERE");
+
+        // All items should be keywords
+        assert!(items.iter().all(|i| i.kind == CompletionItemKind::Keyword));
+    }
+
+    #[test]
+    fn test_complete_sdbl_keywords_russian_prefix() {
+        let items = complete_sdbl_keywords("ВЫ");
+
+        // Should return keywords starting with "ВЫ"
+        assert!(!items.is_empty());
+        assert!(items.iter().any(|i| i.label == "ВЫБРАТЬ"));
+        assert!(items.iter().any(|i| i.label == "ВЫРАЗИТЬ"));
+
+        // Should not return unmatched keywords
+        assert!(!items.iter().any(|i| i.label == "ИЗ"));
+    }
+
+    #[test]
+    fn test_complete_sdbl_keywords_english_prefix() {
+        let items = complete_sdbl_keywords("SEL");
+
+        // Should return SELECT
+        assert!(items.iter().any(|i| i.label == "SELECT"));
+
+        // Should not return unmatched keywords
+        assert!(!items.iter().any(|i| i.label == "FROM"));
+    }
+
+    #[test]
+    fn test_complete_sdbl_keywords_case_insensitive() {
+        let items_upper = complete_sdbl_keywords("ГДЕ");
+        let items_lower = complete_sdbl_keywords("где");
+
+        // Both should return same results (case-insensitive matching)
+        assert!(!items_upper.is_empty());
+        assert!(!items_lower.is_empty());
+        assert!(items_upper.iter().any(|i| i.label == "ГДЕ"));
+        assert!(items_lower.iter().any(|i| i.label == "ГДЕ"));
+    }
+
+    #[test]
+    fn test_complete_sdbl_keywords_join() {
+        let items = complete_sdbl_keywords("ЛЕВОЕ");
+
+        assert!(items.iter().any(|i| i.label == "ЛЕВОЕ"));
+        assert_eq!(items.len(), 1); // Only ЛЕВОЕ matches
     }
 }
