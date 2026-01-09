@@ -148,16 +148,20 @@ pub fn handle_completion(
 
     // Convert position to offset
     let offset = crate::lsp::offset(&line_index, position)?;
+    tracing::info!("Converted position to offset: {:?}", offset);
 
     // Call IDE API with workspace root
     let items = snap.analysis.completions(file_id, offset.into(), snap.workspace_root.clone());
+    tracing::info!("IDE API returned {} completion items", items.len());
 
     // Convert results
     if items.is_empty() {
+        tracing::info!("No completion items, returning None");
         return Ok(None);
     }
 
     let lsp_items: Vec<CompletionItem> = items.into_iter().map(convert_completion_item).collect();
+    tracing::info!("Converted to {} LSP items, returning CompletionResponse", lsp_items.len());
 
     Ok(Some(CompletionResponse::Array(lsp_items)))
 }
