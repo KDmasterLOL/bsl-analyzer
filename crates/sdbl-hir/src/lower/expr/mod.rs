@@ -8,6 +8,7 @@ use crate::diagnostics::SdblDiagnostic;
 use crate::hir::ExprHir;
 use crate::hir::Name;
 use crate::types::SdblType;
+use text_size::TextRange;
 
 use super::context::LoweringContext;
 
@@ -55,6 +56,17 @@ impl<'a> LoweringContext<'a> {
             (None, Name::from(parts[0].trim()))
         };
 
+        // NEW: Extract IDENT ranges from AST for semantic highlighting
+        let ident_ranges: Vec<TextRange> = node
+            .children_with_tokens()
+            .filter_map(|child| match child {
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                    Some(token.text_range())
+                }
+                _ => None,
+            })
+            .collect();
+
         // Resolve type from scope
         let ty = self
             .scope
@@ -81,6 +93,38 @@ impl<'a> LoweringContext<'a> {
                 possible_tables,
                 range: node.text_range(),
             });
+        }
+
+        // NEW: Record identifiers in source_map for semantic highlighting
+        if let Some(ref alias) = table_alias {
+            // Record table alias (first IDENT in qualified reference)
+            if let Some(range) = ident_ranges.first() {
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(
+                        *range,
+                        syntax::SyntaxKind::IDENT,
+                        alias.as_str(),
+                    ),
+                    crate::source_map::TokenCategory::TableAlias,
+                );
+            }
+        }
+
+        // Record field name (last IDENT, or only IDENT in unqualified reference)
+        if let Some(range) = ident_ranges.last() {
+            let category = if ty != SdblType::Unknown && ty != SdblType::Error {
+                crate::source_map::TokenCategory::FieldName
+            } else {
+                crate::source_map::TokenCategory::UnresolvedFieldName
+            };
+            self.source_map.add_token(
+                crate::source_map::TokenInfo::new(
+                    *range,
+                    syntax::SyntaxKind::IDENT,
+                    column_name.as_str(),
+                ),
+                category,
+            );
         }
 
         ExprHir::ColumnRef { table_alias, column: column_name, ty, range: node.text_range() }

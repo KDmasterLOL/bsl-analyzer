@@ -86,6 +86,31 @@ impl<'a> LoweringContext<'a> {
         // Resolve in metadata
         let (_metadata, resolved) = self.resolve_table(&parts, table_ref.syntax().text_range());
 
+        // NEW: Extract IDENT token ranges for semantic highlighting
+        let ident_ranges: Vec<TextRange> = table_ref
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| match child {
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                    Some(token.text_range())
+                }
+                _ => None,
+            })
+            .collect();
+
+        // NEW: Record each table name part in source_map
+        for (part, range) in parts.iter().zip(ident_ranges.iter()) {
+            let category = if resolved.is_some() {
+                crate::source_map::TokenCategory::TableName
+            } else {
+                crate::source_map::TokenCategory::UnresolvedTableName
+            };
+            self.source_map.add_token(
+                crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, part.as_str()),
+                category,
+            );
+        }
+
         // Get alias
         let alias_name = alias
             .and_then(|a| {
@@ -98,6 +123,19 @@ impl<'a> LoweringContext<'a> {
                         crate::source_map::TokenCategory::SpecialKeyword,
                     );
                 }
+
+                // NEW: Record table alias identifier
+                if let Some(ident_token) = a.identifier() {
+                    self.source_map.add_token(
+                        crate::source_map::TokenInfo::new(
+                            ident_token.text_range(),
+                            ident_token.kind(),
+                            ident_token.text(),
+                        ),
+                        crate::source_map::TokenCategory::TableAlias,
+                    );
+                }
+
                 a.name()
             })
             .map(|s| Name::from(s.as_str()));

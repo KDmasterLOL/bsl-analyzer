@@ -142,6 +142,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
         SemanticTokenType::DECORATOR,
         SemanticTokenType::PROPERTY,
         SemanticTokenType::OPERATOR,
+        SemanticTokenType::new("unresolvedReference"),
     ];
 
     let token_modifiers = vec![
@@ -169,6 +170,7 @@ fn token_type_index(tag: HlTag) -> u32 {
         HlTag::Annotation => 8,
         HlTag::Property => 9,
         HlTag::Operator => 10,
+        HlTag::UnresolvedReference => 11,
     }
 }
 

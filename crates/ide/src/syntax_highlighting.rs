@@ -59,6 +59,8 @@ pub enum HlTag {
     Property,
     /// Operators (+, -, *, /, =, etc.)
     Operator,
+    /// Unresolved reference (identifier not found in metadata)
+    UnresolvedReference,
 }
 
 impl HlTag {
@@ -78,6 +80,7 @@ impl HlTag {
             HlTag::Annotation => "decorator",
             HlTag::Property => "property",
             HlTag::Operator => "operator",
+            HlTag::UnresolvedReference => "unresolvedReference",
         }
     }
 }

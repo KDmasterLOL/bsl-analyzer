@@ -103,6 +103,13 @@ fn sdbl_category_to_tag(category: sdbl_hir::TokenCategory) -> HlTag {
         TokenCategory::JoinKeyword => HlTag::Keyword,
         TokenCategory::Modifier => HlTag::Keyword,
         TokenCategory::AggregateFunction => HlTag::Function,
+        // Identifiers
+        TokenCategory::TableName => HlTag::Variable,
+        TokenCategory::UnresolvedTableName => HlTag::UnresolvedReference,
+        TokenCategory::TableAlias => HlTag::Variable,
+        TokenCategory::FieldName => HlTag::Property,
+        TokenCategory::UnresolvedFieldName => HlTag::UnresolvedReference,
+        TokenCategory::FieldAlias => HlTag::Variable,
     }
 }
 

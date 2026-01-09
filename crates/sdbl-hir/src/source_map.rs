@@ -62,6 +62,25 @@ pub struct SdblSourceMap {
     /// Stored separately because they need different highlighting than regular functions.
     pub(crate) aggregate_functions: Vec<TokenInfo>,
 
+    // Identifiers
+    /// Resolved table names (Справочник, Валюты).
+    pub(crate) table_names: Vec<TokenInfo>,
+
+    /// Unresolved table names (table not found in metadata).
+    pub(crate) unresolved_table_names: Vec<TokenInfo>,
+
+    /// Table aliases (FROM ... AS T1).
+    pub(crate) table_aliases: Vec<TokenInfo>,
+
+    /// Resolved field names.
+    pub(crate) field_names: Vec<TokenInfo>,
+
+    /// Unresolved field names (field not found or ambiguous).
+    pub(crate) unresolved_field_names: Vec<TokenInfo>,
+
+    /// Field aliases (SELECT ... AS Code).
+    pub(crate) field_aliases: Vec<TokenInfo>,
+
     /// Range lookup: TextRange → TokenCategory (for reverse lookup).
     /// Used by "find token at position" queries.
     range_to_category: FxHashMap<TextRange, TokenCategory>,
@@ -84,12 +103,28 @@ impl SdblSourceMap {
         let agg_iter =
             self.aggregate_functions.iter().map(|t| (t, TokenCategory::AggregateFunction));
 
+        // Identifiers
+        let table_name_iter = self.table_names.iter().map(|t| (t, TokenCategory::TableName));
+        let unresolved_table_iter =
+            self.unresolved_table_names.iter().map(|t| (t, TokenCategory::UnresolvedTableName));
+        let table_alias_iter = self.table_aliases.iter().map(|t| (t, TokenCategory::TableAlias));
+        let field_name_iter = self.field_names.iter().map(|t| (t, TokenCategory::FieldName));
+        let unresolved_field_iter =
+            self.unresolved_field_names.iter().map(|t| (t, TokenCategory::UnresolvedFieldName));
+        let field_alias_iter = self.field_aliases.iter().map(|t| (t, TokenCategory::FieldAlias));
+
         clause_iter
             .chain(op_iter)
             .chain(special_iter)
             .chain(join_iter)
             .chain(modifier_iter)
             .chain(agg_iter)
+            .chain(table_name_iter)
+            .chain(unresolved_table_iter)
+            .chain(table_alias_iter)
+            .chain(field_name_iter)
+            .chain(unresolved_field_iter)
+            .chain(field_alias_iter)
     }
 
     /// Find token at a given position.
@@ -117,6 +152,12 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => &self.join_keywords,
             TokenCategory::Modifier => &self.modifiers,
             TokenCategory::AggregateFunction => &self.aggregate_functions,
+            TokenCategory::TableName => &self.table_names,
+            TokenCategory::UnresolvedTableName => &self.unresolved_table_names,
+            TokenCategory::TableAlias => &self.table_aliases,
+            TokenCategory::FieldName => &self.field_names,
+            TokenCategory::UnresolvedFieldName => &self.unresolved_field_names,
+            TokenCategory::FieldAlias => &self.field_aliases,
         }
     }
 
@@ -131,6 +172,12 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => self.join_keywords.push(info),
             TokenCategory::Modifier => self.modifiers.push(info),
             TokenCategory::AggregateFunction => self.aggregate_functions.push(info),
+            TokenCategory::TableName => self.table_names.push(info),
+            TokenCategory::UnresolvedTableName => self.unresolved_table_names.push(info),
+            TokenCategory::TableAlias => self.table_aliases.push(info),
+            TokenCategory::FieldName => self.field_names.push(info),
+            TokenCategory::UnresolvedFieldName => self.unresolved_field_names.push(info),
+            TokenCategory::FieldAlias => self.field_aliases.push(info),
         }
     }
 
@@ -142,6 +189,12 @@ impl SdblSourceMap {
         self.join_keywords.sort_by_key(|t| t.range.start());
         self.modifiers.sort_by_key(|t| t.range.start());
         self.aggregate_functions.sort_by_key(|t| t.range.start());
+        self.table_names.sort_by_key(|t| t.range.start());
+        self.unresolved_table_names.sort_by_key(|t| t.range.start());
+        self.table_aliases.sort_by_key(|t| t.range.start());
+        self.field_names.sort_by_key(|t| t.range.start());
+        self.unresolved_field_names.sort_by_key(|t| t.range.start());
+        self.field_aliases.sort_by_key(|t| t.range.start());
     }
 }
 
@@ -181,6 +234,20 @@ pub enum TokenCategory {
     Modifier,
     /// Aggregate functions (SUM, AVG, COUNT, MIN, MAX).
     AggregateFunction,
+
+    // Identifiers
+    /// Resolved table name parts (Справочник, Валюты).
+    TableName,
+    /// Unresolved table name (table not found in metadata).
+    UnresolvedTableName,
+    /// Table alias (FROM ... AS T1).
+    TableAlias,
+    /// Resolved field name.
+    FieldName,
+    /// Unresolved field name (field not found in metadata, or ambiguous).
+    UnresolvedFieldName,
+    /// Field alias (SELECT ... AS Code).
+    FieldAlias,
 }
 
 #[cfg(test)]

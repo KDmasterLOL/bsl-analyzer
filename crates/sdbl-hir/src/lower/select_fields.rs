@@ -127,6 +127,19 @@ impl<'a> LoweringContext<'a> {
                         crate::source_map::TokenCategory::SpecialKeyword,
                     );
                 }
+
+                // NEW: Record field alias identifier
+                if let Some(ident_token) = a.identifier() {
+                    self.source_map.add_token(
+                        crate::source_map::TokenInfo::new(
+                            ident_token.text_range(),
+                            ident_token.kind(),
+                            ident_token.text(),
+                        ),
+                        crate::source_map::TokenCategory::FieldAlias,
+                    );
+                }
+
                 a.name()
             })
             .map(|s| Name::from(s.as_str()));
