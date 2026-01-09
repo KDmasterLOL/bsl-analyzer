@@ -153,7 +153,27 @@ fn get_objects_by_type(
     config: &Configuration,
     mdo_type: MdoType,
 ) -> Vec<bsl_metadata::MetadataObject> {
-    // Filter metadata_objects by type
+    // Check if this is a register type - registers are stored separately
+    if matches!(
+        mdo_type,
+        MdoType::InformationRegister
+            | MdoType::AccumulationRegister
+            | MdoType::AccountingRegister
+            | MdoType::CalculationRegister
+    ) {
+        // Convert Register objects to MetadataObject
+        return config
+            .registers()
+            .iter()
+            .filter(|reg| reg.mdo_type() == mdo_type)
+            .map(|reg| {
+                // Create MetadataObject from Register
+                bsl_metadata::MetadataObject::new(mdo_type, reg.name())
+            })
+            .collect();
+    }
+
+    // Filter metadata_objects by type (for Catalogs, Documents, etc.)
     config.metadata_objects().iter().filter(|obj| obj.mdo_type == mdo_type).cloned().collect()
 }
 
