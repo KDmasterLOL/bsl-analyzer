@@ -776,8 +776,32 @@ fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> 
     // 1. Get lowered HIR through Salsa query (CACHED!)
     let sdbl_hirs = db.sdbl_hir_in_file(file_id);
 
+    tracing::info!(
+        sdbl_hirs_count = sdbl_hirs.len(),
+        "get_sdbl_scope: retrieved SDBL HIRs from cache"
+    );
+
     // 2. Get the first query (TODO: match by cursor position)
     let (_expr_id, sdbl_lower_result) = sdbl_hirs.first()?;
+
+    tracing::info!(
+        from_tables_count = sdbl_lower_result.hir.from.len(),
+        join_tables_count = sdbl_lower_result.hir.joins.len(),
+        diagnostics_count = sdbl_lower_result.hir.diagnostics.len(),
+        "get_sdbl_scope: examining first SDBL HIR"
+    );
+
+    // Log FROM tables in detail
+    for (i, table) in sdbl_lower_result.hir.from.iter().enumerate() {
+        tracing::info!(
+            table_index = i,
+            full_name = %table.full_name,
+            alias = ?table.alias,
+            has_metadata = table.metadata.is_some(),
+            field_count = table.metadata.as_ref().map(|m| m.fields.len()).unwrap_or(0),
+            "FROM table in HIR"
+        );
+    }
 
     // 3. Rebuild Scope from HIR
     let mut scope = Scope::new();
@@ -793,7 +817,7 @@ fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> 
         scope.add_table(join.table.clone());
     }
 
-    tracing::debug!(
+    tracing::info!(
         from_tables = hir.from.len(),
         join_tables = hir.joins.len(),
         "built Scope from HIR"
