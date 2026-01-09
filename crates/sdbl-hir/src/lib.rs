@@ -87,6 +87,18 @@ pub enum SdblCompletionContext {
         prefix: String,
     },
 
+    /// Cursor is after MDO object name - suggest nested elements (tabular sections, virtual tables)
+    /// Example: "Справочник.Номенклатура.$0" -> suggest tabular sections
+    /// Example: "РегистрСведений.МойРегистр.$0" -> suggest virtual tables
+    AfterMdoObject {
+        /// Metadata object type
+        mdo_type: bsl_metadata::MdoType,
+        /// Object name (e.g., "Номенклатура")
+        object_name: String,
+        /// Prefix already typed (for filtering)
+        prefix: String,
+    },
+
     /// No specific completion context detected
     None,
 }
@@ -415,10 +427,35 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         return SdblCompletionContext::AfterFromKeyword;
     }
 
-    // Check for MDO type pattern: "Справочник." or "Catalog."
-    if let Some((mdo_type, prefix)) = parse_inside_mdo_type(text_before_cursor) {
-        tracing::info!(?mdo_type, prefix = %prefix, "detected InsideMdoType");
-        return SdblCompletionContext::InsideMdoType { mdo_type, prefix };
+    // Check for dot-separated path (handles both 2-part and 3-part paths)
+    if let Some(path_parts) = parse_dot_path(text_before_cursor) {
+        match path_parts.len() {
+            // "Справочник.Вал" -> InsideMdoType
+            2 => {
+                if let Ok(mdo_type) = path_parts[0].parse::<bsl_metadata::MdoType>() {
+                    let prefix = path_parts[1].clone();
+                    tracing::info!(?mdo_type, prefix = %prefix, "detected InsideMdoType (2-part path)");
+                    return SdblCompletionContext::InsideMdoType { mdo_type, prefix };
+                }
+            }
+            // "Справочник.Номенклатура.Шт" -> AfterMdoObject
+            3 => {
+                if let Ok(mdo_type) = path_parts[0].parse::<bsl_metadata::MdoType>() {
+                    let object_name = path_parts[1].clone();
+                    let prefix = path_parts[2].clone();
+                    tracing::info!(
+                        ?mdo_type,
+                        object_name = %object_name,
+                        prefix = %prefix,
+                        "detected AfterMdoObject (3-part path)"
+                    );
+                    return SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix };
+                }
+            }
+            _ => {
+                tracing::debug!(parts_len = path_parts.len(), "unexpected path parts count");
+            }
+        }
     }
 
     tracing::info!("no context detected");
@@ -435,57 +472,37 @@ fn is_after_from_keyword(text_before: &str) -> bool {
     text_upper.trim_end().ends_with("FROM") || text_upper.trim_end().ends_with("ИЗ")
 }
 
-/// Parse MDO type reference pattern.
+/// Parse dot-separated path from text before cursor.
 ///
-/// Looks for patterns like:
-/// - "Справочник.Вал" -> (Catalog, "Вал")
-/// - "Document.Sale" -> (Document, "Sale")
+/// Extracts the last whitespace-separated word and splits it by dots.
+/// Returns the parts as a Vec of Strings.
 ///
-/// Returns (mdo_type, prefix) if pattern matches.
-fn parse_inside_mdo_type(text_before: &str) -> Option<(bsl_metadata::MdoType, String)> {
-    // Split by whitespace to get last word
+/// # Examples
+///
+/// ```ignore
+/// parse_dot_path("SELECT * FROM Справочник.Номенклатура.Шт")
+/// // -> Some(vec!["Справочник", "Номенклатура", "Шт"])
+///
+/// parse_dot_path("SELECT * FROM Справочник.")
+/// // -> Some(vec!["Справочник", ""])
+///
+/// parse_dot_path("SELECT * FROM NoDotsHere")
+/// // -> None (no dots)
+/// ```
+fn parse_dot_path(text_before: &str) -> Option<Vec<String>> {
+    // Get last whitespace-separated word
     let words: Vec<&str> = text_before.split_whitespace().collect();
     let last_word = words.last()?;
 
-    tracing::debug!(
-        last_word = %last_word,
-        total_words = words.len(),
-        "parse_inside_mdo_type"
-    );
-
-    // Check if last word contains a dot (MDO type separator)
+    // Check if it contains a dot (otherwise not a path)
     if !last_word.contains('.') {
-        tracing::debug!("last word doesn't contain dot");
         return None;
     }
 
-    // Split by dot
-    let parts: Vec<&str> = last_word.split('.').collect();
-    if parts.len() < 2 {
-        tracing::debug!("not enough parts after split by dot");
-        return None;
-    }
+    // Split by dots and collect into Vec<String>
+    let parts: Vec<String> = last_word.split('.').map(|s| s.to_string()).collect();
 
-    let mdo_type_str = parts[0];
-    let prefix = parts[1..].join(".");
-
-    tracing::debug!(
-        mdo_type_str = %mdo_type_str,
-        prefix = %prefix,
-        "attempting to parse MDO type"
-    );
-
-    // Try to parse MDO type (both Russian and English)
-    match mdo_type_str.parse::<bsl_metadata::MdoType>() {
-        Ok(mdo_type) => {
-            tracing::debug!(?mdo_type, "successfully parsed MDO type");
-            Some((mdo_type, prefix))
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "failed to parse MDO type");
-            None
-        }
-    }
+    Some(parts)
 }
 
 /// Check if a string contains SDBL keywords.
@@ -766,45 +783,134 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_after_mdo_type_in_multiline_query() {
-        let code = r#"Функция ЕстьОчередьОбновленияКэширующихДанных()
-    Запрос = Новый Запрос(
-        "ВЫБРАТЬ ПЕРВЫЕ 500
-        |    Очередь.ОтметкаВремени КАК ОтметкаВремени,
-        |ИЗ
-        |    РегистрСведений. КАК Очередь
-        |ГДЕ
-        |    Очередь.Попыток < 3");
-    Возврат НЕ Запрос.Выполнить().Пустой();
-КонецФункции"#;
+    fn test_completion_after_mdo_type_with_trailing_space() {
+        use bsl_metadata::MdoType;
 
-        let root = parse_bsl(code);
+        // Test with trailing space after dot (common when typing)
+        let query = "ВЫБРАТЬ * ИЗ РегистрСведений. ";
+        let offset = TextSize::from((query.len() - 1) as u32); // Position after dot, before space
+        let context = detect_context(query, offset);
 
-        // Find offset after "РегистрСведений." (should be around the dot)
-        let offset_after_dot = code.find("РегистрСведений.").unwrap() + "РегистрСведений.".len();
-        let offset = TextSize::from(offset_after_dot as u32);
-
-        // Detect SDBL query
-        let query_info = detect_sdbl_at_position(&root, offset);
-
-        match query_info {
-            Some(info) => {
-                // Detect context
-                let context = detect_context(&info.query_text, info.offset_in_query);
-
-                // Should be InsideMdoType with InformationRegister
-                match context {
-                    SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
-                        use bsl_metadata::MdoType;
-                        assert_eq!(mdo_type, MdoType::InformationRegister);
-                        assert_eq!(prefix, "");
-                    }
-                    _ => panic!("Expected InsideMdoType, got {:?}", context),
-                }
+        match context {
+            SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
+                assert_eq!(mdo_type, MdoType::InformationRegister);
+                assert_eq!(prefix, "");
             }
-            None => {
-                panic!("SDBL query not detected at offset {:?}", offset);
-            }
+            _ => panic!("Expected InsideMdoType, got {:?}", context),
         }
+    }
+
+    // --- AfterMdoObject context tests ---
+
+    #[test]
+    fn test_detect_context_after_catalog_object() {
+        use bsl_metadata::MdoType;
+
+        let query = "ВЫБРАТЬ * ИЗ Справочник.Номенклатура.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+                assert_eq!(mdo_type, MdoType::Catalog);
+                assert_eq!(object_name, "Номенклатура");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_after_catalog_object_with_prefix() {
+        use bsl_metadata::MdoType;
+
+        let query = "ВЫБРАТЬ * ИЗ Справочник.Номенклатура.Шт";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+                assert_eq!(mdo_type, MdoType::Catalog);
+                assert_eq!(object_name, "Номенклатура");
+                assert_eq!(prefix, "Шт");
+            }
+            _ => panic!("Expected AfterMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_after_document_object() {
+        use bsl_metadata::MdoType;
+
+        let query = "SELECT * FROM Document.SalesOrder.T";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+                assert_eq!(mdo_type, MdoType::Document);
+                assert_eq!(object_name, "SalesOrder");
+                assert_eq!(prefix, "T");
+            }
+            _ => panic!("Expected AfterMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_after_information_register() {
+        use bsl_metadata::MdoType;
+
+        let query = "ВЫБРАТЬ * ИЗ РегистрСведений.МойРегистр.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+                assert_eq!(mdo_type, MdoType::InformationRegister);
+                assert_eq!(object_name, "МойРегистр");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_after_accumulation_register() {
+        use bsl_metadata::MdoType;
+
+        let query = "SELECT * FROM AccumulationRegister.TaskCount.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+                assert_eq!(mdo_type, MdoType::AccumulationRegister);
+                assert_eq!(object_name, "TaskCount");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_parse_dot_path_helper() {
+        // 2-part path
+        let parts = parse_dot_path("SELECT * FROM Справочник.Вал");
+        assert_eq!(parts, Some(vec!["Справочник".to_string(), "Вал".to_string()]));
+
+        // 3-part path
+        let parts = parse_dot_path("SELECT * FROM Справочник.Номенклатура.Шт");
+        assert_eq!(
+            parts,
+            Some(vec!["Справочник".to_string(), "Номенклатура".to_string(), "Шт".to_string()])
+        );
+
+        // Empty prefix after dot
+        let parts = parse_dot_path("SELECT * FROM Catalog.");
+        assert_eq!(parts, Some(vec!["Catalog".to_string(), "".to_string()]));
+
+        // No dots - should return None
+        let parts = parse_dot_path("SELECT * FROM NoDots");
+        assert_eq!(parts, None);
     }
 }

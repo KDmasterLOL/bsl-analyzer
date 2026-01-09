@@ -241,6 +241,9 @@ pub struct MetadataObject {
     /// Custom attributes (fields) for this object
     #[serde(default)]
     pub attributes: Vec<Attribute>,
+    /// Tabular sections (child collections) for this object
+    #[serde(default)]
+    pub tabular_sections: Vec<crate::tabular_section::TabularSection>,
     /// Child objects (e.g., Cubes for ExternalDataSource, DimensionTables for Cube)
     #[serde(default)]
     pub children: Vec<MetadataObject>,
@@ -298,6 +301,7 @@ impl MetadataObject {
             name: name.into(),
             name_en: None,
             attributes: Vec::new(),
+            tabular_sections: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -308,7 +312,14 @@ impl MetadataObject {
         name: impl Into<String>,
         children: Vec<MetadataObject>,
     ) -> Self {
-        Self { mdo_type, name: name.into(), name_en: None, attributes: Vec::new(), children }
+        Self {
+            mdo_type,
+            name: name.into(),
+            name_en: None,
+            attributes: Vec::new(),
+            tabular_sections: Vec::new(),
+            children,
+        }
     }
 
     /// Create with full details
@@ -318,7 +329,14 @@ impl MetadataObject {
         name_en: Option<String>,
         attributes: Vec<Attribute>,
     ) -> Self {
-        Self { mdo_type, name: name.into(), name_en, attributes, children: Vec::new() }
+        Self {
+            mdo_type,
+            name: name.into(),
+            name_en,
+            attributes,
+            tabular_sections: Vec::new(),
+            children: Vec::new(),
+        }
     }
 
     /// Add child object
@@ -329,6 +347,11 @@ impl MetadataObject {
     /// Add attribute
     pub fn add_attribute(&mut self, attribute: Attribute) {
         self.attributes.push(attribute);
+    }
+
+    /// Add a tabular section
+    pub fn add_tabular_section(&mut self, tabular_section: crate::tabular_section::TabularSection) {
+        self.tabular_sections.push(tabular_section);
     }
 
     /// Find child by name (case-insensitive)

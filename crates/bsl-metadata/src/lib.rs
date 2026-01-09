@@ -101,6 +101,7 @@ pub mod event_subscription;
 pub mod loader;
 pub mod metadata_object;
 pub mod register;
+pub mod tabular_section;
 pub mod traits;
 pub mod xml_parser;
 
@@ -112,5 +113,6 @@ pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
 pub use loader::load_from_directory;
 pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
-pub use register::{Register, RegisterBuilder};
+pub use register::{AccumulationRegisterType, Register, RegisterBuilder, RegisterPeriodicity};
+pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};

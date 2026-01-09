@@ -56,6 +56,16 @@ pub(super) fn sdbl_completions(
             let config = get_configuration(db, position.workspace_root.as_deref());
             Some(complete_mdo_objects(&config, mdo_type, &prefix))
         }
+        SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+            tracing::info!(
+                ?mdo_type,
+                object_name = %object_name,
+                prefix = %prefix,
+                "completion context: AfterMdoObject"
+            );
+            let config = get_configuration(db, position.workspace_root.as_deref());
+            Some(complete_nested_elements(&config, mdo_type, &object_name, &prefix))
+        }
         SdblCompletionContext::None => {
             tracing::info!("no completion context detected");
             None
@@ -143,6 +153,165 @@ fn complete_mdo_objects(
         total = objects.len(),
         ?mdo_type,
         "generated MDO object completions"
+    );
+
+    items
+}
+
+/// Complete nested elements (tabular sections or virtual tables).
+///
+/// For registers: returns virtual tables (СрезПервых, Остатки, etc.)
+/// For other MDO types: returns tabular sections
+///
+/// # Arguments
+///
+/// * `config` - Configuration with metadata
+/// * `mdo_type` - Type of the metadata object
+/// * `object_name` - Name of the specific object (e.g., "Номенклатура")
+/// * `prefix` - Filter prefix (case-insensitive)
+fn complete_nested_elements(
+    config: &Configuration,
+    mdo_type: MdoType,
+    object_name: &str,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    // Distinguish between registers and other MDO types
+    match mdo_type {
+        MdoType::InformationRegister
+        | MdoType::AccumulationRegister
+        | MdoType::AccountingRegister
+        | MdoType::CalculationRegister => {
+            // Find register and return virtual tables
+            complete_virtual_tables(config, mdo_type, object_name, prefix)
+        }
+        _ => {
+            // Find MDO object and return tabular sections
+            complete_tabular_sections(config, mdo_type, object_name, prefix)
+        }
+    }
+}
+
+/// Complete tabular sections for an MDO object.
+///
+/// Returns tabular sections (табличные части) of the specified metadata object.
+///
+/// # Arguments
+///
+/// * `config` - Configuration with metadata
+/// * `mdo_type` - Type of the metadata object
+/// * `object_name` - Name of the object (e.g., "Номенклатура")
+/// * `prefix` - Filter prefix (case-insensitive)
+fn complete_tabular_sections(
+    config: &Configuration,
+    mdo_type: MdoType,
+    object_name: &str,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    // Find metadata object by name
+    let object = config
+        .metadata_objects()
+        .iter()
+        .find(|obj| obj.mdo_type == mdo_type && obj.name == object_name);
+
+    let Some(object) = object else {
+        tracing::debug!(
+            ?mdo_type,
+            object_name = %object_name,
+            "metadata object not found"
+        );
+        return Vec::new();
+    };
+
+    let prefix_lower = prefix.to_lowercase();
+
+    // Filter tabular sections by prefix
+    let items: Vec<CompletionItem> = object
+        .tabular_sections
+        .iter()
+        .filter(|ts| ts.name().to_lowercase().starts_with(&prefix_lower))
+        .map(|ts| {
+            CompletionItem {
+                label: ts.name().to_string(),
+                // Show full path in detail: "Справочник.Номенклатура.Штрихкоды"
+                detail: Some(format!("{}.{}.{}", mdo_type.russian_name(), object_name, ts.name())),
+                kind: CompletionItemKind::Field,
+                insert_text: ts.name().to_string(),
+                documentation: ts.synonym().map(|s| s.to_string()),
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        count = items.len(),
+        total = object.tabular_sections.len(),
+        ?mdo_type,
+        object_name = %object_name,
+        "generated tabular section completions"
+    );
+
+    items
+}
+
+/// Complete virtual tables for a register.
+///
+/// Returns virtual tables based on register parameters:
+/// - InformationRegister: СрезПервых, СрезПоследних (based on periodicity and flags)
+/// - AccumulationRegister: Остатки, Обороты (based on register type)
+/// - AccountingRegister, CalculationRegister: TODO (complex logic)
+///
+/// # Arguments
+///
+/// * `config` - Configuration with metadata
+/// * `mdo_type` - Type of the register
+/// * `register_name` - Name of the register
+/// * `prefix` - Filter prefix (case-insensitive)
+fn complete_virtual_tables(
+    config: &Configuration,
+    mdo_type: MdoType,
+    register_name: &str,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    // Find register by name
+    let register = config
+        .registers()
+        .iter()
+        .find(|reg| reg.mdo_type() == mdo_type && reg.name() == register_name);
+
+    let Some(register) = register else {
+        tracing::debug!(
+            ?mdo_type,
+            register_name = %register_name,
+            "register not found"
+        );
+        return Vec::new();
+    };
+
+    // Get virtual tables based on register parameters
+    let virtual_tables = register.virtual_tables();
+
+    let prefix_lower = prefix.to_lowercase();
+
+    // Filter by prefix and convert to CompletionItem
+    let items: Vec<CompletionItem> = virtual_tables
+        .into_iter()
+        .filter(|vt| vt.to_lowercase().starts_with(&prefix_lower))
+        .map(|vt| {
+            CompletionItem {
+                label: vt.to_string(),
+                // Show full path in detail: "РегистрСведений.МойРегистр.СрезПоследних"
+                detail: Some(format!("{}.{}.{}", mdo_type.russian_name(), register_name, vt)),
+                kind: CompletionItemKind::Field,
+                insert_text: vt.to_string(),
+                documentation: Some(format!("Виртуальная таблица {}", vt)),
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        count = items.len(),
+        ?mdo_type,
+        register_name = %register_name,
+        "generated virtual table completions"
     );
 
     items
@@ -438,5 +607,231 @@ mod tests {
             document_items.iter().any(|item| item.label == "Документ1"),
             "Expected Документ1 in completion items"
         );
+    }
+
+    // --- Tests for nested elements completion ---
+
+    #[test]
+    fn test_complete_tabular_sections() {
+        use bsl_metadata::{MetadataObject, TabularSection};
+        use uuid::Uuid;
+
+        // Create catalog with tabular sections
+        let mut config = Configuration::new("TestConfig");
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+
+        // Add tabular sections
+        let ts1 = TabularSection::new(Uuid::new_v4(), "Штрихкоды");
+        let ts2 = TabularSection::new(Uuid::new_v4(), "Характеристики");
+        catalog.add_tabular_section(ts1);
+        catalog.add_tabular_section(ts2);
+
+        config.add_metadata_object(catalog);
+
+        // Test completion without prefix
+        let items = complete_tabular_sections(&config, MdoType::Catalog, "Номенклатура", "");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.label == "Штрихкоды"));
+        assert!(items.iter().any(|i| i.label == "Характеристики"));
+
+        // Check item structure
+        let item = items.iter().find(|i| i.label == "Штрихкоды").unwrap();
+        assert_eq!(item.detail, Some("Справочник.Номенклатура.Штрихкоды".to_string()));
+        assert_eq!(item.kind, CompletionItemKind::Field);
+    }
+
+    #[test]
+    fn test_complete_tabular_sections_with_prefix() {
+        use bsl_metadata::{MetadataObject, TabularSection};
+        use uuid::Uuid;
+
+        let mut config = Configuration::new("TestConfig");
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+
+        let ts1 = TabularSection::new(Uuid::new_v4(), "Штрихкоды");
+        let ts2 = TabularSection::new(Uuid::new_v4(), "Характеристики");
+        catalog.add_tabular_section(ts1);
+        catalog.add_tabular_section(ts2);
+
+        config.add_metadata_object(catalog);
+
+        // Test with prefix
+        let items = complete_tabular_sections(&config, MdoType::Catalog, "Номенклатура", "Шт");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Штрихкоды");
+    }
+
+    #[test]
+    fn test_complete_tabular_sections_object_not_found() {
+        let config = Configuration::new("TestConfig");
+
+        let items =
+            complete_tabular_sections(&config, MdoType::Catalog, "НесуществующийОбъект", "");
+
+        assert_eq!(items.len(), 0);
+    }
+
+    #[test]
+    fn test_complete_virtual_tables_information_register() {
+        use bsl_metadata::{Register, RegisterPeriodicity};
+
+        let mut config = Configuration::new("TestConfig");
+
+        // Create periodic InformationRegister with slice flags
+        let register = Register::builder()
+            .name("МойРегистр")
+            .mdo_type(MdoType::InformationRegister)
+            .periodicity(Some(RegisterPeriodicity::Day))
+            .enable_totals_slice_first(true)
+            .enable_totals_slice_last(true)
+            .build();
+
+        config.add_register(register);
+
+        // Test completion
+        let items =
+            complete_virtual_tables(&config, MdoType::InformationRegister, "МойРегистр", "");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.label == "СрезПервых"));
+        assert!(items.iter().any(|i| i.label == "СрезПоследних"));
+
+        // Check item structure
+        let item = items.iter().find(|i| i.label == "СрезПервых").unwrap();
+        assert_eq!(item.detail, Some("РегистрСведений.МойРегистр.СрезПервых".to_string()));
+        assert_eq!(item.kind, CompletionItemKind::Field);
+    }
+
+    #[test]
+    fn test_complete_virtual_tables_accumulation_register_balance() {
+        use bsl_metadata::{AccumulationRegisterType, Register};
+
+        let mut config = Configuration::new("TestConfig");
+
+        // Create AccumulationRegister with Balance type
+        let register = Register::builder()
+            .name("КоличествоЗадач")
+            .mdo_type(MdoType::AccumulationRegister)
+            .register_type(Some(AccumulationRegisterType::Balance))
+            .build();
+
+        config.add_register(register);
+
+        // Test completion
+        let items =
+            complete_virtual_tables(&config, MdoType::AccumulationRegister, "КоличествоЗадач", "");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Остатки");
+        assert_eq!(items[0].detail, Some("РегистрНакопления.КоличествоЗадач.Остатки".to_string()));
+    }
+
+    #[test]
+    fn test_complete_virtual_tables_accumulation_register_turnovers() {
+        use bsl_metadata::{AccumulationRegisterType, Register};
+
+        let mut config = Configuration::new("TestConfig");
+
+        let register = Register::builder()
+            .name("РабочееВремя")
+            .mdo_type(MdoType::AccumulationRegister)
+            .register_type(Some(AccumulationRegisterType::Turnovers))
+            .build();
+
+        config.add_register(register);
+
+        let items =
+            complete_virtual_tables(&config, MdoType::AccumulationRegister, "РабочееВремя", "");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Обороты");
+    }
+
+    #[test]
+    fn test_complete_virtual_tables_accumulation_register_both() {
+        use bsl_metadata::{AccumulationRegisterType, Register};
+
+        let mut config = Configuration::new("TestConfig");
+
+        let register = Register::builder()
+            .name("ОстаткиИОбороты")
+            .mdo_type(MdoType::AccumulationRegister)
+            .register_type(Some(AccumulationRegisterType::BalanceAndTurnovers))
+            .build();
+
+        config.add_register(register);
+
+        let items =
+            complete_virtual_tables(&config, MdoType::AccumulationRegister, "ОстаткиИОбороты", "");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.label == "Остатки"));
+        assert!(items.iter().any(|i| i.label == "Обороты"));
+    }
+
+    #[test]
+    fn test_complete_virtual_tables_nonperiodic_register() {
+        use bsl_metadata::{Register, RegisterPeriodicity};
+
+        let mut config = Configuration::new("TestConfig");
+
+        // Nonperiodic register should have no virtual tables
+        let register = Register::builder()
+            .name("НепериодическийРегистр")
+            .mdo_type(MdoType::InformationRegister)
+            .periodicity(Some(RegisterPeriodicity::Nonperiodical))
+            .enable_totals_slice_first(true)
+            .enable_totals_slice_last(true)
+            .build();
+
+        config.add_register(register);
+
+        let items = complete_virtual_tables(
+            &config,
+            MdoType::InformationRegister,
+            "НепериодическийРегистр",
+            "",
+        );
+
+        assert_eq!(items.len(), 0);
+    }
+
+    #[test]
+    fn test_complete_nested_elements_routes_to_tabular_sections() {
+        use bsl_metadata::{MetadataObject, TabularSection};
+        use uuid::Uuid;
+
+        let mut config = Configuration::new("TestConfig");
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Номенклатура");
+        catalog.add_tabular_section(TabularSection::new(Uuid::new_v4(), "Штрихкоды"));
+        config.add_metadata_object(catalog);
+
+        // Should route to complete_tabular_sections for catalogs
+        let items = complete_nested_elements(&config, MdoType::Catalog, "Номенклатура", "");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Штрихкоды");
+    }
+
+    #[test]
+    fn test_complete_nested_elements_routes_to_virtual_tables() {
+        use bsl_metadata::{AccumulationRegisterType, Register};
+
+        let mut config = Configuration::new("TestConfig");
+        let register = Register::builder()
+            .name("КоличествоЗадач")
+            .mdo_type(MdoType::AccumulationRegister)
+            .register_type(Some(AccumulationRegisterType::Balance))
+            .build();
+        config.add_register(register);
+
+        // Should route to complete_virtual_tables for registers
+        let items =
+            complete_nested_elements(&config, MdoType::AccumulationRegister, "КоличествоЗадач", "");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Остатки");
     }
 }

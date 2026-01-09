@@ -208,6 +208,20 @@ struct RegisterXml {
 struct RegisterProperties {
     #[serde(rename = "Name")]
     name: String,
+
+    // For InformationRegister
+    #[serde(rename = "InformationRegisterPeriodicity", default)]
+    periodicity: Option<String>,
+
+    #[serde(rename = "EnableTotalsSliceFirst", default)]
+    enable_totals_slice_first: BoolValue,
+
+    #[serde(rename = "EnableTotalsSliceLast", default)]
+    enable_totals_slice_last: BoolValue,
+
+    // For AccumulationRegister
+    #[serde(rename = "RegisterType", default)]
+    register_type: Option<String>,
 }
 
 /// ChildObjects container for dimensions
@@ -293,11 +307,43 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         }
     }
 
+    // Parse periodicity (for InformationRegister)
+    let periodicity = if mdo_type == MdoType::InformationRegister {
+        root.register.properties.periodicity.and_then(|p| match p.as_str() {
+            "Nonperiodical" => Some(crate::register::RegisterPeriodicity::Nonperiodical),
+            "Second" => Some(crate::register::RegisterPeriodicity::Second),
+            "Day" => Some(crate::register::RegisterPeriodicity::Day),
+            "Month" => Some(crate::register::RegisterPeriodicity::Month),
+            "RecorderPosition" => Some(crate::register::RegisterPeriodicity::RecorderPosition),
+            _ => None,
+        })
+    } else {
+        None
+    };
+
+    // Parse register type (for AccumulationRegister)
+    let register_type = if mdo_type == MdoType::AccumulationRegister {
+        root.register.properties.register_type.and_then(|rt| match rt.as_str() {
+            "Balance" => Some(crate::register::AccumulationRegisterType::Balance),
+            "Turnovers" => Some(crate::register::AccumulationRegisterType::Turnovers),
+            "BalanceAndTurnovers" => {
+                Some(crate::register::AccumulationRegisterType::BalanceAndTurnovers)
+            }
+            _ => None,
+        })
+    } else {
+        None
+    };
+
     let register = Register::builder()
         .uuid(uuid)
         .name(root.register.properties.name)
         .mdo_type(mdo_type)
         .dimensions(dimensions)
+        .periodicity(periodicity)
+        .register_type(register_type)
+        .enable_totals_slice_first(root.register.properties.enable_totals_slice_first.into())
+        .enable_totals_slice_last(root.register.properties.enable_totals_slice_last.into())
         .build();
 
     tracing::debug!(
@@ -305,6 +351,10 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         uuid = %register.uuid(),
         mdo_type = ?register.mdo_type(),
         dimensions = register.dimensions().len(),
+        periodicity = ?register.periodicity(),
+        register_type = ?register.register_type(),
+        enable_totals_slice_first = register.enable_totals_slice_first(),
+        enable_totals_slice_last = register.enable_totals_slice_last(),
         "parsed register"
     );
 
@@ -507,6 +557,10 @@ struct MetadataChildObjects {
     // For InformationRegisters
     #[serde(rename = "Dimension", default)]
     dimensions_as_attributes: Vec<AttributeXml>,
+
+    // Tabular sections (for Catalog, Document, ChartOfCharacteristicTypes, etc.)
+    #[serde(rename = "TabularSection", default)]
+    tabular_sections: Vec<TabularSectionXml>,
 }
 
 /// Attribute XML structure
@@ -579,6 +633,46 @@ struct DateQualifiers {
     date_fractions: Option<String>,
 }
 
+/// Tabular Section XML structure
+#[derive(Debug, Deserialize)]
+struct TabularSectionXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: TabularSectionProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    child_objects: Option<TabularSectionChildObjects>,
+}
+
+/// Tabular Section properties
+#[derive(Debug, Deserialize)]
+struct TabularSectionProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "Synonym", default)]
+    synonym: Option<SynonymXml>,
+
+    #[serde(rename = "Use", default)]
+    use_mode: Option<String>,
+}
+
+/// Synonym XML structure (wraps the actual text value)
+#[derive(Debug, Deserialize)]
+struct SynonymXml {
+    #[serde(rename = "$text", default)]
+    value: Option<String>,
+}
+
+/// Child objects of a tabular section (attributes)
+#[derive(Debug, Deserialize)]
+struct TabularSectionChildObjects {
+    #[serde(rename = "Attribute", default)]
+    attributes: Vec<AttributeXml>,
+}
+
 /// Parse Catalog XML from Designer format
 ///
 /// # Arguments
@@ -622,6 +716,7 @@ fn parse_metadata_object(
     use crate::metadata_object::MetadataObject;
 
     let mut attributes = Vec::new();
+    let mut tabular_sections = Vec::new();
 
     if let Some(child_objects) = obj_xml.child_objects {
         // Parse regular Attributes (for Catalog, Document)
@@ -641,17 +736,27 @@ fn parse_metadata_object(
             let attr = parse_attribute(dim_xml)?;
             attributes.push(attr);
         }
+
+        // Parse Tabular Sections (for Catalog, Document, ChartOfCharacteristicTypes, etc.)
+        for ts_xml in child_objects.tabular_sections {
+            let tabular_section = parse_tabular_section(ts_xml)?;
+            tabular_sections.push(tabular_section);
+        }
     }
 
     let mut mdo = MetadataObject::new(mdo_type, obj_xml.properties.name);
     for attr in attributes {
         mdo.add_attribute(attr);
     }
+    for ts in tabular_sections {
+        mdo.add_tabular_section(ts);
+    }
 
     tracing::debug!(
         mdo_name = %mdo.name,
         mdo_type = ?mdo.mdo_type,
         attributes = mdo.attributes.len(),
+        tabular_sections = mdo.tabular_sections.len(),
         "parsed metadata object"
     );
 
@@ -665,6 +770,54 @@ fn parse_attribute(attr_xml: AttributeXml) -> Result<crate::metadata_object::Att
     let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
 
     Ok(Attribute { name: attr_xml.properties.name, name_en: None, attr_type })
+}
+
+/// Parse TabularSection XML into TabularSection
+fn parse_tabular_section(
+    ts_xml: TabularSectionXml,
+) -> Result<crate::tabular_section::TabularSection> {
+    use crate::tabular_section::{TabularSection, TabularSectionAttribute};
+
+    let uuid = ts_xml
+        .uuid
+        .parse::<Uuid>()
+        .map_err(|e| crate::error::MetadataError::InvalidFormat(format!("Invalid UUID: {}", e)))?;
+
+    let name = ts_xml.properties.name;
+    let mut tabular_section = TabularSection::new(uuid, name);
+
+    // Set synonym if present
+    if let Some(synonym_xml) = ts_xml.properties.synonym {
+        if let Some(synonym_value) = synonym_xml.value {
+            tabular_section.set_synonym(Some(synonym_value));
+        }
+    }
+
+    // Set use mode if present
+    tabular_section.set_use_mode(ts_xml.properties.use_mode);
+
+    // Parse attributes of the tabular section
+    if let Some(child_objects) = ts_xml.child_objects {
+        let mut ts_attributes = Vec::new();
+
+        for attr_xml in child_objects.attributes {
+            let attr_uuid = attr_xml._uuid.parse::<Uuid>().map_err(|e| {
+                crate::error::MetadataError::InvalidFormat(format!("Invalid UUID: {}", e))
+            })?;
+
+            let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
+            let type_str = format!("{:?}", attr_type); // Convert AttributeType to string representation
+
+            let ts_attr =
+                TabularSectionAttribute::new(attr_uuid, attr_xml.properties.name, type_str);
+
+            ts_attributes.push(ts_attr);
+        }
+
+        tabular_section.set_attributes(ts_attributes);
+    }
+
+    Ok(tabular_section)
 }
 
 /// Parse Type XML into AttributeType

@@ -10,6 +10,32 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use uuid::Uuid;
 
+/// Periodicity of an InformationRegister
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegisterPeriodicity {
+    /// Nonperiodical (Непериодический)
+    Nonperiodical,
+    /// Per second (В пределах секунды)
+    Second,
+    /// Per day (В пределах дня)
+    Day,
+    /// Per month (В пределах месяца)
+    Month,
+    /// By recorder position (По позиции регистратора)
+    RecorderPosition,
+}
+
+/// Type of AccumulationRegister
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccumulationRegisterType {
+    /// Balance (Остатки)
+    Balance,
+    /// Turnovers (Обороты)
+    Turnovers,
+    /// Balance and Turnovers (Остатки и обороты)
+    BalanceAndTurnovers,
+}
+
 /// Register metadata object
 ///
 /// Unified structure for all 4 register types:
@@ -36,6 +62,22 @@ pub struct Register {
     /// Dimensions (measurements)
     #[serde(rename = "dimensions", default)]
     dimensions: Vec<Dimension>,
+
+    /// Periodicity (for InformationRegister)
+    #[serde(rename = "periodicity", default)]
+    periodicity: Option<RegisterPeriodicity>,
+
+    /// Register type (for AccumulationRegister)
+    #[serde(rename = "registerType", default)]
+    register_type: Option<AccumulationRegisterType>,
+
+    /// Enable slice first (for InformationRegister)
+    #[serde(rename = "enableTotalsSliceFirst", default)]
+    enable_totals_slice_first: bool,
+
+    /// Enable slice last (for InformationRegister)
+    #[serde(rename = "enableTotalsSliceLast", default)]
+    enable_totals_slice_last: bool,
 }
 
 impl Register {
@@ -83,6 +125,80 @@ impl Register {
     pub fn is_calculation_register(&self) -> bool {
         self.mdo_type == MdoType::CalculationRegister
     }
+
+    /// Get periodicity (for InformationRegister)
+    pub fn periodicity(&self) -> Option<RegisterPeriodicity> {
+        self.periodicity
+    }
+
+    /// Get register type (for AccumulationRegister)
+    pub fn register_type(&self) -> Option<AccumulationRegisterType> {
+        self.register_type
+    }
+
+    /// Get enable totals slice first flag
+    pub fn enable_totals_slice_first(&self) -> bool {
+        self.enable_totals_slice_first
+    }
+
+    /// Get enable totals slice last flag
+    pub fn enable_totals_slice_last(&self) -> bool {
+        self.enable_totals_slice_last
+    }
+
+    /// Get virtual tables available for this register.
+    ///
+    /// Returns a list of virtual table names based on the register type and parameters.
+    ///
+    /// ## InformationRegister
+    /// - If `periodicity` is not `Nonperiodical` and `enable_totals_slice_first` is true: `СрезПервых`
+    /// - If `periodicity` is not `Nonperiodical` and `enable_totals_slice_last` is true: `СрезПоследних`
+    ///
+    /// ## AccumulationRegister
+    /// - If `register_type` is `Balance`: `Остатки`
+    /// - If `register_type` is `Turnovers`: `Обороты`
+    /// - If `register_type` is `BalanceAndTurnovers`: both `Остатки` and `Обороты`
+    ///
+    /// ## AccountingRegister and CalculationRegister
+    /// - TODO: Complex virtual tables logic (deferred)
+    pub fn virtual_tables(&self) -> Vec<&'static str> {
+        match self.mdo_type {
+            MdoType::InformationRegister => self.info_register_virtual_tables(),
+            MdoType::AccumulationRegister => self.accum_register_virtual_tables(),
+            MdoType::AccountingRegister => vec![],  // TODO
+            MdoType::CalculationRegister => vec![], // TODO
+            _ => vec![],
+        }
+    }
+
+    /// Get virtual tables for InformationRegister.
+    fn info_register_virtual_tables(&self) -> Vec<&'static str> {
+        let mut tables = Vec::new();
+
+        // Only for periodic registers
+        if let Some(periodicity) = self.periodicity {
+            if periodicity != RegisterPeriodicity::Nonperiodical {
+                if self.enable_totals_slice_first {
+                    tables.push("СрезПервых");
+                }
+                if self.enable_totals_slice_last {
+                    tables.push("СрезПоследних");
+                }
+            }
+        }
+
+        tables
+    }
+
+    /// Get virtual tables for AccumulationRegister.
+    fn accum_register_virtual_tables(&self) -> Vec<&'static str> {
+        match self.register_type {
+            Some(AccumulationRegisterType::Balance) => vec!["Остатки"],
+            Some(AccumulationRegisterType::Turnovers) => vec!["Обороты"],
+            Some(AccumulationRegisterType::BalanceAndTurnovers) => vec!["Остатки", "Обороты"],
+            None => vec![],
+        }
+    }
 }
 
 impl MdObject for Register {
@@ -118,6 +234,10 @@ pub struct RegisterBuilder {
     name: Option<String>,
     mdo_type: Option<MdoType>,
     dimensions: Vec<Dimension>,
+    periodicity: Option<RegisterPeriodicity>,
+    register_type: Option<AccumulationRegisterType>,
+    enable_totals_slice_first: bool,
+    enable_totals_slice_last: bool,
 }
 
 impl RegisterBuilder {
@@ -151,6 +271,30 @@ impl RegisterBuilder {
         self
     }
 
+    /// Set periodicity (for InformationRegister)
+    pub fn periodicity(mut self, periodicity: Option<RegisterPeriodicity>) -> Self {
+        self.periodicity = periodicity;
+        self
+    }
+
+    /// Set register type (for AccumulationRegister)
+    pub fn register_type(mut self, register_type: Option<AccumulationRegisterType>) -> Self {
+        self.register_type = register_type;
+        self
+    }
+
+    /// Set enable totals slice first flag
+    pub fn enable_totals_slice_first(mut self, value: bool) -> Self {
+        self.enable_totals_slice_first = value;
+        self
+    }
+
+    /// Set enable totals slice last flag
+    pub fn enable_totals_slice_last(mut self, value: bool) -> Self {
+        self.enable_totals_slice_last = value;
+        self
+    }
+
     /// Build the Register
     pub fn build(self) -> Register {
         Register {
@@ -158,6 +302,10 @@ impl RegisterBuilder {
             name: self.name.unwrap_or_default(),
             mdo_type: self.mdo_type.unwrap_or(MdoType::InformationRegister),
             dimensions: self.dimensions,
+            periodicity: self.periodicity,
+            register_type: self.register_type,
+            enable_totals_slice_first: self.enable_totals_slice_first,
+            enable_totals_slice_last: self.enable_totals_slice_last,
         }
     }
 }

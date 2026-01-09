@@ -747,6 +747,7 @@ dependencies = [
  "test-fixture",
  "tracing",
  "triomphe",
+ "uuid",
  "vfs",
 ]
 
