@@ -61,35 +61,29 @@
 //! Salsa caching and the rust-analyzer architecture pattern.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use hir_def::MethodId;
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 ///
 /// This performs CFG-based validation to check if ALL paths truly miss a return.
 /// The lowering emits a candidate diagnostic, and this handler validates it using CFG.
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(
+    range: TextRange,
+    method_id: &MethodId,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     // Note: AllFunctionPathMustHaveReturn is the diagnostic code used in bsl-language-server
     // MissingReturn is the internal HIR diagnostic name
     if ctx.config.is_disabled(DiagnosticCode::AllFunctionPathMustHaveReturn) {
         return None;
     }
 
-    // Get module bodies and find the method containing this diagnostic
+    // Get module bodies and method body using the provided MethodId
     let module_id = hir_def::ModuleId::new(ctx.file_id);
     let module_bodies = ctx.db.module_bodies(module_id);
-
-    // Find which method contains this range by checking body statements
-    let (local_id, body, _source_map) =
-        module_bodies.method_bodies().find(|(_local_id, body, source_map)| {
-            // Check if any statement in this body overlaps with diagnostic range
-            body.stmts_iter().any(|(stmt_id, _)| {
-                source_map
-                    .stmt_range(stmt_id)
-                    .is_some_and(|r| r.contains_range(range) || r == range)
-            }) || body.body_stmts.iter().any(|&stmt_id| {
-                source_map.stmt_range(stmt_id).is_some_and(|r| r.contains_range(range))
-            })
-        })?;
+    let local_id = method_id.local_id;
+    let body = module_bodies.body(local_id)?;
 
     // Get CFG for this method from module-level query (batch processing)
     let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
@@ -239,9 +233,7 @@ mod tests {
     /// Uses the same test file: AllFunctionPathMustHaveReturnDiagnostic.bsl
     /// This test validates that the HIR-based implementation produces the same
     /// results as the Java version.
-    /// TODO: Debug why lowering doesn't emit BodyDiagnostic::MissingReturn candidate
     #[test]
-    #[ignore = "Lowering issue - candidate diagnostic not emitted"]
     fn test_missing_return_from_fixture() {
         let code = include_str!("../../test_data/AllFunctionPathMustHaveReturnDiagnostic.bsl");
 
@@ -284,9 +276,7 @@ mod tests {
     }
 
     /// Test simple case with missing else branch
-    /// TODO: Debug why lowering doesn't emit BodyDiagnostic::MissingReturn candidate
     #[test]
-    #[ignore = "Lowering issue - candidate diagnostic not emitted"]
     fn test_simple_missing_else() {
         let code = r#"
 Функция Тест(Х)

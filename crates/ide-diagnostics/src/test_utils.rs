@@ -219,8 +219,8 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     let module_bodies = ctx.db.module_bodies(module_id);
 
     let mut diagnostics = Vec::new();
-    for (_method_id, body_diag) in module_bodies.all_diagnostics() {
-        if let Some(diag) = convert_hir_diagnostic(body_diag, &ctx) {
+    for (method_id, body_diag) in module_bodies.all_diagnostics() {
+        if let Some(diag) = convert_hir_diagnostic(body_diag, method_id, &ctx) {
             diagnostics.push(diag);
         }
     }
@@ -327,6 +327,7 @@ where
 /// Convert a BodyDiagnostic to Diagnostic for testing.
 fn convert_hir_diagnostic(
     body_diag: &hir::BodyDiagnostic,
+    method_id: &hir::MethodId,
     ctx: &crate::DiagnosticsContext,
 ) -> Option<Diagnostic> {
     use crate::handlers;
@@ -350,7 +351,7 @@ fn convert_hir_diagnostic(
             handlers::unreachable_code::from_hir(*range, ctx)
         }
         BodyDiagnostic::MissingReturn { range } => {
-            handlers::all_function_path_must_have_return::from_hir(*range, ctx)
+            handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)
         }
         BodyDiagnostic::DeprecatedMethod { name, range } => {
             handlers::deprecated_method::from_hir(name, *range, ctx)

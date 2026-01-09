@@ -1024,8 +1024,8 @@ fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Collect method-level HIR diagnostics (from module_bodies)
-    for (_method_id, body_diag) in module_bodies.all_diagnostics() {
-        if let Some(diag) = dispatch_hir_diagnostic(body_diag, ctx) {
+    for (method_id, body_diag) in module_bodies.all_diagnostics() {
+        if let Some(diag) = dispatch_hir_diagnostic(body_diag, method_id, ctx) {
             diagnostics.push(diag);
         }
     }
@@ -1036,6 +1036,7 @@ fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Dispatch BodyDiagnostic to appropriate handler's from_hir() function.
 fn dispatch_hir_diagnostic(
     body_diag: &hir::BodyDiagnostic,
+    method_id: &hir::MethodId,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     use hir::BodyDiagnostic;
@@ -1058,7 +1059,7 @@ fn dispatch_hir_diagnostic(
             handlers::unreachable_code::from_hir(*range, ctx)
         }
         BodyDiagnostic::MissingReturn { range } => {
-            handlers::all_function_path_must_have_return::from_hir(*range, ctx)
+            handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)
         }
         BodyDiagnostic::DeprecatedMethod { name, range } => {
             handlers::deprecated_method::from_hir(name, *range, ctx)
