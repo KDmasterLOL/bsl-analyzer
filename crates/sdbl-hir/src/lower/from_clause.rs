@@ -1,8 +1,9 @@
 //! FROM clause lowering and table resolution.
 
 use crate::diagnostics::SdblDiagnostic;
-use crate::hir::{Name, ResolvedTable, TableRef};
+use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
 use crate::standard_fields::{is_virtual_table_name, standard_fields_for_mdo};
+use crate::SdblType;
 use bsl_metadata::MdoType;
 use syntax::ast::AstNode;
 use text_size::TextRange;
@@ -189,10 +190,61 @@ impl<'a> LoweringContext<'a> {
         }
 
         // Build resolved table with standard fields
-        let fields = standard_fields_for_mdo(mdo_type);
+        let mut fields = standard_fields_for_mdo(mdo_type);
+
+        // Add fields from metadata if available
+        if let Some(_metadata) = self.metadata {
+            self.add_metadata_fields(mdo_type, object_name, &mut fields);
+        }
 
         let resolved = ResolvedTable { mdo_type, name: object_name.clone(), fields };
 
         (Some(mdo_type), Some(resolved))
+    }
+
+    /// Add fields from metadata to the fields list.
+    fn add_metadata_fields(
+        &self,
+        mdo_type: MdoType,
+        object_name: &str,
+        fields: &mut Vec<FieldDef>,
+    ) {
+        let Some(metadata) = self.metadata else { return };
+
+        match mdo_type {
+            // For registers, add dimensions, resources, and attributes
+            MdoType::InformationRegister
+            | MdoType::AccumulationRegister
+            | MdoType::AccountingRegister
+            | MdoType::CalculationRegister => {
+                if let Some(register) = metadata.find_register(object_name) {
+                    // Add dimensions
+                    for dimension in register.dimensions() {
+                        fields.push(FieldDef::new(dimension.name(), SdblType::Unknown));
+                    }
+
+                    // Add resources
+                    for resource in register.resources() {
+                        fields.push(FieldDef::new(resource.name(), SdblType::Unknown));
+                    }
+
+                    // Add attributes
+                    for attribute in register.attributes() {
+                        fields.push(FieldDef::new(attribute.name(), SdblType::Unknown));
+                    }
+                }
+            }
+
+            // For catalogs and documents, add attributes
+            MdoType::Catalog | MdoType::Document => {
+                if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
+                    for attribute in &obj.attributes {
+                        fields.push(FieldDef::new(attribute.name.clone(), SdblType::Unknown));
+                    }
+                }
+            }
+
+            _ => {}
+        }
     }
 }
