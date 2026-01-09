@@ -36,10 +36,19 @@ pub fn file_id_snapshot(snapshot: &GlobalStateSnapshot, url: &Url) -> Result<Fil
 
 /// Converts an LSP Position to a TextSize offset.
 ///
+/// LSP uses UTF-16 code units for character positions, while Rust uses UTF-8 bytes.
+/// This function properly converts between the two encodings.
+///
 /// # Errors
 /// Returns an error if the position is out of bounds.
-pub fn offset(line_index: &LineIndex, position: Position) -> Result<TextSize> {
-    let line_col = LineCol { line: position.line, col: position.character };
+pub fn offset(line_index: &LineIndex, text: &str, position: Position) -> Result<TextSize> {
+    // LSP Position.character is UTF-16 code units, but LineCol.col is byte offset.
+    // We need to convert UTF-16 → UTF-8 bytes first.
+    let byte_col = line_index
+        .utf16_col_to_byte_col(text, position.line, position.character)
+        .ok_or_else(|| anyhow!("Position out of bounds: {:?}", position))?;
+
+    let line_col = LineCol { line: position.line, col: byte_col };
 
     line_index.offset(line_col).ok_or_else(|| anyhow!("Position out of bounds: {:?}", position))
 }
@@ -48,9 +57,13 @@ pub fn offset(line_index: &LineIndex, position: Position) -> Result<TextSize> {
 ///
 /// # Errors
 /// Returns an error if the range is out of bounds.
-pub fn text_range(line_index: &LineIndex, range: lsp_types::Range) -> Result<TextRange> {
-    let start = offset(line_index, range.start)?;
-    let end = offset(line_index, range.end)?;
+pub fn text_range(
+    line_index: &LineIndex,
+    text: &str,
+    range: lsp_types::Range,
+) -> Result<TextRange> {
+    let start = offset(line_index, text, range.start)?;
+    let end = offset(line_index, text, range.end)?;
 
     Ok(TextRange::new(start, end))
 }
@@ -66,12 +79,12 @@ mod tests {
 
         // Position at start of "world" (line 1, col 0)
         let pos = Position { line: 1, character: 0 };
-        let result = offset(&line_index, pos).unwrap();
+        let result = offset(&line_index, text, pos).unwrap();
         assert_eq!(result, TextSize::from(6)); // After "hello\n"
 
         // Position at 'r' in "rust" (line 2, col 0)
         let pos = Position { line: 2, character: 0 };
-        let result = offset(&line_index, pos).unwrap();
+        let result = offset(&line_index, text, pos).unwrap();
         assert_eq!(result, TextSize::from(12)); // After "hello\nworld\n"
     }
 
@@ -82,6 +95,24 @@ mod tests {
 
         // Invalid line
         let pos = Position { line: 10, character: 0 };
-        assert!(offset(&line_index, pos).is_err());
+        assert!(offset(&line_index, text, pos).is_err());
+    }
+
+    #[test]
+    fn test_offset_with_cyrillic() {
+        // Test UTF-16 → UTF-8 conversion with Cyrillic text
+        // "Процедура" = 9 chars, 18 bytes UTF-8, 9 UTF-16 code units
+        let text = "Процедура Тест";
+        let line_index = LineIndex::new(text);
+
+        // UTF-16 position 9 (space after "Процедура") → byte offset 18
+        let pos = Position { line: 0, character: 9 };
+        let result = offset(&line_index, text, pos).unwrap();
+        assert_eq!(result, TextSize::from(18));
+
+        // UTF-16 position 14 (end of "Тест") → byte offset 27
+        let pos = Position { line: 0, character: 14 };
+        let result = offset(&line_index, text, pos).unwrap();
+        assert_eq!(result, TextSize::from(27));
     }
 }

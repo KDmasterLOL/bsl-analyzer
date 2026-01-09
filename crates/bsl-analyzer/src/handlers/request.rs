@@ -42,7 +42,7 @@ pub fn handle_goto_definition(
     let line_index = LineIndex::new(&text);
 
     // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, position)?;
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
 
     // Call IDE API
     let target = snap.analysis.goto_definition(file_id, offset.into());
@@ -91,7 +91,7 @@ pub fn handle_find_references(
     let line_index = LineIndex::new(&text);
 
     // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, position)?;
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
 
     // Call IDE API
     let locations = snap.analysis.find_references(file_id, offset.into());
@@ -163,7 +163,7 @@ pub fn handle_completion(
     }
 
     // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, position)?;
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
     tracing::info!("Converted position to offset: {:?}", offset);
 
     // Call IDE API with workspace root
