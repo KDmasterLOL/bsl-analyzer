@@ -212,12 +212,20 @@ pub struct Binding {
     pub name: Name,
     /// Is this a value parameter (Знач)?
     pub is_val: bool,
+    /// Default value for parameter (if any).
+    /// Only set for function/procedure parameters with default values.
+    pub default_value: Option<ExprId>,
 }
 
 impl Binding {
     /// Create a new binding.
     pub fn new(name: Name, is_val: bool) -> Self {
-        Self { name, is_val }
+        Self { name, is_val, default_value: None }
+    }
+
+    /// Create a new parameter binding with default value.
+    pub fn with_default(name: Name, is_val: bool, default_value: ExprId) -> Self {
+        Self { name, is_val, default_value: Some(default_value) }
     }
 
     /// Create a binding for a regular variable (not a value parameter).

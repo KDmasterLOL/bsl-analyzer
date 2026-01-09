@@ -496,7 +496,19 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
         ctx.by_ref_param_names.insert(name_token.text().to_lowercase());
     }
 
-    let binding = Binding::new(Name::new(name_token.text()), is_val);
+    // Check for default value expression
+    let default_value = param
+        .children()
+        .find(|n| n.kind() == SyntaxKind::EXPR)
+        .map(|expr_node| lower_expr_node(ctx, &expr_node));
+
+    // Create binding with or without default value
+    let binding = if let Some(default_expr_id) = default_value {
+        Binding::with_default(Name::new(name_token.text()), is_val, default_expr_id)
+    } else {
+        Binding::new(Name::new(name_token.text()), is_val)
+    };
+
     let binding_id = ctx.alloc_binding(binding, name_token.text_range());
 
     // Track by-value parameters for RewriteMethodParameter diagnostic

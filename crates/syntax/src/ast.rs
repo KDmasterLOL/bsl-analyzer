@@ -258,6 +258,15 @@ impl Param {
         // We check for the presence of additional children beyond just the name
         self.0.children().next().is_some()
     }
+
+    /// Get the default value expression (if any).
+    ///
+    /// For parameters with default values like `Param1 = 123`, returns the expression node.
+    pub fn default_value_expr(&self) -> Option<SyntaxNode> {
+        // PARAM structure: IDENT [KW_VAL] [EQ] [EXPR]
+        // Find the EXPR child node
+        self.0.children().find(|n| n.kind() == SyntaxKind::EXPR)
+    }
 }
 
 /// Assignment statement.

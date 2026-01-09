@@ -74,16 +74,27 @@ fn test_lower_procedure_with_params() {
     let param1 = result.body.binding(result.body.params[0]);
     assert_eq!(param1.name.as_str(), "А");
     assert!(!param1.is_val);
+    assert!(param1.default_value.is_none(), "param А should not have default value");
 
     // Check second param (Знач)
     let param2 = result.body.binding(result.body.params[1]);
     assert_eq!(param2.name.as_str(), "Б");
     assert!(param2.is_val);
+    assert!(param2.default_value.is_none(), "param Б should not have default value");
 
-    // Check third param
+    // Check third param (with default value)
     let param3 = result.body.binding(result.body.params[2]);
     assert_eq!(param3.name.as_str(), "В");
     assert!(!param3.is_val);
+    assert!(param3.default_value.is_some(), "param В should have default value");
+
+    // Check that the default value is a number literal 1
+    let default_expr_id = param3.default_value.unwrap();
+    let default_expr = result.body.expr(default_expr_id);
+    assert!(
+        matches!(default_expr, Expr::Literal(Literal::Number(_))),
+        "default value should be a number literal"
+    );
 }
 
 #[test]
