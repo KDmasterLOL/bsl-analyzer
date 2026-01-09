@@ -130,8 +130,14 @@ fn extract_query_text(literal_text: &str) -> String {
 /// # Returns
 ///
 /// Offset within the extracted query text (without quotes/|).
+///
+/// Note: The returned offset is guaranteed to be on a UTF-8 char boundary.
 fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextSize {
     let offset_usize: usize = offset_in_literal.into();
+
+    // First extract the query text to validate char boundaries
+    let query_text = extract_query_text(literal_text);
+
     let mut literal_pos = 0;
     let mut query_pos = 0;
     let mut first_line = true;
@@ -161,7 +167,8 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                 }
             }
 
-            return TextSize::from(query_pos as u32);
+            // Ensure we're on a char boundary in the extracted query text
+            return ensure_char_boundary(&query_text, query_pos);
         }
 
         // Move to next line
@@ -180,7 +187,22 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
         }
     }
 
-    TextSize::from(query_pos as u32)
+    // Ensure final position is on char boundary
+    ensure_char_boundary(&query_text, query_pos)
+}
+
+/// Ensure offset is on a UTF-8 char boundary.
+///
+/// If offset is not on a char boundary, walks backwards to find the nearest one.
+fn ensure_char_boundary(text: &str, offset: usize) -> TextSize {
+    if offset <= text.len() && text.is_char_boundary(offset) {
+        TextSize::from(offset as u32)
+    } else {
+        // Walk backwards to find char boundary
+        let safe_offset =
+            (0..=offset.min(text.len())).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+        TextSize::from(safe_offset as u32)
+    }
 }
 
 /// Detect if a position is inside an SDBL query string.
@@ -293,9 +315,19 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
 pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionContext {
     let offset_usize: usize = offset.into();
 
-    // Get text before cursor
-    let text_before_cursor =
-        if offset_usize <= query_text.len() { &query_text[..offset_usize] } else { query_text };
+    // Get text before cursor (ensure we're on a char boundary for UTF-8 safety)
+    let text_before_cursor = if offset_usize <= query_text.len() {
+        // Find the nearest char boundary at or before offset
+        let safe_offset = if query_text.is_char_boundary(offset_usize) {
+            offset_usize
+        } else {
+            // Walk backwards to find char boundary
+            (0..offset_usize).rev().find(|&i| query_text.is_char_boundary(i)).unwrap_or(0)
+        };
+        &query_text[..safe_offset]
+    } else {
+        query_text
+    };
 
     // Check for "FROM " or "ИЗ " keyword immediately before cursor
     if is_after_from_keyword(text_before_cursor) {
