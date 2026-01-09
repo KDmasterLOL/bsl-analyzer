@@ -91,6 +91,98 @@ pub enum SdblCompletionContext {
     None,
 }
 
+/// Extract query text from BSL string literal.
+///
+/// Removes quotes and | prefixes from multiline strings:
+/// ```text
+/// Input:  "ВЫБРАТЬ\n|    Код\n|ИЗ Справочник"
+/// Output: "ВЫБРАТЬ\n    Код\nИЗ Справочник"
+/// ```
+fn extract_query_text(literal_text: &str) -> String {
+    let mut result = String::new();
+    let mut first_line = true;
+
+    for line in literal_text.lines() {
+        if first_line {
+            // First line: skip opening quote
+            let line_text = line.trim_start_matches('"');
+            result.push_str(line_text);
+            first_line = false;
+        } else {
+            // Continuation lines: skip | prefix
+            result.push('\n');
+            let line_text = line.trim_start().trim_start_matches('|');
+            result.push_str(line_text);
+        }
+    }
+
+    // Remove closing quote if present
+    result.trim_end_matches('"').to_string()
+}
+
+/// Map offset from literal text (with quotes/|) to query text offset (without quotes/|).
+///
+/// # Arguments
+///
+/// * `literal_text` - Full literal text including quotes and | prefixes
+/// * `offset_in_literal` - Offset within the literal text
+///
+/// # Returns
+///
+/// Offset within the extracted query text (without quotes/|).
+fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextSize {
+    let offset_usize: usize = offset_in_literal.into();
+    let mut literal_pos = 0;
+    let mut query_pos = 0;
+    let mut first_line = true;
+
+    for line in literal_text.lines() {
+        let line_len = line.len();
+
+        if literal_pos + line_len >= offset_usize {
+            // Cursor is on this line
+            let offset_in_line = offset_usize - literal_pos;
+
+            if first_line {
+                // First line: skip opening quote (1 char)
+                let skip = if line.starts_with('"') { 1 } else { 0 };
+                if offset_in_line > skip {
+                    query_pos += offset_in_line - skip;
+                }
+            } else {
+                // Continuation line: skip whitespace + | prefix
+                let trimmed = line.trim_start();
+                let skip_whitespace = line.len() - trimmed.len();
+                let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
+                let skip = skip_whitespace + skip_pipe;
+
+                if offset_in_line > skip {
+                    query_pos += offset_in_line - skip;
+                }
+            }
+
+            return TextSize::from(query_pos as u32);
+        }
+
+        // Move to next line
+        literal_pos += line_len + 1; // +1 for newline
+
+        if first_line {
+            let skip = if line.starts_with('"') { 1 } else { 0 };
+            query_pos += line_len - skip;
+            first_line = false;
+        } else {
+            query_pos += 1; // newline
+            let trimmed = line.trim_start();
+            let skip_whitespace = line.len() - trimmed.len();
+            let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
+            query_pos += line_len - skip_whitespace - skip_pipe;
+        }
+    }
+
+    TextSize::from(query_pos as u32)
+}
+
 /// Detect if a position is inside an SDBL query string.
 ///
 /// This function checks if the given offset in the syntax tree falls within a string literal
@@ -140,38 +232,36 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
         return None;
     }
 
-    let string_text = token.text();
+    // Find parent LITERAL node (which contains the full multiline string)
+    let literal_node = token.parent_ancestors().find(|node| node.kind() == SyntaxKind::LITERAL)?;
 
-    // Check if string contains SDBL keywords
-    if !is_sdbl_query(string_text) {
-        tracing::trace!("string does not contain SDBL keywords");
+    // Get full text of literal (includes all STRING_START + STRING_PART + STRING_TAIL)
+    let literal_text = literal_node.text().to_string();
+
+    // Check if literal contains SDBL keywords
+    if !is_sdbl_query(&literal_text) {
+        tracing::trace!("literal does not contain SDBL keywords");
         return None;
     }
 
-    // Calculate offset within the query
-    let token_start = token.text_range().start();
-    let offset_in_token = offset - token_start;
+    // Calculate offset within the literal node
+    let literal_start = literal_node.text_range().start();
+    let offset_in_literal = offset - literal_start;
 
-    // Skip opening quote (if present)
-    let query_start_offset = if string_text.starts_with('"') || string_text.starts_with('|') {
-        TextSize::from(1)
-    } else {
-        TextSize::from(0)
-    };
+    // Extract query text by removing quotes and | prefixes
+    let query_text = extract_query_text(&literal_text);
 
-    let offset_in_query = if offset_in_token > query_start_offset {
-        offset_in_token - query_start_offset
-    } else {
-        TextSize::from(0)
-    };
+    // Map offset from literal (with quotes/|) to query text (without quotes/|)
+    let offset_in_query = map_offset_to_query(&literal_text, offset_in_literal);
 
     tracing::debug!(
-        query_len = string_text.len(),
+        literal_len = literal_text.len(),
+        query_len = query_text.len(),
         offset_in_query = u32::from(offset_in_query),
         "detected SDBL query at position"
     );
 
-    Some(SdblQueryInfo { query_text: string_text.to_string(), offset_in_query })
+    Some(SdblQueryInfo { query_text, offset_in_query })
 }
 
 /// Detect completion context within an SDBL query.
