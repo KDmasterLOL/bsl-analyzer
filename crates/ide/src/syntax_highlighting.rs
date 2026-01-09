@@ -7,12 +7,15 @@
 //!
 //! 1. **Syntactic highlighting** - Keywords, literals, comments, operators (by token kind)
 //! 2. **Semantic highlighting** - Function calls, variables, parameters (via HIR + name resolution)
+//! 3. **SDBL highlighting** - SDBL keywords, operators, functions in string literals (via sdbl-hir)
 //!
 //! Semantic highlighting requires name resolution to distinguish:
 //! - Function calls from variables
 //! - Parameters from local variables
 //! - Module variables from local variables
 //! - Builtin functions from user-defined (TODO)
+
+mod sdbl;
 
 use either::Either;
 use ide_db::{
@@ -138,21 +141,32 @@ pub struct HlRange {
 /// This struct lives only during a single `highlight()` call and provides:
 /// - Cached ExprScopes for each method (avoids rebuilding for every token)
 /// - Database and file context
-struct HighlightContext<'db> {
-    db: &'db dyn RootDatabase,
-    module_id: ModuleId,
-    file_id: FileId,
+/// - SDBL context (line index, tracked literals)
+pub(crate) struct HighlightContext<'db> {
+    pub(crate) db: &'db dyn RootDatabase,
+    pub(crate) module_id: ModuleId,
+    pub(crate) file_id: FileId,
     /// Cache: method source_range -> (MethodId, ExprScopes, root ScopeId)
-    expr_scopes_cache: FxHashMap<TextRange, (MethodId, Arc<ExprScopes>)>,
+    pub(crate) expr_scopes_cache: FxHashMap<TextRange, (MethodId, Arc<ExprScopes>)>,
+
+    /// Line index for SDBL position mapping optimization (built once for entire file)
+    /// Eliminates 100× rebuilds for files with many SDBL queries
+    pub(crate) line_index: Option<Vec<usize>>,
+
+    /// SDBL literal ranges to skip STRING token highlighting
+    /// When a literal contains SDBL, its tokens are highlighted by sdbl module
+    pub(crate) sdbl_literal_ranges: rustc_hash::FxHashSet<TextRange>,
 }
 
 impl<'db> HighlightContext<'db> {
-    fn new(db: &'db dyn RootDatabase, file_id: FileId) -> Self {
+    fn new(db: &'db dyn RootDatabase, file_id: FileId, line_index: Option<Vec<usize>>) -> Self {
         Self {
             db,
             module_id: ModuleId::new(file_id),
             file_id,
             expr_scopes_cache: FxHashMap::default(),
+            line_index,
+            sdbl_literal_ranges: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -299,7 +313,12 @@ pub fn highlight(db: &dyn RootDatabase, file_id: FileId) -> Vec<HlRange> {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let mut ctx = HighlightContext::new(db, file_id);
+    // Build line index ONCE for entire file (optimization for SDBL position mapping)
+    let input = db.file_text_input(file_id);
+    let bsl_source = input.text(db);
+    let line_index = ide_diagnostics::sdbl_utils::build_line_index_shared(&bsl_source);
+
+    let mut ctx = HighlightContext::new(db, file_id, Some(line_index));
     let mut highlights = Vec::new();
 
     traverse_node(&mut ctx, &root, &mut highlights);
@@ -321,11 +340,21 @@ fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut
                 }
 
                 // Fall back to syntactic highlighting
-                if let Some(hl) = highlight_token(&token) {
+                if let Some(hl) = highlight_token(&token, ctx) {
                     highlights.push(hl);
                 }
             }
             syntax::NodeOrToken::Node(node) => {
+                // Check for SDBL in string literals BEFORE other processing
+                if node.kind() == SyntaxKind::LITERAL {
+                    if let Some(sdbl_highlights) = sdbl::highlight_sdbl_in_literal(ctx, &node) {
+                        // Track this literal as containing SDBL to skip STRING token highlighting
+                        ctx.sdbl_literal_ranges.insert(node.text_range());
+                        highlights.extend(sdbl_highlights);
+                        continue; // Skip children - SDBL tokens override STRING highlighting
+                    }
+                }
+
                 // Check for special nodes that need specific highlighting
                 highlight_node(&node, highlights);
 
@@ -370,9 +399,24 @@ fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> 
 }
 
 /// Highlight a single token based on its syntax kind.
-fn highlight_token(token: &SyntaxToken) -> Option<HlRange> {
+fn highlight_token(token: &SyntaxToken, ctx: &HighlightContext) -> Option<HlRange> {
     let kind = token.kind();
     let range = token.text_range();
+
+    // Skip STRING tokens if parent is a SDBL literal (already highlighted by sdbl module)
+    if matches!(
+        kind,
+        SyntaxKind::STRING
+            | SyntaxKind::STRING_START
+            | SyntaxKind::STRING_TAIL
+            | SyntaxKind::STRING_PART
+    ) {
+        if let Some(parent) = token.parent() {
+            if ctx.sdbl_literal_ranges.contains(&parent.text_range()) {
+                return None;
+            }
+        }
+    }
 
     let tag = match kind {
         // Keywords
@@ -727,5 +771,139 @@ mod tests {
         // Should find 4 parameter usages (2 per method) and 6 variable usages (3 per method)
         assert!(param_count >= 4, "Expected at least 4 parameter highlights");
         assert!(var_count >= 6, "Expected at least 6 local variable highlights");
+    }
+
+    #[test]
+    fn test_sdbl_keyword_highlighting() {
+        let code = r#"
+Функция Тест()
+    Запрос = "SELECT Код FROM Справочник.Валюты";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find SELECT keyword - should be highlighted as Keyword
+        let select_kw = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Keyword
+                && code[hl.range.start().into()..hl.range.end().into()] == *"SELECT"
+        });
+
+        assert!(select_kw.is_some(), "SELECT should be highlighted as Keyword");
+
+        // Find FROM keyword - should be highlighted as Keyword
+        let from_kw = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Keyword
+                && code[hl.range.start().into()..hl.range.end().into()] == *"FROM"
+        });
+
+        assert!(from_kw.is_some(), "FROM should be highlighted as Keyword");
+    }
+
+    #[test]
+    fn test_sdbl_multiline_highlighting() {
+        let code = r#"
+Функция Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Код
+             |ИЗ
+             |    Справочник.Валюты";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find ВЫБРАТЬ keyword
+        let select_kw = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Keyword && {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text.contains("ВЫБРАТЬ")
+            }
+        });
+
+        assert!(select_kw.is_some(), "ВЫБРАТЬ should be highlighted as Keyword");
+
+        // Find ИЗ keyword
+        let from_kw = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Keyword && {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text.contains("ИЗ")
+            }
+        });
+
+        assert!(from_kw.is_some(), "ИЗ should be highlighted as Keyword");
+    }
+
+    #[test]
+    fn test_sdbl_aggregate_functions() {
+        let code = r#"
+Функция Тест()
+    Запрос = "SELECT SUM(Сумма) FROM Документ.Продажи";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find SUM function - should be highlighted as Function
+        let sum_fn = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Function
+                && code[hl.range.start().into()..hl.range.end().into()] == *"SUM"
+        });
+
+        assert!(sum_fn.is_some(), "SUM should be highlighted as Function");
+    }
+
+    #[test]
+    fn test_sdbl_operators() {
+        let code = r#"
+Функция Тест()
+    Запрос = "SELECT * FROM Таблица WHERE А = Б AND В <> Г";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find = operator - should be highlighted as Operator
+        let eq_op = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Operator
+                    && code[hl.range.start().into()..hl.range.end().into()] == *"="
+            })
+            .count();
+
+        // Should find at least one = operator in SDBL (ignore the BSL assignment)
+        assert!(eq_op >= 1, "= should be highlighted as Operator");
+
+        // Find AND operator - should be highlighted as Operator
+        let and_op = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Operator
+                && code[hl.range.start().into()..hl.range.end().into()] == *"AND"
+        });
+
+        assert!(and_op.is_some(), "AND should be highlighted as Operator");
+    }
+
+    #[test]
+    fn test_no_sdbl_highlight_for_short_strings() {
+        let code = r#"
+Функция Тест()
+    Строка = "SELECT";
+    Возврат Строка;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // The string "SELECT" is too short (< 15 chars) so should be highlighted as StringLiteral
+        let string_highlights: Vec<_> =
+            highlights.iter().filter(|hl| hl.tag == HlTag::StringLiteral).collect();
+
+        // Should have at least one string literal
+        assert!(!string_highlights.is_empty(), "Short strings should remain as StringLiteral");
     }
 }

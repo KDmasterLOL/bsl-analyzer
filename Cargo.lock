@@ -738,9 +738,11 @@ dependencies = [
  "ide-db",
  "ide-diagnostics",
  "rustc-hash 2.1.1",
+ "sdbl-hir",
  "stdx",
  "syntax",
  "test-fixture",
+ "tracing",
  "triomphe",
  "vfs",
 ]
