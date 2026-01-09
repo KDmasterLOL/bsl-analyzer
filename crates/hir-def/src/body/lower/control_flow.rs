@@ -40,19 +40,17 @@ pub(crate) fn analyze_control_flow(stmt_list: &SyntaxNode) -> ControlFlowAnalysi
     ControlFlowAnalysis { has_return, call_stmts }
 }
 
-/// Check if function has missing return paths using CFG analysis.
+/// Check if function has missing return paths using AST analysis (DEPRECATED).
 ///
-/// Returns true if some execution paths don't have explicit return statements.
-/// This uses the same CFG analysis as AllFunctionPathMustHaveReturn diagnostic.
-///
-/// TODO(Phase 6.4): Re-enable after CFG migration to HIR is complete.
-/// For now, return false (don't report missing return paths during lowering).
-/// This diagnostic will be properly implemented with HIR-based CFG.
+/// This function is kept for backwards compatibility but always returns false.
+/// CFG-based analysis is now performed in ide-diagnostics handler to avoid
+/// circular dependency (hir-def → cfg → hir-def).
+#[deprecated(note = "CFG analysis moved to ide-diagnostics handler")]
 pub fn check_missing_return_paths(_stmt_list: &SyntaxNode) -> bool {
-    // Temporarily disabled during CFG migration to HIR (Phase 6)
+    // Always return false - HIR-based analysis is now used
     false
 
-    /* COMMENTED OUT - will be re-enabled with HIR-based CFG in Phase 6.4
+    /* OLD AST-BASED IMPLEMENTATION - replaced by check_missing_return_in_hir
     use cfg::{CfgBuilder, CfgEdgeType, CfgVertex};
 
     // Build CFG with default configuration (loops executed at least once)

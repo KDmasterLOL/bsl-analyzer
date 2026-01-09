@@ -41,6 +41,8 @@ use crate::body::{Body, BodyDiagnostic, BodySourceMap, LowerResult};
 use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
 use crate::Name;
 
+// check_missing_return_paths is deprecated - kept for backwards compatibility only
+#[allow(deprecated)]
 pub use control_flow::check_missing_return_paths;
 
 // Re-export profiling functions
@@ -565,11 +567,11 @@ pub fn lower_method_with_externals(
         }
 
         // Check for MissingReturn (some paths don't return)
-        // Only check if function has at least one return (otherwise FunctionShouldHaveReturn fires)
-        if is_function
-            && cf_analysis.has_return
-            && control_flow::check_missing_return_paths(&stmt_list)
-        {
+        // NOTE: CFG-based analysis is performed in ide-diagnostics handler
+        // to avoid circular dependency (hir-def → cfg → hir-def)
+        // This stub emits diagnostic if function has at least one return statement
+        // The actual path analysis happens in all_function_path_must_have_return handler
+        if is_function && cf_analysis.has_return {
             // Get function name range for diagnostic
             let name_range = method_node
                 .children_with_tokens()
@@ -578,6 +580,7 @@ pub fn lower_method_with_externals(
                 .map(|tok| tok.text_range())
                 .unwrap_or_else(|| method_node.text_range());
 
+            // Emit candidate diagnostic - handler will use CFG to validate
             ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
         }
 

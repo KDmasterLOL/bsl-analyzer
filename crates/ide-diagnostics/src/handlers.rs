@@ -44,6 +44,7 @@ pub mod deprecated_method;
 // NOTE: Replaced with HIR-based deprecated_method diagnostic
 // pub mod deprecated_methods_8310;
 // pub mod deprecated_methods_8317;
+pub mod all_function_path_must_have_return;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;
@@ -91,7 +92,6 @@ pub mod missed_required_parameter;
 pub mod missing_code_try_catch_ex;
 pub mod missing_common_module_method;
 pub mod missing_event_subscription_handler;
-pub mod missing_return;
 pub mod missing_returned_value_description;
 pub mod missing_space;
 pub mod missing_temp_storage_deletion;
