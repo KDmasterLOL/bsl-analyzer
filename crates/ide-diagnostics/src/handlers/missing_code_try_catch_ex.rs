@@ -34,13 +34,30 @@
 //! ## Implementation
 //! Ported from:
 //! - MissingCodeTryCatchExDiagnostic.java (bsl-language-server) - PRIMARY
+//!
+//! **Architecture:** HIR-based diagnostic with AST fallback for commentAsCode.
+//!
+//! ### HIR approach
+//! - Scans `Stmt::Try { body, except }` in method bodies and module-level code
+//! - Empty except detected via `except.is_empty()`
+//! - For commentAsCode option: uses source_map to get range, then checks AST for comments
+//!
+//! ### Advantages over AST
+//! - Semantic analysis - operates on lowered HIR representation
+//! - Salsa caching - benefits from automatic invalidation
+//! - Simpler code - direct check on except array
+//! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use hir_def::{
+    hir::{Stmt, StmtId},
+    ModuleId,
+};
+use syntax::SyntaxKind;
 
 /// Main entry point for MissingCodeTryCatchEx diagnostic.
 ///
-/// Detects empty exception handlers in try-catch blocks.
+/// HIR-based check for empty exception handlers in try-catch blocks.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 1. Early exit if disabled
     if ctx.config.is_disabled(DiagnosticCode::MissingCodeTryCatchEx) {
@@ -53,114 +70,246 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::MissingCodeTryCatchEx, "commentAsCode")
         .unwrap_or(false);
 
-    // 3. Parse file and find all TRY_STMT nodes
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
+    let module_id = ModuleId { file_id: ctx.file_id };
+    let module_bodies = ctx.db.module_bodies(module_id);
 
-    for try_stmt in root.descendants().filter(|n| n.kind() == SyntaxKind::TRY_STMT) {
-        check_try_statement(&try_stmt, comment_as_code, &mut diagnostics);
+    // 3. Check method bodies
+    for (_local_id, body, source_map) in module_bodies.method_bodies() {
+        check_body_for_empty_except(body, source_map, comment_as_code, ctx, &mut diagnostics);
     }
+
+    // 4. Check module-level code
+    if let Some(lower_result) = module_bodies.module_code_result() {
+        check_body_for_empty_except(
+            &lower_result.body,
+            &lower_result.source_map,
+            comment_as_code,
+            ctx,
+            &mut diagnostics,
+        );
+    }
+
+    // 5. Sort diagnostics by position
+    diagnostics.sort_by_key(|d| d.range.start());
 
     diagnostics
 }
 
-/// Check a single try-catch block for empty exception handler.
-fn check_try_statement(
-    try_stmt: &SyntaxNode,
+/// Check a single body (method or module-level code) for empty except blocks.
+fn check_body_for_empty_except(
+    body: &hir_def::Body,
+    source_map: &hir_def::body::BodySourceMap,
     comment_as_code: bool,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    // 1. Find EXCEPT_CLAUSE child
-    let Some(except_clause) = try_stmt.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
-    else {
-        return; // No except clause (malformed or incomplete parse)
-    };
-
-    // 2. Find STMT_LIST within EXCEPT_CLAUSE
-    let Some(stmt_list) = except_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST)
-    else {
-        // No STMT_LIST means empty exception handler
-        report_diagnostic(try_stmt, diagnostics);
-        return;
-    };
-
-    // 3. Check if STMT_LIST has any statement children
-    let has_statements = stmt_list.children().any(|c| is_statement(c.kind()));
-
-    if has_statements {
-        return; // Has code, no diagnostic
+    // Recursively scan all statements
+    for stmt_id in body.body_stmts.iter() {
+        check_stmt_recursive(*stmt_id, body, source_map, comment_as_code, ctx, diagnostics);
     }
-
-    // 4. If commentAsCode=true, check for comments
-    if comment_as_code && has_comments_in_range(&except_clause) {
-        return; // Has comments counting as code, no diagnostic
-    }
-
-    // 5. Report diagnostic on EXCEPT keyword
-    report_diagnostic(try_stmt, diagnostics);
 }
 
-/// Check if a node represents a statement.
-///
-/// Reused pattern from empty_code_block.rs.
-fn is_statement(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::ASSIGN_STMT
-            | SyntaxKind::CALL_STMT
-            | SyntaxKind::RETURN_STMT
-            | SyntaxKind::IF_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::FOR_EACH_STMT
-            | SyntaxKind::TRY_STMT
-            | SyntaxKind::RAISE_STMT
-            | SyntaxKind::BREAK_STMT
-            | SyntaxKind::CONTINUE_STMT
-            | SyntaxKind::GOTO_STMT
-            | SyntaxKind::LABEL_STMT
-            | SyntaxKind::EXECUTE_STMT
-            | SyntaxKind::ADD_HANDLER_STMT
-            | SyntaxKind::REMOVE_HANDLER_STMT
-    )
+/// Recursively check statement and nested statements for Try blocks.
+fn check_stmt_recursive(
+    stmt_id: StmtId,
+    body: &hir_def::Body,
+    source_map: &hir_def::body::BodySourceMap,
+    comment_as_code: bool,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let stmt = body.stmt(stmt_id);
+
+    // Check if this is a Try statement
+    if let Stmt::Try { body: try_body, except } = stmt {
+        // Empty except block?
+        if except.is_empty() {
+            // If commentAsCode=true, check if except block has comments via AST fallback
+            if comment_as_code {
+                // Need to get the range of the except clause and check for comments
+                // For now, we'll use source_map to get the stmt range, then parse AST
+                if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
+                    // Parse AST at this range to check for comments
+                    let parse = ctx.db.parse(ctx.file_id);
+                    let root = parse.syntax_node();
+
+                    // Find the TRY_STMT node at this range
+                    if let Some(try_node) = root
+                        .descendants()
+                        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
+                    {
+                        // Find EXCEPT_CLAUSE and check for comments
+                        if let Some(except_clause) =
+                            try_node.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
+                        {
+                            if has_comments_in_node(&except_clause) {
+                                // Has comments, skip diagnostic
+                            } else {
+                                // No comments, report diagnostic
+                                report_diagnostic_at_except(&try_node, diagnostics);
+                            }
+                        } else {
+                            // No except clause found (shouldn't happen), skip
+                        }
+                    } else {
+                        // Couldn't find AST node, report diagnostic anyway
+                        if let Some(range) = source_map.stmt_range(stmt_id) {
+                            diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::MissingCodeTryCatchEx,
+                                message: "Отсутствует код в блоке исключения".to_string(),
+                                severity: Severity::Error,
+                                range,
+                                tags: vec![],
+                                fixes: vec![],
+                            });
+                        }
+                    }
+                } else {
+                    // No source range, skip
+                }
+            } else {
+                // commentAsCode=false, report diagnostic directly
+                // Find the EXCEPT keyword position via AST fallback
+                if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
+                    let parse = ctx.db.parse(ctx.file_id);
+                    let root = parse.syntax_node();
+
+                    if let Some(try_node) = root
+                        .descendants()
+                        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
+                    {
+                        report_diagnostic_at_except(&try_node, diagnostics);
+                    } else {
+                        // Fallback: use stmt range
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::MissingCodeTryCatchEx,
+                            message: "Отсутствует код в блоке исключения".to_string(),
+                            severity: Severity::Error,
+                            range: stmt_range,
+                            tags: vec![],
+                            fixes: vec![],
+                        });
+                    }
+                }
+            }
+        }
+
+        // Recursively check nested statements in try body
+        for &nested_stmt_id in try_body.iter() {
+            check_stmt_recursive(
+                nested_stmt_id,
+                body,
+                source_map,
+                comment_as_code,
+                ctx,
+                diagnostics,
+            );
+        }
+
+        // Recursively check nested statements in except body
+        for &nested_stmt_id in except.iter() {
+            check_stmt_recursive(
+                nested_stmt_id,
+                body,
+                source_map,
+                comment_as_code,
+                ctx,
+                diagnostics,
+            );
+        }
+    } else {
+        // Recursively check nested statements for other statement types
+        match stmt {
+            Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
+                for &nested in then_branch.iter() {
+                    check_stmt_recursive(
+                        nested,
+                        body,
+                        source_map,
+                        comment_as_code,
+                        ctx,
+                        diagnostics,
+                    );
+                }
+                for (_, branch) in elsif_branches.iter() {
+                    for &nested in branch.iter() {
+                        check_stmt_recursive(
+                            nested,
+                            body,
+                            source_map,
+                            comment_as_code,
+                            ctx,
+                            diagnostics,
+                        );
+                    }
+                }
+                if let Some(branch) = else_branch {
+                    for &nested in branch.iter() {
+                        check_stmt_recursive(
+                            nested,
+                            body,
+                            source_map,
+                            comment_as_code,
+                            ctx,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            Stmt::While { body: while_body, .. } => {
+                for &nested in while_body.iter() {
+                    check_stmt_recursive(
+                        nested,
+                        body,
+                        source_map,
+                        comment_as_code,
+                        ctx,
+                        diagnostics,
+                    );
+                }
+            }
+            Stmt::For { body: for_body, .. } | Stmt::ForEach { body: for_body, .. } => {
+                for &nested in for_body.iter() {
+                    check_stmt_recursive(
+                        nested,
+                        body,
+                        source_map,
+                        comment_as_code,
+                        ctx,
+                        diagnostics,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-/// Check if the EXCEPT_CLAUSE contains any comments.
-///
-/// Used when commentAsCode=true to suppress diagnostic for exception handlers
-/// that contain only comments.
-fn has_comments_in_range(except_clause: &SyntaxNode) -> bool {
-    except_clause
-        .descendants_with_tokens()
+/// Check if a node contains any comments (AST fallback).
+fn has_comments_in_node(node: &syntax::SyntaxNode) -> bool {
+    node.descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .any(|tok| tok.kind() == SyntaxKind::COMMENT)
 }
 
-/// Find the EXCEPT keyword token in a TRY_STMT.
-///
-/// The diagnostic is reported on this token.
-fn find_except_keyword(try_stmt: &SyntaxNode) -> Option<SyntaxToken> {
-    try_stmt
+/// Report diagnostic at EXCEPT keyword position (AST fallback for precise location).
+fn report_diagnostic_at_except(try_node: &syntax::SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
+    // Find EXCEPT keyword
+    if let Some(except_token) = try_node
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .find(|tok| tok.kind() == SyntaxKind::KW_EXCEPT)
-}
-
-/// Report a MissingCodeTryCatchEx diagnostic on the EXCEPT keyword.
-fn report_diagnostic(try_stmt: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
-    let Some(except_token) = find_except_keyword(try_stmt) else {
-        return; // Malformed syntax, skip
-    };
-
-    diagnostics.push(Diagnostic {
-        code: DiagnosticCode::MissingCodeTryCatchEx,
-        message: "Отсутствует код в блоке исключения".to_string(),
-        severity: Severity::Error,
-        range: except_token.text_range(),
-        tags: vec![],
-        fixes: vec![],
-    });
+    {
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::MissingCodeTryCatchEx,
+            message: "Отсутствует код в блоке исключения".to_string(),
+            severity: Severity::Error,
+            range: except_token.text_range(),
+            tags: vec![],
+            fixes: vec![],
+        });
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +335,18 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
+
+        // Set up source root for HIR-based diagnostics
+        use ide_db::base_db::{SourceRoot, SourceRootId};
+        use vfs::VfsPath;
+
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file content
         let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
