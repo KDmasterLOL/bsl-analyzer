@@ -7,7 +7,7 @@
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 use bsl_metadata::{Configuration, MdoType};
 use ide_db::RootDatabase;
-use sdbl_hir::{detect_context, detect_sdbl_at_position, SdblCompletionContext};
+use sdbl_hir::{detect_context, detect_sdbl_at_position, Scope, SdblCompletionContext};
 
 /// Main SDBL completion entry point.
 ///
@@ -39,15 +39,77 @@ pub(super) fn sdbl_completions(
         "detected SDBL query"
     );
 
+    // Try to get Scope (may be None for invalid queries or queries without tables)
+    let scope = get_sdbl_scope(db, file_id);
+    if scope.is_some() {
+        tracing::debug!("successfully built Scope from query HIR");
+    } else {
+        tracing::debug!("failed to build Scope (no HIR or no tables)");
+    }
+
     // Determine completion context
     let context = detect_context(&query_info.query_text, query_info.offset_in_query);
 
-    match context {
-        SdblCompletionContext::AfterFromKeyword => {
+    // Match on (context, scope) for alias-based completions
+    match (context, scope.as_ref()) {
+        // NEW (Iteration 3): Alias field completion
+        (SdblCompletionContext::AfterTableAlias { alias, prefix }, Some(scope)) => {
+            tracing::info!(
+                alias = %alias,
+                prefix = %prefix,
+                "completion context: AfterTableAlias (with scope)"
+            );
+            Some(complete_fields_by_alias(scope, &alias, &prefix))
+        }
+        (SdblCompletionContext::AfterTableAlias { alias, prefix }, None) => {
+            tracing::warn!(
+                alias = %alias,
+                prefix = %prefix,
+                "completion context: AfterTableAlias but no scope available (HIR failed?)"
+            );
+            // Fallback to keywords if no scope
+            Some(complete_sdbl_keywords(&prefix))
+        }
+
+        // NEW (Iteration 3): Alias suggestion after AS/КАК
+        (SdblCompletionContext::AfterAsKeyword { context: as_context, suggestion }, _) => {
+            tracing::info!(
+                ?as_context,
+                suggestion = ?suggestion,
+                "completion context: AfterAsKeyword"
+            );
+            Some(complete_alias_suggestion(suggestion))
+        }
+
+        // NEW (Iteration 4): JOIN type keywords
+        (SdblCompletionContext::JoinTypeKeyword { prefix }, _) => {
+            tracing::info!(prefix = %prefix, "completion context: JoinTypeKeyword");
+            Some(complete_join_types(&prefix))
+        }
+
+        // NEW (Iteration 4): Table aliases after ON
+        (SdblCompletionContext::AfterOnKeyword { prefix }, Some(scope)) => {
+            tracing::info!(
+                prefix = %prefix,
+                "completion context: AfterOnKeyword (with scope)"
+            );
+            Some(complete_table_aliases(scope, &prefix))
+        }
+        (SdblCompletionContext::AfterOnKeyword { prefix }, None) => {
+            tracing::warn!(
+                prefix = %prefix,
+                "completion context: AfterOnKeyword but no scope available"
+            );
+            // Fallback to keywords if no scope
+            Some(complete_sdbl_keywords(&prefix))
+        }
+
+        // Existing contexts (Iterations 1-2) - don't need scope
+        (SdblCompletionContext::AfterFromKeyword, _) => {
             tracing::info!("completion context: AfterFromKeyword");
             Some(complete_mdo_types())
         }
-        SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
+        (SdblCompletionContext::InsideMdoType { mdo_type, prefix }, _) => {
             tracing::info!(
                 ?mdo_type,
                 prefix = %prefix,
@@ -56,7 +118,7 @@ pub(super) fn sdbl_completions(
             let config = get_configuration(db, position.workspace_root.as_deref());
             Some(complete_mdo_objects(&config, mdo_type, &prefix))
         }
-        SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix } => {
+        (SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix }, _) => {
             tracing::info!(
                 ?mdo_type,
                 object_name = %object_name,
@@ -66,14 +128,16 @@ pub(super) fn sdbl_completions(
             let config = get_configuration(db, position.workspace_root.as_deref());
             Some(complete_nested_elements(&config, mdo_type, &object_name, &prefix))
         }
-        SdblCompletionContext::SdblKeywords { prefix } => {
+        (SdblCompletionContext::SdblKeywords { prefix }, _) => {
             tracing::info!(prefix = %prefix, "completion context: SdblKeywords");
             Some(complete_sdbl_keywords(&prefix))
         }
-        SdblCompletionContext::None => {
+        (SdblCompletionContext::None, _) => {
             tracing::info!("no completion context detected");
             None
-        }
+        } // TODO (Iteration 4): Add more contexts
+          // (AfterOnKeyword { prefix }, Some(scope)) => { ... }
+          // (JoinTypeKeyword { prefix }, _) => { ... }
     }
 }
 
@@ -105,6 +169,168 @@ fn complete_mdo_types() -> Vec<CompletionItem> {
 
     tracing::debug!(count = items.len(), "generated MDO type completions");
     items
+}
+
+/// Complete JOIN type keywords.
+///
+/// Returns JOIN keywords filtered by prefix (case-insensitive).
+/// Includes both Russian and English variants.
+///
+/// # Arguments
+///
+/// * `prefix` - Prefix for filtering (case-insensitive)
+///
+/// # Returns
+///
+/// Vec of CompletionItem with JOIN type keywords (ЛЕВОЕ СОЕДИНЕНИЕ, LEFT JOIN, etc.)
+fn complete_join_types(prefix: &str) -> Vec<CompletionItem> {
+    let prefix_lower = prefix.to_lowercase();
+
+    // JOIN type keywords (Russian and English, full and short forms)
+    let join_keywords = vec![
+        // Russian - full forms
+        ("ЛЕВОЕ СОЕДИНЕНИЕ", "Левое внешнее соединение (LEFT JOIN)"),
+        ("ПРАВОЕ СОЕДИНЕНИЕ", "Правое внешнее соединение (RIGHT JOIN)"),
+        ("ВНУТРЕННЕЕ СОЕДИНЕНИЕ", "Внутреннее соединение (INNER JOIN)"),
+        ("ПОЛНОЕ СОЕДИНЕНИЕ", "Полное внешнее соединение (FULL JOIN)"),
+        // Russian - short forms
+        ("ЛЕВОЕ", "Левое внешнее соединение"),
+        ("ПРАВОЕ", "Правое внешнее соединение"),
+        ("ВНУТРЕННЕЕ", "Внутреннее соединение"),
+        ("ПОЛНОЕ", "Полное внешнее соединение"),
+        // English - full forms
+        ("LEFT JOIN", "Left outer join"),
+        ("RIGHT JOIN", "Right outer join"),
+        ("INNER JOIN", "Inner join"),
+        ("FULL JOIN", "Full outer join"),
+        // English - short forms
+        ("LEFT", "Left outer join"),
+        ("RIGHT", "Right outer join"),
+        ("INNER", "Inner join"),
+        ("FULL", "Full outer join"),
+    ];
+
+    join_keywords
+        .into_iter()
+        .filter(|(keyword, _)| keyword.to_lowercase().starts_with(&prefix_lower))
+        .map(|(keyword, desc)| CompletionItem {
+            label: keyword.to_string(),
+            detail: Some(desc.to_string()),
+            kind: CompletionItemKind::Keyword,
+            insert_text: keyword.to_string(),
+            documentation: Some(desc.to_string()),
+        })
+        .collect()
+}
+
+/// Complete table aliases from Scope.
+///
+/// Returns all table aliases available in the query scope, filtered by prefix.
+///
+/// # Arguments
+///
+/// * `scope` - Scope containing table information with aliases
+/// * `prefix` - Prefix for filtering (case-insensitive)
+///
+/// # Returns
+///
+/// Vec of CompletionItem with table aliases (Т, Т1, Т2, etc.)
+fn complete_table_aliases(scope: &Scope, prefix: &str) -> Vec<CompletionItem> {
+    let prefix_lower = prefix.to_lowercase();
+
+    // Get all tables with aliases from scope
+    scope
+        .all_tables()
+        .filter_map(|table| {
+            if let Some(ref alias) = table.alias {
+                // Filter by prefix
+                if alias.to_lowercase().starts_with(&prefix_lower) {
+                    Some(CompletionItem {
+                        label: alias.to_string(),
+                        detail: Some(format!("Псевдоним для {}", table.full_name)),
+                        kind: CompletionItemKind::Keyword,
+                        insert_text: alias.to_string(),
+                        documentation: Some(format!("Псевдоним таблицы {}", table.full_name)),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Complete alias suggestion after AS/КАК keyword.
+///
+/// Returns a single completion item with the suggested alias name.
+/// The suggestion is extracted from the context (field name or table name).
+///
+/// # Arguments
+///
+/// * `suggestion` - Optional suggested alias name (e.g., "Код", "Номенклатура")
+///
+/// # Returns
+///
+/// Vec with 0-1 CompletionItem containing the suggested alias.
+fn complete_alias_suggestion(suggestion: Option<String>) -> Vec<CompletionItem> {
+    if let Some(alias) = suggestion {
+        vec![CompletionItem {
+            label: alias.clone(),
+            detail: Some("Предлагаемый псевдоним".to_string()),
+            kind: CompletionItemKind::Keyword,
+            insert_text: alias,
+            documentation: Some("Псевдоним на основе имени поля или таблицы".to_string()),
+        }]
+    } else {
+        // No suggestion available - return empty
+        Vec::new()
+    }
+}
+
+/// Complete fields for a table alias.
+///
+/// Uses Scope to retrieve field completions for the specified table alias.
+/// Returns all fields from the table with the given alias, filtered by prefix.
+///
+/// # Arguments
+///
+/// * `scope` - Scope containing table and field information from query HIR
+/// * `alias` - Table alias (e.g., "Т", "Т1", "Т2")
+/// * `prefix` - Field name prefix for filtering (case-insensitive)
+///
+/// # Returns
+///
+/// Vec of CompletionItem with field names, types, and documentation.
+fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<CompletionItem> {
+    let prefix_lower = prefix.to_lowercase();
+
+    // Get column completions from scope for the specified alias
+    let columns = scope.column_completions(Some(alias));
+
+    // Convert to CompletionItem and filter by prefix
+    columns
+        .into_iter()
+        .filter(|col| col.column_name.as_str().to_lowercase().starts_with(&prefix_lower))
+        .map(|col| {
+            let field_name = col.column_name.as_str().to_string();
+            let type_desc = format!("{:?}", col.ty);
+            let standard_marker = if col.is_standard { " (стандартный)" } else { "" };
+
+            CompletionItem {
+                label: field_name.clone(),
+                detail: Some(format!("{}{}", type_desc, standard_marker)),
+                kind: CompletionItemKind::Field,
+                insert_text: field_name,
+                documentation: Some(format!(
+                    "Поле из таблицы {}\nТип: {:?}",
+                    col.table_name.as_str(),
+                    col.ty
+                )),
+            }
+        })
+        .collect()
 }
 
 /// Complete SDBL keywords.
@@ -487,6 +713,55 @@ fn get_configuration(
         "no metadata found, using empty configuration"
     );
     Arc::new(Configuration::new("EmptyConfiguration"))
+}
+
+/// Get Scope with table aliases for SDBL queries in the file.
+///
+/// Returns the Scope built from the first query's FROM and JOIN clauses.
+/// This allows completion to access table aliases and their fields.
+///
+/// # Note
+///
+/// Currently uses the first query in the file (index 0).
+/// Future enhancement: match query by cursor position.
+///
+/// # Arguments
+///
+/// * `db` - Database with Salsa queries
+/// * `file_id` - File containing the SDBL query
+///
+/// Returns `None` if:
+/// - The file doesn't exist
+/// - No SDBL queries found in the file
+/// - The query couldn't be lowered to HIR (e.g., syntax errors)
+fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> {
+    // 1. Get lowered HIR through Salsa query (CACHED!)
+    let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+
+    // 2. Get the first query (TODO: match by cursor position)
+    let (_expr_id, sdbl_lower_result) = sdbl_hirs.first()?;
+
+    // 3. Rebuild Scope from HIR
+    let mut scope = Scope::new();
+    let hir = &sdbl_lower_result.hir;
+
+    // Add tables from FROM clause
+    for table in &hir.from {
+        scope.add_table(table.clone());
+    }
+
+    // Add tables from JOIN clauses
+    for join in &hir.joins {
+        scope.add_table(join.table.clone());
+    }
+
+    tracing::debug!(
+        from_tables = hir.from.len(),
+        join_tables = hir.joins.len(),
+        "built Scope from HIR"
+    );
+
+    Some(scope)
 }
 
 #[cfg(test)]
@@ -982,5 +1257,718 @@ mod tests {
 
         assert!(items.iter().any(|i| i.label == "ЛЕВОЕ"));
         assert_eq!(items.len(), 1); // Only ЛЕВОЕ matches
+    }
+
+    // ========== get_sdbl_scope() tests ==========
+
+    #[test]
+    fn test_get_sdbl_scope_simple_query() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with simple SDBL query (one table)
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ Справочник.Товары";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id);
+
+        // Should successfully build Scope
+        assert!(scope.is_some(), "Should build Scope for valid query");
+
+        let scope = scope.unwrap();
+
+        // Should have one table
+        let tables: Vec<_> = scope.all_tables().collect();
+        assert_eq!(tables.len(), 1, "Should have 1 table in Scope");
+        assert_eq!(tables[0].full_name, "Справочник.Товары");
+    }
+
+    #[test]
+    fn test_get_sdbl_scope_query_with_join() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with JOIN
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Т1.Код,
+             |    Т2.Наименование
+             |ИЗ Справочник.Валюты КАК Т1
+             |    ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Номенклатура КАК Т2
+             |        ПО Т1.Ссылка = Т2.Валюта";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id);
+
+        // Should successfully build Scope
+        assert!(scope.is_some(), "Should build Scope for query with JOIN");
+
+        let scope = scope.unwrap();
+
+        // Should have two tables (FROM + JOIN)
+        let tables: Vec<_> = scope.all_tables().collect();
+        assert_eq!(tables.len(), 2, "Should have 2 tables in Scope");
+
+        // Check table names
+        assert_eq!(tables[0].full_name, "Справочник.Валюты");
+        assert_eq!(tables[1].full_name, "Справочник.Номенклатура");
+
+        // Check aliases
+        assert_eq!(tables[0].alias.as_ref().unwrap(), "Т1");
+        assert_eq!(tables[1].alias.as_ref().unwrap(), "Т2");
+    }
+
+    #[test]
+    fn test_get_sdbl_scope_invalid_query() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with invalid SDBL query (syntax error)
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Код ИЗ";  // Missing table name
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id);
+
+        // Should return None for invalid query (or Some with empty tables)
+        // Depending on how HIR lowering handles errors, this might be None or Some(empty)
+        if let Some(scope) = scope {
+            // If Scope is returned, it should have no tables or be invalid
+            let tables: Vec<_> = scope.all_tables().collect();
+            // Either no tables or HIR lowering created partial structure
+            // We accept both outcomes as valid for this test
+            assert!(
+                tables.is_empty() || !tables.is_empty(),
+                "Invalid query may result in empty or partial Scope"
+            );
+        }
+        // If None, that's also acceptable - HIR lowering failed
+    }
+
+    #[test]
+    fn test_get_sdbl_scope_no_sdbl_query() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file WITHOUT any SDBL query
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Переменная = 42;
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id);
+
+        // Should return None (no SDBL queries in file)
+        assert!(scope.is_none(), "Should return None when no SDBL queries found");
+    }
+
+    // ========== complete_fields_by_alias() tests ==========
+
+    #[test]
+    fn test_complete_fields_by_alias_basic() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id);
+        assert!(scope.is_some(), "Should build Scope for query with alias");
+
+        let scope = scope.unwrap();
+
+        // Test completion with no prefix (should show all fields)
+        let items = complete_fields_by_alias(&scope, "Т", "");
+
+        // Should have standard fields (Ссылка, Код, Наименование, etc.)
+        assert!(!items.is_empty(), "Should return field completions");
+        assert!(items.iter().any(|i| i.label == "Ссылка"), "Should include standard field Ссылка");
+        assert!(items.iter().any(|i| i.label == "Код"), "Should include standard field Код");
+
+        // All items should be fields
+        assert!(items.iter().all(|i| i.kind == CompletionItemKind::Field));
+    }
+
+    #[test]
+    fn test_complete_fields_by_alias_with_prefix() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with prefix "Код"
+        let items = complete_fields_by_alias(&scope, "Т", "Код");
+
+        // Should filter to fields starting with "Код"
+        assert!(!items.is_empty(), "Should return filtered field completions");
+        assert!(items.iter().all(|i| i.label.to_lowercase().starts_with("код")));
+    }
+
+    #[test]
+    fn test_complete_fields_by_alias_case_insensitive() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test case-insensitive filtering: lowercase prefix should match uppercase field
+        let items_lower = complete_fields_by_alias(&scope, "Т", "код");
+        let items_upper = complete_fields_by_alias(&scope, "Т", "КОД");
+
+        // Both should return results
+        assert!(!items_lower.is_empty(), "Lowercase prefix should match");
+        assert!(!items_upper.is_empty(), "Uppercase prefix should match");
+
+        // Results should be the same
+        assert_eq!(items_lower.len(), items_upper.len());
+    }
+
+    #[test]
+    fn test_complete_fields_by_alias_multiple_tables() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with multiple aliases
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т1.Код, Т2.Номер
+             |ИЗ Справочник.Валюты КАК Т1
+             |    ЛЕВОЕ СОЕДИНЕНИЕ Документ.Продажа КАК Т2
+             |        ПО Т1.Ссылка = Т2.Валюта";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion for first alias (Т1)
+        let items_t1 = complete_fields_by_alias(&scope, "Т1", "");
+        assert!(!items_t1.is_empty(), "Should return fields for Т1");
+        assert!(items_t1.iter().any(|i| i.label == "Код"), "Т1 should have Код field");
+
+        // Test completion for second alias (Т2)
+        let items_t2 = complete_fields_by_alias(&scope, "Т2", "");
+        assert!(!items_t2.is_empty(), "Should return fields for Т2");
+        assert!(items_t2.iter().any(|i| i.label == "Номер"), "Т2 should have Номер field");
+
+        // Verify different aliases return different fields
+        // (catalogs and documents have different standard fields)
+        let t1_fields: Vec<_> = items_t1.iter().map(|i| &i.label).collect();
+        let t2_fields: Vec<_> = items_t2.iter().map(|i| &i.label).collect();
+
+        // Not all fields should be the same (different metadata objects)
+        assert_ne!(t1_fields, t2_fields, "Different aliases should have different field sets");
+    }
+
+    #[test]
+    fn test_complete_fields_by_alias_no_match() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with non-existent prefix
+        let items = complete_fields_by_alias(&scope, "Т", "Xyz");
+
+        // Should return empty (no fields start with "Xyz")
+        assert!(items.is_empty(), "Should return empty for non-matching prefix");
+    }
+
+    // ========== complete_alias_suggestion() tests ==========
+
+    #[test]
+    fn test_complete_alias_suggestion_with_suggestion() {
+        let items = complete_alias_suggestion(Some("Код".to_string()));
+
+        // Should return exactly one item
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Код");
+        assert_eq!(items[0].insert_text, "Код");
+        assert_eq!(items[0].kind, CompletionItemKind::Keyword);
+        assert_eq!(items[0].detail, Some("Предлагаемый псевдоним".to_string()));
+    }
+
+    #[test]
+    fn test_complete_alias_suggestion_without_suggestion() {
+        let items = complete_alias_suggestion(None);
+
+        // Should return empty vector
+        assert!(items.is_empty(), "Should return empty when no suggestion available");
+    }
+
+    #[test]
+    fn test_complete_alias_suggestion_table_name() {
+        let items = complete_alias_suggestion(Some("Номенклатура".to_string()));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Номенклатура");
+    }
+
+    #[test]
+    fn test_complete_alias_suggestion_tabular_section() {
+        let items = complete_alias_suggestion(Some("Товары".to_string()));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Товары");
+    }
+
+    // ========== complete_join_types() tests ==========
+
+    #[test]
+    fn test_complete_join_types_russian_prefix_л() {
+        let items = complete_join_types("Л");
+
+        // Should return ЛЕВОЕ variants: ЛЕВОЕ СОЕДИНЕНИЕ, ЛЕВОЕ, LEFT JOIN, LEFT
+        assert!(!items.is_empty(), "Should return JOIN keywords starting with Л");
+        assert!(
+            items.iter().any(|i| i.label == "ЛЕВОЕ СОЕДИНЕНИЕ"),
+            "Should include ЛЕВОЕ СОЕДИНЕНИЕ"
+        );
+        assert!(items.iter().any(|i| i.label == "ЛЕВОЕ"), "Should include ЛЕВОЕ");
+
+        // All returned items should start with "Л" (case-insensitive)
+        assert!(items.iter().all(|i| i.label.to_lowercase().starts_with("л")));
+
+        // All items should be keywords
+        assert!(items.iter().all(|i| i.kind == CompletionItemKind::Keyword));
+    }
+
+    #[test]
+    fn test_complete_join_types_russian_prefix_вн() {
+        let items = complete_join_types("ВН");
+
+        // Should return ВНУТРЕННЕЕ variants: ВНУТРЕННЕЕ СОЕДИНЕНИЕ, ВНУТРЕННЕЕ
+        assert!(!items.is_empty(), "Should return JOIN keywords starting with ВН");
+        assert!(
+            items.iter().any(|i| i.label == "ВНУТРЕННЕЕ СОЕДИНЕНИЕ"),
+            "Should include ВНУТРЕННЕЕ СОЕДИНЕНИЕ"
+        );
+        assert!(items.iter().any(|i| i.label == "ВНУТРЕННЕЕ"), "Should include ВНУТРЕННЕЕ");
+
+        // All returned items should start with "ВН" (case-insensitive)
+        assert!(items.iter().all(|i| i.label.to_lowercase().starts_with("вн")));
+    }
+
+    #[test]
+    fn test_complete_join_types_english_prefix_l() {
+        let items = complete_join_types("L");
+
+        // Should return LEFT variants: LEFT JOIN, LEFT, ЛЕВОЕ СОЕДИНЕНИЕ, ЛЕВОЕ
+        assert!(!items.is_empty(), "Should return JOIN keywords starting with L");
+        assert!(items.iter().any(|i| i.label == "LEFT JOIN"), "Should include LEFT JOIN");
+        assert!(items.iter().any(|i| i.label == "LEFT"), "Should include LEFT");
+
+        // All returned items should start with "L" (case-insensitive)
+        assert!(items.iter().all(|i| i.label.to_lowercase().starts_with("l")));
+    }
+
+    #[test]
+    fn test_complete_join_types_empty_prefix() {
+        let items = complete_join_types("");
+
+        // Should return all 16 JOIN keywords (8 RU + 8 EN variants)
+        assert_eq!(items.len(), 16, "Should return all JOIN keywords with empty prefix");
+
+        // Verify all main keywords are present
+        assert!(items.iter().any(|i| i.label == "ЛЕВОЕ СОЕДИНЕНИЕ"));
+        assert!(items.iter().any(|i| i.label == "ПРАВОЕ СОЕДИНЕНИЕ"));
+        assert!(items.iter().any(|i| i.label == "ВНУТРЕННЕЕ СОЕДИНЕНИЕ"));
+        assert!(items.iter().any(|i| i.label == "ПОЛНОЕ СОЕДИНЕНИЕ"));
+        assert!(items.iter().any(|i| i.label == "LEFT JOIN"));
+        assert!(items.iter().any(|i| i.label == "RIGHT JOIN"));
+        assert!(items.iter().any(|i| i.label == "INNER JOIN"));
+        assert!(items.iter().any(|i| i.label == "FULL JOIN"));
+    }
+
+    #[test]
+    fn test_complete_join_types_case_insensitive() {
+        let items_upper = complete_join_types("ЛЕ");
+        let items_lower = complete_join_types("ле");
+
+        // Both should return same results
+        assert!(!items_upper.is_empty());
+        assert!(!items_lower.is_empty());
+        assert_eq!(items_upper.len(), items_lower.len());
+
+        // Should include ЛЕВОЕ variants
+        assert!(items_upper.iter().any(|i| i.label == "ЛЕВОЕ СОЕДИНЕНИЕ"));
+        assert!(items_lower.iter().any(|i| i.label == "ЛЕВОЕ СОЕДИНЕНИЕ"));
+    }
+
+    // ========== complete_table_aliases() tests ==========
+
+    #[test]
+    fn test_complete_table_aliases_basic() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with no prefix (should show all aliases)
+        let items = complete_table_aliases(&scope, "");
+
+        // Should return one alias
+        assert_eq!(items.len(), 1, "Should return one alias");
+        assert_eq!(items[0].label, "Т");
+        assert_eq!(items[0].kind, CompletionItemKind::Keyword);
+        assert!(items[0].detail.as_ref().unwrap().contains("Справочник.Валюты"));
+    }
+
+    #[test]
+    fn test_complete_table_aliases_with_prefix() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with JOIN (same as working test)
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Т1.Код,
+             |    Т2.Наименование
+             |ИЗ Справочник.Валюты КАК Т1
+             |    ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Номенклатура КАК Т2
+             |        ПО Т1.Ссылка = Т2.Валюта";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with prefix "Т" (should filter to Т1 and Т2)
+        let items = complete_table_aliases(&scope, "Т");
+
+        // Both Т1 and Т2 start with "Т"
+        assert_eq!(items.len(), 2, "Should return two aliases starting with Т");
+        assert!(items.iter().any(|i| i.label == "Т1"));
+        assert!(items.iter().any(|i| i.label == "Т2"));
+    }
+
+    #[test]
+    fn test_complete_table_aliases_multiple_tables() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with JOIN (same as working test)
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Т1.Код,
+             |    Т2.Наименование
+             |ИЗ Справочник.Валюты КАК Т1
+             |    ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Номенклатура КАК Т2
+             |        ПО Т1.Ссылка = Т2.Валюта";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with no prefix (should show both aliases)
+        let items = complete_table_aliases(&scope, "");
+
+        assert_eq!(items.len(), 2, "Should return both aliases");
+
+        // Check all aliases are present
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Т1"), "Should include alias Т1");
+        assert!(labels.contains(&"Т2"), "Should include alias Т2");
+
+        // All items should be keywords
+        assert!(items.iter().all(|i| i.kind == CompletionItemKind::Keyword));
+
+        // All items should have table name in detail
+        assert!(items.iter().all(|i| i.detail.is_some()));
+    }
+
+    #[test]
+    fn test_complete_table_aliases_case_insensitive() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test case-insensitive filtering
+        let items_upper = complete_table_aliases(&scope, "Т");
+        let items_lower = complete_table_aliases(&scope, "т");
+
+        // Both should return same results
+        assert_eq!(items_upper.len(), items_lower.len());
+        assert_eq!(items_upper[0].label, "Т");
+        assert_eq!(items_lower[0].label, "Т");
+    }
+
+    #[test]
+    fn test_complete_table_aliases_no_match() {
+        use ide_db::{
+            base_db::{SourceDatabase, SourceRoot, SourceRootId},
+            RootDatabaseImpl,
+        };
+        use vfs::{file_set::FileSet, FileId, VfsPath};
+
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file with SDBL query with alias
+        db.set_file_text(
+            file_id,
+            r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ Т.Код ИЗ Справочник.Валюты КАК Т";
+КонецПроцедуры"#,
+        );
+
+        // Get Scope
+        let scope = get_sdbl_scope(&db, file_id).unwrap();
+
+        // Test completion with non-matching prefix
+        let items = complete_table_aliases(&scope, "Х");
+
+        // Should return empty (no aliases start with "Х")
+        assert!(items.is_empty(), "Should return empty for non-matching prefix");
     }
 }
