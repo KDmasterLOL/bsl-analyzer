@@ -464,5 +464,28 @@ mod tests {
 
         // Check Catalogs and Documents loaded as metadata objects
         assert!(!config.metadata_objects().is_empty(), "No metadata objects loaded");
+
+        // Check that Catalog has attributes loaded
+        let catalog = config.metadata_objects().iter().find(|obj| {
+            obj.mdo_type == crate::metadata_object::MdoType::Catalog && obj.name == "Справочник1"
+        });
+
+        if let Some(cat) = catalog {
+            assert_eq!(cat.attributes.len(), 3, "Expected 3 attributes in Справочник1");
+
+            assert!(cat.find_attribute("Реквизит1").is_some(), "Expected Реквизит1");
+            assert!(cat.find_attribute("Реквизит2").is_some(), "Expected Реквизит2");
+            assert!(cat.find_attribute("Реквизит3").is_some(), "Expected Реквизит3");
+
+            let attr1 = cat.find_attribute("Реквизит1").unwrap();
+            assert!(
+                matches!(attr1.attr_type, crate::metadata_object::AttributeType::String { .. }),
+                "Реквизит1 should be String type"
+            );
+
+            assert_eq!(cat.tabular_sections.len(), 1, "Expected 1 tabular section");
+            let ts = &cat.tabular_sections[0];
+            assert_eq!(ts.name(), "ТабличнаяЧасть1");
+        }
     }
 }

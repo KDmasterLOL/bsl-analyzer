@@ -224,11 +224,17 @@ struct RegisterProperties {
     register_type: Option<String>,
 }
 
-/// ChildObjects container for dimensions
+/// ChildObjects container for dimensions, resources, and attributes
 #[derive(Debug, Deserialize)]
 struct ChildObjects {
     #[serde(rename = "Dimension", default)]
     dimensions: Vec<DimensionXml>,
+
+    #[serde(rename = "Resource", default)]
+    resources: Vec<ResourceXml>,
+
+    #[serde(rename = "Attribute", default)]
+    attributes: Vec<RegisterAttributeXml>,
 }
 
 /// Dimension XML structure
@@ -255,6 +261,46 @@ struct DimensionProperties {
 
     #[serde(rename = "Indexing", default)]
     indexing: String,
+}
+
+/// Resource XML structure
+#[derive(Debug, Deserialize)]
+struct ResourceXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: ResourceProperties,
+}
+
+/// Resource Properties
+#[derive(Debug, Deserialize)]
+struct ResourceProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "Type")]
+    resource_type: TypeXml,
+}
+
+/// RegisterAttribute XML structure
+#[derive(Debug, Deserialize)]
+struct RegisterAttributeXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: RegisterAttributeProperties,
+}
+
+/// RegisterAttribute Properties
+#[derive(Debug, Deserialize)]
+struct RegisterAttributeProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "Type")]
+    attr_type: TypeXml,
 }
 
 /// Parse InformationRegister XML from Designer format
@@ -289,6 +335,9 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         })?;
 
     let mut dimensions = Vec::new();
+    let mut resources = Vec::new();
+    let mut attributes = Vec::new();
+
     if let Some(child_objects) = root.register.child_objects {
         for dim_xml in child_objects.dimensions {
             let dim_uuid = dim_xml.uuid.parse::<Uuid>().map_err(|e| {
@@ -304,6 +353,32 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
                 .build();
 
             dimensions.push(dimension);
+        }
+
+        for resource_xml in child_objects.resources {
+            let resource_uuid = resource_xml.uuid.parse::<Uuid>().map_err(|e| {
+                crate::error::MetadataError::InvalidFormat(format!("Invalid resource UUID: {}", e))
+            })?;
+
+            let mut resource =
+                crate::register::RegisterResource::new(resource_uuid, resource_xml.properties.name);
+            let resource_type = parse_type_xml(&resource_xml.properties.resource_type)?;
+            resource.set_type_str(format!("{:?}", resource_type));
+
+            resources.push(resource);
+        }
+
+        for attr_xml in child_objects.attributes {
+            let attr_uuid = attr_xml.uuid.parse::<Uuid>().map_err(|e| {
+                crate::error::MetadataError::InvalidFormat(format!("Invalid attribute UUID: {}", e))
+            })?;
+
+            let mut attribute =
+                crate::register::RegisterAttribute::new(attr_uuid, attr_xml.properties.name);
+            let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
+            attribute.set_type_str(format!("{:?}", attr_type));
+
+            attributes.push(attribute);
         }
     }
 
@@ -340,6 +415,8 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         .name(root.register.properties.name)
         .mdo_type(mdo_type)
         .dimensions(dimensions)
+        .resources(resources)
+        .attributes(attributes)
         .periodicity(periodicity)
         .register_type(register_type)
         .enable_totals_slice_first(root.register.properties.enable_totals_slice_first.into())
@@ -351,6 +428,8 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
         uuid = %register.uuid(),
         mdo_type = ?register.mdo_type(),
         dimensions = register.dimensions().len(),
+        resources = register.resources().len(),
+        attributes = register.attributes().len(),
         periodicity = ?register.periodicity(),
         register_type = ?register.register_type(),
         enable_totals_slice_first = register.enable_totals_slice_first(),
@@ -1583,5 +1662,165 @@ mod tests {
         } else {
             panic!("Валюты catalog not found in metadata objects");
         }
+    }
+
+    #[test]
+    fn test_parse_information_register_with_resources_and_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <InformationRegister uuid="12345678-1234-5678-1234-123456789012">
+        <Properties>
+            <Name>ЦеныНоменклатуры</Name>
+            <InformationRegisterPeriodicity>Day</InformationRegisterPeriodicity>
+            <EnableTotalsSliceFirst>true</EnableTotalsSliceFirst>
+            <EnableTotalsSliceLast>true</EnableTotalsSliceLast>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Номенклатура</Name>
+                    <Type><v8:Type>cfg:CatalogRef.Номенклатура</v8:Type></Type>
+                    <Master>false</Master>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+            <Resource uuid="22222222-2222-2222-2222-222222222222">
+                <Properties>
+                    <Name>Цена</Name>
+                    <Type>
+                        <v8:Type>xs:decimal</v8:Type>
+                        <v8:NumberQualifiers>
+                            <v8:Digits>15</v8:Digits>
+                            <v8:FractionDigits>2</v8:FractionDigits>
+                        </v8:NumberQualifiers>
+                    </Type>
+                </Properties>
+            </Resource>
+            <Attribute uuid="33333333-3333-3333-3333-333333333333">
+                <Properties>
+                    <Name>Валюта</Name>
+                    <Type><v8:Type>cfg:CatalogRef.Валюты</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "ЦеныНоменклатуры");
+        assert!(register.is_information_register());
+        assert_eq!(register.dimensions().len(), 1);
+        assert_eq!(register.resources().len(), 1);
+        assert_eq!(register.attributes().len(), 1);
+
+        assert_eq!(register.dimensions()[0].name(), "Номенклатура");
+        assert_eq!(register.resources()[0].name(), "Цена");
+        assert_eq!(register.attributes()[0].name(), "Валюта");
+    }
+
+    #[test]
+    fn test_parse_accumulation_register_with_resources() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <AccumulationRegister uuid="aaaaaaaa-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>ТоварыНаСкладах</Name>
+            <RegisterType>Balance</RegisterType>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="11111111-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Номенклатура</Name>
+                    <Type><v8:Type>cfg:CatalogRef.Номенклатура</v8:Type></Type>
+                    <Master>false</Master>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+            <Resource uuid="22222222-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Количество</Name>
+                    <Type>
+                        <v8:Type>xs:decimal</v8:Type>
+                        <v8:NumberQualifiers>
+                            <v8:Digits>15</v8:Digits>
+                            <v8:FractionDigits>3</v8:FractionDigits>
+                        </v8:NumberQualifiers>
+                    </Type>
+                </Properties>
+            </Resource>
+        </ChildObjects>
+    </AccumulationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_accumulation_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "ТоварыНаСкладах");
+        assert!(register.is_accumulation_register());
+        assert_eq!(register.dimensions().len(), 1);
+        assert_eq!(register.resources().len(), 1);
+
+        assert_eq!(register.resources()[0].name(), "Количество");
+    }
+
+    #[test]
+    fn test_parse_accumulation_register_with_resources_and_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <AccumulationRegister uuid="bbbbbbbb-2222-2222-2222-222222222222">
+        <Properties>
+            <Name>РабочееВремяСотрудников</Name>
+            <RegisterType>Turnovers</RegisterType>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="11111111-2222-2222-2222-111111111111">
+                <Properties>
+                    <Name>Сотрудник</Name>
+                    <Type><v8:Type>cfg:CatalogRef.Сотрудники</v8:Type></Type>
+                    <Master>false</Master>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+            <Resource uuid="22222222-2222-2222-2222-111111111111">
+                <Properties>
+                    <Name>ОтработаноЧасов</Name>
+                    <Type>
+                        <v8:Type>xs:decimal</v8:Type>
+                        <v8:NumberQualifiers>
+                            <v8:Digits>7</v8:Digits>
+                            <v8:FractionDigits>2</v8:FractionDigits>
+                        </v8:NumberQualifiers>
+                    </Type>
+                </Properties>
+            </Resource>
+            <Attribute uuid="33333333-1111-1111-1111-111111111111">
+                <Properties>
+                    <Name>Комментарий</Name>
+                    <Type>
+                        <v8:Type>xs:string</v8:Type>
+                        <v8:StringQualifiers>
+                            <v8:Length>100</v8:Length>
+                        </v8:StringQualifiers>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </AccumulationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_accumulation_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "РабочееВремяСотрудников");
+        assert!(register.is_accumulation_register());
+        assert_eq!(register.dimensions().len(), 1);
+        assert_eq!(register.resources().len(), 1);
+        assert_eq!(register.attributes().len(), 1);
+
+        assert_eq!(register.dimensions()[0].name(), "Сотрудник");
+        assert_eq!(register.resources()[0].name(), "ОтработаноЧасов");
+        assert_eq!(register.attributes()[0].name(), "Комментарий");
     }
 }
