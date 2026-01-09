@@ -63,9 +63,9 @@
 //! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::base_db::RegionInfo;
 use ide_db::TextRange;
 use std::collections::HashMap;
-use syntax::{ast::AstNode, ast::PreRegionDir, SyntaxKind, TextSize};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicateRegion::check").entered();
@@ -74,44 +74,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
-    let root = parse.syntax_node();
+    // Use Salsa-cached query (LRU=256) - shared with non_standard_region
+    let regions = ctx.db.module_level_regions(ctx.file_id);
 
-    let regions = collect_module_level_regions(&root);
-    let diagnostics = report_duplicates(regions);
+    let diagnostics = report_duplicates(&regions);
 
     tracing::debug!(count = diagnostics.len(), "DuplicateRegion diagnostics found");
     diagnostics
-}
-
-fn collect_module_level_regions(root: &syntax::SyntaxNode) -> Vec<(String, TextRange)> {
-    let mut regions = Vec::new();
-
-    // CRITICAL: Use children() not descendants() - only module level
-    for child in root.children() {
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            if let Some(region) = PreRegionDir::cast(child.clone()) {
-                // Only region starts (#Область/#Region), not ends (#КонецОбласти/#EndRegion)
-                if region.is_start() {
-                    if let Some(name) = region.name() {
-                        // PRE_REGION_DIR node includes entire region from #Область to #КонецОбласти
-                        // We only want the range of the first line (#Область Name)
-                        let text = child.text().to_string();
-                        let first_line = text.lines().next().unwrap_or(&text);
-                        let first_line_len = first_line.len();
-
-                        let start = child.text_range().start();
-                        let end = start + TextSize::from(first_line_len as u32);
-                        let range = TextRange::new(start, end);
-
-                        regions.push((name, range));
-                    }
-                }
-            }
-        }
-    }
-
-    regions
 }
 
 fn get_canonical_name(name: &str) -> String {
@@ -157,13 +126,13 @@ fn get_canonical_name(name: &str) -> String {
     }
 }
 
-fn report_duplicates(regions: Vec<(String, TextRange)>) -> Vec<Diagnostic> {
+fn report_duplicates(regions: &[RegionInfo]) -> Vec<Diagnostic> {
     let mut groups: HashMap<String, Vec<(String, TextRange)>> = HashMap::new();
 
     // Group regions by canonical name
-    for (name, range) in regions {
-        let canonical = get_canonical_name(&name);
-        groups.entry(canonical).or_default().push((name, range));
+    for region in regions {
+        let canonical = get_canonical_name(&region.name);
+        groups.entry(canonical).or_default().push((region.name.clone(), region.range));
     }
 
     let mut diagnostics = Vec::new();
