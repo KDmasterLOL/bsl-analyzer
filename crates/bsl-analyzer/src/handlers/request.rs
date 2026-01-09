@@ -126,6 +126,12 @@ pub fn handle_completion(
     )
     .entered();
 
+    tracing::info!(
+        "COMPLETION REQUEST RECEIVED at line={} char={}",
+        params.text_document_position.position.line,
+        params.text_document_position.position.character
+    );
+
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
 

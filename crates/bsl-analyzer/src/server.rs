@@ -119,6 +119,8 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{Completion, GotoDefinition, References, SemanticTokensFullRequest};
 
+    tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
+
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
             state.shutdown_requested = true;
