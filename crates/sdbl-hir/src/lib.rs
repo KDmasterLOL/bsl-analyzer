@@ -170,23 +170,39 @@ pub enum AsContext {
 fn extract_query_text(literal_text: &str) -> String {
     let mut result = String::new();
     let mut first_line = true;
+    let mut line_num = 0;
 
     for line in literal_text.lines() {
+        line_num += 1;
         if first_line {
             // First line: skip opening quote
             let line_text = line.trim_start_matches('"');
+            tracing::info!(
+                "extract_query_text line {}: input={:?} → output={:?}",
+                line_num,
+                line,
+                line_text
+            );
             result.push_str(line_text);
             first_line = false;
         } else {
             // Continuation lines: skip | prefix
             result.push('\n');
-            let line_text = line.trim_start().trim_start_matches('|');
+            let before_trim = line;
+            let after_trim_start = line.trim_start();
+            let line_text = after_trim_start.trim_start_matches('|');
+            tracing::info!(
+                "extract_query_text line {}: input={:?} → after trim_start={:?} → after trim |={:?}",
+                line_num, before_trim, after_trim_start, line_text
+            );
             result.push_str(line_text);
         }
     }
 
     // Remove closing quote if present
-    result.trim_end_matches('"').to_string()
+    let final_result = result.trim_end_matches('"').to_string();
+    tracing::info!("extract_query_text: final result length={}", final_result.len());
+    final_result
 }
 
 /// Map offset from literal text (with quotes/|) to query text offset (without quotes/|).
