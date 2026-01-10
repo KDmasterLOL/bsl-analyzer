@@ -208,16 +208,166 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     code.push_str("// DO NOT EDIT MANUALLY\n\n");
     code.push_str("use super::types::*;\n\n");
 
+    // Generate context availability constants
+    let mut context_counter = 0;
+    let mut type_context_names = Vec::new();
+
+    if let Some(types) = data.get("types").and_then(|v| v.as_array()) {
+        for ty in types {
+            if let Some(context) = ty.get("context").and_then(|v| v.as_object()) {
+                let context_name = format!("TYPE_CONTEXT_{}", context_counter);
+                context_counter += 1;
+
+                code.push_str(&format!(
+                    "const {}: RawContextAvailability = RawContextAvailability {{\n",
+                    context_name
+                ));
+                code.push_str(&format!(
+                    "    thick_client: {},\n",
+                    context.get("thick_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    thin_client: {},\n",
+                    context.get("thin_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    web_client: {},\n",
+                    context.get("web_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    server: {},\n",
+                    context.get("server").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    mobile_client: {},\n",
+                    context.get("mobile_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    external_connection: {},\n",
+                    context.get("external_connection").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str("};\n\n");
+
+                type_context_names.push(Some(context_name));
+            } else {
+                type_context_names.push(None);
+            }
+        }
+    }
+
+    // Generate method parameter arrays and context availability constants
+    let mut param_counter = 0;
+    let mut method_param_names = Vec::new();
+    let mut method_context_names = Vec::new();
+
+    if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
+        for method in methods {
+            // Generate parameters array
+            if let Some(params) = method.get("parameters").and_then(|v| v.as_array()) {
+                if !params.is_empty() {
+                    let param_name = format!("METHOD_PARAMS_{}", param_counter);
+                    param_counter += 1;
+
+                    code.push_str(&format!("const {}: &[RawMethodParam] = &[\n", param_name));
+                    for param in params {
+                        code.push_str("    RawMethodParam {\n");
+                        code.push_str(&format!(
+                            "        name: {:?},\n",
+                            param.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                        ));
+
+                        if let Some(param_type) = param.get("param_type").and_then(|v| v.as_str()) {
+                            code.push_str(&format!(
+                                "        param_type: Some({:?}),\n",
+                                param_type
+                            ));
+                        } else {
+                            code.push_str("        param_type: None,\n");
+                        }
+
+                        code.push_str(&format!(
+                            "        is_optional: {},\n",
+                            param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
+                        code.push_str("    },\n");
+                    }
+                    code.push_str("];\n\n");
+
+                    method_param_names.push(Some(param_name));
+                } else {
+                    method_param_names.push(None);
+                }
+            } else {
+                method_param_names.push(None);
+            }
+
+            // Generate context availability
+            if let Some(context) = method.get("context").and_then(|v| v.as_object()) {
+                let context_name = format!("METHOD_CONTEXT_{}", context_counter);
+                context_counter += 1;
+
+                code.push_str(&format!(
+                    "const {}: RawContextAvailability = RawContextAvailability {{\n",
+                    context_name
+                ));
+                code.push_str(&format!(
+                    "    thick_client: {},\n",
+                    context.get("thick_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    thin_client: {},\n",
+                    context.get("thin_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    web_client: {},\n",
+                    context.get("web_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    server: {},\n",
+                    context.get("server").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    mobile_client: {},\n",
+                    context.get("mobile_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    external_connection: {},\n",
+                    context.get("external_connection").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str("};\n\n");
+
+                method_context_names.push(Some(context_name));
+            } else {
+                method_context_names.push(None);
+            }
+        }
+    }
+
     // Generate platform types array
     if let Some(types) = data.get("types").and_then(|v| v.as_array()) {
         code.push_str("pub const PLATFORM_TYPES: &[RawPlatformType] = &[\n");
-        for ty in types {
+        for (idx, ty) in types.iter().enumerate() {
             let name = ty.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let english_name = ty.get("english_name").and_then(|v| v.as_str()).unwrap_or("");
 
             code.push_str("    RawPlatformType {\n");
             code.push_str(&format!("        name: {:?},\n", name));
             code.push_str(&format!("        english_name: {:?},\n", english_name));
+
+            // min_version
+            if let Some(min_version) = ty.get("min_version").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
+            } else {
+                code.push_str("        min_version: None,\n");
+            }
+
+            // context
+            if let Some(context_name) = &type_context_names[idx] {
+                code.push_str(&format!("        context: Some({}),\n", context_name));
+            } else {
+                code.push_str("        context: None,\n");
+            }
+
             code.push_str("    },\n");
         }
         code.push_str("];\n\n");
@@ -228,7 +378,7 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     // Generate platform methods array
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
         code.push_str("pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[\n");
-        for method in methods {
+        for (idx, method) in methods.iter().enumerate() {
             let id = method.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
             let type_name = method.get("type_name").and_then(|v| v.as_str()).unwrap_or("");
             let name = method.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -239,6 +389,35 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
             code.push_str(&format!("        type_name: {:?},\n", type_name));
             code.push_str(&format!("        name: {:?},\n", name));
             code.push_str(&format!("        english_name: {:?},\n", english_name));
+
+            // return_type
+            if let Some(return_type) = method.get("return_type").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        return_type: Some({:?}),\n", return_type));
+            } else {
+                code.push_str("        return_type: None,\n");
+            }
+
+            // parameters
+            if let Some(param_name) = &method_param_names[idx] {
+                code.push_str(&format!("        parameters: {},\n", param_name));
+            } else {
+                code.push_str("        parameters: &[],\n");
+            }
+
+            // min_version
+            if let Some(min_version) = method.get("min_version").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
+            } else {
+                code.push_str("        min_version: None,\n");
+            }
+
+            // context
+            if let Some(context_name) = &method_context_names[idx] {
+                code.push_str(&format!("        context: Some({}),\n", context_name));
+            } else {
+                code.push_str("        context: None,\n");
+            }
+
             code.push_str("    },\n");
         }
         code.push_str("];\n");
