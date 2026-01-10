@@ -469,12 +469,12 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
         (0..lit_offset_usize).rev().find(|&i| literal_text.is_char_boundary(i)).unwrap_or(0)
     };
 
-    // Find char boundaries for context window
-    let lit_start = (safe_offset.saturating_sub(50)..=safe_offset)
+    // Find char boundaries for context window (exclude safe_offset itself)
+    let lit_start = (safe_offset.saturating_sub(50)..safe_offset)
         .rev()
         .find(|&i| literal_text.is_char_boundary(i))
         .unwrap_or(0);
-    let lit_end = (safe_offset..=(safe_offset + 50).min(literal_text.len()))
+    let lit_end = ((safe_offset + 1)..=(safe_offset + 50).min(literal_text.len()))
         .find(|&i| literal_text.is_char_boundary(i))
         .unwrap_or(literal_text.len());
 
