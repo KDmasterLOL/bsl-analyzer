@@ -9,6 +9,10 @@ pub struct PlatformType {
     pub name: SmolStr,
     /// English name (e.g., "String")
     pub english_name: SmolStr,
+    /// Minimum version (e.g., "8.0")
+    pub min_version: Option<SmolStr>,
+    /// Context availability
+    pub context: Option<ContextAvailability>,
 }
 
 /// Raw platform type for const initialization (internal use only)
@@ -17,11 +21,18 @@ pub struct PlatformType {
 pub struct RawPlatformType {
     pub name: &'static str,
     pub english_name: &'static str,
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
 }
 
 impl From<&RawPlatformType> for PlatformType {
     fn from(raw: &RawPlatformType) -> Self {
-        Self { name: raw.name.into(), english_name: raw.english_name.into() }
+        Self {
+            name: raw.name.into(),
+            english_name: raw.english_name.into(),
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
     }
 }
 
@@ -36,6 +47,14 @@ pub struct PlatformMethod {
     pub name: SmolStr,
     /// English method name (e.g., "Upper")
     pub english_name: SmolStr,
+    /// Return type (e.g., "Строка")
+    pub return_type: Option<SmolStr>,
+    /// Method parameters
+    pub parameters: Vec<MethodParam>,
+    /// Minimum version (e.g., "8.0")
+    pub min_version: Option<SmolStr>,
+    /// Context availability
+    pub context: Option<ContextAvailability>,
 }
 
 /// Raw platform method for const initialization (internal use only)
@@ -46,6 +65,10 @@ pub struct RawPlatformMethod {
     pub type_name: &'static str,
     pub name: &'static str,
     pub english_name: &'static str,
+    pub return_type: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
 }
 
 impl From<&RawPlatformMethod> for PlatformMethod {
@@ -55,6 +78,10 @@ impl From<&RawPlatformMethod> for PlatformMethod {
             type_name: raw.type_name.into(),
             name: raw.name.into(),
             english_name: raw.english_name.into(),
+            return_type: raw.return_type.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
         }
     }
 }
@@ -64,10 +91,71 @@ impl From<&RawPlatformMethod> for PlatformMethod {
 pub struct MethodParam {
     /// Parameter name
     pub name: SmolStr,
-    /// Parameter type
-    pub type_name: SmolStr,
+    /// Parameter type (e.g., "Число", "Произвольный")
+    pub param_type: Option<SmolStr>,
     /// Whether parameter is optional
-    pub optional: bool,
+    pub is_optional: bool,
+}
+
+/// Raw method parameter for const initialization (internal use only)
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawMethodParam {
+    pub name: &'static str,
+    pub param_type: Option<&'static str>,
+    pub is_optional: bool,
+}
+
+impl From<&RawMethodParam> for MethodParam {
+    fn from(raw: &RawMethodParam) -> Self {
+        Self {
+            name: raw.name.into(),
+            param_type: raw.param_type.map(SmolStr::from),
+            is_optional: raw.is_optional,
+        }
+    }
+}
+
+/// Context availability information
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextAvailability {
+    /// Available on thick client
+    pub thick_client: bool,
+    /// Available on thin client
+    pub thin_client: bool,
+    /// Available on web client
+    pub web_client: bool,
+    /// Available on server
+    pub server: bool,
+    /// Available on mobile client
+    pub mobile_client: bool,
+    /// Available on external connection
+    pub external_connection: bool,
+}
+
+/// Raw context availability for const initialization (internal use only)
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawContextAvailability {
+    pub thick_client: bool,
+    pub thin_client: bool,
+    pub web_client: bool,
+    pub server: bool,
+    pub mobile_client: bool,
+    pub external_connection: bool,
+}
+
+impl From<&RawContextAvailability> for ContextAvailability {
+    fn from(raw: &RawContextAvailability) -> Self {
+        Self {
+            thick_client: raw.thick_client,
+            thin_client: raw.thin_client,
+            web_client: raw.web_client,
+            server: raw.server,
+            mobile_client: raw.mobile_client,
+            external_connection: raw.external_connection,
+        }
+    }
 }
 
 /// Full method documentation (available only with platform_docs feature)

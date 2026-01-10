@@ -38,6 +38,12 @@ struct TypeInfo {
     name: String,
     /// English name (e.g., "Array")
     english_name: String,
+    /// Minimum version (e.g., "8.0")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    /// Context availability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ContextAvailability>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +56,45 @@ struct MethodInfo {
     name: String,
     /// English method name
     english_name: String,
+    /// Return type (e.g., "Число", "Неопределено")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_type: Option<String>,
+    /// Method parameters
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    parameters: Vec<MethodParameter>,
+    /// Minimum version (e.g., "8.0")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    /// Context availability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ContextAvailability>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MethodParameter {
+    /// Parameter name (e.g., "Значение")
+    name: String,
+    /// Parameter type (e.g., "Число", "Произвольный")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param_type: Option<String>,
+    /// Is parameter optional
+    is_optional: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextAvailability {
+    /// Available on thick client
+    thick_client: bool,
+    /// Available on thin client
+    thin_client: bool,
+    /// Available on web client
+    web_client: bool,
+    /// Available on server
+    server: bool,
+    /// Available on mobile client
+    mobile_client: bool,
+    /// Available on external connection
+    external_connection: bool,
 }
 
 fn main() -> Result<()> {
@@ -297,9 +342,15 @@ fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo
                 if let Some(paren_end) = after_paren.find(')') {
                     let english = after_paren[..paren_end].trim().to_string();
 
+                    // Extract additional information
+                    let min_version = extract_version(&html_content);
+                    let context = extract_context(&html_content);
+
                     return Ok(Some(TypeInfo {
                         name: russian,
                         english_name: english,
+                        min_version,
+                        context,
                     }));
                 }
             }
@@ -369,11 +420,21 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             let id = *method_id_counter;
                             *method_id_counter += 1;
 
+                            // Extract additional information
+                            let return_type = extract_return_type(&html_content);
+                            let parameters = extract_parameters(&html_content);
+                            let min_version = extract_version(&html_content);
+                            let context = extract_context(&html_content);
+
                             return Ok(Some(MethodInfo {
                                 id,
                                 type_name: type_name.to_string(),
                                 name: russian_method,
                                 english_name: english_method,
+                                return_type,
+                                parameters,
+                                min_version,
+                                context,
                             }));
                         }
                     }
@@ -383,6 +444,161 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
     }
 
     Ok(None)
+}
+
+/// Extracts version from HTML content
+/// Looks for: "Доступен, начиная с версии 8.0."
+fn extract_version(html: &str) -> Option<String> {
+    if let Some(start) = html.find("Доступен, начиная с версии ") {
+        let after_start = &html[start + "Доступен, начиная с версии ".len()..];
+        if let Some(end) = after_start.find('.') {
+            let version = after_start[..end].trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extracts context availability from HTML content
+/// Looks for: "Доступность: Тонкий клиент, веб-клиент, сервер..."
+fn extract_context(html: &str) -> Option<ContextAvailability> {
+    if let Some(start) = html.find("Доступность: ") {
+        let after_start = &html[start + "Доступность: ".len()..];
+        let context_text = if let Some(end) = after_start.find("</p>") {
+            after_start[..end].to_lowercase()
+        } else {
+            return None;
+        };
+
+        Some(ContextAvailability {
+            thick_client: context_text.contains("толстый клиент"),
+            thin_client: context_text.contains("тонкий клиент"),
+            web_client: context_text.contains("веб-клиент"),
+            server: context_text.contains("сервер"),
+            mobile_client: context_text.contains("мобильный клиент"),
+            external_connection: context_text.contains("внешнее соединение"),
+        })
+    } else {
+        None
+    }
+}
+
+/// Extracts return type from HTML content
+/// Looks for: "Возвращаемое значение:</p>Тип: Число, Неопределено."
+fn extract_return_type(html: &str) -> Option<String> {
+    if let Some(start) = html.find("Возвращаемое значение:") {
+        let after_start = &html[start..];
+        if let Some(type_start) = after_start.find("Тип: ") {
+            let after_type = &after_start[type_start + "Тип: ".len()..];
+            // Find text until <br> or </p> or period
+            let end_pos = after_type
+                .find("</p>")
+                .or_else(|| after_type.find("<br>"))
+                .or_else(|| after_type.find('.'))
+                .unwrap_or(after_type.len());
+
+            let type_text = &after_type[..end_pos];
+            // Clean up HTML tags like <a href...>Число</a>
+            let cleaned = strip_html_tags(type_text).trim().to_string();
+            if !cleaned.is_empty() && cleaned != "." {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+/// Extracts method parameters from HTML content
+/// Looks for: "Параметры:</p><div class="V8SH_rubric">..."
+fn extract_parameters(html: &str) -> Vec<MethodParameter> {
+    let mut parameters = Vec::new();
+
+    if let Some(params_start) = html.find("Параметры:</p>") {
+        let after_params = &html[params_start..];
+
+        // Find all parameter blocks: <div class="V8SH_rubric">
+        let mut search_from = 0;
+        while let Some(rubric_start) = after_params[search_from..].find(r#"<div class="V8SH_rubric">"#) {
+            let param_block = &after_params[search_from + rubric_start..];
+
+            // Extract parameter name: &lt;Значение&gt; (обязательный)
+            if let Some(name_start) = param_block.find("&lt;") {
+                let after_name_start = &param_block[name_start + "&lt;".len()..];
+                if let Some(name_end) = after_name_start.find("&gt;") {
+                    let param_name = after_name_start[..name_end].trim().to_string();
+
+                    // Check if optional: (необязательный) or (обязательный)
+                    let is_optional = param_block.contains("(необязательный)");
+
+                    // Extract type: "Тип: Число."
+                    let param_type = if let Some(type_start) = param_block.find("Тип: ") {
+                        let after_type = &param_block[type_start + "Тип: ".len()..];
+                        let type_end = after_type
+                            .find('.')
+                            .or_else(|| after_type.find("<br>"))
+                            .or_else(|| after_type.find('\n'))
+                            .unwrap_or_else(|| {
+                                // Take first 100 chars safely
+                                after_type.char_indices()
+                                    .nth(100)
+                                    .map(|(idx, _)| idx)
+                                    .unwrap_or(after_type.len())
+                            });
+                        let type_text = &after_type[..type_end];
+                        let cleaned = strip_html_tags(type_text).trim().to_string();
+                        if !cleaned.is_empty() {
+                            Some(cleaned)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    parameters.push(MethodParameter {
+                        name: param_name,
+                        param_type,
+                        is_optional,
+                    });
+                }
+            }
+
+            // Move search position forward safely (using char boundaries)
+            let skip_chars = 50;  // Skip approximately 50 characters
+            let new_pos = after_params[search_from + rubric_start..]
+                .char_indices()
+                .nth(skip_chars)
+                .map(|(idx, _)| search_from + rubric_start + idx)
+                .unwrap_or(after_params.len());
+            search_from = new_pos;
+
+            // Prevent infinite loop
+            if search_from >= after_params.len() {
+                break;
+            }
+        }
+    }
+
+    parameters
+}
+
+/// Strips HTML tags from text
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut inside_tag = false;
+
+    for ch in html.chars() {
+        match ch {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => result.push(ch),
+            _ => {}
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
