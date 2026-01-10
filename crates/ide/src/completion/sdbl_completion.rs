@@ -603,7 +603,7 @@ fn complete_tabular_sections(
 /// Complete virtual tables for a register.
 ///
 /// Returns virtual tables based on register parameters:
-/// - InformationRegister: СрезПервых, СрезПоследних (based on periodicity and flags)
+/// - InformationRegister: СрезПервых, СрезПоследних (for periodic registers)
 /// - AccumulationRegister: Остатки, Обороты (based on register type)
 /// - AccountingRegister, CalculationRegister: TODO (complex logic)
 ///

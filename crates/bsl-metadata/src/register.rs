@@ -303,8 +303,9 @@ impl Register {
     /// Returns a list of virtual table names based on the register type and parameters.
     ///
     /// ## InformationRegister
-    /// - If `periodicity` is not `Nonperiodical` and `enable_totals_slice_first` is true: `СрезПервых`
-    /// - If `periodicity` is not `Nonperiodical` and `enable_totals_slice_last` is true: `СрезПоследних`
+    /// - If `periodicity` is not `Nonperiodical`: `СрезПервых` and `СрезПоследних`
+    /// - Note: `enable_totals_slice_first/last` flags only control physical tables,
+    ///   virtual tables are always available for periodic registers
     ///
     /// ## AccumulationRegister
     /// - If `register_type` is `Balance`: `Остатки`
@@ -327,15 +328,12 @@ impl Register {
     fn info_register_virtual_tables(&self) -> Vec<&'static str> {
         let mut tables = Vec::new();
 
-        // Only for periodic registers
+        // Periodic registers always have slice virtual tables
+        // (enable_totals_slice_first/last flags only control physical tables)
         if let Some(periodicity) = self.periodicity {
             if periodicity != RegisterPeriodicity::Nonperiodical {
-                if self.enable_totals_slice_first {
-                    tables.push("СрезПервых");
-                }
-                if self.enable_totals_slice_last {
-                    tables.push("СрезПоследних");
-                }
+                tables.push("СрезПервых");
+                tables.push("СрезПоследних");
             }
         }
 
