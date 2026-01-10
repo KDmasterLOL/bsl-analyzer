@@ -420,11 +420,16 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let token_after_cursor =
         if offset_in_token < token_text.len() { &token_text[offset_in_token..] } else { "" };
 
+    // DEBUG: Show full token text and bytes
+    let token_bytes = token.text().as_bytes();
+
     tracing::info!(
         token_kind = ?token.kind(),
         token_range = ?token.text_range(),
         token_text_len = token.text().len(),
         offset_in_token = offset_in_token,
+        token_text_full = %token.text(),
+        token_bytes = ?token_bytes,
         token_before = %token_before_cursor,
         token_after = %token_after_cursor,
         "Found token at offset"
@@ -455,6 +460,13 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     }
 
     // Calculate offset within the literal node
+    // BUG FIX: offset - literal_start is CORRECT for position in original file!
+    // The issue is that literal_text is constructed from literal_node.text() which
+    // gives us the ORIGINAL file text (including gaps/newlines between tokens).
+    //
+    // So offset_in_literal should just be offset - literal_start.
+    // The real bug is elsewhere - let's keep original calculation and trace it.
+
     let literal_start = literal_node.text_range().start();
     let offset_in_literal = offset - literal_start;
 
