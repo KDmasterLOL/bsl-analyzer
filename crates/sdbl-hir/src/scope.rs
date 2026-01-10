@@ -176,7 +176,24 @@ impl Scope {
         for table in tables {
             // Use full_name (not effective_name which returns alias) for metadata lookup
             let table_name = &table.full_name;
+
+            tracing::info!(
+                full_name = %table_name,
+                alias = ?table.alias,
+                has_metadata = table.metadata.is_some(),
+                fields_count = table.metadata.as_ref().map(|m| m.fields.len()).unwrap_or(0),
+                "column_completions: Processing table"
+            );
+
             if let Some(ref resolved) = table.metadata {
+                // Log field details
+                tracing::info!(
+                    full_name = %table_name,
+                    total_fields = resolved.fields.len(),
+                    field_names = ?resolved.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                    "column_completions: Fields in metadata"
+                );
+
                 for field in &resolved.fields {
                     result.push(ColumnCompletion {
                         column_name: Name::from(field.name.as_str()),
@@ -185,6 +202,11 @@ impl Scope {
                         is_standard: field.is_standard,
                     });
                 }
+            } else {
+                tracing::warn!(
+                    full_name = %table_name,
+                    "column_completions: Table has no metadata!"
+                );
             }
         }
 
