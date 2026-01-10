@@ -107,10 +107,11 @@ impl<'a> LoweringContext<'a> {
                 // TODO: Lower subquery properly using typed AST
                 // For now, create empty placeholder HIR
                 InValues::Subquery(Box::new(SdblHir {
-                    from: Vec::new(),
                     select: SelectHir { fields: Vec::new(), distinct: false, top: None },
-                    where_clause: None,
+                    into_table: None,
+                    from: Vec::new(),
                     joins: Vec::new(),
+                    where_clause: None,
                     group_by: None,
                     having: None,
                     order_by: None,

@@ -20,6 +20,10 @@ pub struct SdblHir {
     /// SELECT clause with typed fields.
     pub select: SelectHir,
 
+    /// INTO clause - temporary table name (if present).
+    /// Example: SELECT ... INTO TemporaryTable FROM ...
+    pub into_table: Option<Name>,
+
     /// FROM clause with resolved tables.
     pub from: Vec<TableRef>,
 
@@ -53,6 +57,7 @@ impl SdblHir {
     pub fn empty() -> Self {
         Self {
             select: SelectHir::empty(),
+            into_table: None,
             from: Vec::new(),
             joins: Vec::new(),
             where_clause: None,
@@ -172,24 +177,53 @@ impl TableRef {
     }
 }
 
-/// Resolved table from metadata.
+/// Resolved table reference - either from metadata or temporary table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedTable {
-    /// MDO type (Catalog, Document, InformationRegister, etc.).
-    pub mdo_type: MdoType,
+pub enum ResolvedTable {
+    /// Table from 1C metadata (Catalog, Document, Register, etc.).
+    Metadata {
+        /// MDO type (Catalog, Document, InformationRegister, etc.).
+        mdo_type: MdoType,
+        /// Object name.
+        name: String,
+        /// Available fields from metadata.
+        fields: Vec<FieldDef>,
+    },
 
-    /// Object name.
-    pub name: String,
-
-    /// Available fields from metadata.
-    pub fields: Vec<FieldDef>,
+    /// Temporary table created with INTO clause.
+    TempTable {
+        /// Table name.
+        name: String,
+        /// Fields from SELECT clause of the query that created this table.
+        fields: Vec<FieldDef>,
+    },
 }
 
 impl ResolvedTable {
     /// Find field by name (case-insensitive).
     pub fn find_field(&self, name: &str) -> Option<&FieldDef> {
         let name_lower = name.to_lowercase();
-        self.fields.iter().find(|f| f.name.to_lowercase() == name_lower)
+        let fields = match self {
+            ResolvedTable::Metadata { fields, .. } => fields,
+            ResolvedTable::TempTable { fields, .. } => fields,
+        };
+        fields.iter().find(|f| f.name.to_lowercase() == name_lower)
+    }
+
+    /// Get table name.
+    pub fn name(&self) -> &str {
+        match self {
+            ResolvedTable::Metadata { name, .. } => name,
+            ResolvedTable::TempTable { name, .. } => name,
+        }
+    }
+
+    /// Get all fields.
+    pub fn fields(&self) -> &[FieldDef] {
+        match self {
+            ResolvedTable::Metadata { fields, .. } => fields,
+            ResolvedTable::TempTable { fields, .. } => fields,
+        }
     }
 }
 

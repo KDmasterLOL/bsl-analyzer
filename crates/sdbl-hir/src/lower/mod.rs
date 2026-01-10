@@ -176,6 +176,7 @@ impl LoweringContext<'_> {
         // Build HIR
         let mut hir = SdblHir {
             select,
+            into_table: None,
             from,
             joins,
             where_clause,

@@ -97,6 +97,8 @@ pub enum NodeKind {
     SdblSelectedField,
     SdblAlias,
     SdblAsteriskField,
+    SdblIntoClause,
+    SdblTempTableName,
     SdblFromClause,
     SdblDataSource,
     SdblTableRef,

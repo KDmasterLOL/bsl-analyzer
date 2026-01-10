@@ -89,6 +89,8 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblSelectedField => SK::SDBL_SELECTED_FIELD,
         NodeKind::SdblAlias => SK::SDBL_ALIAS,
         NodeKind::SdblAsteriskField => SK::SDBL_ASTERISK_FIELD,
+        NodeKind::SdblIntoClause => SK::SDBL_INTO_CLAUSE,
+        NodeKind::SdblTempTableName => SK::SDBL_TEMP_TABLE_NAME,
         NodeKind::SdblFromClause => SK::SDBL_FROM_CLAUSE,
         NodeKind::SdblDataSource => SK::SDBL_DATA_SOURCE,
         NodeKind::SdblTableRef => SK::SDBL_TABLE_REF,

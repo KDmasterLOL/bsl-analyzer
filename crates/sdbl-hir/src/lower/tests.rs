@@ -136,7 +136,7 @@ fn test_table_resolves_with_standard_fields() {
     // Standard fields are added for known MDO types
     assert!(hir.from[0].metadata.is_some());
     let resolved = hir.from[0].metadata.as_ref().unwrap();
-    assert!(!resolved.fields.is_empty());
+    assert!(!resolved.fields().is_empty());
 }
 
 #[test]

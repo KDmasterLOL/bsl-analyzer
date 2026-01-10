@@ -133,15 +133,10 @@ fn query(p: &mut Parser) {
     // Selected fields (mandatory)
     selected_fields(p);
 
-    // INTO clause for temporary tables (minimal support - just skip it)
+    // INTO clause for temporary tables
     p.skip_trivia();
     if at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ") {
-        eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
-        p.skip_trivia();
-        // Skip temporary table name (identifier)
-        if p.at(TokenKind::Ident) {
-            p.bump();
-        }
+        into_clause(p);
     }
 
     // FROM clause (optional)
@@ -332,6 +327,27 @@ fn from_clause(p: &mut Parser) {
     }
 
     m.complete(p, NodeKind::SdblFromClause);
+}
+
+/// Parse INTO clause for temporary tables
+///
+/// Grammar: `INTO|ПОМЕСТИТЬ tempTableName`
+fn into_clause(p: &mut Parser) {
+    let m = p.start();
+
+    eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
+    p.skip_trivia();
+
+    // Parse temporary table name
+    if p.at(TokenKind::Ident) {
+        let table_m = p.start();
+        p.bump();
+        table_m.complete(p, NodeKind::SdblTempTableName);
+    } else {
+        p.error();
+    }
+
+    m.complete(p, NodeKind::SdblIntoClause);
 }
 
 /// Parse a data source (table, subquery, or parameter)

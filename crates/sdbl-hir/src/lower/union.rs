@@ -83,6 +83,7 @@ impl<'a> LoweringContext<'a> {
 
         SdblHir {
             select,
+            into_table: None,
             from,
             joins,
             where_clause,

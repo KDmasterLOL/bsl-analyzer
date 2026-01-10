@@ -122,7 +122,7 @@ impl Scope {
 
         for table in self.all_tables() {
             if let Some(ref resolved) = table.metadata {
-                if resolved.fields.iter().any(|f| f.name.to_lowercase() == column_lower) {
+                if resolved.fields().iter().any(|f| f.name.to_lowercase() == column_lower) {
                     result.push(table.effective_name().to_string());
                 }
             }
@@ -181,7 +181,7 @@ impl Scope {
                 full_name = %table_name,
                 alias = ?table.alias,
                 has_metadata = table.metadata.is_some(),
-                fields_count = table.metadata.as_ref().map(|m| m.fields.len()).unwrap_or(0),
+                fields_count = table.metadata.as_ref().map(|m| m.fields().len()).unwrap_or(0),
                 "column_completions: Processing table"
             );
 
@@ -189,12 +189,12 @@ impl Scope {
                 // Log field details
                 tracing::info!(
                     full_name = %table_name,
-                    total_fields = resolved.fields.len(),
-                    field_names = ?resolved.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                    total_fields = resolved.fields().len(),
+                    field_names = ?resolved.fields().iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
                     "column_completions: Fields in metadata"
                 );
 
-                for field in &resolved.fields {
+                for field in resolved.fields() {
                     result.push(ColumnCompletion {
                         column_name: Name::from(field.name.as_str()),
                         table_name: Name::from(table_name.as_str()),
@@ -239,7 +239,7 @@ mod tests {
             parts: vec![Name::from(name)],
             full_name: name.to_string(),
             alias: alias.map(Name::from),
-            metadata: Some(ResolvedTable {
+            metadata: Some(ResolvedTable::Metadata {
                 mdo_type: MdoType::Catalog,
                 name: name.to_string(),
                 fields,

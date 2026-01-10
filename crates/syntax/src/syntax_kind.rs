@@ -223,11 +223,13 @@ pub enum SyntaxKind {
     SDBL_TOP_CLAUSE,    // TOP count clause
 
     // SELECT Components
-    SDBL_SELECT_CLAUSE,  // SELECT clause with fields
-    SDBL_FIELD_LIST,     // List of fields in SELECT
-    SDBL_SELECTED_FIELD, // Single field (expression + optional alias)
-    SDBL_ALIAS,          // [AS] identifier (CRITICAL for diagnostic)
-    SDBL_ASTERISK_FIELD, // * or Table.*
+    SDBL_SELECT_CLAUSE,   // SELECT clause with fields
+    SDBL_FIELD_LIST,      // List of fields in SELECT
+    SDBL_SELECTED_FIELD,  // Single field (expression + optional alias)
+    SDBL_ALIAS,           // [AS] identifier (CRITICAL for diagnostic)
+    SDBL_ASTERISK_FIELD,  // * or Table.*
+    SDBL_INTO_CLAUSE,     // INTO/ПОМЕСТИТЬ clause for temporary tables
+    SDBL_TEMP_TABLE_NAME, // Temporary table name in INTO clause
 
     // FROM/WHERE Components
     SDBL_FROM_CLAUSE,  // FROM clause with data sources

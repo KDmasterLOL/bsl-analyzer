@@ -259,7 +259,7 @@ impl<'a> LoweringContext<'a> {
             "Resolved table with fields"
         );
 
-        let resolved = ResolvedTable { mdo_type, name: object_name.clone(), fields };
+        let resolved = ResolvedTable::Metadata { mdo_type, name: object_name.clone(), fields };
 
         (Some(mdo_type), Some(resolved))
     }

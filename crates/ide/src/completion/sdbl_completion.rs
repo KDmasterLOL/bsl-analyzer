@@ -827,7 +827,7 @@ fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> 
             full_name = %table.full_name,
             alias = ?table.alias,
             has_metadata = table.metadata.is_some(),
-            field_count = table.metadata.as_ref().map(|m| m.fields.len()).unwrap_or(0),
+            field_count = table.metadata.as_ref().map(|m| m.fields().len()).unwrap_or(0),
             "FROM table in HIR"
         );
     }
