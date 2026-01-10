@@ -261,6 +261,118 @@ pub struct Attribute {
     pub attr_type: AttributeType,
 }
 
+/// Standard attribute (built-in by platform)
+///
+/// Standard attributes are predefined by the 1C platform and available on all objects
+/// of certain types. Their presence is controlled by object properties (e.g., CodeLength,
+/// Hierarchical) rather than explicit XML declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StandardAttributeKind {
+    // Catalog/Document standard attributes
+    /// Code attribute (Код) - present if CodeLength > 0
+    Code {
+        /// Maximum length of code
+        length: u32,
+    },
+    /// Description attribute (Наименование) - present if DescriptionLength > 0
+    Description {
+        /// Maximum length of description
+        length: u32,
+    },
+    /// Reference attribute (Ссылка) - always present
+    Ref,
+    /// Deletion mark attribute (ПометкаУдаления) - always present
+    DeletionMark,
+    /// Is folder attribute (ЭтоГруппа) - present if Hierarchical=true
+    IsFolder,
+    /// Owner attribute (Владелец) - present if Owners is not empty
+    Owner,
+    /// Parent attribute (Родитель) - present if Hierarchical=true
+    Parent,
+    /// Predefined attribute (Предопределенный) - always present
+    Predefined,
+    /// Predefined data name attribute (ИмяПредопределенныхДанных) - always present
+    PredefinedDataName,
+
+    // Information Register standard attributes
+    /// Active attribute (Активность) - always present
+    Active,
+    /// Line number attribute (НомерСтроки) - always present
+    LineNumber,
+    /// Recorder attribute (Регистратор) - always present
+    Recorder,
+    /// Period attribute (Период) - present if periodicity != Nonperiodical
+    Period,
+}
+
+impl StandardAttributeKind {
+    /// Get the AttributeType for this standard attribute
+    ///
+    /// # Arguments
+    ///
+    /// * `mdo_type` - Type of metadata object (for reference types)
+    /// * `object_name` - Name of the object (for reference types)
+    ///
+    /// # Returns
+    ///
+    /// The platform-defined type for this standard attribute
+    pub fn attribute_type(&self, mdo_type: MdoType, object_name: &str) -> AttributeType {
+        match self {
+            Self::Code { length } => AttributeType::String { length: Some(*length) },
+            Self::Description { length } => AttributeType::String { length: Some(*length) },
+            Self::Ref => AttributeType::Ref { mdo_type, name: object_name.to_string() },
+            Self::DeletionMark => AttributeType::Boolean,
+            Self::IsFolder => AttributeType::Boolean,
+            Self::Owner => AttributeType::Unknown, // Type determined from Owners property
+            Self::Parent => AttributeType::Ref { mdo_type, name: object_name.to_string() },
+            Self::Predefined => AttributeType::Boolean,
+            Self::PredefinedDataName => AttributeType::String { length: None },
+            Self::Active => AttributeType::Boolean,
+            Self::LineNumber => AttributeType::Number { precision: 10, scale: 0 },
+            Self::Recorder => AttributeType::AnyObjectRef { mdo_type: MdoType::Document },
+            Self::Period => AttributeType::DateTime,
+        }
+    }
+
+    /// Get the Russian name for this standard attribute
+    pub fn russian_name(&self) -> &'static str {
+        match self {
+            Self::Code { .. } => "Код",
+            Self::Description { .. } => "Наименование",
+            Self::Ref => "Ссылка",
+            Self::DeletionMark => "ПометкаУдаления",
+            Self::IsFolder => "ЭтоГруппа",
+            Self::Owner => "Владелец",
+            Self::Parent => "Родитель",
+            Self::Predefined => "Предопределенный",
+            Self::PredefinedDataName => "ИмяПредопределенныхДанных",
+            Self::Active => "Активность",
+            Self::LineNumber => "НомерСтроки",
+            Self::Recorder => "Регистратор",
+            Self::Period => "Период",
+        }
+    }
+
+    /// Get the English name for this standard attribute
+    pub fn english_name(&self) -> &'static str {
+        match self {
+            Self::Code { .. } => "Code",
+            Self::Description { .. } => "Description",
+            Self::Ref => "Ref",
+            Self::DeletionMark => "DeletionMark",
+            Self::IsFolder => "IsFolder",
+            Self::Owner => "Owner",
+            Self::Parent => "Parent",
+            Self::Predefined => "Predefined",
+            Self::PredefinedDataName => "PredefinedDataName",
+            Self::Active => "Active",
+            Self::LineNumber => "LineNumber",
+            Self::Recorder => "Recorder",
+            Self::Period => "Period",
+        }
+    }
+}
+
 /// Attribute type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttributeType {

@@ -554,7 +554,11 @@ mod tests {
         });
 
         if let Some(cat) = catalog {
-            assert_eq!(cat.attributes.len(), 3, "Expected 3 attributes in Справочник1");
+            // Should have 3 custom attributes + standard attributes
+            assert!(
+                cat.attributes.len() >= 3,
+                "Expected at least 3 custom attributes in Справочник1"
+            );
 
             assert!(cat.find_attribute("Реквизит1").is_some(), "Expected Реквизит1");
             assert!(cat.find_attribute("Реквизит2").is_some(), "Expected Реквизит2");

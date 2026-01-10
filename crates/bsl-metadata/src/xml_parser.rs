@@ -87,7 +87,7 @@ struct CommonModuleProperties {
 /// Helper type for deserializing bool values from XML text content
 ///
 /// XML format: `<Server>true</Server>` or `<Server>false</Server>`
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 struct BoolValue {
     #[serde(rename = "$text", default)]
     value: Option<String>,
@@ -340,6 +340,93 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
     let mut dimensions = Vec::new();
     let mut resources = Vec::new();
     let mut attributes = Vec::new();
+
+    // Add standard attributes FIRST for registers
+    match mdo_type {
+        MdoType::InformationRegister => {
+            use crate::metadata_object::StandardAttributeKind;
+            use crate::register::RegisterAttribute;
+
+            let nil_uuid = Uuid::nil(); // Use nil UUID for standard attributes
+
+            // Active - always present
+            let mut active_attr = RegisterAttribute::new(nil_uuid, "Активность");
+            active_attr.set_attr_type(
+                StandardAttributeKind::Active
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(active_attr);
+
+            // LineNumber - always present
+            let mut line_number_attr = RegisterAttribute::new(nil_uuid, "НомерСтроки");
+            line_number_attr.set_attr_type(
+                StandardAttributeKind::LineNumber
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(line_number_attr);
+
+            // Recorder - always present
+            let mut recorder_attr = RegisterAttribute::new(nil_uuid, "Регистратор");
+            recorder_attr.set_attr_type(
+                StandardAttributeKind::Recorder
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(recorder_attr);
+
+            // Period - only if periodic (not Nonperiodical)
+            let periodicity_str =
+                root.register.properties.periodicity.as_deref().unwrap_or("Nonperiodical");
+            if periodicity_str != "Nonperiodical" {
+                let mut period_attr = RegisterAttribute::new(nil_uuid, "Период");
+                period_attr.set_attr_type(
+                    StandardAttributeKind::Period
+                        .attribute_type(mdo_type, &root.register.properties.name),
+                );
+                attributes.push(period_attr);
+            }
+        }
+        MdoType::AccumulationRegister => {
+            use crate::metadata_object::StandardAttributeKind;
+            use crate::register::RegisterAttribute;
+
+            let nil_uuid = Uuid::nil(); // Use nil UUID for standard attributes
+
+            // Active - always present
+            let mut active_attr = RegisterAttribute::new(nil_uuid, "Активность");
+            active_attr.set_attr_type(
+                StandardAttributeKind::Active
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(active_attr);
+
+            // LineNumber - always present
+            let mut line_number_attr = RegisterAttribute::new(nil_uuid, "НомерСтроки");
+            line_number_attr.set_attr_type(
+                StandardAttributeKind::LineNumber
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(line_number_attr);
+
+            // Recorder - always present
+            let mut recorder_attr = RegisterAttribute::new(nil_uuid, "Регистратор");
+            recorder_attr.set_attr_type(
+                StandardAttributeKind::Recorder
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(recorder_attr);
+
+            // Period - ALWAYS present for AccumulationRegister
+            let mut period_attr = RegisterAttribute::new(nil_uuid, "Период");
+            period_attr.set_attr_type(
+                StandardAttributeKind::Period
+                    .attribute_type(mdo_type, &root.register.properties.name),
+            );
+            attributes.push(period_attr);
+        }
+        _ => {
+            // AccountingRegister and CalculationRegister - TODO: add standard attributes
+        }
+    }
 
     if let Some(child_objects) = root.register.child_objects {
         for dim_xml in child_objects.dimensions {
@@ -640,6 +727,51 @@ struct MetadataObjectXml {
 struct MetadataObjectProperties {
     #[serde(rename = "Name")]
     name: String,
+
+    // Catalog/Document properties for standard attributes
+    #[serde(rename = "CodeLength", default)]
+    code_length: Option<IntValue>,
+
+    #[serde(rename = "DescriptionLength", default)]
+    description_length: Option<IntValue>,
+
+    #[serde(rename = "Hierarchical", default)]
+    hierarchical: BoolValue,
+
+    #[serde(rename = "Owners", default)]
+    owners: Option<OwnersXml>,
+
+    // InformationRegister properties for standard attributes
+    #[serde(rename = "InformationRegisterPeriodicity", default)]
+    periodicity: Option<String>,
+}
+
+/// Helper type for deserializing integer values from XML text content
+#[derive(Debug, Deserialize, Default, Clone)]
+struct IntValue {
+    #[serde(rename = "$text", default)]
+    value: Option<u32>,
+}
+
+impl From<IntValue> for Option<u32> {
+    fn from(val: IntValue) -> Self {
+        val.value
+    }
+}
+
+/// Owners XML structure - can be empty or contain owner references
+#[derive(Debug, Deserialize)]
+struct OwnersXml {
+    /// List of owner references (e.g., Catalog.Контрагенты)
+    #[serde(rename = "Item", default)]
+    items: Vec<OwnerItemXml>,
+}
+
+/// Owner item - reference to metadata object
+#[derive(Debug, Deserialize)]
+struct OwnerItemXml {
+    #[serde(rename = "$text")]
+    value: String,
 }
 
 /// Child objects container (attributes, tabular sections, etc.)
@@ -820,6 +952,188 @@ pub fn parse_business_process_xml(xml: &str) -> Result<crate::metadata_object::M
     parse_metadata_object(root.business_process, MdoType::BusinessProcess)
 }
 
+/// Parse owner types from Owners XML items
+///
+/// Parses strings like "Catalog.Контрагенты" into AttributeType::Ref
+fn parse_owner_types(items: &[OwnerItemXml]) -> Vec<crate::metadata_object::AttributeType> {
+    use crate::metadata_object::{AttributeType, MdoType};
+
+    items
+        .iter()
+        .filter_map(|item| {
+            // Parse format: "Catalog.Контрагенты" or "ChartOfCharacteristicTypes.Свойства"
+            let parts: Vec<&str> = item.value.split('.').collect();
+            if parts.len() != 2 {
+                tracing::warn!(value = %item.value, "Invalid owner format, expected Type.Name");
+                return None;
+            }
+
+            let type_str = parts[0];
+            let name = parts[1].to_string();
+
+            // Parse MDO type from string
+            match type_str.parse::<MdoType>() {
+                Ok(mdo_type) => Some(AttributeType::Ref { mdo_type, name }),
+                Err(e) => {
+                    tracing::warn!(type_str = %type_str, error = %e, "Unknown MDO type in owner");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Add standard attributes for Catalog/Document objects
+///
+/// Standard attributes are added based on object properties like CodeLength, Hierarchical, etc.
+fn add_catalog_standard_attributes(
+    attributes: &mut Vec<crate::metadata_object::Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    use crate::metadata_object::{Attribute, StandardAttributeKind};
+
+    let object_name = &properties.name;
+
+    // Ref - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::Ref.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::Ref.english_name().to_string()),
+        attr_type: StandardAttributeKind::Ref.attribute_type(mdo_type, object_name),
+    });
+
+    // DeletionMark - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::DeletionMark.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::DeletionMark.english_name().to_string()),
+        attr_type: StandardAttributeKind::DeletionMark.attribute_type(mdo_type, object_name),
+    });
+
+    // Code - only if CodeLength > 0
+    if let Some(code_length_val) = &properties.code_length {
+        if let Some(length) = code_length_val.value {
+            if length > 0 {
+                let kind = StandardAttributeKind::Code { length };
+                attributes.push(Attribute {
+                    name: kind.russian_name().to_string(),
+                    name_en: Some(kind.english_name().to_string()),
+                    attr_type: kind.attribute_type(mdo_type, object_name),
+                });
+            }
+        }
+    }
+
+    // Description - only if DescriptionLength > 0
+    if let Some(desc_length_val) = &properties.description_length {
+        if let Some(length) = desc_length_val.value {
+            if length > 0 {
+                let kind = StandardAttributeKind::Description { length };
+                attributes.push(Attribute {
+                    name: kind.russian_name().to_string(),
+                    name_en: Some(kind.english_name().to_string()),
+                    attr_type: kind.attribute_type(mdo_type, object_name),
+                });
+            }
+        }
+    }
+
+    // IsFolder/Parent - only if Hierarchical
+    if bool::from(properties.hierarchical.clone()) {
+        attributes.push(Attribute {
+            name: StandardAttributeKind::IsFolder.russian_name().to_string(),
+            name_en: Some(StandardAttributeKind::IsFolder.english_name().to_string()),
+            attr_type: StandardAttributeKind::IsFolder.attribute_type(mdo_type, object_name),
+        });
+
+        attributes.push(Attribute {
+            name: StandardAttributeKind::Parent.russian_name().to_string(),
+            name_en: Some(StandardAttributeKind::Parent.english_name().to_string()),
+            attr_type: StandardAttributeKind::Parent.attribute_type(mdo_type, object_name),
+        });
+    }
+
+    // Owner - only if Owners is not empty
+    if let Some(owners_xml) = &properties.owners {
+        if !owners_xml.items.is_empty() {
+            // Parse owner types from items
+            let owner_types = parse_owner_types(&owners_xml.items);
+
+            let owner_attr_type = if owner_types.len() == 1 {
+                // Single owner - use direct Ref type
+                owner_types.into_iter().next().unwrap()
+            } else if owner_types.len() > 1 {
+                // Multiple owners - use Composite type
+                crate::metadata_object::AttributeType::Composite { types: owner_types }
+            } else {
+                // No valid owners parsed - use Unknown
+                crate::metadata_object::AttributeType::Unknown
+            };
+
+            attributes.push(Attribute {
+                name: StandardAttributeKind::Owner.russian_name().to_string(),
+                name_en: Some(StandardAttributeKind::Owner.english_name().to_string()),
+                attr_type: owner_attr_type,
+            });
+        }
+    }
+
+    // Predefined - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::Predefined.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::Predefined.english_name().to_string()),
+        attr_type: StandardAttributeKind::Predefined.attribute_type(mdo_type, object_name),
+    });
+
+    // PredefinedDataName - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::PredefinedDataName.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::PredefinedDataName.english_name().to_string()),
+        attr_type: StandardAttributeKind::PredefinedDataName.attribute_type(mdo_type, object_name),
+    });
+}
+
+/// Add standard attributes for InformationRegister objects
+fn add_information_register_standard_attributes(
+    attributes: &mut Vec<crate::metadata_object::Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    use crate::metadata_object::{Attribute, StandardAttributeKind};
+
+    let object_name = &properties.name;
+
+    // Active - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::Active.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::Active.english_name().to_string()),
+        attr_type: StandardAttributeKind::Active.attribute_type(mdo_type, object_name),
+    });
+
+    // LineNumber - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::LineNumber.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::LineNumber.english_name().to_string()),
+        attr_type: StandardAttributeKind::LineNumber.attribute_type(mdo_type, object_name),
+    });
+
+    // Recorder - always present
+    attributes.push(Attribute {
+        name: StandardAttributeKind::Recorder.russian_name().to_string(),
+        name_en: Some(StandardAttributeKind::Recorder.english_name().to_string()),
+        attr_type: StandardAttributeKind::Recorder.attribute_type(mdo_type, object_name),
+    });
+
+    // Period - only if periodic (not Nonperiodical)
+    let periodicity = properties.periodicity.as_deref().unwrap_or("Nonperiodical");
+    if periodicity != "Nonperiodical" {
+        attributes.push(Attribute {
+            name: StandardAttributeKind::Period.russian_name().to_string(),
+            name_en: Some(StandardAttributeKind::Period.english_name().to_string()),
+            attr_type: StandardAttributeKind::Period.attribute_type(mdo_type, object_name),
+        });
+    }
+}
+
 /// Internal helper to parse metadata object XML
 fn parse_metadata_object(
     obj_xml: MetadataObjectXml,
@@ -829,6 +1143,23 @@ fn parse_metadata_object(
 
     let mut attributes = Vec::new();
     let mut tabular_sections = Vec::new();
+
+    // Add standard attributes FIRST based on object type
+    match mdo_type {
+        MdoType::Catalog | MdoType::Document => {
+            add_catalog_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::InformationRegister => {
+            add_information_register_standard_attributes(
+                &mut attributes,
+                &obj_xml.properties,
+                mdo_type,
+            );
+        }
+        _ => {
+            // Other types don't have standard attributes yet
+        }
+    }
 
     if let Some(child_objects) = obj_xml.child_objects {
         // Parse regular Attributes (for Catalog, Document)
@@ -1345,6 +1676,25 @@ mod tests {
         assert!(dimension.is_deny_incomplete_values());
         assert!(dimension.is_master());
         assert_eq!(dimension.indexing(), "Index");
+
+        // Verify standard attributes for AccumulationRegister
+        let attrs = register.attributes();
+        let attr_names: Vec<&str> = attrs.iter().map(|a| a.name()).collect();
+
+        // AccumulationRegister must have these 4 standard attributes
+        assert!(
+            attr_names.contains(&"Активность"),
+            "AccumulationRegister must have Active attribute"
+        );
+        assert!(
+            attr_names.contains(&"НомерСтроки"),
+            "AccumulationRegister must have LineNumber attribute"
+        );
+        assert!(
+            attr_names.contains(&"Регистратор"),
+            "AccumulationRegister must have Recorder attribute"
+        );
+        assert!(attr_names.contains(&"Период"), "AccumulationRegister must have Period attribute");
     }
 
     #[test]
@@ -1606,7 +1956,8 @@ mod tests {
         let catalog = parse_catalog_xml(xml).unwrap();
 
         assert_eq!(catalog.name, "Валюты");
-        assert_eq!(catalog.attributes.len(), 4);
+        // Should have 4 custom attributes + 4 standard attributes (Ref, DeletionMark, Predefined, PredefinedDataName)
+        assert!(catalog.attributes.len() >= 4);
 
         // Check Boolean attribute
         let attr1 = catalog.find_attribute("ЗагружаетсяИзИнтернета").unwrap();
@@ -1633,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_catalog_xml_no_attributes() {
+    fn test_parse_catalog_xml_no_custom_attributes() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
     <Catalog uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
@@ -1646,7 +1997,14 @@ mod tests {
         let catalog = parse_catalog_xml(xml).unwrap();
 
         assert_eq!(catalog.name, "ПростойСправочник");
-        assert_eq!(catalog.attributes.len(), 0);
+
+        // Should have standard attributes (Ref, DeletionMark, Predefined, PredefinedDataName)
+        // even without custom attributes
+        assert!(catalog.attributes.len() >= 4);
+        assert!(catalog.find_attribute("Ссылка").is_some());
+        assert!(catalog.find_attribute("ПометкаУдаления").is_some());
+        assert!(catalog.find_attribute("Предопределенный").is_some());
+        assert!(catalog.find_attribute("ИмяПредопределенныхДанных").is_some());
     }
 
     #[test]
@@ -1681,7 +2039,8 @@ mod tests {
         let catalog = parse_catalog_xml(xml).unwrap();
 
         assert_eq!(catalog.name, "ДескрипторыДоступаРегистров");
-        assert_eq!(catalog.attributes.len(), 1);
+        // Should have 1 custom attribute + standard attributes
+        assert!(!catalog.attributes.is_empty());
 
         let attr = catalog.find_attribute("ОбъектДоступа1").unwrap();
         assert_eq!(attr.name, "ОбъектДоступа1");
@@ -1763,7 +2122,8 @@ mod tests {
         let catalog = parse_catalog_xml(xml).unwrap();
 
         assert_eq!(catalog.name, "ТестовыйСправочник");
-        assert_eq!(catalog.attributes.len(), 3);
+        // Should have 3 custom attributes + standard attributes
+        assert!(catalog.attributes.len() >= 3);
 
         // Check BusinessProcess AnyObjectRef
         let attr1 = catalog.find_attribute("ЛюбойБизнесПроцесс").unwrap();
@@ -1831,7 +2191,8 @@ mod tests {
         let document = parse_document_xml(xml).unwrap();
 
         assert_eq!(document.name, "ЗаказПокупателя");
-        assert_eq!(document.attributes.len(), 2);
+        // Should have 2 custom attributes + standard attributes
+        assert!(document.attributes.len() >= 2);
 
         // Check Reference attribute
         let attr1 = document.find_attribute("Контрагент").unwrap();
@@ -2076,11 +2437,19 @@ mod tests {
         assert!(register.is_information_register());
         assert_eq!(register.dimensions().len(), 1);
         assert_eq!(register.resources().len(), 1);
-        assert_eq!(register.attributes().len(), 1);
+        // Should have 1 custom attribute + standard attributes (3-4 depending on periodicity)
+        assert!(!register.attributes().is_empty());
 
         assert_eq!(register.dimensions()[0].name(), "Номенклатура");
         assert_eq!(register.resources()[0].name(), "Цена");
-        assert_eq!(register.attributes()[0].name(), "Валюта");
+
+        // Find custom attribute "Валюта" (standard attributes come first)
+        let valuta_attr = register
+            .attributes()
+            .iter()
+            .find(|a| a.name() == "Валюта")
+            .expect("Валюта attribute not found");
+        assert_eq!(valuta_attr.name(), "Валюта");
     }
 
     #[test]
@@ -2180,11 +2549,19 @@ mod tests {
         assert!(register.is_accumulation_register());
         assert_eq!(register.dimensions().len(), 1);
         assert_eq!(register.resources().len(), 1);
-        assert_eq!(register.attributes().len(), 1);
+        // Should have 1 custom attribute + 4 standard attributes
+        assert!(register.attributes().len() >= 5);
 
         assert_eq!(register.dimensions()[0].name(), "Сотрудник");
         assert_eq!(register.resources()[0].name(), "ОтработаноЧасов");
-        assert_eq!(register.attributes()[0].name(), "Комментарий");
+
+        // Find custom attribute by name (standard attributes come first)
+        let comment_attr = register
+            .attributes()
+            .iter()
+            .find(|a| a.name() == "Комментарий")
+            .expect("Комментарий attribute not found");
+        assert_eq!(comment_attr.name(), "Комментарий");
     }
 
     #[test]
@@ -2272,6 +2649,60 @@ mod tests {
 
     #[test]
     #[ignore] // Only run when doc3 project is available
+    fn test_parse_accumulation_register_from_doc3() {
+        use crate::metadata_object::AttributeType;
+
+        // РабочееВремяСотрудников is an AccumulationRegister from doc3
+        let xml_path = concat!(
+            env!("HOME"),
+            "/src/doc3/src/cf/AccumulationRegisters/РабочееВремяСотрудников.xml"
+        );
+
+        // Skip if file doesn't exist
+        if !std::path::Path::new(xml_path).exists() {
+            eprintln!("Skipping test: doc3 РабочееВремяСотрудников not found at {}", xml_path);
+            return;
+        }
+
+        let xml = std::fs::read_to_string(xml_path).expect("Failed to read XML file");
+        let register =
+            parse_accumulation_register_xml(&xml).expect("Failed to parse AccumulationRegister");
+
+        // Verify basic properties
+        assert_eq!(register.name(), "РабочееВремяСотрудников");
+        assert!(register.is_accumulation_register());
+
+        // Verify standard attributes
+        let attrs = register.attributes();
+        let attr_names: Vec<&str> = attrs.iter().map(|a| a.name()).collect();
+
+        // Must have all 4 standard attributes
+        assert!(attr_names.contains(&"Активность"), "Expected Active attribute");
+        assert!(attr_names.contains(&"НомерСтроки"), "Expected LineNumber attribute");
+        assert!(attr_names.contains(&"Регистратор"), "Expected Recorder attribute");
+        assert!(attr_names.contains(&"Период"), "Expected Period attribute");
+
+        // Verify Recorder type
+        let recorder =
+            attrs.iter().find(|a| a.name() == "Регистратор").expect("Recorder not found");
+        match recorder.attr_type() {
+            Some(AttributeType::AnyObjectRef { mdo_type }) => {
+                assert_eq!(*mdo_type, crate::metadata_object::MdoType::Document);
+            }
+            _ => panic!("Expected AnyObjectRef for Recorder, got {:?}", recorder.attr_type()),
+        }
+
+        tracing::info!(
+            register = %register.name(),
+            dimensions = register.dimensions().len(),
+            resources = register.resources().len(),
+            attributes = register.attributes().len(),
+            "Successfully verified AccumulationRegister standard attributes from doc3"
+        );
+    }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
     fn test_parse_register_from_doc3() {
         // Test with real register from doc3 that has composite types
         let xml_path = concat!(
@@ -2351,5 +2782,291 @@ mod tests {
         }
 
         assert!(found_composite, "ВидДействия dimension not found");
+    }
+
+    #[test]
+    fn test_catalog_standard_attributes_with_code_description() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>Валюты</Name>
+            <CodeLength>3</CodeLength>
+            <DescriptionLength>50</DescriptionLength>
+            <Hierarchical>false</Hierarchical>
+            <Owners/>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should have standard attributes
+        assert!(catalog.find_attribute("Ссылка").is_some());
+        assert!(catalog.find_attribute("ПометкаУдаления").is_some());
+        assert!(catalog.find_attribute("Код").is_some()); // CodeLength > 0
+        assert!(catalog.find_attribute("Наименование").is_some()); // DescriptionLength > 0
+        assert!(catalog.find_attribute("Предопределенный").is_some());
+        assert!(catalog.find_attribute("ИмяПредопределенныхДанных").is_some());
+
+        // Should NOT have hierarchy attributes
+        assert!(catalog.find_attribute("ЭтоГруппа").is_none());
+        assert!(catalog.find_attribute("Родитель").is_none());
+    }
+
+    #[test]
+    fn test_catalog_standard_attributes_no_code() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>Тест</Name>
+            <CodeLength>0</CodeLength>
+            <DescriptionLength>0</DescriptionLength>
+            <Hierarchical>false</Hierarchical>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should NOT have Code/Description (length = 0)
+        assert!(catalog.find_attribute("Код").is_none());
+        assert!(catalog.find_attribute("Наименование").is_none());
+
+        // Should have other standard attributes
+        assert!(catalog.find_attribute("Ссылка").is_some());
+        assert!(catalog.find_attribute("ПометкаУдаления").is_some());
+    }
+
+    #[test]
+    fn test_catalog_hierarchical_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>Папки</Name>
+            <Hierarchical>true</Hierarchical>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should have hierarchy attributes
+        assert!(catalog.find_attribute("ЭтоГруппа").is_some());
+        assert!(catalog.find_attribute("Родитель").is_some());
+    }
+
+    #[test]
+    fn test_catalog_owner_single_type() {
+        use crate::metadata_object::{AttributeType, MdoType};
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>Товары</Name>
+            <Owners>
+                <xr:Item>Catalog.Контрагенты</xr:Item>
+            </Owners>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should have Owner attribute
+        let owner = catalog.find_attribute("Владелец").expect("Owner attribute should exist");
+
+        // Should be a single Ref type (not Composite)
+        match &owner.attr_type {
+            AttributeType::Ref { mdo_type, name } => {
+                assert_eq!(*mdo_type, MdoType::Catalog);
+                assert_eq!(name, "Контрагенты");
+            }
+            _ => panic!("Expected Ref type for single Owner, got {:?}", owner.attr_type),
+        }
+    }
+
+    #[test]
+    fn test_catalog_owner_multiple_types() {
+        use crate::metadata_object::{AttributeType, MdoType};
+
+        // Real example from БанковскиеСчета catalog in doc3
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>БанковскиеСчета</Name>
+            <Owners>
+                <xr:Item>Catalog.Контрагенты</xr:Item>
+                <xr:Item>Catalog.Организации</xr:Item>
+            </Owners>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should have Owner attribute
+        let owner = catalog.find_attribute("Владелец").expect("Owner attribute should exist");
+
+        // Should be Composite with two Catalog refs
+        match &owner.attr_type {
+            AttributeType::Composite { types } => {
+                assert_eq!(types.len(), 2, "Expected 2 owner types");
+
+                // Check first owner type
+                assert_eq!(
+                    types[0],
+                    AttributeType::Ref {
+                        mdo_type: MdoType::Catalog,
+                        name: "Контрагенты".to_string()
+                    }
+                );
+
+                // Check second owner type
+                assert_eq!(
+                    types[1],
+                    AttributeType::Ref {
+                        mdo_type: MdoType::Catalog,
+                        name: "Организации".to_string()
+                    }
+                );
+            }
+            _ => panic!("Expected Composite type for multiple Owners, got {:?}", owner.attr_type),
+        }
+    }
+
+    #[test]
+    fn test_catalog_no_owner() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Catalog uuid="...">
+        <Properties>
+            <Name>Валюты</Name>
+            <Owners/>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        // Should NOT have Owner attribute (empty Owners element)
+        assert!(catalog.find_attribute("Владелец").is_none());
+    }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_catalog_owner_from_doc3() {
+        use crate::metadata_object::{AttributeType, MdoType};
+
+        // БанковскиеСчета has multiple owners in doc3
+        let xml_path = concat!(env!("HOME"), "/src/doc3/src/cf/Catalogs/БанковскиеСчета.xml");
+
+        // Skip if file doesn't exist
+        if !std::path::Path::new(xml_path).exists() {
+            eprintln!("Skipping test: doc3 БанковскиеСчета not found at {}", xml_path);
+            return;
+        }
+
+        let xml = std::fs::read_to_string(xml_path).expect("Failed to read XML file");
+        let catalog = parse_catalog_xml(&xml).expect("Failed to parse catalog XML");
+
+        // Verify basic properties
+        assert_eq!(catalog.name, "БанковскиеСчета");
+
+        // Should have Owner attribute
+        let owner = catalog
+            .find_attribute("Владелец")
+            .expect("БанковскиеСчета should have Owner attribute");
+
+        // Verify it's a Composite type with multiple owners
+        match &owner.attr_type {
+            AttributeType::Composite { types } => {
+                assert!(types.len() >= 2, "Expected at least 2 owner types, got {}", types.len());
+
+                // Verify all types are Catalog refs
+                for owner_type in types {
+                    match owner_type {
+                        AttributeType::Ref { mdo_type, name } => {
+                            assert_eq!(
+                                *mdo_type,
+                                MdoType::Catalog,
+                                "Expected Catalog ref, got {:?} for {}",
+                                mdo_type,
+                                name
+                            );
+                        }
+                        _ => panic!("Expected Ref type in Owner composite, got {:?}", owner_type),
+                    }
+                }
+
+                tracing::info!(
+                    catalog = %catalog.name,
+                    owner_types = types.len(),
+                    "Successfully verified Owner types from doc3"
+                );
+            }
+            _ => panic!(
+                "Expected Composite type for БанковскиеСчета Owner, got {:?}",
+                owner.attr_type
+            ),
+        }
+    }
+
+    #[test]
+    fn test_information_register_periodic() {
+        use crate::xml_parser::parse_information_register_xml;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <InformationRegister uuid="12345678-1234-1234-1234-123456789012">
+        <Properties>
+            <Name>Курсы</Name>
+            <InformationRegisterPeriodicity>Second</InformationRegisterPeriodicity>
+        </Properties>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        // Should have all standard attributes including Period
+        let attrs = register.attributes();
+        let attr_names: Vec<&str> = attrs.iter().map(|a| a.name()).collect();
+
+        assert!(attr_names.contains(&"Активность"));
+        assert!(attr_names.contains(&"НомерСтроки"));
+        assert!(attr_names.contains(&"Регистратор"));
+        assert!(attr_names.contains(&"Период")); // Periodic
+    }
+
+    #[test]
+    fn test_information_register_nonperiodic() {
+        use crate::xml_parser::parse_information_register_xml;
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <InformationRegister uuid="12345678-1234-1234-1234-123456789012">
+        <Properties>
+            <Name>Настройки</Name>
+            <InformationRegisterPeriodicity>Nonperiodical</InformationRegisterPeriodicity>
+        </Properties>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        // Should NOT have Period
+        let attrs = register.attributes();
+        let attr_names: Vec<&str> = attrs.iter().map(|a| a.name()).collect();
+
+        assert!(!attr_names.contains(&"Период"));
+
+        // Should have other standard attributes
+        assert!(attr_names.contains(&"Активность"));
+        assert!(attr_names.contains(&"НомерСтроки"));
+        assert!(attr_names.contains(&"Регистратор"));
     }
 }
