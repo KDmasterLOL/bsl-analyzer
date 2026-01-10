@@ -329,9 +329,26 @@ pub fn sdbl_hir_in_file_query<'db>(
     tracing::info!(sdbl_queries_count = sdbl_queries.len(), "sdbl_hir_in_file: starting lowering");
 
     // Try to load configuration for metadata-based type inference
-    let configuration = crate::get_file_path_for_sdbl(db, file_id).and_then(|file_path| {
-        crate::find_configuration_root_for_sdbl(db, &file_path).map(|config_root| {
+    let file_path_opt = crate::get_file_path_for_sdbl(db, file_id);
+    tracing::info!(
+        file_path = ?file_path_opt,
+        "sdbl_hir_in_file: got file path from VFS"
+    );
+
+    let configuration = file_path_opt.and_then(|file_path| {
+        let config_root_opt = crate::find_configuration_root_for_sdbl(db, &file_path);
+        tracing::info!(
+            file_path = ?file_path,
+            config_root = ?config_root_opt,
+            "sdbl_hir_in_file: searched for configuration root"
+        );
+
+        config_root_opt.map(|config_root| {
             let config_path_str = config_root.to_string_lossy().to_string();
+            tracing::info!(
+                config_path = %config_path_str,
+                "sdbl_hir_in_file: loading configuration"
+            );
             let path_input = ConfigurationPathInput::new(db, config_path_str);
             // Salsa dependency tracked automatically!
             load_configuration(db, path_input)
