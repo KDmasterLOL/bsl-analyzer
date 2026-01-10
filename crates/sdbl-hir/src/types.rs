@@ -259,12 +259,8 @@ impl std::fmt::Display for SdblType {
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
             Self::Uuid => write!(f, "УникальныйИдентификатор"),
             Self::ValueStorage => write!(f, "ХранилищеЗначения"),
-            Self::DefinedType { name, underlying_type } => {
-                write!(f, "ОпределяемыйТип.{}", name)?;
-                if let Some(ty) = underlying_type {
-                    write!(f, " ({})", ty)?;
-                }
-                Ok(())
+            Self::DefinedType { name, .. } => {
+                write!(f, "ОпределяемыйТип.{}", name)
             }
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
@@ -339,14 +335,14 @@ mod tests {
             "ОпределяемыйТип.ОтметкаВремени"
         );
 
-        // DefinedType with underlying type
+        // DefinedType with underlying type (underlying not shown in Display)
         assert_eq!(
             SdblType::DefinedType {
                 name: "ОтметкаВремени".to_string(),
                 underlying_type: Some(Box::new(SdblType::string_with_length(17)))
             }
             .to_string(),
-            "ОпределяемыйТип.ОтметкаВремени (Строка(17))"
+            "ОпределяемыйТип.ОтметкаВремени"
         );
 
         assert_eq!(SdblType::Unknown.to_string(), "Неизвестно");

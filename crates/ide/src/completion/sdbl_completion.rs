@@ -348,17 +348,37 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
             );
 
             // For composite types, show multiline list in documentation
-            let (detail, documentation) = if let SdblType::Composite { types } = &col.ty {
-                // Composite type - show brief label in detail, multiline list in documentation
-                let detail = format!("Составной тип:{}", standard_marker);
-                let types_list = types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
-                let doc = format!("{}\n\nТаблица: {}", types_list, col.table_name.as_str());
-                (detail, doc)
-            } else {
-                // Single type - show type in detail
-                let detail = format!("{}{}", col.ty, standard_marker);
-                let doc = format!("Таблица: {}", col.table_name.as_str());
-                (detail, doc)
+            let (detail, documentation) = match &col.ty {
+                SdblType::Composite { types } => {
+                    // Composite type - show brief label in detail, multiline list in documentation
+                    let detail = format!("Составной тип:{}", standard_marker);
+                    let types_list =
+                        types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
+                    let doc = format!("{}\n\nТаблица: {}", types_list, col.table_name.as_str());
+                    (detail, doc)
+                }
+                SdblType::DefinedType { name, underlying_type: Some(underlying) } => {
+                    // Check if underlying type is Composite
+                    if let SdblType::Composite { types } = underlying.as_ref() {
+                        // DefinedType with composite underlying - show multiline list
+                        let detail = format!("ОпределяемыйТип.{}:{}", name, standard_marker);
+                        let types_list =
+                            types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
+                        let doc = format!("{}\n\nТаблица: {}", types_list, col.table_name.as_str());
+                        (detail, doc)
+                    } else {
+                        // DefinedType with non-composite underlying
+                        let detail = format!("{}{}", col.ty, standard_marker);
+                        let doc = format!("Таблица: {}", col.table_name.as_str());
+                        (detail, doc)
+                    }
+                }
+                _ => {
+                    // Single type - show type in detail
+                    let detail = format!("{}{}", col.ty, standard_marker);
+                    let doc = format!("Таблица: {}", col.table_name.as_str());
+                    (detail, doc)
+                }
             };
 
             CompletionItem {
