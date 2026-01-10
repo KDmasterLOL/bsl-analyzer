@@ -174,7 +174,8 @@ impl Scope {
         };
 
         for table in tables {
-            let table_name = table.effective_name().to_string();
+            // Use full_name (not effective_name which returns alias) for metadata lookup
+            let table_name = &table.full_name;
             if let Some(ref resolved) = table.metadata {
                 for field in &resolved.fields {
                     result.push(ColumnCompletion {

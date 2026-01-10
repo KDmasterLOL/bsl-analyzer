@@ -202,17 +202,24 @@ impl<'a> LoweringContext<'a> {
 
         // Build resolved table with standard fields
         let mut fields = standard_fields_for_mdo(mdo_type);
-        tracing::debug!(
+        let full_name_for_logging = parts.join(".");
+        tracing::info!(
+            full_name = %full_name_for_logging,
             mdo_type = ?mdo_type,
-            object_name = object_name,
+            object_name = %object_name,
             standard_fields = fields.len(),
-            "Built standard fields for table"
+            has_metadata = self.metadata.is_some(),
+            "resolve_table: Built standard fields, checking metadata"
         );
 
         // Add fields from metadata if available
         if let Some(_metadata) = self.metadata {
-            let full_name_for_logging = parts.join(".");
             self.add_metadata_fields(mdo_type, object_name, &full_name_for_logging, &mut fields);
+        } else {
+            tracing::warn!(
+                full_name = %full_name_for_logging,
+                "resolve_table: No metadata available, cannot add custom fields"
+            );
         }
 
         tracing::info!(
