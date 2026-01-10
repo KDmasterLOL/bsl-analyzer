@@ -254,6 +254,16 @@ impl FieldDef {
         Self { name: name.into(), name_en: Some(name_en.into()), ty, is_standard: true }
     }
 
+    /// Create a field definition with full details.
+    pub fn new_with_names(
+        name: String,
+        name_en: Option<String>,
+        ty: SdblType,
+        is_standard: bool,
+    ) -> Self {
+        Self { name, name_en, ty, is_standard }
+    }
+
     /// Check if name matches (case-insensitive, bilingual).
     pub fn matches_name(&self, name: &str) -> bool {
         let name_lower = name.to_lowercase();

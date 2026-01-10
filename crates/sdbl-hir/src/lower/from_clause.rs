@@ -196,6 +196,9 @@ impl<'a> LoweringContext<'a> {
 
         let object_name = &parts[1];
 
+        // Check if this is a 3-part name (tabular section reference)
+        let tabular_section_name = if parts.len() == 3 { Some(parts[2].as_str()) } else { None };
+
         // Check metadata if available
         if let Some(metadata) = self.metadata {
             // Check if object exists in metadata
@@ -245,21 +248,36 @@ impl<'a> LoweringContext<'a> {
             tracing::debug!("No metadata available for validation");
         }
 
-        // Build resolved table with standard fields
-        let mut fields = standard_fields_for_mdo(mdo_type);
+        // Build resolved table
         let full_name_for_logging = parts.join(".");
+
+        // For tabular sections, don't add standard fields for the main object
+        // (they will be added inside add_metadata_fields)
+        let mut fields = if tabular_section_name.is_none() {
+            standard_fields_for_mdo(mdo_type)
+        } else {
+            Vec::new()
+        };
+
         tracing::info!(
             full_name = %full_name_for_logging,
             mdo_type = ?mdo_type,
             object_name = %object_name,
-            standard_fields = fields.len(),
+            tabular_section = ?tabular_section_name,
+            initial_fields = fields.len(),
             has_metadata = self.metadata.is_some(),
-            "resolve_table: Built standard fields, checking metadata"
+            "resolve_table: Starting field resolution"
         );
 
         // Add fields from metadata if available
         if let Some(_metadata) = self.metadata {
-            self.add_metadata_fields(mdo_type, object_name, &full_name_for_logging, &mut fields);
+            self.add_metadata_fields(
+                mdo_type,
+                object_name,
+                tabular_section_name,
+                &full_name_for_logging,
+                &mut fields,
+            );
         } else {
             tracing::warn!(
                 full_name = %full_name_for_logging,
@@ -284,6 +302,7 @@ impl<'a> LoweringContext<'a> {
         &self,
         mdo_type: MdoType,
         object_name: &str,
+        tabular_section_name: Option<&str>,
         full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
@@ -292,6 +311,13 @@ impl<'a> LoweringContext<'a> {
             return;
         };
 
+        // Handle tabular section if 3-part name detected
+        if let Some(ts_name) = tabular_section_name {
+            self.add_tabular_section_fields(mdo_type, object_name, ts_name, full_name, fields);
+            return; // Early return - don't process as main object
+        }
+
+        // Continue with existing logic for main objects
         match mdo_type {
             // For registers, add dimensions, resources, and attributes
             MdoType::InformationRegister
@@ -394,6 +420,154 @@ impl<'a> LoweringContext<'a> {
             }
 
             _ => {}
+        }
+    }
+
+    /// Add fields from tabular section to the fields list.
+    fn add_tabular_section_fields(
+        &self,
+        mdo_type: MdoType,
+        object_name: &str,
+        tabular_section_name: &str,
+        full_name: &str,
+        fields: &mut Vec<FieldDef>,
+    ) {
+        let Some(metadata) = self.metadata else {
+            tracing::debug!("No metadata available for tabular section resolution");
+            return;
+        };
+
+        tracing::info!(
+            full_name = %full_name,
+            mdo_type = ?mdo_type,
+            object_name = %object_name,
+            tabular_section_name = %tabular_section_name,
+            "add_tabular_section_fields: Looking up tabular section in metadata"
+        );
+
+        // 1. Validate MDO type supports tabular sections
+        match mdo_type {
+            MdoType::Catalog
+            | MdoType::Document
+            | MdoType::BusinessProcess
+            | MdoType::Task
+            | MdoType::ChartOfCharacteristicTypes
+            | MdoType::ChartOfAccounts => {
+                // Valid - continue
+            }
+            _ => {
+                tracing::warn!(
+                    mdo_type = ?mdo_type,
+                    object_name = %object_name,
+                    tabular_section_name = %tabular_section_name,
+                    "MDO type does not support tabular sections"
+                );
+                return;
+            }
+        }
+
+        // 2. Find parent object in metadata
+        let Some(parent_obj) = metadata.find_metadata_object(mdo_type, object_name) else {
+            tracing::warn!(
+                mdo_type = ?mdo_type,
+                object_name = %object_name,
+                "Parent object not found in metadata"
+            );
+            return;
+        };
+
+        // 3. Find tabular section by name
+        let Some(tabular_section) = parent_obj.find_tabular_section(tabular_section_name) else {
+            tracing::warn!(
+                mdo_type = ?mdo_type,
+                object_name = %object_name,
+                tabular_section_name = %tabular_section_name,
+                available_sections = ?parent_obj.tabular_sections.iter()
+                    .map(|ts| ts.name())
+                    .collect::<Vec<_>>(),
+                "Tabular section not found in parent object"
+            );
+            return;
+        };
+
+        tracing::info!(
+            tabular_section_name = %tabular_section_name,
+            attributes_count = tabular_section.attributes().len(),
+            "Found tabular section in metadata"
+        );
+
+        // 4. Add standard Ссылка field (reference to parent object)
+        let ref_type = SdblType::reference(mdo_type, object_name);
+        fields.push(FieldDef::new_with_names(
+            "Ссылка".to_string(),
+            Some("Ref".to_string()),
+            ref_type,
+            true, // is_standard
+        ));
+
+        // 5. Add all tabular section attributes
+        for attribute in tabular_section.attributes() {
+            // Parse type from type_str
+            let ty = self.parse_tabular_section_attribute_type(attribute.type_str());
+
+            fields.push(FieldDef::new_with_names(
+                attribute.name().to_string(),
+                attribute.name_en().map(|s| s.to_string()),
+                ty,
+                false, // Not a standard attribute
+            ));
+        }
+
+        tracing::info!(
+            mdo_type = ?mdo_type,
+            object_name = %object_name,
+            tabular_section_name = %tabular_section_name,
+            total_fields = fields.len(),
+            "Added tabular section fields"
+        );
+    }
+
+    /// Parse attribute type from type_str (simplified for MVP).
+    fn parse_tabular_section_attribute_type(&self, type_str: &str) -> SdblType {
+        // Simplified type parsing for common cases
+        // TODO: Enhance with full type parser later
+
+        let type_str = type_str.trim();
+
+        // Check for reference types: "CatalogRef.Name" or "DocumentRef.Name"
+        if let Some(dot_pos) = type_str.find('.') {
+            let type_part = &type_str[..dot_pos];
+            let name_part = &type_str[dot_pos + 1..];
+
+            if let Some(mdo_type) = MdoType::from_plural(type_part) {
+                return SdblType::reference(mdo_type, name_part);
+            }
+        }
+
+        // Check for primitive types
+        match type_str.to_lowercase().as_str() {
+            s if s.starts_with("string") || s.starts_with("строка") => {
+                // Extract length if present: "String(100)" or "Строка(100)"
+                if let Some(start) = s.find('(') {
+                    if let Some(end) = s.find(')') {
+                        if let Ok(len) = s[start + 1..end].trim().parse::<u32>() {
+                            return SdblType::string_with_length(len);
+                        }
+                    }
+                }
+                SdblType::string()
+            }
+            s if s.starts_with("number") || s.starts_with("число") => {
+                // Extract precision/scale if present: "Number(10, 2)"
+                SdblType::number()
+            }
+            "boolean" | "булево" => SdblType::Boolean,
+            "date" | "дата" => SdblType::Date,
+            "datetime" | "датавремя" => SdblType::DateTime,
+            _ => {
+                tracing::debug!(type_str = %type_str, "Unknown type, using SdblType::Unknown");
+                SdblType::Unknown
+            }
         }
     }
 

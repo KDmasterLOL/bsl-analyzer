@@ -653,3 +653,199 @@ fn test_temp_table_in_union() {
         panic!("Expected TempTable variant, got: {:?}", temp_table_ref.metadata);
     }
 }
+
+// ===== Tabular Section Resolution Tests =====
+
+/// Helper to create a test configuration with a business process that has tabular sections.
+fn create_test_metadata_with_tabular_section() -> bsl_metadata::Configuration {
+    use bsl_metadata::{
+        tabular_section::{TabularSection, TabularSectionAttribute},
+        MdoType, MetadataObject,
+    };
+
+    // Use the uuid crate from bsl-metadata's dependencies
+    // We need to import it through a test helper
+    let uuid_nil = *bsl_metadata::tabular_section::TabularSection::new(
+        Default::default(), // Use default UUID for testing
+        "temp",
+    )
+    .uuid();
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+
+    // Create BusinessProcess with tabular section
+    let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
+
+    // Create tabular section "РезультатыПроверки"
+    let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
+    ts.set_name_en(Some("CheckResults".to_string()));
+
+    // Create attributes for tabular section
+    let mut attr1 = TabularSectionAttribute::new(uuid_nil, "ЗадачаИсполнителя", "TaskRef.Задача");
+    attr1.set_name_en(Some("ExecutorTask".to_string()));
+
+    let mut attr2 = TabularSectionAttribute::new(uuid_nil, "ЗадачаПроверяющего", "TaskRef.Задача");
+    attr2.set_name_en(Some("CheckerTask".to_string()));
+
+    let mut attr3 = TabularSectionAttribute::new(uuid_nil, "ОтправленоНаДоработку", "Boolean");
+    attr3.set_name_en(Some("SentForRevision".to_string()));
+
+    // Set attributes all at once
+    ts.set_attributes(vec![attr1, attr2, attr3]);
+
+    bp.add_tabular_section(ts);
+
+    config.add_metadata_object(bp);
+    config
+}
+
+#[test]
+fn test_tabular_section_field_resolution() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let hir = single_query_hir(&package);
+
+    // Verify table resolved
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert_eq!(table_ref.full_name, "БизнесПроцесс.Исполнение.РезультатыПроверки");
+    assert!(table_ref.is_resolved(), "Tabular section should be resolved");
+
+    // Verify fields
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+
+    // Should have Ссылка field + 3 tabular section attributes
+    assert_eq!(fields.len(), 4, "Expected 4 fields: Ссылка + 3 attributes");
+
+    // Verify Ссылка field
+    let ref_field = fields.iter().find(|f| f.name.as_str() == "Ссылка");
+    assert!(ref_field.is_some(), "Missing Ссылка field");
+    let ref_field = ref_field.unwrap();
+    assert!(ref_field.is_standard, "Ссылка should be marked as standard");
+    assert_eq!(ref_field.name_en.as_deref(), Some("Ref"));
+
+    // Verify tabular section attributes
+    assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаИсполнителя"));
+    assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаПроверяющего"));
+    assert!(fields.iter().any(|f| f.name.as_str() == "ОтправленоНаДоработку"));
+}
+
+#[test]
+fn test_tabular_section_case_insensitive_matching() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    // Use lowercase tabular section name
+    let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.результатыпроверки КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let hir = single_query_hir(&package);
+
+    // Should still resolve (case-insensitive matching)
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert!(table_ref.is_resolved(), "Should resolve with case-insensitive matching");
+}
+
+#[test]
+fn test_tabular_section_bilingual_support() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    // Use English tabular section name
+    let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.CheckResults КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let hir = single_query_hir(&package);
+
+    // Should resolve using English name
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert!(table_ref.is_resolved(), "Should resolve using English name");
+
+    // Verify fields are present
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+    assert_eq!(fields.len(), 4, "Expected 4 fields");
+}
+
+#[test]
+fn test_tabular_section_not_found() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    // Use non-existent tabular section name
+    let code = "ВЫБРАТЬ Т.Поле ИЗ БизнесПроцесс.Исполнение.НесуществующаяТабличнаяЧасть КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let hir = single_query_hir(&package);
+
+    // Table should not be resolved (tabular section doesn't exist)
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+
+    // Metadata should be None because tabular section wasn't found
+    // (add_tabular_section_fields returns early when not found)
+    let resolved = table_ref.metadata.as_ref();
+    if let Some(r) = resolved {
+        // If metadata is present, it should have only standard fields
+        assert_eq!(r.fields().len(), 0, "Should have no fields when tabular section not found");
+    }
+}
+
+#[test]
+fn test_main_object_still_works() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    // Use 2-part name (main object, not tabular section)
+    let code = "ВЫБРАТЬ Т.Ссылка ИЗ БизнесПроцесс.Исполнение КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let hir = single_query_hir(&package);
+
+    // Should resolve main object
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert_eq!(table_ref.full_name, "БизнесПроцесс.Исполнение");
+    assert!(table_ref.is_resolved(), "Main object should still resolve");
+
+    // Should have standard fields for BusinessProcess
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+    assert!(!fields.is_empty(), "Should have standard fields for main object");
+    assert!(fields.iter().any(|f| f.name.as_str() == "Ссылка"));
+}
+
+#[test]
+fn test_invalid_mdo_type_for_tabular_section() {
+    use bsl_metadata::{Configuration, MdoType, MetadataObject};
+
+    let mut config = Configuration::new("TestConfig");
+
+    // Add an InformationRegister (which doesn't support tabular sections)
+    let register = MetadataObject::new(MdoType::InformationRegister, "ТестовыйРегистр");
+    config.add_metadata_object(register);
+
+    // Try to access non-existent tabular section
+    let code = "ВЫБРАТЬ Т.Поле ИЗ РегистрСведений.ТестовыйРегистр.ТабличнаяЧасть КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let hir = single_query_hir(&package);
+
+    // Should not resolve (registers don't have tabular sections)
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+
+    let resolved = table_ref.metadata.as_ref();
+    if let Some(r) = resolved {
+        // Should have no fields because MDO type doesn't support tabular sections
+        assert_eq!(r.fields().len(), 0, "Should have no fields for invalid MDO type");
+    }
+}

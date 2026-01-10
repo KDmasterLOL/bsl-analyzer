@@ -509,6 +509,18 @@ impl MetadataObject {
         let name_lower = name.to_lowercase();
         self.attributes.iter().find(|attr| attr.name.to_lowercase() == name_lower)
     }
+
+    /// Find tabular section by name (case-insensitive, bilingual)
+    pub fn find_tabular_section(
+        &self,
+        name: &str,
+    ) -> Option<&crate::tabular_section::TabularSection> {
+        let name_lower = name.to_lowercase();
+        self.tabular_sections.iter().find(|ts| {
+            ts.name().to_lowercase() == name_lower
+                || ts.name_en().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+        })
+    }
 }
 
 impl std::fmt::Display for AttributeType {
