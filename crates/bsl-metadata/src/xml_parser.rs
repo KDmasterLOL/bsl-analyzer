@@ -907,11 +907,17 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
 
     // If no types specified, return Unknown
     if type_xml.types.is_empty() {
+        tracing::warn!("parse_type_xml: types vector is empty, returning Unknown");
         return Ok(AttributeType::Unknown);
     }
 
     // Take first type (1C can have multiple, we'll use first for now)
     let type_str = &type_xml.types[0];
+    tracing::debug!(
+        type_str = %type_str,
+        types_count = type_xml.types.len(),
+        "parse_type_xml: parsing type"
+    );
 
     // Parse type string
     match type_str.as_str() {
