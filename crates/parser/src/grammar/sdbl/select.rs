@@ -181,6 +181,10 @@ fn query(p: &mut Parser) {
 /// Parse selected fields list
 ///
 /// Grammar: `selectedFields: fields+=selectedField (COMMA fields+=selectedField)*`
+///
+/// Error recovery: If we encounter a clause keyword (FROM, WHERE, etc.) while parsing fields,
+/// we stop immediately and let the clause parser handle it. This allows completion to work
+/// even when field list is incomplete (e.g., "SELECT Table.| FROM ...").
 fn selected_fields(p: &mut Parser) {
     let m = p.start();
 
@@ -190,6 +194,12 @@ fn selected_fields(p: &mut Parser) {
     // Parse additional fields (COMMA field)*
     loop {
         p.skip_trivia(); // CRITICAL: Skip trivia before checking for comma
+
+        // ERROR RECOVERY: Check if we hit a clause keyword
+        // This allows incomplete field lists like "SELECT Table.|" to not block FROM parsing
+        if is_clause_keyword(p) {
+            break; // Let FROM/WHERE/etc. parser handle this token
+        }
 
         if !p.eat(TokenKind::Comma) {
             break; // No more fields
