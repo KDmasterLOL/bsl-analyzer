@@ -1095,6 +1095,26 @@ fn parse_single_type(
 fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::AttributeType> {
     use crate::metadata_object::AttributeType;
 
+    // Special case: types without name (e.g., cfg:BusinessProcessObject, cfg:BusinessProcessRoutePointRef)
+    // These are typically used in event subscriptions and represent "any object of this type"
+    match type_str {
+        "cfg:CatalogObject" => {
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog })
+        }
+        "cfg:DocumentObject" => {
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Document })
+        }
+        "cfg:BusinessProcessObject" => {
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess })
+        }
+        "cfg:TaskObject" => return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Task }),
+        "cfg:BusinessProcessRoutePointRef" => {
+            // Route points are specific to business processes - treat as any BP ref
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess });
+        }
+        _ => {}
+    }
+
     // Format: "cfg:CatalogRef.Name" or "cfg:DocumentRef.Name" or "cfg:EnumRef.Name"
     let parts: Vec<&str> = type_str.split('.').collect();
     if parts.len() != 2 {
