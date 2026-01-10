@@ -482,11 +482,14 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let lit_after = &literal_text[safe_offset..lit_end];
 
     tracing::info!(
-        "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}, lit_before={:?}, lit_after={:?}",
+        "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}, safe_offset={}, lit_start={}, lit_end={}, lit_before={:?}, lit_after={:?}",
         offset,
         literal_start,
         offset_in_literal,
         literal_text.len(),
+        safe_offset,
+        lit_start,
+        lit_end,
         lit_before,
         lit_after
     );
