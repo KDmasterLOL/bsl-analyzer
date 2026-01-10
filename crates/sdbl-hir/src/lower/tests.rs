@@ -577,3 +577,39 @@ fn test_in_expression_not_in() {
         "Expected NOT keyword in operators (from NOT_EXPR lowering)"
     );
 }
+
+#[test]
+fn test_into_clause_russian() {
+    let hir = lower_query("ВЫБРАТЬ Поле1 ПОМЕСТИТЬ ВременнаяТаблица ИЗ Справочник.Валюты");
+
+    assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("ВременнаяТаблица"));
+    assert!(!hir.select.fields.is_empty());
+    assert_eq!(hir.from.len(), 1);
+}
+
+#[test]
+fn test_into_clause_english() {
+    let hir = lower_query("SELECT Field1 INTO TempTable FROM Catalog.Currency");
+
+    assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("TempTable"));
+    assert!(!hir.select.fields.is_empty());
+    assert_eq!(hir.from.len(), 1);
+}
+
+#[test]
+fn test_into_clause_with_distinct_and_top() {
+    let hir = lower_query("SELECT DISTINCT TOP 10 Field1 INTO MyTemp FROM Catalog.Items");
+
+    assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("MyTemp"));
+    assert!(hir.select.distinct);
+    assert_eq!(hir.select.top, Some(10));
+    assert!(!hir.select.fields.is_empty());
+}
+
+#[test]
+fn test_no_into_clause() {
+    let hir = lower_query("SELECT Field1 FROM Catalog.Items");
+
+    assert!(hir.into_table.is_none());
+    assert!(!hir.select.fields.is_empty());
+}

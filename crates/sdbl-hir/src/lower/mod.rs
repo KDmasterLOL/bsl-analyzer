@@ -162,7 +162,10 @@ impl LoweringContext<'_> {
         // 8. Lower ORDER BY clause
         let order_by = main_query.order_by_clause().map(|o| self.lower_order_by(&o));
 
-        // 9. Lower UNION queries
+        // 9. Lower INTO clause (temporary table)
+        let into_table = self.lower_into_clause(main_query.syntax());
+
+        // 10. Lower UNION queries
         let unions = self.lower_union_clauses(&subquery);
 
         // Collect diagnostics from UNION queries before moving them
@@ -176,7 +179,7 @@ impl LoweringContext<'_> {
         // Build HIR
         let mut hir = SdblHir {
             select,
-            into_table: None,
+            into_table,
             from,
             joins,
             where_clause,
@@ -198,5 +201,50 @@ impl LoweringContext<'_> {
         hir.diagnostics.extend(std::mem::take(&mut self.diagnostics));
 
         hir
+    }
+
+    /// Lower INTO clause (for temporary tables).
+    ///
+    /// Extracts temporary table name from `INTO TemporaryTableName` clause.
+    ///
+    /// # Example
+    /// ```sql
+    /// SELECT Field1 INTO MyTempTable FROM Catalog.Products
+    /// ```
+    ///
+    /// Returns: `Some("MyTempTable")`
+    pub(super) fn lower_into_clause(
+        &mut self,
+        query_node: &syntax::SyntaxNode,
+    ) -> Option<crate::hir::Name> {
+        use syntax::SyntaxKind;
+
+        // Find INTO_CLAUSE node
+        let into_clause =
+            query_node.children().find(|n| n.kind() == SyntaxKind::SDBL_INTO_CLAUSE)?;
+
+        // Record INTO keyword
+        self.record_keyword_by_text(
+            &into_clause,
+            "INTO",
+            "ПОМЕСТИТЬ",
+            crate::source_map::TokenCategory::ClauseKeyword,
+        );
+
+        // Find TEMP_TABLE_NAME node
+        let temp_table_node =
+            into_clause.children().find(|n| n.kind() == SyntaxKind::SDBL_TEMP_TABLE_NAME)?;
+
+        // Extract table name from first identifier token
+        let table_name = temp_table_node.children_with_tokens().find_map(|element| {
+            element
+                .as_token()
+                .filter(|t| t.kind() == SyntaxKind::IDENT)
+                .map(|t| t.text().to_string())
+        })?;
+
+        tracing::debug!(table_name = %table_name, "Extracted INTO clause temporary table name");
+
+        Some(crate::hir::Name::from(table_name))
     }
 }

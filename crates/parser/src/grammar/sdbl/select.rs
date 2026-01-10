@@ -467,7 +467,7 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || p.at_keyword("HAVING")
         || p.at_keyword("ORDER")
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
-        || p.at_keyword("INTO")
+        || at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ")
         || at_sdbl_keyword(p, "ON", "ПО")
         || is_join_keyword(p)
 }
