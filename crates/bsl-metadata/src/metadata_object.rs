@@ -424,8 +424,8 @@ impl std::fmt::Display for AttributeType {
                     // Single type - just show it
                     write!(f, "{}", types[0])
                 } else {
-                    // Multiple types - show count
-                    write!(f, "Составной тип ({} вариантов)", types.len())
+                    // Multiple types - show brief label
+                    write!(f, "Составной тип:")
                 }
             }
             Self::Unknown => write!(f, "Неизвестно"),
@@ -596,7 +596,7 @@ mod tests {
         };
         assert_eq!(single.to_string(), "Перечисление.ВидДействия");
 
-        // Multiple types composite should show count
+        // Multiple types composite should show brief label
         let composite = AttributeType::Composite {
             types: vec![
                 AttributeType::Ref {
@@ -619,6 +619,6 @@ mod tests {
         };
 
         let display = composite.to_string();
-        assert_eq!(display, "Составной тип (4 вариантов)");
+        assert_eq!(display, "Составной тип:");
     }
 }

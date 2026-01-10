@@ -349,9 +349,8 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
 
             // For composite types, show multiline list in documentation
             let (detail, documentation) = if let SdblType::Composite { types } = &col.ty {
-                // Composite type - show count in detail, multiline list in documentation
-                let detail =
-                    format!("Составной тип ({} вариантов){}", types.len(), standard_marker);
+                // Composite type - show brief label in detail, multiline list in documentation
+                let detail = format!("Составной тип:{}", standard_marker);
                 let types_list = types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
                 let doc = format!("{}\n\nТаблица: {}", types_list, col.table_name.as_str());
                 (detail, doc)
