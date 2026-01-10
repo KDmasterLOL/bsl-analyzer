@@ -472,10 +472,28 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     // Map offset from literal (with quotes/|) to query text (without quotes/|)
     let offset_in_query = map_offset_to_query(&literal_text, offset_in_literal);
 
-    tracing::debug!(
+    // DEBUG: Show query text around mapped offset
+    let offset_q_usize: usize = offset_in_query.into();
+    let q_start = offset_q_usize.saturating_sub(30);
+    let q_end = (offset_q_usize + 30).min(query_text.len());
+    let query_before = if query_text.is_char_boundary(offset_q_usize) {
+        &query_text[q_start..offset_q_usize]
+    } else {
+        "<not char boundary>"
+    };
+    let query_after =
+        if offset_q_usize < query_text.len() && query_text.is_char_boundary(offset_q_usize) {
+            &query_text[offset_q_usize..q_end]
+        } else {
+            ""
+        };
+
+    tracing::info!(
         literal_len = literal_text.len(),
         query_len = query_text.len(),
-        offset_in_query = u32::from(offset_in_query),
+        offset_in_query = offset_q_usize,
+        query_before = %query_before,
+        query_after = %query_after,
         "detected SDBL query at position"
     );
 
