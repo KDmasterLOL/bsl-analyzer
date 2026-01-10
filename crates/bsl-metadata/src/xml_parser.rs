@@ -920,32 +920,97 @@ fn parse_tabular_section(
 fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::AttributeType> {
     use crate::metadata_object::AttributeType;
 
-    // Check for TypeSet first (DefinedType has priority)
+    // Check for TypeSet (but only use if no concrete types specified)
+    // TypeSet is typically used alongside concrete types, or alone to mean "any object of this type"
     if !type_xml.type_sets.is_empty() {
         let type_set = &type_xml.type_sets[0];
         tracing::debug!(
             type_set = %type_set,
             type_sets_count = type_xml.type_sets.len(),
-            "parse_type_xml: parsing TypeSet"
+            types_count = type_xml.types.len(),
+            "parse_type_xml: found TypeSet"
         );
 
-        // Handle special TypeSet values
-        match type_set.as_str() {
-            "cfg:AnyIBRef" => return Ok(AttributeType::AnyRef),
-            // DefinedType reference: cfg:DefinedType.Name
-            _ if type_set.starts_with("cfg:DefinedType.") => {
-                let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
-                return Ok(AttributeType::DefinedType { name });
+        // Only process TypeSet if no concrete types specified
+        // If concrete types exist, they take priority over TypeSet
+        if type_xml.types.is_empty() {
+            // Handle special TypeSet values
+            match type_set.as_str() {
+                "cfg:AnyIBRef" => return Ok(AttributeType::AnyRef),
+                // DefinedType reference: cfg:DefinedType.Name
+                _ if type_set.starts_with("cfg:DefinedType.") => {
+                    let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
+                    return Ok(AttributeType::DefinedType { name });
+                }
+                // TypeSet for "any object of specific type"
+                "cfg:CatalogRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog })
+                }
+                "cfg:DocumentRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Document })
+                }
+                "cfg:BusinessProcessRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess })
+                }
+                "cfg:TaskRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Task })
+                }
+                "cfg:EnumRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Enum })
+                }
+                "cfg:InformationRegisterRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::InformationRegister,
+                    })
+                }
+                "cfg:AccumulationRegisterRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::AccumulationRegister,
+                    })
+                }
+                "cfg:AccountingRegisterRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::AccountingRegister,
+                    })
+                }
+                "cfg:CalculationRegisterRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::CalculationRegister,
+                    })
+                }
+                "cfg:ChartOfCharacteristicTypesRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::ChartOfCharacteristicTypes,
+                    })
+                }
+                "cfg:ChartOfAccountsRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfAccounts })
+                }
+                "cfg:ChartOfCalculationTypesRef" => {
+                    return Ok(AttributeType::AnyObjectRef {
+                        mdo_type: MdoType::ChartOfCalculationTypes,
+                    })
+                }
+                "cfg:ExchangePlanRef" => {
+                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::ExchangePlan })
+                }
+                // Other unrecognized TypeSet values - ignore and continue to process types list
+                _ => {
+                    tracing::debug!(
+                        type_set = %type_set,
+                        "ignoring unrecognized TypeSet, will process Type list instead"
+                    );
+                    // Fall through to process types list
+                }
             }
-            // Other TypeSet values (e.g., cfg:BusinessProcessRef, cfg:CatalogRef) - ignore and continue
-            // These typically mean "any object of this type" and are used alongside concrete types list
-            _ => {
-                tracing::debug!(
-                    type_set = %type_set,
-                    "ignoring unrecognized TypeSet, will process Type list instead"
-                );
-                // Fall through to process types list
-            }
+        } else {
+            // TypeSet exists but concrete types also specified - use concrete types
+            tracing::debug!(
+                type_set = %type_set,
+                types_count = type_xml.types.len(),
+                "TypeSet found but concrete types also specified, using concrete types"
+            );
+            // Fall through to process concrete types
         }
     }
 
@@ -1634,6 +1699,80 @@ mod tests {
                 );
             }
             _ => panic!("Expected Composite type, got {:?}", attr.attr_type),
+        }
+    }
+
+    #[test]
+    fn test_parse_catalog_xml_any_object_ref_typeset() {
+        use crate::metadata_object::AttributeType;
+
+        // Test TypeSet without concrete types - should parse as AnyObjectRef
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.20">
+    <Catalog uuid="ee807eb7-94a8-4c8c-8362-dbb1fd28e6ed">
+        <Properties>
+            <Name>ТестовыйСправочник</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="5944a61b-a374-4d3d-aab5-de83abf0dde0">
+                <Properties>
+                    <Name>ЛюбойБизнесПроцесс</Name>
+                    <Type>
+                        <v8:TypeSet>cfg:BusinessProcessRef</v8:TypeSet>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="6944a61b-a374-4d3d-aab5-de83abf0dde0">
+                <Properties>
+                    <Name>ЛюбойСправочник</Name>
+                    <Type>
+                        <v8:TypeSet>cfg:CatalogRef</v8:TypeSet>
+                    </Type>
+                </Properties>
+            </Attribute>
+            <Attribute uuid="7944a61b-a374-4d3d-aab5-de83abf0dde0">
+                <Properties>
+                    <Name>ЛюбойДокумент</Name>
+                    <Type>
+                        <v8:TypeSet>cfg:DocumentRef</v8:TypeSet>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        assert_eq!(catalog.name, "ТестовыйСправочник");
+        assert_eq!(catalog.attributes.len(), 3);
+
+        // Check BusinessProcess AnyObjectRef
+        let attr1 = catalog.find_attribute("ЛюбойБизнесПроцесс").unwrap();
+        assert_eq!(attr1.name, "ЛюбойБизнесПроцесс");
+        match &attr1.attr_type {
+            AttributeType::AnyObjectRef { mdo_type } => {
+                assert_eq!(*mdo_type, MdoType::BusinessProcess);
+            }
+            _ => panic!("Expected AnyObjectRef for BusinessProcessRef, got {:?}", attr1.attr_type),
+        }
+
+        // Check Catalog AnyObjectRef
+        let attr2 = catalog.find_attribute("ЛюбойСправочник").unwrap();
+        match &attr2.attr_type {
+            AttributeType::AnyObjectRef { mdo_type } => {
+                assert_eq!(*mdo_type, MdoType::Catalog);
+            }
+            _ => panic!("Expected AnyObjectRef for CatalogRef, got {:?}", attr2.attr_type),
+        }
+
+        // Check Document AnyObjectRef
+        let attr3 = catalog.find_attribute("ЛюбойДокумент").unwrap();
+        match &attr3.attr_type {
+            AttributeType::AnyObjectRef { mdo_type } => {
+                assert_eq!(*mdo_type, MdoType::Document);
+            }
+            _ => panic!("Expected AnyObjectRef for DocumentRef, got {:?}", attr3.attr_type),
         }
     }
 

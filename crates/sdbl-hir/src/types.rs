@@ -53,6 +53,15 @@ pub enum SdblType {
     /// Can hold reference to any metadata object.
     AnyRef,
 
+    /// Any object of specific type.
+    ///
+    /// E.g., any Catalog, any Document, any BusinessProcess.
+    /// Used in SDBL when field can hold any object of a specific type.
+    AnyObjectRef {
+        /// Type of metadata object
+        mdo_type: MdoType,
+    },
+
     /// UUID (УникальныйИдентификатор).
     Uuid,
 
@@ -144,6 +153,7 @@ impl SdblType {
                 Self::Ref(MdoRef { mdo_type: *mdo_type, name: name.clone() })
             }
             AttributeType::AnyRef => Self::AnyRef,
+            AttributeType::AnyObjectRef { mdo_type } => Self::AnyObjectRef { mdo_type: *mdo_type },
             AttributeType::Uuid => Self::Uuid,
             AttributeType::ValueStorage => Self::ValueStorage,
             AttributeType::DefinedType { name } => {
@@ -184,7 +194,7 @@ impl SdblType {
 
     /// Check if type is a reference.
     pub fn is_ref(&self) -> bool {
-        matches!(self, Self::Ref(_))
+        matches!(self, Self::Ref(_) | Self::AnyRef | Self::AnyObjectRef { .. })
     }
 
     /// Get the inner type for aggregate, or self.
@@ -220,6 +230,16 @@ impl SdblType {
             // AnyRef is compatible with any Ref and vice versa
             (AnyRef, Ref(_)) | (Ref(_), AnyRef) => true,
             (AnyRef, AnyRef) => true,
+
+            // AnyObjectRef is compatible with:
+            // 1. AnyRef (bidirectional)
+            (AnyObjectRef { .. }, AnyRef) | (AnyRef, AnyObjectRef { .. }) => true,
+            // 2. Ref of the same MDO type
+            (AnyObjectRef { mdo_type: a }, Ref(b)) | (Ref(b), AnyObjectRef { mdo_type: a }) => {
+                *a == b.mdo_type
+            }
+            // 3. Another AnyObjectRef of the same MDO type
+            (AnyObjectRef { mdo_type: a }, AnyObjectRef { mdo_type: b }) => a == b,
 
             // Special types - only compatible with themselves
             (Uuid, Uuid) => true,
@@ -257,6 +277,9 @@ impl std::fmt::Display for SdblType {
             Self::DateTime => write!(f, "ДатаВремя"),
             Self::Ref(mdo_ref) => write!(f, "{}", mdo_ref),
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
+            Self::AnyObjectRef { mdo_type } => {
+                write!(f, "{}", mdo_type.russian_name())
+            }
             Self::Uuid => write!(f, "УникальныйИдентификатор"),
             Self::ValueStorage => write!(f, "ХранилищеЗначения"),
             Self::DefinedType { name, .. } => {
@@ -323,6 +346,12 @@ mod tests {
         assert_eq!(SdblType::number_with_precision(10, 2).to_string(), "Число(10, 2)");
         assert_eq!(SdblType::Date.to_string(), "Дата");
         assert_eq!(SdblType::AnyRef.to_string(), "ЛюбаяСсылка");
+        assert_eq!(SdblType::AnyObjectRef { mdo_type: MdoType::Catalog }.to_string(), "Справочник");
+        assert_eq!(SdblType::AnyObjectRef { mdo_type: MdoType::Document }.to_string(), "Документ");
+        assert_eq!(
+            SdblType::AnyObjectRef { mdo_type: MdoType::BusinessProcess }.to_string(),
+            "БизнесПроцесс"
+        );
         assert_eq!(SdblType::Uuid.to_string(), "УникальныйИдентификатор");
         assert_eq!(SdblType::ValueStorage.to_string(), "ХранилищеЗначения");
 
@@ -375,6 +404,41 @@ mod tests {
 
         assert!(!SdblType::Boolean.is_compatible_with(&SdblType::string()));
         assert!(!SdblType::number().is_compatible_with(&SdblType::string()));
+    }
+
+    #[test]
+    fn test_any_object_ref_compatibility() {
+        use bsl_metadata::MdoType;
+
+        let catalog_ref = SdblType::AnyObjectRef { mdo_type: MdoType::Catalog };
+        let document_ref = SdblType::AnyObjectRef { mdo_type: MdoType::Document };
+        let bp_ref = SdblType::AnyObjectRef { mdo_type: MdoType::BusinessProcess };
+
+        // AnyObjectRef compatible with AnyRef
+        assert!(catalog_ref.is_compatible_with(&SdblType::AnyRef));
+        assert!(SdblType::AnyRef.is_compatible_with(&catalog_ref));
+
+        // AnyObjectRef compatible with Ref of same type
+        let catalog_item = SdblType::reference(MdoType::Catalog, "Валюты");
+        assert!(catalog_ref.is_compatible_with(&catalog_item));
+        assert!(catalog_item.is_compatible_with(&catalog_ref));
+
+        // AnyObjectRef not compatible with Ref of different type
+        let document_item = SdblType::reference(MdoType::Document, "ПКО");
+        assert!(!catalog_ref.is_compatible_with(&document_item));
+        assert!(!document_item.is_compatible_with(&catalog_ref));
+
+        // AnyObjectRef compatible with same type
+        let another_catalog_ref = SdblType::AnyObjectRef { mdo_type: MdoType::Catalog };
+        assert!(catalog_ref.is_compatible_with(&another_catalog_ref));
+
+        // AnyObjectRef not compatible with different type
+        assert!(!catalog_ref.is_compatible_with(&document_ref));
+        assert!(!document_ref.is_compatible_with(&bp_ref));
+
+        // AnyObjectRef not compatible with primitives
+        assert!(!catalog_ref.is_compatible_with(&SdblType::string()));
+        assert!(!catalog_ref.is_compatible_with(&SdblType::number()));
     }
 
     #[test]

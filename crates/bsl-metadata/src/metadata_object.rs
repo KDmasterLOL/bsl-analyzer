@@ -291,6 +291,14 @@ pub enum AttributeType {
     },
     /// Any reference (ЛюбаяСсылка)
     AnyRef,
+    /// Any object of specific type (e.g., any Catalog, any Document, any BusinessProcess)
+    ///
+    /// From TypeSet like cfg:CatalogRef, cfg:DocumentRef, cfg:BusinessProcessRef.
+    /// Means "any object of this type" without specifying concrete object name.
+    AnyObjectRef {
+        /// Type of metadata object
+        mdo_type: MdoType,
+    },
     /// UUID
     Uuid,
     /// ValueStorage (ХранилищеЗначения)
@@ -411,6 +419,9 @@ impl std::fmt::Display for AttributeType {
                 write!(f, "{}.{}", mdo_type.russian_name(), name)
             }
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
+            Self::AnyObjectRef { mdo_type } => {
+                write!(f, "{}", mdo_type.russian_name())
+            }
             Self::Uuid => write!(f, "УникальныйИдентификатор"),
             Self::ValueStorage => write!(f, "ХранилищеЗначения"),
             Self::DefinedType { name } => {
@@ -620,5 +631,21 @@ mod tests {
 
         let display = composite.to_string();
         assert_eq!(display, "Составной тип:");
+    }
+
+    #[test]
+    fn test_any_object_ref_display() {
+        // Test AnyObjectRef Display implementation
+        let catalog_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog };
+        assert_eq!(catalog_ref.to_string(), "Справочник");
+
+        let document_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Document };
+        assert_eq!(document_ref.to_string(), "Документ");
+
+        let bp_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess };
+        assert_eq!(bp_ref.to_string(), "БизнесПроцесс");
+
+        let enum_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Enum };
+        assert_eq!(enum_ref.to_string(), "Перечисление");
     }
 }
