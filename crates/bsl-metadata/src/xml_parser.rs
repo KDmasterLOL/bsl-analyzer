@@ -253,6 +253,9 @@ struct DimensionProperties {
     #[serde(rename = "Name")]
     name: String,
 
+    #[serde(rename = "Type")]
+    dim_type: TypeXml,
+
     #[serde(rename = "DenyIncompleteValues", default)]
     deny_incomplete_values: BoolValue,
 
@@ -344,13 +347,18 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
                 crate::error::MetadataError::InvalidFormat(format!("Invalid dimension UUID: {}", e))
             })?;
 
-            let dimension = Dimension::builder()
+            let mut dimension = Dimension::builder()
                 .uuid(dim_uuid)
-                .name(dim_xml.properties.name)
+                .name(dim_xml.properties.name.clone())
                 .deny_incomplete_values(dim_xml.properties.deny_incomplete_values.into())
                 .master(dim_xml.properties.master.into())
                 .indexing(dim_xml.properties.indexing)
                 .build();
+
+            // Parse and store dimension type
+            let dim_type = parse_type_xml(&dim_xml.properties.dim_type)?;
+            dimension.set_type_str(format!("{:?}", dim_type));
+            dimension.set_attr_type(dim_type);
 
             dimensions.push(dimension);
         }
@@ -671,11 +679,16 @@ struct AttributeProperties {
 /// - `<v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>100</v8:Length>...`
 /// - `<v8:Type>xs:decimal</v8:Type><v8:NumberQualifiers><v8:Digits>10</v8:Digits>...`
 /// - `<v8:Type>cfg:CatalogRef.Name</v8:Type>`
+/// - `<v8:TypeSet>cfg:DefinedType.Name</v8:TypeSet>` (for DefinedType)
 #[derive(Debug, Deserialize)]
 struct TypeXml {
     /// Type value (can be multiple)
     #[serde(rename = "Type", default)]
     types: Vec<String>,
+
+    /// TypeSet value (for DefinedType - ОпределяемыеТипы)
+    #[serde(rename = "TypeSet", default)]
+    type_sets: Vec<String>,
 
     /// String qualifiers (for xs:string)
     #[serde(rename = "StringQualifiers", default)]
@@ -905,9 +918,24 @@ fn parse_tabular_section(
 fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::AttributeType> {
     use crate::metadata_object::AttributeType;
 
+    // Check for TypeSet first (DefinedType has priority)
+    if !type_xml.type_sets.is_empty() {
+        let type_set = &type_xml.type_sets[0];
+        tracing::debug!(
+            type_set = %type_set,
+            type_sets_count = type_xml.type_sets.len(),
+            "parse_type_xml: parsing TypeSet (DefinedType)"
+        );
+        // DefinedType reference: cfg:DefinedType.Name
+        // For now, treat as Unknown since we don't resolve DefinedType yet
+        return Ok(AttributeType::Unknown);
+    }
+
     // If no types specified, return Unknown
     if type_xml.types.is_empty() {
-        tracing::warn!("parse_type_xml: types vector is empty, returning Unknown");
+        tracing::warn!(
+            "parse_type_xml: both types and type_sets vectors are empty, returning Unknown"
+        );
         return Ok(AttributeType::Unknown);
     }
 
@@ -916,7 +944,7 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
     tracing::debug!(
         type_str = %type_str,
         types_count = type_xml.types.len(),
-        "parse_type_xml: parsing type"
+        "parse_type_xml: parsing Type"
     );
 
     // Parse type string

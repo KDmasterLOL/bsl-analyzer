@@ -298,8 +298,11 @@ impl<'a> LoweringContext<'a> {
 
                     // Add dimensions
                     for dimension in register.dimensions() {
-                        // Dimensions don't have types in metadata, keep as Unknown
-                        fields.push(FieldDef::new(dimension.name(), SdblType::Unknown));
+                        let ty = dimension
+                            .attr_type()
+                            .map(SdblType::from_attribute_type)
+                            .unwrap_or(SdblType::Unknown);
+                        fields.push(FieldDef::new(dimension.name(), ty));
                     }
 
                     // Add resources
