@@ -365,8 +365,37 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
 
     let _span = tracing::debug_span!("detect_sdbl_at_position", ?offset).entered();
 
+    // DEBUG: Show text around cursor position in BSL file
+    let bsl_text = root.text().to_string();
+    let offset_usize: usize = offset.into();
+
+    // Find char boundaries for context (UTF-8 safe)
+    let context_start = (offset_usize.saturating_sub(50)..=offset_usize)
+        .rev()
+        .find(|&i| bsl_text.is_char_boundary(i))
+        .unwrap_or(0);
+    let context_end = (offset_usize..=(offset_usize + 50).min(bsl_text.len()))
+        .find(|&i| bsl_text.is_char_boundary(i))
+        .unwrap_or(bsl_text.len());
+
+    let text_before = &bsl_text[context_start..offset_usize];
+    let text_after = &bsl_text[offset_usize..context_end];
+    tracing::info!(
+        offset = offset_usize,
+        text_before = %text_before,
+        text_after = %text_after,
+        "BSL file context around cursor"
+    );
+
     // Find token at offset (prefer token to the left of cursor)
     let token = root.token_at_offset(offset).left_biased()?;
+
+    tracing::info!(
+        token_kind = ?token.kind(),
+        token_range = ?token.text_range(),
+        token_text_len = token.text().len(),
+        "Found token at offset"
+    );
 
     // Check if it's a string token (including multiline string parts)
     if !matches!(
