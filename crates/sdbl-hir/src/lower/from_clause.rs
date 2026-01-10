@@ -211,7 +211,8 @@ impl<'a> LoweringContext<'a> {
 
         // Add fields from metadata if available
         if let Some(_metadata) = self.metadata {
-            self.add_metadata_fields(mdo_type, object_name, &mut fields);
+            let full_name_for_logging = parts.join(".");
+            self.add_metadata_fields(mdo_type, object_name, &full_name_for_logging, &mut fields);
         }
 
         tracing::info!(
@@ -231,6 +232,7 @@ impl<'a> LoweringContext<'a> {
         &self,
         mdo_type: MdoType,
         object_name: &str,
+        full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
         let Some(metadata) = self.metadata else {
@@ -244,6 +246,13 @@ impl<'a> LoweringContext<'a> {
             | MdoType::AccumulationRegister
             | MdoType::AccountingRegister
             | MdoType::CalculationRegister => {
+                tracing::info!(
+                    full_name = %full_name,
+                    mdo_type = ?mdo_type,
+                    object_name = %object_name,
+                    "add_metadata_fields: Looking up register in metadata"
+                );
+
                 // Use find_register_by_type_and_name to ensure we get the correct register type
                 if let Some(register) =
                     metadata.find_register_by_type_and_name(mdo_type, object_name)
@@ -277,8 +286,9 @@ impl<'a> LoweringContext<'a> {
                     );
                 } else {
                     tracing::warn!(
+                        full_name = %full_name,
                         mdo_type = ?mdo_type,
-                        object_name = object_name,
+                        object_name = %object_name,
                         "Register not found in metadata (type mismatch or missing)"
                     );
                 }
@@ -286,6 +296,13 @@ impl<'a> LoweringContext<'a> {
 
             // For catalogs and documents, add attributes
             MdoType::Catalog | MdoType::Document => {
+                tracing::info!(
+                    full_name = %full_name,
+                    mdo_type = ?mdo_type,
+                    object_name = %object_name,
+                    "add_metadata_fields: Looking up catalog/document in metadata"
+                );
+
                 if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
                     let initial_count = fields.len();
 
@@ -302,9 +319,10 @@ impl<'a> LoweringContext<'a> {
                         "Added metadata fields to catalog/document"
                     );
                 } else {
-                    tracing::debug!(
+                    tracing::warn!(
+                        full_name = %full_name,
                         mdo_type = ?mdo_type,
-                        object_name = object_name,
+                        object_name = %object_name,
                         "Catalog/Document not found in metadata"
                     );
                 }
