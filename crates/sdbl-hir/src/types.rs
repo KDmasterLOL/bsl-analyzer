@@ -61,7 +61,13 @@ pub enum SdblType {
     /// DefinedType (ОпределяемыйТип).
     ///
     /// User-defined type that can hold multiple primitive/reference types.
-    DefinedType(String),
+    /// Contains the type name and optionally the resolved underlying type.
+    DefinedType {
+        /// Name of the defined type
+        name: String,
+        /// Resolved underlying type (if available from metadata)
+        underlying_type: Option<Box<SdblType>>,
+    },
 
     /// Value table (ТаблицаЗначений).
     ///
@@ -118,7 +124,9 @@ impl SdblType {
             AttributeType::AnyRef => Self::AnyRef,
             AttributeType::Uuid => Self::Uuid,
             AttributeType::ValueStorage => Self::ValueStorage,
-            AttributeType::DefinedType { name } => Self::DefinedType(name.clone()),
+            AttributeType::DefinedType { name } => {
+                Self::DefinedType { name: name.clone(), underlying_type: None }
+            }
             AttributeType::Unknown => Self::Unknown,
         }
     }
@@ -159,8 +167,8 @@ impl SdblType {
             (Unknown, _) | (_, Unknown) => true,
             (Error, _) | (_, Error) => true,
 
-            // DefinedType is compatible with anything (we don't resolve DefinedType)
-            (DefinedType(_), _) | (_, DefinedType(_)) => true,
+            // DefinedType is compatible with anything
+            (DefinedType { .. }, _) | (_, DefinedType { .. }) => true,
 
             // Same types are compatible
             (Boolean, Boolean) => true,
@@ -204,7 +212,13 @@ impl std::fmt::Display for SdblType {
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
             Self::Uuid => write!(f, "УникальныйИдентификатор"),
             Self::ValueStorage => write!(f, "ХранилищеЗначения"),
-            Self::DefinedType(name) => write!(f, "ОпределяемыйТип.{}", name),
+            Self::DefinedType { name, underlying_type } => {
+                write!(f, "ОпределяемыйТип.{}", name)?;
+                if let Some(ty) = underlying_type {
+                    write!(f, " ({})", ty)?;
+                }
+                Ok(())
+            }
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
@@ -255,10 +269,26 @@ mod tests {
         assert_eq!(SdblType::AnyRef.to_string(), "ЛюбаяСсылка");
         assert_eq!(SdblType::Uuid.to_string(), "УникальныйИдентификатор");
         assert_eq!(SdblType::ValueStorage.to_string(), "ХранилищеЗначения");
+
+        // DefinedType without underlying type
         assert_eq!(
-            SdblType::DefinedType("ОтметкаВремени".to_string()).to_string(),
+            SdblType::DefinedType {
+                name: "ОтметкаВремени".to_string(), underlying_type: None
+            }
+            .to_string(),
             "ОпределяемыйТип.ОтметкаВремени"
         );
+
+        // DefinedType with underlying type
+        assert_eq!(
+            SdblType::DefinedType {
+                name: "ОтметкаВремени".to_string(),
+                underlying_type: Some(Box::new(SdblType::String))
+            }
+            .to_string(),
+            "ОпределяемыйТип.ОтметкаВремени (Строка)"
+        );
+
         assert_eq!(SdblType::Unknown.to_string(), "Неизвестно");
     }
 
@@ -279,9 +309,13 @@ mod tests {
             SdblType::Null.is_compatible_with(&SdblType::Number { precision: None, scale: None })
         );
 
-        // DefinedType is compatible with anything (we don't resolve it)
-        assert!(SdblType::DefinedType("Test".to_string()).is_compatible_with(&SdblType::String));
-        assert!(SdblType::Boolean.is_compatible_with(&SdblType::DefinedType("Test".to_string())));
+        // DefinedType is compatible with anything
+        assert!(SdblType::DefinedType { name: "Test".to_string(), underlying_type: None }
+            .is_compatible_with(&SdblType::String));
+        assert!(SdblType::Boolean.is_compatible_with(&SdblType::DefinedType {
+            name: "Test".to_string(),
+            underlying_type: None
+        }));
 
         assert!(!SdblType::Boolean.is_compatible_with(&SdblType::String));
         assert!(!SdblType::number().is_compatible_with(&SdblType::String));

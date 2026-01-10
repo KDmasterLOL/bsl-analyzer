@@ -388,15 +388,18 @@ impl<'a> LoweringContext<'a> {
 
         match attr_type {
             AttributeType::DefinedType { name } => {
-                // Try to resolve DefinedType through metadata
-                if let Some(metadata) = &self.metadata {
-                    if let Some(defined_type) = metadata.find_defined_type(name) {
+                // Try to resolve underlying type through metadata
+                let underlying_type = if let Some(metadata) = &self.metadata {
+                    metadata.find_defined_type(name).map(|defined_type| {
                         // Recursively resolve the underlying type
-                        return self.resolve_attribute_type(defined_type.underlying_type());
-                    }
-                }
-                // If not found, fallback to showing DefinedType as is
-                SdblType::DefinedType(name.clone())
+                        Box::new(self.resolve_attribute_type(defined_type.underlying_type()))
+                    })
+                } else {
+                    None
+                };
+
+                // Return DefinedType with optional underlying type
+                SdblType::DefinedType { name: name.clone(), underlying_type }
             }
             // For all other types, use standard conversion
             _ => SdblType::from_attribute_type(attr_type),
