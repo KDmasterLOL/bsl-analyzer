@@ -165,7 +165,28 @@ impl LoweringContext<'_> {
         // 9. Lower INTO clause (temporary table)
         let into_table = self.lower_into_clause(main_query.syntax());
 
-        // 10. Lower UNION queries
+        // 10. Register temporary table in scope (for use in UNION queries)
+        if let Some(ref temp_name) = into_table {
+            // Extract fields from SELECT clause
+            let temp_fields: Vec<_> = select
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    f.alias_or_name()
+                        .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                })
+                .collect();
+
+            tracing::debug!(
+                temp_table = %temp_name.as_str(),
+                fields = temp_fields.len(),
+                "Registering temporary table in scope"
+            );
+
+            self.scope.add_temp_table(temp_name.to_string(), temp_fields);
+        }
+
+        // 11. Lower UNION queries (can now reference temporary table)
         let unions = self.lower_union_clauses(&subquery);
 
         // Collect diagnostics from UNION queries before moving them

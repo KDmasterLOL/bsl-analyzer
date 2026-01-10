@@ -613,3 +613,36 @@ fn test_no_into_clause() {
     assert!(hir.into_table.is_none());
     assert!(!hir.select.fields.is_empty());
 }
+
+#[test]
+fn test_temp_table_in_union() {
+    // Query creates temporary table in first part, uses it in UNION
+    let query = "SELECT Поле1 AS Действие INTO ТаблицаДействий FROM Справочник.Валюты UNION ALL SELECT Действие FROM ТаблицаДействий";
+
+    let ast = parser::parse_sdbl(query);
+    let result = lower_sdbl_to_hir(&ast, None);
+    let hir = result.hir;
+
+    // First query creates temporary table
+    assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("ТаблицаДействий"));
+    assert_eq!(hir.select.fields.len(), 1); // Only one field in first query
+
+    // Second query (UNION) references temporary table
+    assert_eq!(hir.unions.len(), 1);
+    let union_hir = &hir.unions[0].query;
+    assert_eq!(union_hir.from.len(), 1);
+
+    // Check that temporary table is resolved
+    let temp_table_ref = &union_hir.from[0];
+    assert_eq!(temp_table_ref.full_name, "ТаблицаДействий");
+    assert!(temp_table_ref.is_resolved(), "Temporary table should be resolved");
+
+    // Check that it's a TempTable variant
+    if let Some(crate::hir::ResolvedTable::TempTable { name, fields }) = &temp_table_ref.metadata {
+        assert_eq!(name, "ТаблицаДействий");
+        assert_eq!(fields.len(), 1); // One field from SELECT
+        assert_eq!(fields[0].name.as_str(), "Действие"); // Alias from first query
+    } else {
+        panic!("Expected TempTable variant, got: {:?}", temp_table_ref.metadata);
+    }
+}

@@ -166,6 +166,21 @@ impl<'a> LoweringContext<'a> {
     ) -> (Option<MdoType>, Option<ResolvedTable>) {
         tracing::debug!(parts = ?parts, "Resolving table");
 
+        // Check for temporary tables first (single-part names)
+        if parts.len() == 1 {
+            let table_name = &parts[0];
+            if let Some(temp_table) = self.scope.find_temp_table(table_name) {
+                tracing::debug!(name = %table_name, fields = temp_table.fields.len(), "Resolved as temporary table");
+                return (
+                    None,
+                    Some(ResolvedTable::TempTable {
+                        name: temp_table.name.clone(),
+                        fields: temp_table.fields.clone(),
+                    }),
+                );
+            }
+        }
+
         if parts.len() < 2 {
             tracing::debug!("Table parts < 2, skipping resolution");
             return (None, None);

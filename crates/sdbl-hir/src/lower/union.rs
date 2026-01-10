@@ -35,14 +35,14 @@ impl<'a> LoweringContext<'a> {
                 continue;
             };
 
-            // Save current scope
-            let saved_scope = std::mem::replace(&mut self.scope, crate::scope::Scope::new());
+            // Push a new scope frame for UNION query (preserves parent scope with temp tables)
+            self.scope.push_frame();
 
-            // Lower the UNION query in fresh scope
+            // Lower the UNION query in nested scope
             let union_hir = self.lower_query(&union_query);
 
-            // Restore scope
-            self.scope = saved_scope;
+            // Pop scope frame
+            self.scope.pop_frame();
 
             unions.push(crate::hir::UnionHir {
                 all: union_clause.has_all(),

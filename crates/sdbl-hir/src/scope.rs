@@ -21,6 +21,20 @@ pub struct Scope {
 struct ScopeFrame {
     /// Tables in this scope, keyed by effective name (alias or full name).
     tables: FxHashMap<String, TableRef>,
+
+    /// Temporary tables created with INTO clause.
+    /// Keyed by lowercase table name.
+    temp_tables: FxHashMap<String, TempTableDef>,
+}
+
+/// Temporary table definition.
+#[derive(Debug, Clone)]
+pub struct TempTableDef {
+    /// Table name.
+    pub name: String,
+
+    /// Fields from SELECT clause that created this table.
+    pub fields: Vec<FieldDef>,
 }
 
 impl Scope {
@@ -47,6 +61,32 @@ impl Scope {
             let key = table.effective_name().to_lowercase();
             frame.tables.insert(key, table);
         }
+    }
+
+    /// Add a temporary table to the current scope.
+    ///
+    /// Temporary tables are created with INTO clause and available
+    /// in subsequent queries (e.g., UNION parts).
+    pub fn add_temp_table(&mut self, name: String, fields: Vec<FieldDef>) {
+        if let Some(frame) = self.frames.last_mut() {
+            let key = name.to_lowercase();
+            tracing::debug!(name = %name, fields = fields.len(), "Adding temporary table to scope");
+            frame.temp_tables.insert(key, TempTableDef { name, fields });
+        }
+    }
+
+    /// Find temporary table by name (case-insensitive).
+    ///
+    /// Searches from innermost to outermost scope.
+    pub fn find_temp_table(&self, name: &str) -> Option<&TempTableDef> {
+        let name_lower = name.to_lowercase();
+        for frame in self.frames.iter().rev() {
+            if let Some(temp_table) = frame.temp_tables.get(&name_lower) {
+                tracing::debug!(name = %name, "Found temporary table in scope");
+                return Some(temp_table);
+            }
+        }
+        None
     }
 
     /// Find table by name (case-insensitive).
