@@ -358,13 +358,13 @@ impl<'a> LoweringContext<'a> {
                 }
             }
 
-            // For catalogs and documents, add attributes
-            MdoType::Catalog | MdoType::Document => {
+            // For catalogs, documents, business processes, and tasks - add attributes
+            MdoType::Catalog | MdoType::Document | MdoType::BusinessProcess | MdoType::Task => {
                 tracing::info!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,
                     object_name = %object_name,
-                    "add_metadata_fields: Looking up catalog/document in metadata"
+                    "add_metadata_fields: Looking up catalog/document/business process/task in metadata"
                 );
 
                 if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
@@ -381,14 +381,14 @@ impl<'a> LoweringContext<'a> {
                         attributes = obj.attributes.len(),
                         fields_added = fields.len() - initial_count,
                         total_fields = fields.len(),
-                        "Added metadata fields to catalog/document"
+                        "Added metadata fields to object"
                     );
                 } else {
                     tracing::warn!(
                         full_name = %full_name,
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
-                        "Catalog/Document not found in metadata"
+                        "Metadata object not found"
                     );
                 }
             }
