@@ -481,6 +481,17 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let lit_before = &literal_text[lit_start..safe_offset];
     let lit_after = &literal_text[safe_offset..lit_end];
 
+    // DEBUG: Show literal bytes around safe_offset (ensure char boundaries)
+    let debug_start = (safe_offset.saturating_sub(20)..=safe_offset)
+        .rev()
+        .find(|&i| literal_text.is_char_boundary(i))
+        .unwrap_or(0);
+    let debug_end = (safe_offset..=(safe_offset + 20).min(literal_text.len()))
+        .find(|&i| literal_text.is_char_boundary(i))
+        .unwrap_or(literal_text.len());
+    let literal_bytes = &literal_text.as_bytes()[debug_start..debug_end];
+    let literal_sample = &literal_text[debug_start..debug_end];
+
     tracing::info!(
         "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}, safe_offset={}, lit_start={}, lit_end={}, lit_before={:?}, lit_after={:?}",
         offset,
@@ -492,6 +503,14 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
         lit_end,
         lit_before,
         lit_after
+    );
+
+    tracing::info!(
+        "literal sample [{}-{}]: bytes={:?}, text={:?}",
+        debug_start,
+        debug_end,
+        literal_bytes,
+        literal_sample
     );
 
     // Extract query text by removing quotes and | prefixes
