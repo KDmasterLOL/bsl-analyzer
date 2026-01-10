@@ -937,9 +937,14 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
                 let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
                 return Ok(AttributeType::DefinedType { name });
             }
+            // Other TypeSet values (e.g., cfg:BusinessProcessRef, cfg:CatalogRef) - ignore and continue
+            // These typically mean "any object of this type" and are used alongside concrete types list
             _ => {
-                tracing::warn!(type_set = %type_set, "unknown TypeSet value");
-                return Ok(AttributeType::Unknown);
+                tracing::debug!(
+                    type_set = %type_set,
+                    "ignoring unrecognized TypeSet, will process Type list instead"
+                );
+                // Fall through to process types list
             }
         }
     }
@@ -1565,6 +1570,71 @@ mod tests {
 
         assert_eq!(catalog.name, "ПростойСправочник");
         assert_eq!(catalog.attributes.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_catalog_xml_composite_type_with_typeset() {
+        use crate::metadata_object::AttributeType;
+
+        // Real-world example: composite type with multiple concrete types + TypeSet
+        // From: Справочник.ДескрипторыДоступаРегистров.ОбъектДоступа1
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.20">
+    <Catalog uuid="ee807eb7-94a8-4c8c-8362-dbb1fd28e6ed">
+        <Properties>
+            <Name>ДескрипторыДоступаРегистров</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="5944a61b-a374-4d3d-aab5-de83abf0dde0">
+                <Properties>
+                    <Name>ОбъектДоступа1</Name>
+                    <Type>
+                        <v8:Type>cfg:CatalogRef.Сотрудники</v8:Type>
+                        <v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+                        <v8:Type>cfg:DocumentRef.ВходящееПисьмо</v8:Type>
+                        <v8:Type>cfg:BusinessProcessRef.Утверждение</v8:Type>
+                        <v8:TypeSet>cfg:BusinessProcessRef</v8:TypeSet>
+                    </Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#;
+
+        let catalog = parse_catalog_xml(xml).unwrap();
+
+        assert_eq!(catalog.name, "ДескрипторыДоступаРегистров");
+        assert_eq!(catalog.attributes.len(), 1);
+
+        let attr = catalog.find_attribute("ОбъектДоступа1").unwrap();
+        assert_eq!(attr.name, "ОбъектДоступа1");
+
+        // Should parse as Composite type with 4 concrete types
+        // TypeSet (cfg:BusinessProcessRef) should be ignored
+        match &attr.attr_type {
+            AttributeType::Composite { types } => {
+                assert_eq!(types.len(), 4);
+
+                // Check first type
+                assert_eq!(
+                    types[0],
+                    AttributeType::Ref {
+                        mdo_type: MdoType::Catalog,
+                        name: "Сотрудники".to_string()
+                    }
+                );
+
+                // Check last type
+                assert_eq!(
+                    types[3],
+                    AttributeType::Ref {
+                        mdo_type: MdoType::BusinessProcess,
+                        name: "Утверждение".to_string()
+                    }
+                );
+            }
+            _ => panic!("Expected Composite type, got {:?}", attr.attr_type),
+        }
     }
 
     #[test]
