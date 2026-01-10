@@ -48,9 +48,38 @@ pub fn offset(line_index: &LineIndex, text: &str, position: Position) -> Result<
         .utf16_col_to_byte_col(text, position.line, position.character)
         .ok_or_else(|| anyhow!("Position out of bounds: {:?}", position))?;
 
+    tracing::info!(
+        "from_proto::offset: LSP position={}:{} (UTF-16) → byte_col={}",
+        position.line,
+        position.character,
+        byte_col
+    );
+
+    // Get line content to log it
+    if let Some(line_range) = line_index.line_range(position.line) {
+        let line_start: usize = line_range.start().into();
+        let line_end: usize = line_range.end().into();
+        if line_start < text.len() {
+            let line_text = &text[line_start..line_end.min(text.len())];
+            tracing::info!(
+                "Line {} range: {}..{}, text (first 100 chars): {:?}",
+                position.line,
+                line_start,
+                line_end,
+                line_text.chars().take(100).collect::<String>()
+            );
+        }
+    }
+
     let line_col = LineCol { line: position.line, col: byte_col };
 
-    line_index.offset(line_col).ok_or_else(|| anyhow!("Position out of bounds: {:?}", position))
+    let result = line_index
+        .offset(line_col)
+        .ok_or_else(|| anyhow!("Position out of bounds: {:?}", position))?;
+
+    tracing::info!("from_proto::offset: final offset = {:?}", result);
+
+    Ok(result)
 }
 
 /// Converts an LSP Range to a TextRange.
