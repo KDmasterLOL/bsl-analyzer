@@ -67,7 +67,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Iterate SDBL HIRs and corresponding query infos in parallel
     // Both are sorted by position in file, so we can zip them
-    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
         sdbl_hirs.iter().zip(sdbl_queries.iter())
     {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
@@ -77,7 +77,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         );
 
         // Emit diagnostics from HIR
-        for hir_diag in &sdbl_hir.hir.diagnostics {
+        for hir_diag in sdbl_package.all_diagnostics() {
             if let sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } = hir_diag {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 

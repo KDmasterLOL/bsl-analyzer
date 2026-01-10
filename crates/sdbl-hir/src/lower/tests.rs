@@ -1,12 +1,19 @@
-use crate::hir::{JoinType, SdblHir};
-use crate::lower::{lower_sdbl_to_hir, SdblLowerResult};
+use crate::hir::{JoinType, SdblHir, SdblPackage};
+use crate::lower::lower_sdbl_to_hir;
+
+/// Helper to extract single query HIR for tests (most tests have single query).
+fn single_query_hir(package: &SdblPackage) -> &SdblHir {
+    assert_eq!(package.queries().len(), 1, "Expected single query in package");
+    &package.queries()[0].hir
+}
 
 fn lower_query(sdbl: &str) -> SdblHir {
     let ast = parser::parse_sdbl(sdbl);
-    lower_sdbl_to_hir(&ast, None).hir
+    let package = lower_sdbl_to_hir(&ast, None);
+    single_query_hir(&package).clone()
 }
 
-fn lower_query_with_source_map(sdbl: &str) -> SdblLowerResult {
+fn lower_query_with_source_map(sdbl: &str) -> SdblPackage {
     let ast = parser::parse_sdbl(sdbl);
     lower_sdbl_to_hir(&ast, None)
 }
@@ -288,7 +295,7 @@ fn test_in_expression_value_list() {
     let result = lower_query_with_source_map(query);
 
     // Verify HIR contains IN expression
-    let hir = &result.hir;
+    let hir = single_query_hir(&result);
     assert!(hir.where_clause.is_some(), "Expected WHERE clause");
 
     // Check that IN keyword is collected
@@ -312,7 +319,7 @@ fn test_source_map_collects_distinct_keyword() {
     );
 
     // Check HIR
-    assert!(result.hir.select.distinct);
+    assert!(single_query_hir(&result).select.distinct);
 }
 
 #[test]
@@ -330,7 +337,7 @@ fn test_source_map_collects_distinct_keyword_russian() {
     );
 
     // Check HIR
-    assert!(result.hir.select.distinct);
+    assert!(single_query_hir(&result).select.distinct);
 }
 
 #[test]
@@ -348,7 +355,7 @@ fn test_source_map_collects_top_keyword() {
     );
 
     // Check HIR
-    assert_eq!(result.hir.select.top, Some(10));
+    assert_eq!(single_query_hir(&result).select.top, Some(10));
 }
 
 #[test]
@@ -366,7 +373,7 @@ fn test_source_map_collects_top_keyword_russian() {
     );
 
     // Check HIR
-    assert_eq!(result.hir.select.top, Some(5));
+    assert_eq!(single_query_hir(&result).select.top, Some(5));
 }
 
 #[test]
@@ -382,8 +389,8 @@ fn test_distinct_and_top_together() {
     assert!(modifiers.iter().any(|k| k.eq_ignore_ascii_case("TOP")));
 
     // Check HIR
-    assert!(result.hir.select.distinct);
-    assert_eq!(result.hir.select.top, Some(20));
+    assert!(single_query_hir(&result).select.distinct);
+    assert_eq!(single_query_hir(&result).select.top, Some(20));
 }
 
 #[test]
@@ -621,7 +628,7 @@ fn test_temp_table_in_union() {
 
     let ast = parser::parse_sdbl(query);
     let result = lower_sdbl_to_hir(&ast, None);
-    let hir = result.hir;
+    let hir = single_query_hir(&result).clone();
 
     // First query creates temporary table
     assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("ТаблицаДействий"));

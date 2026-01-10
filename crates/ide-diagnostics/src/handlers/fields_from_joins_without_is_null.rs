@@ -131,7 +131,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Process HIR diagnostics
-    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
         sdbl_hirs.iter().zip(sdbl_queries.iter())
     {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
@@ -140,8 +140,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &line_starts,
         );
 
-        // Extract diagnostics recursively (including UNION subqueries)
-        extract_diagnostics(&sdbl_hir.hir, &mapper, &query_info.query_text, &mut diagnostics);
+        // Extract diagnostics recursively from all queries (including UNION subqueries)
+        for query in sdbl_package.queries() {
+            extract_diagnostics(&query.hir, &mapper, &query_info.query_text, &mut diagnostics);
+        }
     }
 
     debug!(

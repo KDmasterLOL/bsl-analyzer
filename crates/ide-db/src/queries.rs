@@ -365,16 +365,15 @@ pub fn sdbl_hir_in_file_query<'db>(
     for (expr_id, query_info) in sdbl_queries.iter() {
         // Only lower if we have a parsed AST
         if let Some(ref sdbl_ast) = query_info.query_ast {
-            let sdbl_hir = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+            let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
 
             tracing::info!(
-                from_tables = sdbl_hir.hir.from.len(),
-                join_tables = sdbl_hir.hir.joins.len(),
-                diagnostics = sdbl_hir.hir.diagnostics.len(),
-                "sdbl_hir_in_file: lowered query to HIR"
+                queries_count = sdbl_package.queries().len(),
+                total_diagnostics = sdbl_package.all_diagnostics().count(),
+                "sdbl_hir_in_file: lowered query package to HIR"
             );
 
-            result.push((*expr_id, Arc::new(sdbl_hir)));
+            result.push((*expr_id, Arc::new(sdbl_package)));
         } else {
             skipped += 1;
             tracing::warn!("sdbl_hir_in_file: skipped query without AST");

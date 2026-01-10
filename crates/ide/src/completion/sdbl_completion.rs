@@ -824,9 +824,9 @@ fn get_sdbl_scope(
         "get_sdbl_scope: searching for query containing cursor"
     );
 
-    // 2. Find the ExprId of the query containing the cursor
+    // 2. Find the ExprId and QueryInfo of the query containing the cursor
     // Use bsl_literal_range (BSL-space) for reliable matching
-    let target_expr_id = all_sdbl.iter().find_map(|(expr_id, qinfo)| {
+    let (target_expr_id, query_info) = all_sdbl.iter().find_map(|(expr_id, qinfo)| {
         let contains = qinfo.bsl_literal_range.contains(bsl_offset);
         tracing::info!(
             expr_id = ?expr_id,
@@ -837,7 +837,7 @@ fn get_sdbl_scope(
             "checking if query BSL range contains cursor offset"
         );
         if contains {
-            Some(*expr_id)
+            Some((*expr_id, qinfo.clone()))
         } else {
             None
         }
@@ -857,19 +857,25 @@ fn get_sdbl_scope(
         "get_sdbl_scope: retrieved SDBL HIRs from cache"
     );
 
-    // 4. Find the HIR for the target ExprId
-    let (_expr_id, sdbl_lower_result) =
+    // 4. Find the package for the target ExprId
+    let (_expr_id, sdbl_package) =
         sdbl_hirs.iter().find(|(expr_id, _)| *expr_id == target_expr_id)?;
 
+    // 5. Find query containing cursor using SDBL-space offset
+    // Compute offset within the SDBL query string (relative to query start)
+    let offset_in_query = bsl_offset - query_info.bsl_literal_range.start();
+    let target_query = sdbl_package.query_at_offset(offset_in_query)?;
+
     tracing::info!(
-        from_tables_count = sdbl_lower_result.hir.from.len(),
-        join_tables_count = sdbl_lower_result.hir.joins.len(),
-        diagnostics_count = sdbl_lower_result.hir.diagnostics.len(),
-        "get_sdbl_scope: examining first SDBL HIR"
+        query_range = ?target_query.range,
+        from_tables_count = target_query.hir.from.len(),
+        join_tables_count = target_query.hir.joins.len(),
+        diagnostics_count = target_query.hir.diagnostics.len(),
+        "get_sdbl_scope: found target query for completion"
     );
 
     // Log FROM tables in detail
-    for (i, table) in sdbl_lower_result.hir.from.iter().enumerate() {
+    for (i, table) in target_query.hir.from.iter().enumerate() {
         tracing::info!(
             table_index = i,
             full_name = %table.full_name,
@@ -880,9 +886,9 @@ fn get_sdbl_scope(
         );
     }
 
-    // 3. Rebuild Scope from HIR
+    // 6. Rebuild Scope from HIR
     let mut scope = Scope::new();
-    let hir = &sdbl_lower_result.hir;
+    let hir = &target_query.hir;
 
     // Add tables from FROM clause
     for table in &hir.from {

@@ -72,7 +72,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Iterate SDBL HIRs and corresponding query infos in parallel
     // Both are sorted by position in file, so we can zip them
-    for ((_expr_id, sdbl_hir), (_query_expr_id, query_info)) in
+    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
         sdbl_hirs.iter().zip(sdbl_queries.iter())
     {
         let mapper = SdblPositionMapper::new_from_range_with_line_index(
@@ -82,7 +82,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         );
 
         // Emit diagnostics from HIR
-        for hir_diag in &sdbl_hir.hir.diagnostics {
+        for hir_diag in sdbl_package.all_diagnostics() {
             if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = hir_diag
             {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
@@ -461,16 +461,14 @@ Query = "ВЫБРАТЬ
         }
 
         let hir = lower_sdbl_to_hir(&parse, None);
-        eprintln!("\nHIR diagnostics: {}", hir.hir.diagnostics.len());
-        for diag in &hir.hir.diagnostics {
+        eprintln!("\nHIR diagnostics: {}", hir.all_diagnostics().count());
+        for diag in hir.all_diagnostics() {
             eprintln!("  - {} at {:?}", diag.message(), diag.range());
         }
 
         // Count only AliasWithoutAsKeyword diagnostics
         let alias_diagnostics: Vec<_> = hir
-            .hir
-            .diagnostics
-            .iter()
+            .all_diagnostics()
             .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
             .collect();
 
@@ -515,8 +513,8 @@ Query = "ВЫБРАТЬ
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
         eprintln!("Simple query: {} HIRs", sdbl_hirs.len());
         for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
-            eprintln!("HIR {}: {} diagnostics", i, hir.hir.diagnostics.len());
-            for diag in &hir.hir.diagnostics {
+            eprintln!("HIR {}: {} diagnostics", i, hir.all_diagnostics().count());
+            for diag in hir.all_diagnostics() {
                 eprintln!("  - {} at {:?}", diag.message(), diag.range());
             }
         }
@@ -524,7 +522,7 @@ Query = "ВЫБРАТЬ
         assert_eq!(sdbl_hirs.len(), 1);
         // Should have at least 1 diagnostic (field without alias)
         assert!(
-            !sdbl_hirs[0].1.hir.diagnostics.is_empty(),
+            !sdbl_hirs[0].1.queries()[0].hir.diagnostics.is_empty(),
             "Expected diagnostics for fields without AS keyword"
         );
     }
@@ -559,7 +557,7 @@ Query = "ВЫБРАТЬ
         eprintln!(
             "Wrapped in procedure: {} HIRs, {} total diagnostics",
             sdbl_hirs_wrapped.len(),
-            sdbl_hirs_wrapped.iter().map(|(_, h)| h.hir.diagnostics.len()).sum::<usize>()
+            sdbl_hirs_wrapped.iter().map(|(_, h)| h.all_diagnostics().count()).sum::<usize>()
         );
 
         // Test 2: Code at module level (no procedure)
@@ -584,7 +582,7 @@ Query = "ВЫБРАТЬ
         eprintln!(
             "Module-level code: {} HIRs, {} total diagnostics",
             sdbl_hirs_unwrapped.len(),
-            sdbl_hirs_unwrapped.iter().map(|(_, h)| h.hir.diagnostics.len()).sum::<usize>()
+            sdbl_hirs_unwrapped.iter().map(|(_, h)| h.all_diagnostics().count()).sum::<usize>()
         );
 
         // Both should work
@@ -655,16 +653,14 @@ Query = "ВЫБРАТЬ
         use sdbl_hir::lower_sdbl_to_hir;
 
         let hir = lower_sdbl_to_hir(&parse, None);
-        eprintln!("\nHIR diagnostics: {}", hir.hir.diagnostics.len());
-        for diag in &hir.hir.diagnostics {
+        eprintln!("\nHIR diagnostics: {}", hir.all_diagnostics().count());
+        for diag in hir.all_diagnostics() {
             eprintln!("  - {} at {:?}", diag.message(), diag.range());
         }
 
         // Count only AliasWithoutAsKeyword diagnostics
         let alias_diagnostics: Vec<_> = hir
-            .hir
-            .diagnostics
-            .iter()
+            .all_diagnostics()
             .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
             .collect();
 
@@ -857,8 +853,8 @@ Query = "ВЫБРАТЬ
         eprintln!("\nTotal SDBL HIRs generated: {}", sdbl_hirs.len());
 
         for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
-            eprintln!("HIR {}: {} diagnostics", i, hir.hir.diagnostics.len());
-            for diag in &hir.hir.diagnostics {
+            eprintln!("HIR {}: {} diagnostics", i, hir.all_diagnostics().count());
+            for diag in hir.all_diagnostics() {
                 eprintln!("  - {}", diag.message());
             }
         }

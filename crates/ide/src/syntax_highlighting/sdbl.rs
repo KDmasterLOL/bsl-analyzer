@@ -67,7 +67,7 @@ pub(super) fn highlight_sdbl_in_literal(
     let literal_range = literal_node.text_range();
     let sdbl_entry = find_sdbl_entry_by_range(&sdbl_hir_entries, &sdbl_queries, literal_range)?;
 
-    let ((_expr_id, lower_result), (_query_expr_id, query_info)) = sdbl_entry;
+    let ((_expr_id, sdbl_package), (_query_expr_id, query_info)) = sdbl_entry;
 
     // 7. Create position mapper with shared line index (optimization)
     let input = ctx.db.file_text_input(ctx.file_id);
@@ -87,7 +87,7 @@ pub(super) fn highlight_sdbl_in_literal(
 
     // 8. Convert tokens to highlights
     Some(convert_sdbl_tokens_to_highlights(
-        &lower_result.source_map,
+        &sdbl_package.source_map,
         &mapper,
         &query_info.query_text,
     ))
@@ -144,12 +144,12 @@ fn convert_sdbl_tokens_to_highlights(
 #[allow(clippy::type_complexity)]
 fn find_sdbl_entry_by_range<'a>(
     sdbl_hir_entries: &'a std::sync::Arc<
-        Vec<(hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblLowerResult>)>,
+        Vec<(hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>,
     >,
     sdbl_queries: &'a std::sync::Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>,
     literal_range: TextRange,
 ) -> Option<(
-    &'a (hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblLowerResult>),
+    &'a (hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblPackage>),
     &'a (hir_def::ExprId, syntax::SdblQueryInfo),
 )> {
     for (hir_entry, query_entry) in sdbl_hir_entries.iter().zip(sdbl_queries.iter()) {

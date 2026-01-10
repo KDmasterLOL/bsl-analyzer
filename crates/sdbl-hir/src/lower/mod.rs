@@ -47,29 +47,36 @@ pub struct SdblLowerResult {
 ///
 /// # Returns
 ///
-/// `SdblLowerResult` containing HIR with resolved types, collected diagnostics,
-/// and source mapping for semantic highlighting.
+/// `SdblPackage` containing HIR for all queries in the package,
+/// collected diagnostics from all queries, and source mapping
+/// for semantic highlighting.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let sdbl_ast = parser::parse_sdbl("SELECT Код FROM Справочник.Валюты");
+/// let sdbl_ast = parser::parse_sdbl("SELECT ...; SELECT ...");
 /// let metadata = load_configuration()?;
-/// let result = lower_sdbl_to_hir(&sdbl_ast, Some(&metadata));
+/// let package = lower_sdbl_to_hir(&sdbl_ast, Some(&metadata));
 ///
-/// for diag in &result.hir.diagnostics {
+/// // Get diagnostics from all queries
+/// for diag in package.all_diagnostics() {
 ///     println!("Error: {}", diag.message());
 /// }
 ///
+/// // Find query at cursor position
+/// if let Some(query) = package.query_at_offset(cursor_offset) {
+///     // Use query.hir for completion
+/// }
+///
 /// // Use source map for semantic highlighting
-/// for (token, category) in result.source_map.all_tokens() {
+/// for (token, category) in package.source_map.all_tokens() {
 ///     println!("Token: {} at {:?}", token.text, token.range);
 /// }
 /// ```
 pub fn lower_sdbl_to_hir(
     sdbl_ast: &Parse<syntax::SyntaxNode>,
     metadata: Option<&Configuration>,
-) -> SdblLowerResult {
+) -> crate::hir::SdblPackage {
     let _span = tracing::info_span!("lower_sdbl_to_hir").entered();
 
     let root = sdbl_ast.syntax_node();
@@ -86,7 +93,7 @@ pub fn lower_sdbl_to_hir(
     // Try to cast root as query package
     let Some(package) = SdblQueryPackage::cast(root) else {
         tracing::debug!("Failed to cast root as SdblQueryPackage");
-        return SdblLowerResult { hir: SdblHir::empty(), source_map: SdblSourceMap::new() };
+        return crate::hir::SdblPackage::empty();
     };
 
     // Create lowering context
@@ -97,40 +104,33 @@ pub fn lower_sdbl_to_hir(
 
     if all_queries.is_empty() {
         tracing::debug!("No queries in package");
-        return SdblLowerResult { hir: SdblHir::empty(), source_map: SdblSourceMap::new() };
+        return crate::hir::SdblPackage::empty();
     }
 
     tracing::debug!(query_count = all_queries.len(), "lower_sdbl_to_hir: found queries in package");
 
-    // Lower ALL queries and collect diagnostics
-    let mut all_hirs = Vec::new();
+    // Lower ALL queries and track their ranges
+    let mut sdbl_queries = Vec::new();
     for (index, select_query) in all_queries.iter().enumerate() {
         let query_hir = ctx.lower_select_query(select_query);
+        let range = select_query.syntax().text_range();
+
         tracing::debug!(
             query_index = index,
             from_tables = query_hir.from.len(),
             join_tables = query_hir.joins.len(),
+            range = ?range,
             "lowered query in package"
         );
-        all_hirs.push(query_hir);
+
+        sdbl_queries.push(crate::hir::SdblQuery { hir: query_hir, range });
     }
-
-    // Collect ALL diagnostics from ALL queries (preserving order)
-    let mut all_diagnostics = Vec::new();
-    for query_hir in &all_hirs {
-        all_diagnostics.extend(query_hir.diagnostics.clone());
-    }
-
-    // Use the LAST query's HIR (most common use case for completion)
-    let mut hir = all_hirs.pop().unwrap();
-
-    // Replace diagnostics with ALL collected diagnostics
-    hir.diagnostics = all_diagnostics;
 
     // Finalize source map (sort token lists)
     ctx.source_map.finalize();
 
-    SdblLowerResult { hir, source_map: ctx.source_map }
+    // Return package with all queries
+    crate::hir::SdblPackage { queries: sdbl_queries, source_map: ctx.source_map }
 }
 
 impl LoweringContext<'_> {

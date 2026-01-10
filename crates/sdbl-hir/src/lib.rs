@@ -51,7 +51,7 @@ mod types;
 pub use diagnostics::SdblDiagnostic;
 pub use hir::{
     ExprHir, FieldDef, FieldHir, GroupByHir, JoinHir, JoinType, OrderByHir, ResolvedTable, SdblHir,
-    SelectHir, TableRef, UnionHir,
+    SdblPackage, SdblQuery, SelectHir, TableRef, UnionHir,
 };
 pub use lower::{lower_sdbl_to_hir, SdblLowerResult};
 pub use scope::Scope;

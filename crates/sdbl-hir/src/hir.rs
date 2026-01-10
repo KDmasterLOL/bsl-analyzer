@@ -3,7 +3,7 @@
 //! High-level Intermediate Representation of SDBL queries.
 
 use smol_str::SmolStr;
-use text_size::TextRange;
+use text_size::{TextRange, TextSize};
 
 use crate::diagnostics::SdblDiagnostic;
 use crate::types::SdblType;
@@ -743,4 +743,52 @@ pub enum InValues {
     List(Vec<ExprHir>),
     /// Subquery.
     Subquery(Box<SdblHir>),
+}
+
+/// A single SDBL query within a package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdblQuery {
+    /// The lowered HIR for this query.
+    pub hir: SdblHir,
+
+    /// Source range in SDBL text (relative to start of SDBL string).
+    pub range: TextRange,
+}
+
+/// Result of SDBL lowering.
+///
+/// Represents a package of SDBL queries (one or more SELECT queries
+/// separated by semicolons in source text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdblPackage {
+    /// All queries in the package, ordered by position.
+    pub(crate) queries: Vec<SdblQuery>,
+
+    /// Source mapping for semantic highlighting.
+    /// Shared across all queries in the package.
+    pub source_map: crate::source_map::SdblSourceMap,
+}
+
+impl SdblPackage {
+    /// Find query containing the given offset (in SDBL text space).
+    ///
+    /// Returns the query whose range contains the offset.
+    pub fn query_at_offset(&self, offset: TextSize) -> Option<&SdblQuery> {
+        self.queries.iter().find(|q| q.range.contains(offset))
+    }
+
+    /// Get all queries in the package.
+    pub fn queries(&self) -> &[SdblQuery] {
+        &self.queries
+    }
+
+    /// Iterate all diagnostics from all queries in the package.
+    pub fn all_diagnostics(&self) -> impl Iterator<Item = &crate::diagnostics::SdblDiagnostic> {
+        self.queries.iter().flat_map(|q| q.hir.diagnostics.iter())
+    }
+
+    /// Create an empty package (for error cases).
+    pub fn empty() -> Self {
+        Self { queries: Vec::new(), source_map: crate::source_map::SdblSourceMap::new() }
+    }
 }
