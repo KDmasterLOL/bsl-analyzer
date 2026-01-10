@@ -339,7 +339,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
         .filter(|col| col.column_name.as_str().to_lowercase().starts_with(&prefix_lower))
         .map(|col| {
             let field_name = col.column_name.as_str().to_string();
-            let type_desc = format!("{:?}", col.ty);
+            let type_desc = col.ty.to_string();
             let standard_marker = if col.is_standard { " (стандартный)" } else { "" };
 
             tracing::info!(
@@ -354,7 +354,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
                 kind: CompletionItemKind::Field,
                 insert_text: field_name,
                 documentation: Some(format!(
-                    "Поле из таблицы {}\nТип: {:?}",
+                    "Поле из таблицы {}\nТип: {}",
                     col.table_name.as_str(),
                     col.ty
                 )),
