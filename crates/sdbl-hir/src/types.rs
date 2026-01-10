@@ -276,9 +276,9 @@ impl std::fmt::Display for SdblType {
                 } else if types.len() == 1 {
                     write!(f, "{}", types[0])
                 } else {
-                    // Multiple types - each on new line with 2-space indent
-                    // Start with newline so "Тип: " and types are on separate lines
-                    for ty in types.iter() {
+                    // Multiple types - first on same line, rest with indent
+                    write!(f, "{}", types[0])?;
+                    for ty in types.iter().skip(1) {
                         write!(f, "\n  {}", ty)?;
                     }
                     Ok(())
