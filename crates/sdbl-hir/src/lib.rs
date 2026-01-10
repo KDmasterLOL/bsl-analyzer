@@ -222,11 +222,29 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
         let line_len = line.len();
         line_num += 1;
 
+        // Determine line ending size for this line
+        // .lines() removes \n, \r\n, or \r, so we need to check what was actually there
+        let line_end_in_literal = literal_pos + line_len;
+        let newline_len = if line_end_in_literal < literal_text.len() {
+            // Check if next bytes are \r\n (Windows), \n (Unix), or \r (old Mac)
+            let remaining = &literal_text.as_bytes()[line_end_in_literal..];
+            if remaining.starts_with(b"\r\n") {
+                2
+            } else if remaining.starts_with(b"\n") || remaining.starts_with(b"\r") {
+                1
+            } else {
+                0 // Last line without newline
+            }
+        } else {
+            0 // Last line
+        };
+
         tracing::info!(
-            "  line {}: literal_pos={}, line_len={}, line_text={:?}",
+            "  line {}: literal_pos={}, line_len={}, newline_len={}, line_text={:?}",
             line_num,
             literal_pos,
             line_len,
+            newline_len,
             line
         );
 
@@ -286,15 +304,15 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
             return result;
         }
 
-        // Move to next line
-        literal_pos += line_len + 1; // +1 for newline
+        // Move to next line (including line ending bytes)
+        literal_pos += line_len + newline_len;
 
         if first_line {
             let skip = if line.starts_with('"') { 1 } else { 0 };
             query_pos += line_len - skip;
             first_line = false;
         } else {
-            query_pos += 1; // newline
+            query_pos += 1; // newline in query text (always \n regardless of source)
             let trimmed = line.trim_start();
             let skip_whitespace_before = line.len() - trimmed.len();
 
