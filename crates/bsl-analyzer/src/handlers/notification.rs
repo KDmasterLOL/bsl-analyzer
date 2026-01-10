@@ -85,14 +85,19 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     // Update Salsa database with SourceRoot setup
     {
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
-        use vfs::FileSet;
 
         let db = state.analysis_host.raw_database_mut();
         let source_root_id = SourceRootId(0);
+        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
 
-        // Ensure SourceRoot exists (idempotent)
-        // We use an empty FileSet here as files are tracked independently
-        let source_root = SourceRoot::new_local(FileSet::new());
+        // Create FileSet with this file
+        // NOTE: For now we create a simple FileSet. In the future, we may need to
+        // maintain a global FileSet with all open files.
+        let mut file_set = vfs::FileSet::new();
+        file_set.insert(file_id, vfs_path);
+
+        // Update SourceRoot with new FileSet
+        let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(source_root_id, source_root);
 
         // Associate file with SourceRoot
@@ -153,12 +158,21 @@ pub fn handle_did_change(
 
     // Update Salsa database (this triggers incremental recomputation)
     {
-        use base_db::{SourceDatabase, SourceRootId};
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
         let db = state.analysis_host.raw_database_mut();
         let source_root_id = SourceRootId(0);
+        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
 
-        // Ensure file is associated with SourceRoot (should be set by didOpen, but be defensive)
+        // Update FileSet (ensure file path is registered)
+        let mut file_set = vfs::FileSet::new();
+        file_set.insert(file_id, vfs_path);
+
+        // Update SourceRoot with FileSet
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(source_root_id, source_root);
+
+        // Ensure file is associated with SourceRoot
         db.set_file_source_root(file_id, source_root_id);
 
         // Set file content (triggers incremental recomputation)
