@@ -263,7 +263,7 @@ mod tests {
                     "Ref",
                     SdblType::reference(MdoType::Catalog, "Валюты"),
                 ),
-                FieldDef::standard("Код", "Code", SdblType::String),
+                FieldDef::standard("Код", "Code", SdblType::string()),
             ],
         );
 
@@ -275,7 +275,7 @@ mod tests {
 
         // Resolve column
         let ty = scope.resolve_column_type(Some("в"), "Код");
-        assert_eq!(ty, SdblType::String);
+        assert_eq!(ty, SdblType::string());
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
         let mut scope = Scope::new();
 
         let outer_table =
-            make_table("Outer", None, vec![FieldDef::new("Field1", SdblType::String)]);
+            make_table("Outer", None, vec![FieldDef::new("Field1", SdblType::string())]);
         scope.add_table(outer_table);
 
         // Push subquery scope
@@ -313,7 +313,7 @@ mod tests {
             "Table1",
             Some("T1"),
             vec![
-                FieldDef::new("UniqueField", SdblType::String),
+                FieldDef::new("UniqueField", SdblType::string()),
                 FieldDef::new("SharedField", SdblType::number()),
             ],
         );
@@ -328,7 +328,7 @@ mod tests {
 
         // Unique field resolves OK
         let ty = scope.resolve_column_type(None, "UniqueField");
-        assert_eq!(ty, SdblType::String);
+        assert_eq!(ty, SdblType::string());
 
         // Shared field is ambiguous
         let ty = scope.resolve_column_type(None, "SharedField");

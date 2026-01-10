@@ -18,7 +18,10 @@ pub enum SdblType {
     /// String (Строка).
     ///
     /// Used for: Код, Наименование, Комментарий, etc.
-    String,
+    String {
+        /// Maximum string length.
+        length: Option<u32>,
+    },
 
     /// Number (Число).
     ///
@@ -91,6 +94,16 @@ pub enum SdblType {
 }
 
 impl SdblType {
+    /// Create a String type with no length info.
+    pub fn string() -> Self {
+        Self::String { length: None }
+    }
+
+    /// Create a String type with specified length.
+    pub fn string_with_length(length: u32) -> Self {
+        Self::String { length: Some(length) }
+    }
+
     /// Create a Number type with no precision/scale info.
     pub fn number() -> Self {
         Self::Number { precision: None, scale: None }
@@ -111,7 +124,7 @@ impl SdblType {
         use bsl_metadata::AttributeType;
 
         match attr_type {
-            AttributeType::String { .. } => Self::String,
+            AttributeType::String { length } => Self::String { length: *length },
             AttributeType::Number { precision, scale } => {
                 Self::Number { precision: Some(*precision), scale: Some(*scale) }
             }
@@ -172,7 +185,7 @@ impl SdblType {
 
             // Same types are compatible
             (Boolean, Boolean) => true,
-            (String, String) => true,
+            (String { .. }, String { .. }) => true,
             (Number { .. }, Number { .. }) => true,
             (Date, Date) | (DateTime, DateTime) | (Date, DateTime) | (DateTime, Date) => true,
             (Null, _) | (_, Null) => true,
@@ -198,7 +211,13 @@ impl std::fmt::Display for SdblType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Boolean => write!(f, "Булево"),
-            Self::String => write!(f, "Строка"),
+            Self::String { length } => {
+                write!(f, "Строка")?;
+                if let Some(len) = length {
+                    write!(f, "({})", len)?;
+                }
+                Ok(())
+            }
             Self::Number { precision, scale } => {
                 write!(f, "Число")?;
                 if let (Some(p), Some(s)) = (precision, scale) {
@@ -262,7 +281,8 @@ mod tests {
     #[test]
     fn test_sdbl_type_display() {
         assert_eq!(SdblType::Boolean.to_string(), "Булево");
-        assert_eq!(SdblType::String.to_string(), "Строка");
+        assert_eq!(SdblType::string().to_string(), "Строка");
+        assert_eq!(SdblType::string_with_length(17).to_string(), "Строка(17)");
         assert_eq!(SdblType::number().to_string(), "Число");
         assert_eq!(SdblType::number_with_precision(10, 2).to_string(), "Число(10, 2)");
         assert_eq!(SdblType::Date.to_string(), "Дата");
@@ -283,10 +303,10 @@ mod tests {
         assert_eq!(
             SdblType::DefinedType {
                 name: "ОтметкаВремени".to_string(),
-                underlying_type: Some(Box::new(SdblType::String))
+                underlying_type: Some(Box::new(SdblType::string_with_length(17)))
             }
             .to_string(),
-            "ОпределяемыйТип.ОтметкаВремени (Строка)"
+            "ОпределяемыйТип.ОтметкаВремени (Строка(17))"
         );
 
         assert_eq!(SdblType::Unknown.to_string(), "Неизвестно");
@@ -304,21 +324,21 @@ mod tests {
         assert!(SdblType::Boolean.is_compatible_with(&SdblType::Boolean));
         assert!(SdblType::number().is_compatible_with(&SdblType::number_with_precision(10, 2)));
         assert!(SdblType::Date.is_compatible_with(&SdblType::DateTime));
-        assert!(SdblType::Unknown.is_compatible_with(&SdblType::String));
+        assert!(SdblType::Unknown.is_compatible_with(&SdblType::string()));
         assert!(
             SdblType::Null.is_compatible_with(&SdblType::Number { precision: None, scale: None })
         );
 
         // DefinedType is compatible with anything
         assert!(SdblType::DefinedType { name: "Test".to_string(), underlying_type: None }
-            .is_compatible_with(&SdblType::String));
+            .is_compatible_with(&SdblType::string()));
         assert!(SdblType::Boolean.is_compatible_with(&SdblType::DefinedType {
             name: "Test".to_string(),
             underlying_type: None
         }));
 
-        assert!(!SdblType::Boolean.is_compatible_with(&SdblType::String));
-        assert!(!SdblType::number().is_compatible_with(&SdblType::String));
+        assert!(!SdblType::Boolean.is_compatible_with(&SdblType::string()));
+        assert!(!SdblType::number().is_compatible_with(&SdblType::string()));
     }
 
     #[test]
@@ -327,7 +347,7 @@ mod tests {
         assert!(SdblType::number_with_precision(10, 2).is_numeric());
         assert!(SdblType::Aggregate(Box::new(SdblType::number())).is_numeric());
 
-        assert!(!SdblType::String.is_numeric());
+        assert!(!SdblType::string().is_numeric());
         assert!(!SdblType::Boolean.is_numeric());
     }
 }

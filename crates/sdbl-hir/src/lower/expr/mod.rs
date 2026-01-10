@@ -152,7 +152,7 @@ impl<'a> LoweringContext<'a> {
         let (value, ty) = if text.starts_with('"') || text.starts_with('\'') {
             (
                 LiteralValue::String(text.trim_matches(|c| c == '"' || c == '\'').to_string()),
-                SdblType::String,
+                SdblType::string(),
             )
         } else if text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("истина") {
             (LiteralValue::Boolean(true), SdblType::Boolean)
@@ -199,7 +199,7 @@ impl<'a> LoweringContext<'a> {
         let text = node.text().to_string();
         ExprHir::Literal {
             value: LiteralValue::String(text),
-            ty: SdblType::String,
+            ty: SdblType::string(),
             range: node.text_range(),
         }
     }
@@ -319,7 +319,7 @@ impl<'a> LoweringContext<'a> {
             | FunctionKind::Ltrim
             | FunctionKind::Rtrim
             | FunctionKind::Concat
-            | FunctionKind::Presentation => SdblType::String,
+            | FunctionKind::Presentation => SdblType::string(),
 
             // Date part functions return Number
             FunctionKind::Year

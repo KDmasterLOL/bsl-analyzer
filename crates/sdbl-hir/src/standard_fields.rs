@@ -37,8 +37,8 @@ pub fn standard_fields_for_mdo(mdo_type: MdoType) -> Vec<FieldDef> {
 fn catalog_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown), // Type depends on specific catalog
-        FieldDef::standard("Код", "Code", SdblType::String),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Код", "Code", SdblType::string()),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("Родитель", "Parent", SdblType::Unknown), // Ref to same catalog
         FieldDef::standard("Владелец", "Owner", SdblType::Unknown),  // Ref to owner type
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
@@ -51,7 +51,7 @@ fn catalog_standard_fields() -> Vec<FieldDef> {
 fn document_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Номер", "Number", SdblType::String),
+        FieldDef::standard("Номер", "Number", SdblType::string()),
         FieldDef::standard("Дата", "Date", SdblType::DateTime),
         FieldDef::standard("Проведен", "Posted", SdblType::Boolean),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
@@ -75,7 +75,7 @@ fn accumulation_register_standard_fields() -> Vec<FieldDef> {
         FieldDef::standard("Регистратор", "Recorder", SdblType::Unknown),
         FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
         FieldDef::standard("Активность", "Active", SdblType::Boolean),
-        FieldDef::standard("ВидДвижения", "RecordType", SdblType::String), // Приход/Расход
+        FieldDef::standard("ВидДвижения", "RecordType", SdblType::string()), // Приход/Расход
     ]
 }
 
@@ -109,8 +109,8 @@ fn calculation_register_standard_fields() -> Vec<FieldDef> {
 fn chart_of_characteristic_types_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Код", "Code", SdblType::String),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Код", "Code", SdblType::string()),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("Родитель", "Parent", SdblType::Unknown),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
         FieldDef::standard("Предопределенный", "Predefined", SdblType::Boolean),
@@ -123,12 +123,12 @@ fn chart_of_characteristic_types_standard_fields() -> Vec<FieldDef> {
 fn chart_of_accounts_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Код", "Code", SdblType::String),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Код", "Code", SdblType::string()),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("Родитель", "Parent", SdblType::Unknown),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
         FieldDef::standard("Предопределенный", "Predefined", SdblType::Boolean),
-        FieldDef::standard("Порядок", "Order", SdblType::String),
+        FieldDef::standard("Порядок", "Order", SdblType::string()),
         FieldDef::standard("ВидСчета", "Type", SdblType::Unknown),
         FieldDef::standard("Забалансовый", "OffBalance", SdblType::Boolean),
     ]
@@ -138,8 +138,8 @@ fn chart_of_accounts_standard_fields() -> Vec<FieldDef> {
 fn chart_of_calculation_types_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Код", "Code", SdblType::String),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Код", "Code", SdblType::string()),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
         FieldDef::standard("Предопределенный", "Predefined", SdblType::Boolean),
     ]
@@ -149,7 +149,7 @@ fn chart_of_calculation_types_standard_fields() -> Vec<FieldDef> {
 fn business_process_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Номер", "Number", SdblType::String),
+        FieldDef::standard("Номер", "Number", SdblType::string()),
         FieldDef::standard("Дата", "Date", SdblType::DateTime),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
         FieldDef::standard("Стартован", "Started", SdblType::Boolean),
@@ -161,10 +161,10 @@ fn business_process_standard_fields() -> Vec<FieldDef> {
 fn task_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Номер", "Number", SdblType::String),
+        FieldDef::standard("Номер", "Number", SdblType::string()),
         FieldDef::standard("Дата", "Date", SdblType::DateTime),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("Выполнена", "Executed", SdblType::Boolean),
         FieldDef::standard("БизнесПроцесс", "BusinessProcess", SdblType::Unknown),
         FieldDef::standard("ТочкаМаршрута", "RoutePoint", SdblType::Unknown),
@@ -183,8 +183,8 @@ fn enum_standard_fields() -> Vec<FieldDef> {
 fn exchange_plan_standard_fields() -> Vec<FieldDef> {
     vec![
         FieldDef::standard("Ссылка", "Ref", SdblType::Unknown),
-        FieldDef::standard("Код", "Code", SdblType::String),
-        FieldDef::standard("Наименование", "Description", SdblType::String),
+        FieldDef::standard("Код", "Code", SdblType::string()),
+        FieldDef::standard("Наименование", "Description", SdblType::string()),
         FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean),
         FieldDef::standard("Предопределенный", "Predefined", SdblType::Boolean),
         FieldDef::standard("ЭтотУзел", "ThisNode", SdblType::Boolean),
