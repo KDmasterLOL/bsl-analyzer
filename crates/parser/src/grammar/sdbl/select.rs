@@ -442,8 +442,8 @@ fn is_identifier_token(p: &Parser) -> bool {
 
 /// Check if current token is a clause keyword (FROM, WHERE, GROUP, etc.)
 ///
-/// Used to avoid consuming keywords when parsing aliases
-fn is_clause_keyword(p: &Parser) -> bool {
+/// Used to avoid consuming keywords when parsing aliases and for error recovery.
+pub(super) fn is_clause_keyword(p: &Parser) -> bool {
     at_sdbl_keyword(p, "SELECT", "ВЫБРАТЬ")
         || at_sdbl_keyword(p, "FROM", "ИЗ")
         || at_sdbl_keyword(p, "WHERE", "ГДЕ")
@@ -659,5 +659,74 @@ fn order_by_item(p: &mut Parser) {
     {
         p.bump(); // Consume ASC/DESC
         p.skip_trivia();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_sdbl;
+
+    #[test]
+    fn test_error_recovery_incomplete_field_list() {
+        // Test that FROM clause is parsed even when SELECT field list is incomplete
+        let input = r#"ВЫБРАТЬ
+    Очередь.
+ИЗ
+    РегистрСведений.ОчередьОбновленияКэширующихДанных КАК Очередь"#;
+
+        let parse = parse_sdbl(input);
+        let tree_text = format!("{:#?}", parse.syntax_node());
+
+        // Should have ERROR node marking incomplete field
+        assert!(
+            tree_text.contains("ERROR"),
+            "Expected ERROR node for incomplete field.\nTree: {}",
+            tree_text
+        );
+
+        // But FROM clause should still be parsed!
+        assert!(
+            tree_text.contains("SDBL_FROM_CLAUSE"),
+            "FROM clause should be parsed despite incomplete field list.\nTree: {}",
+            tree_text
+        );
+
+        // Should have SDBL_DATA_SOURCE (table reference)
+        assert!(
+            tree_text.contains("SDBL_DATA_SOURCE"),
+            "Data source should be in FROM clause.\nTree: {}",
+            tree_text
+        );
+    }
+
+    #[test]
+    fn test_error_recovery_complete_query_after_incomplete_field() {
+        // More complete test: incomplete field, but FROM and WHERE both present
+        let input = r#"ВЫБРАТЬ
+    Очередь.
+ИЗ
+    РегистрСведений.Тест КАК Очередь
+ГДЕ
+    Очередь.Попыток < 3"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should have ERROR node for incomplete field
+        assert!(
+            text.contains("ERROR"),
+            "Expected ERROR node for incomplete field.\nTree: {}",
+            text
+        );
+
+        // Should have FROM clause
+        assert!(text.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", text);
+
+        // Should have WHERE clause
+        assert!(
+            text.contains("SDBL_WHERE_CLAUSE"),
+            "WHERE clause should be parsed.\nTree: {}",
+            text
+        );
     }
 }

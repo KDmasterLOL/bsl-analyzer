@@ -436,8 +436,19 @@ fn column_or_function(p: &mut Parser) {
         // Column reference: Table.Column or MDO.Table.Column
         while p.eat(TokenKind::Dot) {
             p.skip_trivia();
+
+            // ERROR RECOVERY: Check if next token is a clause keyword
+            // This prevents "Очередь.\nИЗ" from parsing ИЗ as field name
+            if super::select::is_clause_keyword(p) {
+                // Mark incomplete column ref as error WITHOUT consuming the keyword
+                // This allows FROM/WHERE/etc. parser to see and handle the keyword
+                let err = p.start();
+                err.complete(p, NodeKind::Error); // Empty ERROR node marking the issue
+                break; // Stop parsing column ref, let clause parser handle it
+            }
+
             if !p.expect(TokenKind::Ident) {
-                // Error recovery
+                // Error recovery (p.expect already created ERROR node)
                 break;
             }
             p.skip_trivia();
