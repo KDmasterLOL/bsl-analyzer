@@ -7,7 +7,7 @@
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 use bsl_metadata::{Configuration, MdoType};
 use ide_db::RootDatabase;
-use sdbl_hir::{detect_context, detect_sdbl_at_position, Scope, SdblCompletionContext};
+use sdbl_hir::{detect_context, detect_sdbl_at_position, Scope, SdblCompletionContext, SdblType};
 
 /// Main SDBL completion entry point.
 ///
@@ -339,7 +339,6 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
         .filter(|col| col.column_name.as_str().to_lowercase().starts_with(&prefix_lower))
         .map(|col| {
             let field_name = col.column_name.as_str().to_string();
-            let type_desc = col.ty.to_string();
             let standard_marker = if col.is_standard { " (стандартный)" } else { "" };
 
             tracing::info!(
@@ -348,12 +347,27 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
                 "including field in completion"
             );
 
+            // For composite types, show multiline list in documentation
+            let (detail, documentation) = if let SdblType::Composite { types } = &col.ty {
+                // Composite type - show count in detail, multiline list in documentation
+                let detail =
+                    format!("Составной тип ({} вариантов){}", types.len(), standard_marker);
+                let types_list = types.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("\n");
+                let doc = format!("{}\n\nТаблица: {}", types_list, col.table_name.as_str());
+                (detail, doc)
+            } else {
+                // Single type - show type in detail
+                let detail = format!("{}{}", col.ty, standard_marker);
+                let doc = format!("Таблица: {}", col.table_name.as_str());
+                (detail, doc)
+            };
+
             CompletionItem {
                 label: field_name.clone(),
-                detail: Some(format!("{}{}", type_desc, standard_marker)),
+                detail: Some(detail),
                 kind: CompletionItemKind::Field,
                 insert_text: field_name,
-                documentation: Some(format!("Таблица: {}", col.table_name.as_str())),
+                documentation: Some(documentation),
             }
         })
         .collect();

@@ -417,18 +417,15 @@ impl std::fmt::Display for AttributeType {
                 write!(f, "ОпределяемыйТип.{}", name)
             }
             Self::Composite { types } => {
-                // Display all types on separate lines at same level
+                // Display brief description for composite types
                 if types.is_empty() {
                     write!(f, "Составной тип (пусто)")
                 } else if types.len() == 1 {
-                    // Single type - just display it
+                    // Single type - just show it
                     write!(f, "{}", types[0])
                 } else {
-                    // Multiple types - all on new lines at same level
-                    for ty in types.iter() {
-                        write!(f, "\n{}", ty)?;
-                    }
-                    Ok(())
+                    // Multiple types - show count
+                    write!(f, "Составной тип ({} вариантов)", types.len())
                 }
             }
             Self::Unknown => write!(f, "Неизвестно"),
@@ -599,7 +596,7 @@ mod tests {
         };
         assert_eq!(single.to_string(), "Перечисление.ВидДействия");
 
-        // Multiple types composite should show all types with separator
+        // Multiple types composite should show count
         let composite = AttributeType::Composite {
             types: vec![
                 AttributeType::Ref {
@@ -622,19 +619,6 @@ mod tests {
         };
 
         let display = composite.to_string();
-        println!("\nComposite type display (showing as would appear after 'Тип: '):{}", display);
-
-        // Verify all 4 types are present
-        assert!(display.contains("ВидыУсловийОтбораИсходящихПисем"));
-        assert!(display.contains("ВидыДействийПриОбработкеИсходящихПисем"));
-        assert!(display.contains("ВидыУсловийОтбораВходящихПисем"));
-        assert!(display.contains("ВидыДействийПриОбработкеВходящихПисем"));
-
-        // Verify newlines are present (multiline format)
-        assert!(display.contains('\n'));
-
-        // Verify exactly 4 non-empty lines (each type on separate line)
-        let lines: Vec<&str> = display.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines.len(), 4, "Expected 4 non-empty lines in composite type display");
+        assert_eq!(display, "Составной тип (4 вариантов)");
     }
 }
