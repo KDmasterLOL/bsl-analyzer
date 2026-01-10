@@ -992,8 +992,9 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
         // Reference types: "cfg:CatalogRef.Name", "cfg:DocumentRef.Name"
         type_str if type_str.starts_with("cfg:") => parse_reference_type(type_str),
 
-        // UUID, ValueStorage, etc.
-        "v8:UUID" | "v8:ValueStorage" => Ok(AttributeType::Unknown),
+        // Special types
+        "v8:UUID" => Ok(AttributeType::Uuid),
+        "v8:ValueStorage" => Ok(AttributeType::ValueStorage),
 
         _ => {
             tracing::warn!(type_str = %type_str, "unknown type");

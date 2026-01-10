@@ -50,6 +50,14 @@ pub enum SdblType {
     /// Can hold reference to any metadata object.
     AnyRef,
 
+    /// UUID (УникальныйИдентификатор).
+    Uuid,
+
+    /// Value storage (ХранилищеЗначения).
+    ///
+    /// Binary storage for arbitrary data.
+    ValueStorage,
+
     /// Value table (ТаблицаЗначений).
     ///
     /// Result of subquery or temporary table.
@@ -103,8 +111,8 @@ impl SdblType {
                 Self::Ref(MdoRef { mdo_type: *mdo_type, name: name.clone() })
             }
             AttributeType::AnyRef => Self::AnyRef,
-            // UUID and ValueStorage - treat as Unknown for now
-            AttributeType::Uuid | AttributeType::ValueStorage => Self::Unknown,
+            AttributeType::Uuid => Self::Uuid,
+            AttributeType::ValueStorage => Self::ValueStorage,
             AttributeType::Unknown => Self::Unknown,
         }
     }
@@ -159,7 +167,9 @@ impl SdblType {
             (AnyRef, Ref(_)) | (Ref(_), AnyRef) => true,
             (AnyRef, AnyRef) => true,
 
-            // ValueTable comparison
+            // Special types - only compatible with themselves
+            (Uuid, Uuid) => true,
+            (ValueStorage, ValueStorage) => true,
             (ValueTable, ValueTable) => true,
 
             _ => false,
@@ -183,6 +193,8 @@ impl std::fmt::Display for SdblType {
             Self::DateTime => write!(f, "ДатаВремя"),
             Self::Ref(mdo_ref) => write!(f, "{}", mdo_ref),
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
+            Self::Uuid => write!(f, "УникальныйИдентификатор"),
+            Self::ValueStorage => write!(f, "ХранилищеЗначения"),
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
