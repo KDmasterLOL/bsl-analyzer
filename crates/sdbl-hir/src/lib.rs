@@ -727,37 +727,59 @@ fn is_mdo_type(s: &str) -> bool {
 /// parse_table_alias_field("ВЫБРАТЬ Справочник.Валюты") -> None (MDO type, not alias)
 /// ```
 fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
-    // Get last whitespace-separated word
-    let words: Vec<&str> = text_before.split_whitespace().collect();
-    let last_word = words.last()?;
+    // Walk backwards from cursor to find "Alias.Field" pattern
+    // This correctly handles cases like "Исполнение.," where comma follows the dot
 
-    // Check if it contains a dot (otherwise not a path)
-    if !last_word.contains('.') {
-        return None;
+    let chars: Vec<char> = text_before.chars().collect();
+    let mut pos = chars.len();
+
+    // Skip trailing punctuation and whitespace (e.g., skip ',' in "Исполнение.,")
+    while pos > 0
+        && !chars[pos - 1].is_alphanumeric()
+        && chars[pos - 1] != '_'
+        && chars[pos - 1] != '.'
+    {
+        pos -= 1;
     }
 
-    // Split by dots
-    let parts: Vec<&str> = last_word.split('.').collect();
+    // Collect field prefix (identifier chars before cursor)
+    let field_start = pos;
+    while pos > 0 && (chars[pos - 1].is_alphanumeric() || chars[pos - 1] == '_') {
+        pos -= 1;
+    }
+    let field_prefix: String = chars[pos..field_start].iter().collect();
 
-    // We only handle 2-part patterns: "Alias.Field"
-    if parts.len() != 2 {
+    // Expect a dot
+    if pos == 0 || chars[pos - 1] != '.' {
         return None;
     }
+    pos -= 1; // skip dot
 
-    let potential_alias = parts[0];
-    let field_prefix = parts[1];
+    // Collect alias (identifier before dot)
+    let alias_end = pos;
+    while pos > 0 && (chars[pos - 1].is_alphanumeric() || chars[pos - 1] == '_') {
+        pos -= 1;
+    }
+    let potential_alias: String = chars[pos..alias_end].iter().collect();
+
+    // Check if what's before alias is whitespace or start of text
+    // (to ensure we got the complete alias, not middle of a word or MDO path)
+    // Reject if:
+    // - Previous char is alphanumeric (middle of word)
+    // - Previous char is '.' (MDO path like "Справочник.Номенклатура.")
+    if pos > 0 && (chars[pos - 1].is_alphanumeric() || chars[pos - 1] == '.') {
+        return None;
+    }
 
     // Check heuristics for table alias:
     // 1. Not empty
     // 2. Starts with uppercase (Т, Т1, Т2, Очередь, Items, ДескрипторыДоступаРегистров, etc.)
     // 3. NOT an MDO type keyword (Справочник, Документ, etc.)
-    //
-    // Note: No length limit - if someone wants to use a very long alias name, that's their choice
     if !potential_alias.is_empty()
         && potential_alias.chars().next()?.is_uppercase()
-        && !is_mdo_type(potential_alias)
+        && !is_mdo_type(&potential_alias)
     {
-        return Some((potential_alias.to_string(), field_prefix.to_string()));
+        return Some((potential_alias, field_prefix));
     }
 
     None
