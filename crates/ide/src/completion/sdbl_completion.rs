@@ -39,8 +39,8 @@ pub(super) fn sdbl_completions(
         "detected SDBL query"
     );
 
-    // Try to get Scope (may be None for invalid queries or queries without tables)
-    let scope = get_sdbl_scope(db, file_id);
+    // Try to get Scope for the query at cursor position
+    let scope = get_sdbl_scope(db, file_id, &query_info);
     if scope.is_some() {
         tracing::debug!("successfully built Scope from query HIR");
     } else {
@@ -801,17 +801,35 @@ fn get_configuration(
 /// - The file doesn't exist
 /// - No SDBL queries found in the file
 /// - The query couldn't be lowered to HIR (e.g., syntax errors)
-fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> {
+fn get_sdbl_scope(
+    db: &dyn RootDatabase,
+    file_id: vfs::FileId,
+    query_info: &sdbl_hir::SdblQueryInfo,
+) -> Option<Scope> {
     // 1. Get lowered HIR through Salsa query (CACHED!)
     let sdbl_hirs = db.sdbl_hir_in_file(file_id);
 
+    let offset_in_query = query_info.offset_in_query;
+
     tracing::info!(
         sdbl_hirs_count = sdbl_hirs.len(),
+        offset_in_query = u32::from(offset_in_query),
         "get_sdbl_scope: retrieved SDBL HIRs from cache"
     );
 
-    // 2. Get the first query (TODO: match by cursor position)
-    let (_expr_id, sdbl_lower_result) = sdbl_hirs.first()?;
+    // 2. Find the query that contains the cursor position (offset within SDBL query)
+    let (_expr_id, sdbl_lower_result) = sdbl_hirs.iter().find(|(_expr_id, lower_result)| {
+        let range = lower_result.hir.range;
+        let contains = range.contains(offset_in_query);
+        tracing::debug!(
+            range_start = u32::from(range.start()),
+            range_end = u32::from(range.end()),
+            offset_in_query = u32::from(offset_in_query),
+            contains = contains,
+            "checking if HIR range contains offset_in_query"
+        );
+        contains
+    })?;
 
     tracing::info!(
         from_tables_count = sdbl_lower_result.hir.from.len(),
@@ -859,6 +877,7 @@ fn get_sdbl_scope(db: &dyn RootDatabase, file_id: vfs::FileId) -> Option<Scope> 
 mod tests {
     use super::*;
     use bsl_metadata::MetadataObject;
+    use syntax::TextSize;
 
     fn setup_test_configuration() -> Configuration {
         // Create test configuration with sample metadata
@@ -1403,7 +1422,14 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id);
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        );
 
         // Should successfully build Scope
         assert!(scope.is_some(), "Should build Scope for valid query");
@@ -1448,7 +1474,14 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id);
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        );
 
         // Should successfully build Scope
         assert!(scope.is_some(), "Should build Scope for query with JOIN");
@@ -1495,7 +1528,14 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id);
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        );
 
         // Should return None for invalid query (or Some with empty tables)
         // Depending on how HIR lowering handles errors, this might be None or Some(empty)
@@ -1539,7 +1579,14 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id);
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        );
 
         // Should return None (no SDBL queries in file)
         assert!(scope.is_none(), "Should return None when no SDBL queries found");
@@ -1574,7 +1621,14 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id);
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        );
         assert!(scope.is_some(), "Should build Scope for query with alias");
 
         let scope = scope.unwrap();
@@ -1618,7 +1672,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with prefix "Код"
         let items = complete_fields_by_alias(&scope, "Т", "Код");
@@ -1655,7 +1717,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test case-insensitive filtering: lowercase prefix should match uppercase field
         let items_lower = complete_fields_by_alias(&scope, "Т", "код");
@@ -1699,7 +1769,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion for first alias (Т1)
         let items_t1 = complete_fields_by_alias(&scope, "Т1", "");
@@ -1747,7 +1825,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with non-existent prefix
         let items = complete_fields_by_alias(&scope, "Т", "Xyz");
@@ -1906,7 +1992,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with no prefix (should show all aliases)
         let items = complete_table_aliases(&scope, "");
@@ -1950,7 +2044,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with prefix "Т" (should filter to Т1 and Т2)
         let items = complete_table_aliases(&scope, "Т");
@@ -1993,7 +2095,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with no prefix (should show both aliases)
         let items = complete_table_aliases(&scope, "");
@@ -2039,7 +2149,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test case-insensitive filtering
         let items_upper = complete_table_aliases(&scope, "Т");
@@ -2078,7 +2196,15 @@ mod tests {
         );
 
         // Get Scope
-        let scope = get_sdbl_scope(&db, file_id).unwrap();
+        let scope = get_sdbl_scope(
+            &db,
+            file_id,
+            &sdbl_hir::SdblQueryInfo {
+                query_text: String::new(),
+                offset_in_query: TextSize::from(0),
+            },
+        )
+        .unwrap();
 
         // Test completion with non-matching prefix
         let items = complete_table_aliases(&scope, "Х");
