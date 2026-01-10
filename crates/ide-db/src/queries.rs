@@ -271,10 +271,13 @@ pub fn all_sdbl_in_file_query<'db>(
     for (i, (_expr_id, query_info)) in result.iter().enumerate() {
         let has_ast = query_info.query_ast.is_some();
         let has_errors = query_info.query_ast.as_ref().map(|ast| ast.has_errors()).unwrap_or(false);
-        let query_text_preview = if query_info.query_text.len() > 100 {
-            format!("{}...", &query_info.query_text[..100])
+
+        // Safe truncation respecting UTF-8 char boundaries
+        let query_text_preview: String = query_info.query_text.chars().take(100).collect();
+        let query_text_preview = if query_info.query_text.len() > query_text_preview.len() {
+            format!("{}...", query_text_preview)
         } else {
-            query_info.query_text.clone()
+            query_text_preview
         };
 
         tracing::info!(
