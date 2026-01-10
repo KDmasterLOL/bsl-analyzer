@@ -76,6 +76,34 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
         }
     }
 
+    // macOS: /opt/1cv8/*/
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(entries) = fs::read_dir("/opt/1cv8") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip common, conf, etc. - only process version directories
+                if !path.is_dir() {
+                    continue;
+                }
+
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name == "common" || dir_name == "conf" {
+                    continue;
+                }
+
+                let shcntx_path = path.join("shcntx_ru.hbk");
+                let shlang_path = path.join("shlang_ru.hbk");
+
+                if shcntx_path.exists() && shlang_path.exists() {
+                    println!("cargo:warning=Found 1C help files at: {}", path.display());
+                    return Some((shcntx_path, shlang_path));
+                }
+            }
+        }
+    }
+
     // Windows: C:\Program Files\1cv8\*\
     #[cfg(target_os = "windows")]
     {
