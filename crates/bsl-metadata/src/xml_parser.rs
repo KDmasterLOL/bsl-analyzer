@@ -2013,4 +2013,40 @@ mod tests {
             _ => panic!("Expected String type, got {:?}", defined_type.underlying_type()),
         }
     }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_parse_register_from_doc3() {
+        // Test with real register from doc3 that has composite types
+        let xml_path = concat!(
+            env!("HOME"),
+            "/src/doc3/src/cf/InformationRegisters/ЗначенияДействийПриОбработкеПисем.xml"
+        );
+
+        // Skip if file doesn't exist
+        if !std::path::Path::new(xml_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", xml_path);
+            return;
+        }
+
+        let xml = std::fs::read_to_string(xml_path).expect("Failed to read XML file");
+        let result = parse_information_register_xml(&xml);
+
+        match result {
+            Ok(register) => {
+                println!("Successfully parsed register: {}", register.name());
+                println!("Dimensions: {}", register.dimensions().len());
+                println!("Resources: {}", register.resources().len());
+                println!("Attributes: {}", register.attributes().len());
+
+                // Print resource types
+                for resource in register.resources() {
+                    println!("Resource: {} - Type: {:?}", resource.name(), resource.attr_type());
+                }
+            }
+            Err(e) => {
+                panic!("Failed to parse register: {:?}", e);
+            }
+        }
+    }
 }

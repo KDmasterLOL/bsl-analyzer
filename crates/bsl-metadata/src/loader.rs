@@ -303,8 +303,10 @@ fn load_calculation_registers(dir: &Path, config: &mut Configuration) -> Result<
 /// Generic register loader for all 4 register types
 ///
 /// Designer format structure:
-/// - XML: `<RegisterType>/<Name>.xml` (NEXT TO folder)
-/// - Code: `<RegisterType>/<Name>/Ext/ManagerModule.bsl` (inside Ext/)
+/// - XML: `<RegisterType>/<Name>.xml` (NEXT TO folder OR standalone)
+/// - Code: `<RegisterType>/<Name>/Ext/ManagerModule.bsl` (inside Ext/, optional)
+///
+/// Note: Registers without code (no Ext/ folder) will only have XML files.
 fn load_registers<F>(dir: &Path, config: &mut Configuration, parser: F) -> Result<()>
 where
     F: Fn(&str) -> Result<crate::register::Register>,
@@ -316,27 +318,34 @@ where
         return Ok(());
     }
 
+    // Collect all XML files (both with and without folders)
+    let mut xml_files = std::collections::HashSet::new();
+
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let register_dir = entry.path();
+        let path = entry.path();
 
-        // Look for directories
-        if register_dir.is_dir() {
-            if let Some(name) = register_dir.file_name().and_then(|n| n.to_str()) {
-                // XML is NEXT TO folder: <RegisterType>/<Name>.xml
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let register = parser(&xml)?;
-                    config.add_register(register);
-
-                    tracing::debug!(
-                        register = %name,
-                        "loaded register"
-                    );
-                }
+        // If it's a .xml file, add it to the set
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
+            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                xml_files.insert(name.to_string());
             }
+        }
+    }
+
+    // Load each register from its XML file
+    for name in xml_files {
+        let xml_path = dir.join(format!("{}.xml", name));
+
+        if xml_path.exists() {
+            let xml = fs::read_to_string(&xml_path)?;
+            let register = parser(&xml)?;
+            config.add_register(register);
+
+            tracing::debug!(
+                register = %name,
+                "loaded register"
+            );
         }
     }
 
@@ -526,6 +535,83 @@ mod tests {
             assert_eq!(cat.tabular_sections.len(), 1, "Expected 1 tabular section");
             let ts = &cat.tabular_sections[0];
             assert_eq!(ts.name(), "ТабличнаяЧасть1");
+        }
+    }
+
+    /// Test loading from doc3 project (only run when doc3 is available)
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_load_from_doc3_project() {
+        let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
+
+        if !std::path::Path::new(doc3_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", doc3_path);
+            return;
+        }
+
+        let config = load_from_directory(doc3_path).expect("Failed to load doc3 configuration");
+
+        println!("Total registers loaded: {}", config.registers().len());
+
+        // Find InformationRegisters
+        let info_registers: Vec<_> =
+            config.registers().iter().filter(|r| r.is_information_register()).collect();
+
+        println!("InformationRegisters count: {}", info_registers.len());
+
+        // List first 20 registers to see what's loaded
+        println!("\nFirst 20 InformationRegisters:");
+        for (i, reg) in info_registers.iter().take(20).enumerate() {
+            println!("  {}: {}", i + 1, reg.name());
+        }
+
+        // Search for registers containing "Значения" or "Действий" or "Писем"
+        println!("\nRegisters containing 'Значения':");
+        for reg in info_registers.iter() {
+            if reg.name().contains("Значения") {
+                println!("  - {}", reg.name());
+            }
+        }
+
+        println!("\nRegisters containing 'Действий':");
+        for reg in info_registers.iter() {
+            if reg.name().contains("Действий") {
+                println!("  - {}", reg.name());
+            }
+        }
+
+        println!("\nRegisters containing 'Писем':");
+        for reg in info_registers.iter() {
+            if reg.name().contains("Писем") {
+                println!("  - {}", reg.name());
+            }
+        }
+
+        // Look for the specific register user asked about
+        let target_register = config.find_register("ЗначенияДействийПриОбработкеПисем");
+
+        if let Some(register) = target_register {
+            println!("✅ Found register: {}", register.name());
+            println!("  Type: {:?}", register.mdo_type());
+            println!("  Dimensions: {}", register.dimensions().len());
+            println!("  Resources: {}", register.resources().len());
+            println!("  Attributes: {}", register.attributes().len());
+
+            for dim in register.dimensions() {
+                println!("    Dimension: {}", dim.name());
+            }
+
+            for res in register.resources() {
+                println!("    Resource: {} - Type: {:?}", res.name(), res.attr_type());
+            }
+
+            for attr in register.attributes() {
+                println!("    Attribute: {} - Type: {:?}", attr.name(), attr.attr_type());
+            }
+
+            assert!(register.is_information_register(), "Should be InformationRegister");
+        } else {
+            panic!("❌ Register 'ЗначенияДействийПриОбработкеПисем' not found in loaded configuration!");
         }
     }
 }

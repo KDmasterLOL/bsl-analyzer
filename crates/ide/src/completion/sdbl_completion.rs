@@ -1028,6 +1028,30 @@ mod tests {
             document_items.iter().any(|item| item.label == "Документ1"),
             "Expected Документ1 in completion items"
         );
+
+        // Test InformationRegister completion (registers without folders should also work)
+        let register_items = complete_mdo_objects(&config, MdoType::InformationRegister, "");
+
+        assert!(
+            !register_items.is_empty(),
+            "Expected at least 1 InformationRegister completion item, got {}",
+            register_items.len()
+        );
+
+        assert!(
+            register_items.iter().any(|item| item.label == "РегистрСведений1"),
+            "Expected РегистрСведений1 in completion items"
+        );
+
+        // Check register item structure
+        let register1 = register_items
+            .iter()
+            .find(|item| item.label == "РегистрСведений1")
+            .expect("РегистрСведений1 not found");
+
+        assert_eq!(register1.detail, Some("РегистрСведений.РегистрСведений1".to_string()));
+        assert_eq!(register1.kind, CompletionItemKind::MdoObject);
+        assert_eq!(register1.insert_text, "РегистрСведений1");
     }
 
     // --- Tests for nested elements completion ---
