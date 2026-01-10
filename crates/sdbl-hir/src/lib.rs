@@ -748,11 +748,12 @@ fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
     let field_prefix = parts[1];
 
     // Check heuristics for table alias:
-    // 1. Reasonable identifier length (1-20 characters) - covers both short (Т, Т1) and long (Очередь) aliases
-    // 2. Starts with uppercase (Т, Т1, Т2, Очередь, Items)
+    // 1. Not empty
+    // 2. Starts with uppercase (Т, Т1, Т2, Очередь, Items, ДескрипторыДоступаРегистров, etc.)
     // 3. NOT an MDO type keyword (Справочник, Документ, etc.)
+    //
+    // Note: No length limit - if someone wants to use a very long alias name, that's their choice
     if !potential_alias.is_empty()
-        && potential_alias.len() <= 20
         && potential_alias.chars().next()?.is_uppercase()
         && !is_mdo_type(potential_alias)
     {
@@ -1544,6 +1545,43 @@ mod tests {
                 assert_eq!(prefix, "Поп");
             }
             _ => panic!("Expected AfterTableAlias for long alias with prefix, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_very_long_alias() {
+        // Test for very long alias names (no arbitrary length limit)
+        // Real-world example: ДескрипторыДоступаРегистров (27 chars)
+        let query = "ВЫБРАТЬ ДескрипторыДоступаРегистров.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "ДескрипторыДоступаРегистров");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterTableAlias for very long alias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_extremely_long_alias() {
+        // Test for extremely long alias names - no arbitrary limit
+        let query =
+            "ВЫБРАТЬ ОченьДлинноеНазваниеТаблицыПростоПотомуЧтоМогуНазыватьКакУгодно.Ссылка";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(
+                    alias,
+                    "ОченьДлинноеНазваниеТаблицыПростоПотомуЧтоМогуНазыватьКакУгодно"
+                );
+                assert_eq!(prefix, "Ссылка");
+            }
+            _ => panic!("Expected AfterTableAlias for extremely long alias, got {:?}", context),
         }
     }
 
