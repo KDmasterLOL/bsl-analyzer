@@ -181,6 +181,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsl-platform"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
+ "smol_str",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
