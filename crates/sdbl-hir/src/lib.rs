@@ -369,23 +369,41 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let bsl_text = root.text().to_string();
     let offset_usize: usize = offset.into();
 
-    // Find char boundaries for context (UTF-8 safe)
-    let context_start = (offset_usize.saturating_sub(50)..=offset_usize)
-        .rev()
-        .find(|&i| bsl_text.is_char_boundary(i))
-        .unwrap_or(0);
-    let context_end = (offset_usize..=(offset_usize + 50).min(bsl_text.len()))
-        .find(|&i| bsl_text.is_char_boundary(i))
-        .unwrap_or(bsl_text.len());
-
-    let text_before = &bsl_text[context_start..offset_usize];
-    let text_after = &bsl_text[offset_usize..context_end];
     tracing::info!(
         offset = offset_usize,
-        text_before = %text_before,
-        text_after = %text_after,
-        "BSL file context around cursor"
+        bsl_text_len = bsl_text.len(),
+        is_char_boundary = bsl_text.is_char_boundary(offset_usize),
+        "BSL file basic info"
     );
+
+    if offset_usize <= bsl_text.len() {
+        // Find char boundaries for context (UTF-8 safe)
+        let context_start = (offset_usize.saturating_sub(50)..=offset_usize)
+            .rev()
+            .find(|&i| bsl_text.is_char_boundary(i))
+            .unwrap_or(0);
+        let context_end = (offset_usize..=(offset_usize + 50).min(bsl_text.len()))
+            .find(|&i| bsl_text.is_char_boundary(i))
+            .unwrap_or(bsl_text.len());
+
+        let text_before = &bsl_text[context_start..offset_usize];
+        let text_after = &bsl_text[offset_usize..context_end];
+        tracing::info!(
+            context_start = context_start,
+            context_end = context_end,
+            text_before_len = text_before.len(),
+            text_after_len = text_after.len(),
+            text_before = %text_before,
+            text_after = %text_after,
+            "BSL file context around cursor"
+        );
+    } else {
+        tracing::warn!(
+            offset = offset_usize,
+            bsl_text_len = bsl_text.len(),
+            "Offset is BEYOND file length!"
+        );
+    }
 
     // Find token at offset (prefer token to the left of cursor)
     let token = root.token_at_offset(offset).left_biased()?;
