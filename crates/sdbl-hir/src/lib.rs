@@ -458,12 +458,29 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     let literal_start = literal_node.text_range().start();
     let offset_in_literal = offset - literal_start;
 
+    // DEBUG: Show literal text around offset_in_literal
+    let lit_offset_usize: usize = offset_in_literal.into();
+
+    // Find char boundaries
+    let lit_start = (lit_offset_usize.saturating_sub(50)..=lit_offset_usize)
+        .rev()
+        .find(|&i| literal_text.is_char_boundary(i))
+        .unwrap_or(0);
+    let lit_end = (lit_offset_usize..=(lit_offset_usize + 50).min(literal_text.len()))
+        .find(|&i| literal_text.is_char_boundary(i))
+        .unwrap_or(literal_text.len());
+
+    let lit_before = &literal_text[lit_start..lit_offset_usize];
+    let lit_after = &literal_text[lit_offset_usize..lit_end];
+
     tracing::info!(
-        "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}",
+        "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}, lit_before={:?}, lit_after={:?}",
         offset,
         literal_start,
         offset_in_literal,
-        literal_text.len()
+        literal_text.len(),
+        lit_before,
+        lit_after
     );
 
     // Extract query text by removing quotes and | prefixes
