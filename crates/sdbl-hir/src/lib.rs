@@ -408,10 +408,25 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     // Find token at offset (prefer token to the left of cursor)
     let token = root.token_at_offset(offset).left_biased()?;
 
+    let token_text = token.text();
+    let offset_in_token = usize::from(offset - token.text_range().start());
+
+    // Show token text with cursor position marked
+    let token_before_cursor = if offset_in_token <= token_text.len() {
+        &token_text[..offset_in_token]
+    } else {
+        token_text
+    };
+    let token_after_cursor =
+        if offset_in_token < token_text.len() { &token_text[offset_in_token..] } else { "" };
+
     tracing::info!(
         token_kind = ?token.kind(),
         token_range = ?token.text_range(),
         token_text_len = token.text().len(),
+        offset_in_token = offset_in_token,
+        token_before = %token_before_cursor,
+        token_after = %token_after_cursor,
         "Found token at offset"
     );
 
