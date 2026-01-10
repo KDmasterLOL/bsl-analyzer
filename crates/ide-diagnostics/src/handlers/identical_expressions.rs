@@ -591,7 +591,7 @@ fn normalize_text(text: &str) -> String {
 ///    - After lowering, HIR sees only separate statements without context
 ///
 /// 2. **HIR sees this as:**
-///    ```
+///    ```text
 ///    Stmt[0]: Assign { Результат = Bool(true) }  // complete assignment
 ///    Stmt[1]: Expr(Missing)                       // ERROR(ИЛИ) → Missing expr
 ///    Stmt[2]: Expr(Bool(true))                    // separate literal
@@ -694,7 +694,7 @@ fn extract_assign_rhs(assign_stmt: &SyntaxNode) -> Option<String> {
 /// **Returns:** All literals and identifiers found in the directive content.
 ///
 /// **Example AST structure:**
-/// ```
+/// ```text
 /// PRE_REGION_DIR:
 ///   CALL_STMT:
 ///     ERROR(KW_OR)           ← ИЛИ without operands
