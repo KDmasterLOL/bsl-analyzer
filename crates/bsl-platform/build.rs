@@ -43,34 +43,40 @@ fn main() {
 fn find_and_extract_platform_data() -> Option<PathBuf> {
     // Check environment variable first
     if let Ok(path) = env::var("BSL_PLATFORM_PATH") {
-        let hbk_path = PathBuf::from(path).join("shcntx_ru.hbk");
-        if hbk_path.exists() {
-            return extract_platform_data(&hbk_path);
+        let base_path = PathBuf::from(path);
+        let shcntx_path = base_path.join("shcntx_ru.hbk");
+        let shlang_path = base_path.join("shlang_ru.hbk");
+
+        if shcntx_path.exists() && shlang_path.exists() {
+            return extract_both_help_files(&shcntx_path, &shlang_path);
         }
     }
 
     // Try to find 1C installation
-    let hbk_path = find_1c_help_file()?;
-    extract_platform_data(&hbk_path)
+    let (shcntx_path, shlang_path) = find_1c_help_files()?;
+    extract_both_help_files(&shcntx_path, &shlang_path)
 }
 
-/// Searches for shcntx_ru.hbk in standard installation locations.
-fn find_1c_help_file() -> Option<PathBuf> {
-    // Linux: /opt/1cv8/x86_64/*/shcntx_ru.hbk
+/// Searches for 1C help files in standard installation locations.
+/// Returns (shcntx_ru.hbk, shlang_ru.hbk) paths.
+fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
+    // Linux: /opt/1cv8/x86_64/*/
     #[cfg(target_os = "linux")]
     {
         if let Ok(entries) = fs::read_dir("/opt/1cv8/x86_64") {
             for entry in entries.flatten() {
-                let hbk_path = entry.path().join("shcntx_ru.hbk");
-                if hbk_path.exists() {
-                    println!("cargo:warning=Found 1C help at: {}", hbk_path.display());
-                    return Some(hbk_path);
+                let shcntx_path = entry.path().join("shcntx_ru.hbk");
+                let shlang_path = entry.path().join("shlang_ru.hbk");
+
+                if shcntx_path.exists() && shlang_path.exists() {
+                    println!("cargo:warning=Found 1C help files at: {}", entry.path().display());
+                    return Some((shcntx_path, shlang_path));
                 }
             }
         }
     }
 
-    // Windows: C:\Program Files\1cv8\*\shcntx_ru.hbk
+    // Windows: C:\Program Files\1cv8\*\
     #[cfg(target_os = "windows")]
     {
         let program_files =
@@ -79,10 +85,12 @@ fn find_1c_help_file() -> Option<PathBuf> {
 
         if let Ok(entries) = fs::read_dir(&base_path) {
             for entry in entries.flatten() {
-                let hbk_path = entry.path().join("shcntx_ru.hbk");
-                if hbk_path.exists() {
-                    println!("cargo:warning=Found 1C help at: {}", hbk_path.display());
-                    return Some(hbk_path);
+                let shcntx_path = entry.path().join("shcntx_ru.hbk");
+                let shlang_path = entry.path().join("shlang_ru.hbk");
+
+                if shcntx_path.exists() && shlang_path.exists() {
+                    println!("cargo:warning=Found 1C help files at: {}", entry.path().display());
+                    return Some((shcntx_path, shlang_path));
                 }
             }
         }
@@ -91,25 +99,45 @@ fn find_1c_help_file() -> Option<PathBuf> {
     None
 }
 
-/// Extracts platform documentation from .hbk file using 7z.
-fn extract_platform_data(hbk_path: &Path) -> Option<PathBuf> {
-    println!("cargo:warning=Extracting platform data from: {}", hbk_path.display());
-
+/// Extracts a single .hbk file using 7z.
+fn extract_hbk_file(hbk_path: &Path, name: &str) -> Option<PathBuf> {
     // Create temp directory for extraction
-    let temp_dir = env::temp_dir().join("bsl-platform-extract");
+    let temp_dir = env::temp_dir().join(format!("bsl-platform-{}", name));
     let _ = fs::remove_dir_all(&temp_dir); // Clean up previous extraction
     fs::create_dir_all(&temp_dir).ok()?;
 
-    // Extract with 7z
-    let output =
-        Command::new("7z").args(["x", "-y", "-o"]).arg(&temp_dir).arg(hbk_path).output().ok()?;
+    // Extract with 7z: 7z x -y -o<output_dir> <input_file>
+    // Note: Some .hbk files have minor errors but still extract most files
+    let output_arg = format!("-o{}", temp_dir.display());
+    let _output = Command::new("7z").args(["x", "-y", &output_arg]).arg(hbk_path).output().ok()?;
 
-    if !output.status.success() {
-        println!("cargo:warning=Failed to extract .hbk file with 7z");
-        return None;
+    // Don't check exit code - 7z returns error for corrupted archives even if most files extracted
+    // Instead, check if any files were actually extracted
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
+        let file_count = entries.count();
+        if file_count > 0 {
+            println!("cargo:warning=Extracted {} files from {}", file_count, name);
+            return Some(temp_dir);
+        }
     }
 
-    println!("cargo:warning=Extracted to: {}", temp_dir.display());
+    println!("cargo:warning=No files extracted from {}", name);
+    None
+}
+
+/// Extracts both help files and combines data.
+fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<PathBuf> {
+    println!("cargo:warning=Extracting platform help files...");
+    println!("cargo:warning=  shcntx_ru.hbk: {}", shcntx_path.display());
+    println!("cargo:warning=  shlang_ru.hbk: {}", shlang_path.display());
+
+    // Extract shlang_ru.hbk (keywords) - small file, extract first
+    let shlang_dir = extract_hbk_file(shlang_path, "shlang")?;
+    println!("cargo:warning=Extracted shlang to: {}", shlang_dir.display());
+
+    // Extract shcntx_ru.hbk (platform types/methods) - large file
+    let shcntx_dir = extract_hbk_file(shcntx_path, "shcntx")?;
+    println!("cargo:warning=Extracted shcntx to: {}", shcntx_dir.display());
 
     // Check if HTML parser tool exists
     let parser_binary = PathBuf::from("tools/html-parser/target/release/html-parser");
@@ -123,10 +151,16 @@ fn extract_platform_data(hbk_path: &Path) -> Option<PathBuf> {
 
     // Parse HTML files to JSON
     let json_output = PathBuf::from(env::var("OUT_DIR").unwrap()).join("platform_data.json");
-    let output = Command::new(&parser_binary).arg(&temp_dir).arg(&json_output).output().ok()?;
+    let output = Command::new(&parser_binary)
+        .arg(&shlang_dir)
+        .arg(&shcntx_dir)
+        .arg(&json_output)
+        .output()
+        .ok()?;
 
     if !output.status.success() {
         println!("cargo:warning=Failed to parse HTML files");
+        println!("cargo:warning=Parser stderr: {}", String::from_utf8_lossy(&output.stderr));
         return None;
     }
 
