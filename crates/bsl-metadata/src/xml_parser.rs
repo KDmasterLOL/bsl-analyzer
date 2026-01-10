@@ -445,7 +445,7 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
             // Parse and store dimension type if present
             if let Some(ref dim_type_xml) = dim_xml.properties.dim_type {
                 let dim_type = parse_type_xml(dim_type_xml)?;
-                dimension.set_type_str(format!("{:?}", dim_type));
+                dimension.set_type_str(format!("{}", dim_type)); // Use Display format
                 dimension.set_attr_type(dim_type);
             }
 
@@ -460,7 +460,7 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
             let mut resource =
                 crate::register::RegisterResource::new(resource_uuid, resource_xml.properties.name);
             let resource_type = parse_type_xml(&resource_xml.properties.resource_type)?;
-            resource.set_type_str(format!("{:?}", resource_type));
+            resource.set_type_str(format!("{}", resource_type)); // Use Display format
             resource.set_attr_type(resource_type);
 
             resources.push(resource);
@@ -474,7 +474,7 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
             let mut attribute =
                 crate::register::RegisterAttribute::new(attr_uuid, attr_xml.properties.name);
             let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
-            attribute.set_type_str(format!("{:?}", attr_type));
+            attribute.set_type_str(format!("{}", attr_type)); // Use Display format
             attribute.set_attr_type(attr_type);
 
             attributes.push(attribute);
@@ -1249,7 +1249,7 @@ fn parse_tabular_section(
             })?;
 
             let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
-            let type_str = format!("{:?}", attr_type); // Convert AttributeType to string representation
+            let type_str = format!("{}", attr_type); // Convert AttributeType to Display string (e.g., "Задача.ИмяЗадачи")
 
             let ts_attr =
                 TabularSectionAttribute::new(attr_uuid, attr_xml.properties.name, type_str);

@@ -534,12 +534,16 @@ impl<'a> LoweringContext<'a> {
 
         let type_str = type_str.trim();
 
-        // Check for reference types: "CatalogRef.Name" or "DocumentRef.Name"
+        tracing::debug!(type_str = %type_str, "Parsing tabular section attribute type");
+
+        // Check for reference types in format "МдоТип.ИмяОбъекта"
+        // The type_str comes from Display format of AttributeType::Ref
         if let Some(dot_pos) = type_str.find('.') {
             let type_part = &type_str[..dot_pos];
             let name_part = &type_str[dot_pos + 1..];
 
-            if let Some(mdo_type) = MdoType::from_plural(type_part) {
+            // Try to parse MDO type (expects singular form like "Задача", "Справочник")
+            if let Ok(mdo_type) = type_part.parse::<MdoType>() {
                 return SdblType::reference(mdo_type, name_part);
             }
         }

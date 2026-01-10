@@ -849,3 +849,60 @@ fn test_invalid_mdo_type_for_tabular_section() {
         assert_eq!(r.fields().len(), 0, "Should have no fields for invalid MDO type");
     }
 }
+
+#[test]
+fn test_tabular_section_task_ref_type_parsing() {
+    // Test that TaskRef types (Задача.ИмяЗадачи) are parsed correctly
+    use bsl_metadata::{
+        tabular_section::{TabularSection, TabularSectionAttribute},
+        MdoType, MetadataObject,
+    };
+
+    let uuid_nil =
+        *bsl_metadata::tabular_section::TabularSection::new(Default::default(), "temp").uuid();
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
+    let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
+
+    // Create attribute with Task reference type (Display format from AttributeType)
+    let mut attr =
+        TabularSectionAttribute::new(uuid_nil, "ЗадачаПроверяющего", "Задача.ЗадачаИсполнителя");
+    attr.set_name_en(Some("CheckerTask".to_string()));
+
+    ts.set_attributes(vec![attr]);
+    bp.add_tabular_section(ts);
+    config.add_metadata_object(bp);
+
+    // Test query
+    let code = "ВЫБРАТЬ Т.ЗадачаПроверяющего ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let hir = single_query_hir(&package);
+
+    // Verify field resolved
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert!(table_ref.is_resolved(), "Table should be resolved");
+
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+
+    // Find ЗадачаПроверяющего field
+    let field = fields.iter().find(|f| f.name.as_str() == "ЗадачаПроверяющего");
+    assert!(field.is_some(), "Should find ЗадачаПроверяющего field");
+
+    let field = field.unwrap();
+    // Verify type is correctly parsed as Task reference
+    match &field.ty {
+        crate::SdblType::Ref(mdo_ref) => {
+            assert_eq!(mdo_ref.mdo_type, MdoType::Task, "Should be Task reference");
+            assert_eq!(
+                mdo_ref.name, "ЗадачаИсполнителя",
+                "Should reference ЗадачаИсполнителя task"
+            );
+        }
+        other => panic!("Expected Ref type, got: {:?}", other),
+    }
+}
