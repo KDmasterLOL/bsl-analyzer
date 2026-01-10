@@ -140,6 +140,15 @@ impl SdblType {
             AttributeType::DefinedType { name } => {
                 Self::DefinedType { name: name.clone(), underlying_type: None }
             }
+            AttributeType::Composite { types } => {
+                // For composite types, use first type (for now)
+                // TODO: Consider representing composite types in SdblType
+                if let Some(first_type) = types.first() {
+                    Self::from_attribute_type(first_type)
+                } else {
+                    Self::Unknown
+                }
+            }
             AttributeType::Unknown => Self::Unknown,
         }
     }

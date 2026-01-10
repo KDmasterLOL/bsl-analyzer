@@ -952,16 +952,45 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
         return Ok(AttributeType::Unknown);
     }
 
-    // Take first type (1C can have multiple, we'll use first for now)
-    let type_str = &type_xml.types[0];
     tracing::debug!(
-        type_str = %type_str,
         types_count = type_xml.types.len(),
-        "parse_type_xml: parsing Type"
+        "parse_type_xml: parsing Type with {} types",
+        type_xml.types.len()
     );
 
-    // Parse type string
-    match type_str.as_str() {
+    // If multiple types - create Composite type
+    if type_xml.types.len() > 1 {
+        let mut parsed_types = Vec::new();
+
+        for type_str in &type_xml.types {
+            let parsed_type = parse_single_type(type_str, type_xml)?;
+            parsed_types.push(parsed_type);
+        }
+
+        tracing::debug!(
+            types_count = parsed_types.len(),
+            "parsed composite type with {} types",
+            parsed_types.len()
+        );
+
+        return Ok(AttributeType::Composite { types: parsed_types });
+    }
+
+    // Single type - parse directly
+    let type_str = &type_xml.types[0];
+    parse_single_type(type_str, type_xml)
+}
+
+/// Parse a single type string
+fn parse_single_type(
+    type_str: &str,
+    type_xml: &TypeXml,
+) -> Result<crate::metadata_object::AttributeType> {
+    use crate::metadata_object::AttributeType;
+
+    tracing::debug!(type_str = %type_str, "parse_single_type");
+
+    match type_str {
         "xs:boolean" => Ok(AttributeType::Boolean),
 
         "xs:string" => {
@@ -994,7 +1023,7 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
         }
 
         // Reference types: "cfg:CatalogRef.Name", "cfg:DocumentRef.Name"
-        type_str if type_str.starts_with("cfg:") => parse_reference_type(type_str),
+        s if s.starts_with("cfg:") => parse_reference_type(s),
 
         // Special types
         "v8:UUID" => Ok(AttributeType::Uuid),
@@ -2048,5 +2077,52 @@ mod tests {
                 panic!("Failed to parse register: {:?}", e);
             }
         }
+    }
+
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_dimension_composite_type() {
+        let xml_path = concat!(
+            env!("HOME"),
+            "/src/doc3/src/cf/InformationRegisters/ЗначенияДействийПриОбработкеПисем.xml"
+        );
+
+        if !std::path::Path::new(xml_path).exists() {
+            eprintln!("Skipping test: file not found");
+            return;
+        }
+
+        let xml = std::fs::read_to_string(xml_path).expect("Failed to read XML");
+
+        let register = parse_information_register_xml(&xml).expect("Failed to parse register");
+
+        println!("\n✓ Register: {}", register.name());
+
+        let mut found_composite = false;
+
+        for dim in register.dimensions() {
+            if dim.name() == "ВидДействия" {
+                println!("\n✓ Parsed ВидДействия dimension");
+                println!("  Expected 4 enum types in XML:");
+                println!("    1. cfg:EnumRef.ВидыУсловийОтбораИсходящихПисем");
+                println!("    2. cfg:EnumRef.ВидыДействийПриОбработкеИсходящихПисем");
+                println!("    3. cfg:EnumRef.ВидыУсловийОтбораВходящихПисем");
+                println!("    4. cfg:EnumRef.ВидыДействийПриОбработкеВходящихПисем");
+                println!("\n  Actually parsed as: {:?}", dim.attr_type());
+
+                // Verify it's a Composite type with 4 types
+                if let Some(crate::metadata_object::AttributeType::Composite { types }) =
+                    dim.attr_type()
+                {
+                    assert_eq!(types.len(), 4, "Expected 4 types in composite");
+                    println!("\n  ✅ SUCCESS: Composite type parsed with all 4 enum types!");
+                    found_composite = true;
+                } else {
+                    panic!("Expected Composite type, got: {:?}", dim.attr_type());
+                }
+            }
+        }
+
+        assert!(found_composite, "ВидДействия dimension not found");
     }
 }

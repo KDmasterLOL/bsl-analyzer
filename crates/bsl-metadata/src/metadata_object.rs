@@ -300,6 +300,14 @@ pub enum AttributeType {
         /// Name of the defined type
         name: String,
     },
+    /// Composite type (multiple types allowed)
+    ///
+    /// Used when a field can hold values of different types.
+    /// Example: Dimension "ВидДействия" in 1C can be one of 4 enum types.
+    Composite {
+        /// List of allowed types (union type)
+        types: Vec<AttributeType>,
+    },
     /// Unknown or unsupported type
     Unknown,
 }
