@@ -920,135 +920,104 @@ fn parse_tabular_section(
 fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::AttributeType> {
     use crate::metadata_object::AttributeType;
 
-    // Check for TypeSet (but only use if no concrete types specified)
-    // TypeSet is typically used alongside concrete types, or alone to mean "any object of this type"
+    let mut all_types = Vec::new();
+
+    // 1. Parse all concrete types from Type elements
+    for type_str in &type_xml.types {
+        let parsed_type = parse_single_type(type_str, type_xml)?;
+        all_types.push(parsed_type);
+    }
+
+    // 2. Check for TypeSet and add to list if recognized
     if !type_xml.type_sets.is_empty() {
         let type_set = &type_xml.type_sets[0];
         tracing::debug!(
             type_set = %type_set,
-            type_sets_count = type_xml.type_sets.len(),
-            types_count = type_xml.types.len(),
-            "parse_type_xml: found TypeSet"
+            concrete_types_count = type_xml.types.len(),
+            "parse_type_xml: found TypeSet, will add to concrete types list"
         );
 
-        // Only process TypeSet if no concrete types specified
-        // If concrete types exist, they take priority over TypeSet
-        if type_xml.types.is_empty() {
-            // Handle special TypeSet values
-            match type_set.as_str() {
-                "cfg:AnyIBRef" => return Ok(AttributeType::AnyRef),
-                // DefinedType reference: cfg:DefinedType.Name
-                _ if type_set.starts_with("cfg:DefinedType.") => {
-                    let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
-                    return Ok(AttributeType::DefinedType { name });
-                }
-                // TypeSet for "any object of specific type"
-                "cfg:CatalogRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog })
-                }
-                "cfg:DocumentRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Document })
-                }
-                "cfg:BusinessProcessRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess })
-                }
-                "cfg:TaskRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Task })
-                }
-                "cfg:EnumRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Enum })
-                }
-                "cfg:InformationRegisterRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::InformationRegister,
-                    })
-                }
-                "cfg:AccumulationRegisterRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::AccumulationRegister,
-                    })
-                }
-                "cfg:AccountingRegisterRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::AccountingRegister,
-                    })
-                }
-                "cfg:CalculationRegisterRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::CalculationRegister,
-                    })
-                }
-                "cfg:ChartOfCharacteristicTypesRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::ChartOfCharacteristicTypes,
-                    })
-                }
-                "cfg:ChartOfAccountsRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfAccounts })
-                }
-                "cfg:ChartOfCalculationTypesRef" => {
-                    return Ok(AttributeType::AnyObjectRef {
-                        mdo_type: MdoType::ChartOfCalculationTypes,
-                    })
-                }
-                "cfg:ExchangePlanRef" => {
-                    return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::ExchangePlan })
-                }
-                // Other unrecognized TypeSet values - ignore and continue to process types list
-                _ => {
-                    tracing::debug!(
-                        type_set = %type_set,
-                        "ignoring unrecognized TypeSet, will process Type list instead"
-                    );
-                    // Fall through to process types list
-                }
+        // Try to parse TypeSet into an AttributeType
+        let type_set_parsed = match type_set.as_str() {
+            "cfg:AnyIBRef" => Some(AttributeType::AnyRef),
+            // DefinedType reference: cfg:DefinedType.Name
+            _ if type_set.starts_with("cfg:DefinedType.") => {
+                let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
+                Some(AttributeType::DefinedType { name })
             }
-        } else {
-            // TypeSet exists but concrete types also specified - use concrete types
+            // TypeSet for "any object of specific type"
+            "cfg:CatalogRef" => Some(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog }),
+            "cfg:DocumentRef" => Some(AttributeType::AnyObjectRef { mdo_type: MdoType::Document }),
+            "cfg:BusinessProcessRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess })
+            }
+            "cfg:TaskRef" => Some(AttributeType::AnyObjectRef { mdo_type: MdoType::Task }),
+            "cfg:EnumRef" => Some(AttributeType::AnyObjectRef { mdo_type: MdoType::Enum }),
+            "cfg:InformationRegisterRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::InformationRegister })
+            }
+            "cfg:AccumulationRegisterRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::AccumulationRegister })
+            }
+            "cfg:AccountingRegisterRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::AccountingRegister })
+            }
+            "cfg:CalculationRegisterRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::CalculationRegister })
+            }
+            "cfg:ChartOfCharacteristicTypesRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfCharacteristicTypes })
+            }
+            "cfg:ChartOfAccountsRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfAccounts })
+            }
+            "cfg:ChartOfCalculationTypesRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::ChartOfCalculationTypes })
+            }
+            "cfg:ExchangePlanRef" => {
+                Some(AttributeType::AnyObjectRef { mdo_type: MdoType::ExchangePlan })
+            }
+            // Other unrecognized TypeSet values - ignore
+            _ => {
+                tracing::debug!(
+                    type_set = %type_set,
+                    "ignoring unrecognized TypeSet"
+                );
+                None
+            }
+        };
+
+        // Add TypeSet to list if recognized
+        if let Some(parsed) = type_set_parsed {
             tracing::debug!(
                 type_set = %type_set,
-                types_count = type_xml.types.len(),
-                "TypeSet found but concrete types also specified, using concrete types"
+                "adding TypeSet to types list"
             );
-            // Fall through to process concrete types
+            all_types.push(parsed);
         }
     }
 
-    // If no types specified, return Unknown
-    if type_xml.types.is_empty() {
-        tracing::warn!(
-            "parse_type_xml: both types and type_sets vectors are empty, returning Unknown"
-        );
-        return Ok(AttributeType::Unknown);
-    }
-
-    tracing::debug!(
-        types_count = type_xml.types.len(),
-        "parse_type_xml: parsing Type with {} types",
-        type_xml.types.len()
-    );
-
-    // If multiple types - create Composite type
-    if type_xml.types.len() > 1 {
-        let mut parsed_types = Vec::new();
-
-        for type_str in &type_xml.types {
-            let parsed_type = parse_single_type(type_str, type_xml)?;
-            parsed_types.push(parsed_type);
+    // 3. Return based on collected types
+    match all_types.len() {
+        0 => {
+            tracing::warn!("parse_type_xml: no types collected, returning Unknown");
+            Ok(AttributeType::Unknown)
         }
-
-        tracing::debug!(
-            types_count = parsed_types.len(),
-            "parsed composite type with {} types",
-            parsed_types.len()
-        );
-
-        return Ok(AttributeType::Composite { types: parsed_types });
+        1 => {
+            // Single type - return it directly
+            tracing::debug!("parse_type_xml: single type");
+            Ok(all_types.into_iter().next().unwrap())
+        }
+        _ => {
+            // Multiple types - create Composite
+            tracing::debug!(
+                types_count = all_types.len(),
+                "parse_type_xml: composite type with {} types",
+                all_types.len()
+            );
+            Ok(AttributeType::Composite { types: all_types })
+        }
     }
-
-    // Single type - parse directly
-    let type_str = &type_xml.types[0];
-    parse_single_type(type_str, type_xml)
 }
 
 /// Parse a single type string
@@ -1674,11 +1643,11 @@ mod tests {
         let attr = catalog.find_attribute("ОбъектДоступа1").unwrap();
         assert_eq!(attr.name, "ОбъектДоступа1");
 
-        // Should parse as Composite type with 4 concrete types
-        // TypeSet (cfg:BusinessProcessRef) should be ignored
+        // Should parse as Composite type with 4 concrete types + 1 TypeSet (total 5)
+        // TypeSet (cfg:BusinessProcessRef) should be added to the list
         match &attr.attr_type {
             AttributeType::Composite { types } => {
-                assert_eq!(types.len(), 4);
+                assert_eq!(types.len(), 5);
 
                 // Check first type
                 assert_eq!(
@@ -1689,13 +1658,19 @@ mod tests {
                     }
                 );
 
-                // Check last type
+                // Check 4th concrete type
                 assert_eq!(
                     types[3],
                     AttributeType::Ref {
                         mdo_type: MdoType::BusinessProcess,
                         name: "Утверждение".to_string()
                     }
+                );
+
+                // Check last type - should be AnyObjectRef from TypeSet
+                assert_eq!(
+                    types[4],
+                    AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess }
                 );
             }
             _ => panic!("Expected Composite type, got {:?}", attr.attr_type),
