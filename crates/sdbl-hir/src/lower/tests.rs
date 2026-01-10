@@ -906,3 +906,55 @@ fn test_tabular_section_task_ref_type_parsing() {
         other => panic!("Expected Ref type, got: {:?}", other),
     }
 }
+
+#[test]
+fn test_tabular_section_uuid_type_parsing() {
+    // Test that UUID type (УникальныйИдентификатор) is parsed correctly
+    use bsl_metadata::{
+        tabular_section::{TabularSection, TabularSectionAttribute},
+        MdoType, MetadataObject,
+    };
+
+    let uuid_nil =
+        *bsl_metadata::tabular_section::TabularSection::new(Default::default(), "temp").uuid();
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut bp = MetadataObject::new(MdoType::BusinessProcess, "Исполнение");
+    let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
+
+    // Create attribute with UUID type
+    let mut attr = TabularSectionAttribute::new(
+        uuid_nil,
+        "ИдентификаторИсполнителя",
+        "УникальныйИдентификатор",
+    );
+    attr.set_name_en(Some("ExecutorId".to_string()));
+
+    ts.set_attributes(vec![attr]);
+    bp.add_tabular_section(ts);
+    config.add_metadata_object(bp);
+
+    // Test query
+    let code =
+        "ВЫБРАТЬ Т.ИдентификаторИсполнителя ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let hir = single_query_hir(&package);
+
+    // Verify field resolved
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert!(table_ref.is_resolved(), "Table should be resolved");
+
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+
+    // Find ИдентификаторИсполнителя field
+    let field = fields.iter().find(|f| f.name.as_str() == "ИдентификаторИсполнителя");
+    assert!(field.is_some(), "Should find ИдентификаторИсполнителя field");
+
+    let field = field.unwrap();
+    // Verify type is correctly parsed as UUID
+    assert_eq!(field.ty, crate::SdblType::Uuid, "Should be UUID type");
+}

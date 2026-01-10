@@ -548,7 +548,7 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        // Check for primitive types
+        // Check for primitive and special types
         match type_str.to_lowercase().as_str() {
             s if s.starts_with("string") || s.starts_with("строка") => {
                 // Extract length if present: "String(100)" or "Строка(100)"
@@ -568,6 +568,15 @@ impl<'a> LoweringContext<'a> {
             "boolean" | "булево" => SdblType::Boolean,
             "date" | "дата" => SdblType::Date,
             "datetime" | "датавремя" => SdblType::DateTime,
+            "уникальныйидентификатор" => SdblType::Uuid,
+            "хранилищезначения" => SdblType::ValueStorage,
+            "любаяссылка" => SdblType::AnyRef,
+            s if s.starts_with("определяемыйтип.") => {
+                // Extract defined type name after "ОпределяемыйТип."
+                let prefix_len = "ОпределяемыйТип.".len();
+                let name = type_str[prefix_len..].to_string();
+                SdblType::DefinedType { name, underlying_type: None }
+            }
             _ => {
                 tracing::debug!(type_str = %type_str, "Unknown type, using SdblType::Unknown");
                 SdblType::Unknown
