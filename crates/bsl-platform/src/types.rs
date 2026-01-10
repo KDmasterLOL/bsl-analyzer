@@ -11,6 +11,20 @@ pub struct PlatformType {
     pub english_name: SmolStr,
 }
 
+/// Raw platform type for const initialization (internal use only)
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformType {
+    pub name: &'static str,
+    pub english_name: &'static str,
+}
+
+impl From<&RawPlatformType> for PlatformType {
+    fn from(raw: &RawPlatformType) -> Self {
+        Self { name: raw.name.into(), english_name: raw.english_name.into() }
+    }
+}
+
 /// Platform method
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformMethod {
@@ -22,10 +36,27 @@ pub struct PlatformMethod {
     pub name: SmolStr,
     /// English method name (e.g., "Upper")
     pub english_name: SmolStr,
-    /// Return type (e.g., "Строка")
-    pub return_type: SmolStr,
-    /// Brief summary (one-line description)
-    pub summary: SmolStr,
+}
+
+/// Raw platform method for const initialization (internal use only)
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformMethod {
+    pub id: u32,
+    pub type_name: &'static str,
+    pub name: &'static str,
+    pub english_name: &'static str,
+}
+
+impl From<&RawPlatformMethod> for PlatformMethod {
+    fn from(raw: &RawPlatformMethod) -> Self {
+        Self {
+            id: raw.id,
+            type_name: raw.type_name.into(),
+            name: raw.name.into(),
+            english_name: raw.english_name.into(),
+        }
+    }
 }
 
 /// Method parameter

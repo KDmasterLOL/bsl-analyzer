@@ -211,10 +211,178 @@ fn parse_st_snippet(content: &str) -> Result<(String, String, String, String)> {
 }
 
 /// Parses shcntx directory for platform types and methods.
-fn parse_shcntx_data(_shcntx_dir: &Path) -> Result<(Vec<TypeInfo>, Vec<MethodInfo>)> {
-    // TODO: Implement shcntx parsing in next iteration
-    // For now, return empty data
-    Ok((Vec::new(), Vec::new()))
+fn parse_shcntx_data(shcntx_dir: &Path) -> Result<(Vec<TypeInfo>, Vec<MethodInfo>)> {
+    let mut types = Vec::new();
+    let mut methods = Vec::new();
+    let mut method_id_counter = 0u32;
+
+    let objects_dir = shcntx_dir.join("objects");
+    if !objects_dir.exists() {
+        return Ok((types, methods));
+    }
+
+    // Iterate through catalog directories
+    for catalog_entry in fs::read_dir(&objects_dir)? {
+        let catalog_entry = catalog_entry?;
+        let catalog_path = catalog_entry.path();
+
+        if !catalog_path.is_dir() {
+            continue;
+        }
+
+        // Recursively parse this catalog
+        parse_catalog_directory(&catalog_path, &mut types, &mut methods, &mut method_id_counter)?;
+    }
+
+    Ok((types, methods))
+}
+
+/// Recursively parses a catalog directory for types and methods.
+fn parse_catalog_directory(
+    catalog_path: &Path,
+    types: &mut Vec<TypeInfo>,
+    methods: &mut Vec<MethodInfo>,
+    method_id_counter: &mut u32,
+) -> Result<()> {
+    // Iterate through entries in this catalog
+    for entry in fs::read_dir(catalog_path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+
+        // Skip non-directories
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry_path.file_name().unwrap().to_string_lossy().to_string();
+
+        // If it's a nested catalog, recurse into it
+        if dir_name.starts_with("catalog") {
+            parse_catalog_directory(&entry_path, types, methods, method_id_counter)?;
+            continue;
+        }
+
+        // Otherwise it's a type directory - find corresponding .html file
+        let type_html = entry_path.with_extension("html");
+        if type_html.exists() {
+            if let Some(type_info) = parse_type_html(&type_html, &entry_path)? {
+                println!("Found type: {} / {}", type_info.name, type_info.english_name);
+
+                // Parse methods for this type
+                let type_methods = parse_type_methods(&entry_path, &type_info.english_name, method_id_counter)?;
+                methods.extend(type_methods);
+
+                types.push(type_info);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Parses type HTML file to extract type information.
+fn parse_type_html(html_path: &Path, _type_dir: &Path) -> Result<Option<TypeInfo>> {
+    let html_content = fs::read_to_string(html_path)?;
+
+    // Extract type names from <h1 class="V8SH_pagetitle">Массив (Array)</h1>
+    if let Some(title_start) = html_content.find(r#"<h1 class="V8SH_pagetitle">"#) {
+        let after_title = &html_content[title_start + r#"<h1 class="V8SH_pagetitle">"#.len()..];
+        if let Some(title_end) = after_title.find("</h1>") {
+            let title = &after_title[..title_end];
+
+            // Parse "Массив (Array)" format
+            if let Some(paren_start) = title.find('(') {
+                let russian = title[..paren_start].trim().to_string();
+                let after_paren = &title[paren_start + 1..];
+                if let Some(paren_end) = after_paren.find(')') {
+                    let english = after_paren[..paren_end].trim().to_string();
+
+                    return Ok(Some(TypeInfo {
+                        name: russian,
+                        english_name: english,
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Parses methods for a platform type.
+fn parse_type_methods(type_dir: &Path, type_name: &str, method_id_counter: &mut u32) -> Result<Vec<MethodInfo>> {
+    let mut methods = Vec::new();
+
+    let methods_dir = type_dir.join("methods");
+    if !methods_dir.exists() {
+        return Ok(methods);
+    }
+
+    // Iterate through method HTML files
+    for method_entry in fs::read_dir(&methods_dir)? {
+        let method_entry = method_entry?;
+        let method_path = method_entry.path();
+
+        // Only process .html files
+        if method_path.extension().and_then(|s| s.to_str()) != Some("html") {
+            continue;
+        }
+
+        if let Some(method_info) = parse_method_html(&method_path, type_name, method_id_counter)? {
+            methods.push(method_info);
+        }
+    }
+
+    Ok(methods)
+}
+
+/// Parses method HTML file to extract method information.
+fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut u32) -> Result<Option<MethodInfo>> {
+    let html_content = fs::read_to_string(html_path)?;
+
+    // Extract method names from <h1 class="V8SH_pagetitle">Массив.Найти (Array.Find)</h1>
+    if let Some(title_start) = html_content.find(r#"<h1 class="V8SH_pagetitle">"#) {
+        let after_title = &html_content[title_start + r#"<h1 class="V8SH_pagetitle">"#.len()..];
+        if let Some(title_end) = after_title.find("</h1>") {
+            let title = &after_title[..title_end];
+
+            // Parse "Массив.Найти (Array.Find)" format
+            // Extract method names (after dot, before parenthesis)
+            if let Some(dot_pos) = title.find('.') {
+                let after_dot = &title[dot_pos + 1..];
+
+                // Russian method name (before space and opening paren)
+                let russian_method = if let Some(space_pos) = after_dot.find(' ') {
+                    after_dot[..space_pos].trim().to_string()
+                } else {
+                    return Ok(None);
+                };
+
+                // English method name (inside parentheses, after dot)
+                if let Some(paren_start) = title.find('(') {
+                    let after_paren = &title[paren_start + 1..];
+                    if let Some(dot_in_paren) = after_paren.find('.') {
+                        let after_paren_dot = &after_paren[dot_in_paren + 1..];
+                        if let Some(paren_end) = after_paren_dot.find(')') {
+                            let english_method = after_paren_dot[..paren_end].trim().to_string();
+
+                            let id = *method_id_counter;
+                            *method_id_counter += 1;
+
+                            return Ok(Some(MethodInfo {
+                                id,
+                                type_name: type_name.to_string(),
+                                name: russian_method,
+                                english_name: english_method,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
