@@ -58,6 +58,11 @@ pub enum SdblType {
     /// Binary storage for arbitrary data.
     ValueStorage,
 
+    /// DefinedType (ОпределяемыйТип).
+    ///
+    /// User-defined type that can hold multiple primitive/reference types.
+    DefinedType(String),
+
     /// Value table (ТаблицаЗначений).
     ///
     /// Result of subquery or temporary table.
@@ -113,6 +118,7 @@ impl SdblType {
             AttributeType::AnyRef => Self::AnyRef,
             AttributeType::Uuid => Self::Uuid,
             AttributeType::ValueStorage => Self::ValueStorage,
+            AttributeType::DefinedType { name } => Self::DefinedType(name.clone()),
             AttributeType::Unknown => Self::Unknown,
         }
     }
@@ -152,6 +158,9 @@ impl SdblType {
             // Unknown/Error is compatible with anything
             (Unknown, _) | (_, Unknown) => true,
             (Error, _) | (_, Error) => true,
+
+            // DefinedType is compatible with anything (we don't resolve DefinedType)
+            (DefinedType(_), _) | (_, DefinedType(_)) => true,
 
             // Same types are compatible
             (Boolean, Boolean) => true,
@@ -195,6 +204,7 @@ impl std::fmt::Display for SdblType {
             Self::AnyRef => write!(f, "ЛюбаяСсылка"),
             Self::Uuid => write!(f, "УникальныйИдентификатор"),
             Self::ValueStorage => write!(f, "ХранилищеЗначения"),
+            Self::DefinedType(name) => write!(f, "ОпределяемыйТип.{}", name),
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
@@ -242,6 +252,13 @@ mod tests {
         assert_eq!(SdblType::number().to_string(), "Число");
         assert_eq!(SdblType::number_with_precision(10, 2).to_string(), "Число(10, 2)");
         assert_eq!(SdblType::Date.to_string(), "Дата");
+        assert_eq!(SdblType::AnyRef.to_string(), "ЛюбаяСсылка");
+        assert_eq!(SdblType::Uuid.to_string(), "УникальныйИдентификатор");
+        assert_eq!(SdblType::ValueStorage.to_string(), "ХранилищеЗначения");
+        assert_eq!(
+            SdblType::DefinedType("ОтметкаВремени".to_string()).to_string(),
+            "ОпределяемыйТип.ОтметкаВремени"
+        );
         assert_eq!(SdblType::Unknown.to_string(), "Неизвестно");
     }
 
@@ -261,6 +278,10 @@ mod tests {
         assert!(
             SdblType::Null.is_compatible_with(&SdblType::Number { precision: None, scale: None })
         );
+
+        // DefinedType is compatible with anything (we don't resolve it)
+        assert!(SdblType::DefinedType("Test".to_string()).is_compatible_with(&SdblType::String));
+        assert!(SdblType::Boolean.is_compatible_with(&SdblType::DefinedType("Test".to_string())));
 
         assert!(!SdblType::Boolean.is_compatible_with(&SdblType::String));
         assert!(!SdblType::number().is_compatible_with(&SdblType::String));

@@ -295,6 +295,11 @@ pub enum AttributeType {
     Uuid,
     /// ValueStorage (ХранилищеЗначения)
     ValueStorage,
+    /// DefinedType (ОпределяемыйТип)
+    DefinedType {
+        /// Name of the defined type
+        name: String,
+    },
     /// Unknown or unsupported type
     Unknown,
 }

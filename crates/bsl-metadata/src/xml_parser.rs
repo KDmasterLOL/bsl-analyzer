@@ -253,8 +253,8 @@ struct DimensionProperties {
     #[serde(rename = "Name")]
     name: String,
 
-    #[serde(rename = "Type")]
-    dim_type: TypeXml,
+    #[serde(rename = "Type", default)]
+    dim_type: Option<TypeXml>,
 
     #[serde(rename = "DenyIncompleteValues", default)]
     deny_incomplete_values: BoolValue,
@@ -355,10 +355,12 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
                 .indexing(dim_xml.properties.indexing)
                 .build();
 
-            // Parse and store dimension type
-            let dim_type = parse_type_xml(&dim_xml.properties.dim_type)?;
-            dimension.set_type_str(format!("{:?}", dim_type));
-            dimension.set_attr_type(dim_type);
+            // Parse and store dimension type if present
+            if let Some(ref dim_type_xml) = dim_xml.properties.dim_type {
+                let dim_type = parse_type_xml(dim_type_xml)?;
+                dimension.set_type_str(format!("{:?}", dim_type));
+                dimension.set_attr_type(dim_type);
+            }
 
             dimensions.push(dimension);
         }
@@ -931,8 +933,10 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
         match type_set.as_str() {
             "cfg:AnyIBRef" => return Ok(AttributeType::AnyRef),
             // DefinedType reference: cfg:DefinedType.Name
-            // For now, treat as Unknown since we don't resolve DefinedType yet
-            _ if type_set.starts_with("cfg:DefinedType.") => return Ok(AttributeType::Unknown),
+            _ if type_set.starts_with("cfg:DefinedType.") => {
+                let name = type_set.strip_prefix("cfg:DefinedType.").unwrap().to_string();
+                return Ok(AttributeType::DefinedType { name });
+            }
             _ => {
                 tracing::warn!(type_set = %type_set, "unknown TypeSet value");
                 return Ok(AttributeType::Unknown);
@@ -1605,13 +1609,13 @@ mod tests {
 
         let catalog = parse_catalog_xml(xml).unwrap();
 
-        // UUID -> Unknown
+        // UUID -> now supported
         let attr1 = catalog.find_attribute("УникальныйИдентификатор").unwrap();
-        assert_eq!(attr1.attr_type, AttributeType::Unknown);
+        assert_eq!(attr1.attr_type, AttributeType::Uuid);
 
-        // ValueStorage -> Unknown
+        // ValueStorage -> now supported
         let attr2 = catalog.find_attribute("Хранилище").unwrap();
-        assert_eq!(attr2.attr_type, AttributeType::Unknown);
+        assert_eq!(attr2.attr_type, AttributeType::ValueStorage);
 
         // EnumRef -> now supported
         let attr3 = catalog.find_attribute("Перечисление").unwrap();
@@ -1868,5 +1872,53 @@ mod tests {
         assert_eq!(register.dimensions()[0].name(), "Сотрудник");
         assert_eq!(register.resources()[0].name(), "ОтработаноЧасов");
         assert_eq!(register.attributes()[0].name(), "Комментарий");
+    }
+
+    #[test]
+    fn test_parse_defined_type() {
+        use crate::metadata_object::AttributeType;
+
+        // Test parsing DefinedType from TypeSet
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <InformationRegister uuid="12345678-1234-1234-1234-123456789012">
+        <Properties>
+            <Name>ТестовыйРегистр</Name>
+            <InformationRegisterPeriodicity>Nonperiodical</InformationRegisterPeriodicity>
+            <EnableTotalsSliceFirst>false</EnableTotalsSliceFirst>
+            <EnableTotalsSliceLast>false</EnableTotalsSliceLast>
+        </Properties>
+        <ChildObjects>
+            <Dimension uuid="a1dfacbc-d474-4679-bc7d-3181c29578b3">
+                <Properties>
+                    <Name>ОтметкаВремени</Name>
+                    <Type>
+                        <v8:TypeSet>cfg:DefinedType.ОтметкаВремени</v8:TypeSet>
+                    </Type>
+                    <Master>false</Master>
+                    <DenyIncompleteValues>true</DenyIncompleteValues>
+                    <Indexing>Index</Indexing>
+                </Properties>
+            </Dimension>
+        </ChildObjects>
+    </InformationRegister>
+</MetaDataObject>"#;
+
+        let register = parse_information_register_xml(xml).unwrap();
+
+        assert_eq!(register.name(), "ТестовыйРегистр");
+        assert_eq!(register.dimensions().len(), 1);
+
+        let dimension = &register.dimensions()[0];
+        assert_eq!(dimension.name(), "ОтметкаВремени");
+
+        // Check that DefinedType is parsed correctly
+        let dim_type = dimension.attr_type().expect("Dimension should have type");
+        match dim_type {
+            AttributeType::DefinedType { name } => {
+                assert_eq!(name, "ОтметкаВремени");
+            }
+            _ => panic!("Expected DefinedType, got {:?}", dim_type),
+        }
     }
 }
