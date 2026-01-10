@@ -1142,6 +1142,7 @@ fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::Attrib
         "cfg:TaskRef" => MdoType::Task,
         "cfg:ExchangePlanRef" => MdoType::ExchangePlan,
         "cfg:BusinessProcessRef" => MdoType::BusinessProcess,
+        "cfg:BusinessProcessRoutePointRef" => MdoType::BusinessProcess,
         "cfg:ChartOfCharacteristicTypesRef" => MdoType::ChartOfCharacteristicTypes,
         "cfg:ChartOfAccountsRef" => MdoType::ChartOfAccounts,
         "cfg:ChartOfCalculationTypesRef" => MdoType::ChartOfCalculationTypes,
