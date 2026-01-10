@@ -183,7 +183,37 @@ impl<'a> LoweringContext<'a> {
 
         // Check metadata if available
         if let Some(metadata) = self.metadata {
-            if !metadata.has_metadata_object(mdo_type, object_name) {
+            // Check if object exists in metadata
+            let exists = match mdo_type {
+                // For registers, check in registers collection
+                MdoType::InformationRegister
+                | MdoType::AccumulationRegister
+                | MdoType::AccountingRegister
+                | MdoType::CalculationRegister => {
+                    let found = metadata.find_register_by_type_and_name(mdo_type, object_name);
+                    tracing::info!(
+                        mdo_type = ?mdo_type,
+                        object_name = %object_name,
+                        found = found.is_some(),
+                        total_registers = metadata.registers().len(),
+                        "Checking register in metadata"
+                    );
+                    found.is_some()
+                }
+                // For other types (Catalog, Document, etc.), check in metadata_objects
+                _ => {
+                    let found = metadata.has_metadata_object(mdo_type, object_name);
+                    tracing::info!(
+                        mdo_type = ?mdo_type,
+                        object_name = %object_name,
+                        found = found,
+                        "Checking metadata object"
+                    );
+                    found
+                }
+            };
+
+            if !exists {
                 tracing::warn!(
                     mdo_type = ?mdo_type,
                     object_name = object_name,
