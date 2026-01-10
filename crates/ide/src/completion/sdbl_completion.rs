@@ -40,7 +40,13 @@ pub(super) fn sdbl_completions(
     );
 
     // Try to get Scope for the query at cursor position
+    tracing::info!(
+        file_id = ?file_id,
+        bsl_offset = u32::from(offset),
+        "calling get_sdbl_scope"
+    );
     let scope = get_sdbl_scope(db, file_id, offset);
+    tracing::info!(scope_is_some = scope.is_some(), "get_sdbl_scope returned");
     if scope.is_some() {
         tracing::debug!("successfully built Scope from query HIR");
     } else {
@@ -806,6 +812,9 @@ fn get_sdbl_scope(
     file_id: vfs::FileId,
     bsl_offset: syntax::TextSize,
 ) -> Option<Scope> {
+    let _span = tracing::info_span!("get_sdbl_scope", ?file_id, bsl_offset = u32::from(bsl_offset))
+        .entered();
+
     // 1. Get all SDBL queries from HIR to find ExprId by BSL range
     let all_sdbl = db.all_sdbl_in_file(file_id);
 
