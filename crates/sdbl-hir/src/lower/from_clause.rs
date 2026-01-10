@@ -298,17 +298,26 @@ impl<'a> LoweringContext<'a> {
 
                     // Add dimensions
                     for dimension in register.dimensions() {
+                        // Dimensions don't have types in metadata, keep as Unknown
                         fields.push(FieldDef::new(dimension.name(), SdblType::Unknown));
                     }
 
                     // Add resources
                     for resource in register.resources() {
-                        fields.push(FieldDef::new(resource.name(), SdblType::Unknown));
+                        let ty = resource
+                            .attr_type()
+                            .map(SdblType::from_attribute_type)
+                            .unwrap_or(SdblType::Unknown);
+                        fields.push(FieldDef::new(resource.name(), ty));
                     }
 
                     // Add attributes
                     for attribute in register.attributes() {
-                        fields.push(FieldDef::new(attribute.name(), SdblType::Unknown));
+                        let ty = attribute
+                            .attr_type()
+                            .map(SdblType::from_attribute_type)
+                            .unwrap_or(SdblType::Unknown);
+                        fields.push(FieldDef::new(attribute.name(), ty));
                     }
 
                     tracing::info!(
@@ -344,7 +353,8 @@ impl<'a> LoweringContext<'a> {
                     let initial_count = fields.len();
 
                     for attribute in &obj.attributes {
-                        fields.push(FieldDef::new(attribute.name.clone(), SdblType::Unknown));
+                        let ty = SdblType::from_attribute_type(&attribute.attr_type);
+                        fields.push(FieldDef::new(attribute.name.clone(), ty));
                     }
 
                     tracing::info!(

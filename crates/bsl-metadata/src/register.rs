@@ -29,12 +29,16 @@ pub struct RegisterResource {
     /// Example: "Number(15,2)", "String(100)"
     #[serde(default)]
     type_str: String,
+
+    /// Parsed attribute type (for type inference in SDBL)
+    #[serde(skip)]
+    attr_type: Option<crate::metadata_object::AttributeType>,
 }
 
 impl RegisterResource {
     /// Create a new resource with the given UUID and name.
     pub fn new(uuid: Uuid, name: impl Into<String>) -> Self {
-        Self { uuid, name: name.into(), name_en: None, type_str: String::new() }
+        Self { uuid, name: name.into(), name_en: None, type_str: String::new(), attr_type: None }
     }
 
     /// Get the UUID of the resource.
@@ -61,6 +65,16 @@ impl RegisterResource {
     pub fn set_type_str(&mut self, type_str: String) {
         self.type_str = type_str;
     }
+
+    /// Get the parsed attribute type.
+    pub fn attr_type(&self) -> Option<&crate::metadata_object::AttributeType> {
+        self.attr_type.as_ref()
+    }
+
+    /// Set the attribute type.
+    pub fn set_attr_type(&mut self, attr_type: crate::metadata_object::AttributeType) {
+        self.attr_type = Some(attr_type);
+    }
 }
 
 /// Attribute (реквизит) in InformationRegister
@@ -82,12 +96,16 @@ pub struct RegisterAttribute {
     /// Example: "String(100)", "CatalogRef.Валюты"
     #[serde(default)]
     type_str: String,
+
+    /// Parsed attribute type (for type inference in SDBL)
+    #[serde(skip)]
+    attr_type: Option<crate::metadata_object::AttributeType>,
 }
 
 impl RegisterAttribute {
     /// Create a new attribute with the given UUID and name.
     pub fn new(uuid: Uuid, name: impl Into<String>) -> Self {
-        Self { uuid, name: name.into(), name_en: None, type_str: String::new() }
+        Self { uuid, name: name.into(), name_en: None, type_str: String::new(), attr_type: None }
     }
 
     /// Get the UUID of the attribute.
@@ -113,6 +131,16 @@ impl RegisterAttribute {
     /// Set the type string.
     pub fn set_type_str(&mut self, type_str: String) {
         self.type_str = type_str;
+    }
+
+    /// Get the parsed attribute type.
+    pub fn attr_type(&self) -> Option<&crate::metadata_object::AttributeType> {
+        self.attr_type.as_ref()
+    }
+
+    /// Set the attribute type.
+    pub fn set_attr_type(&mut self, attr_type: crate::metadata_object::AttributeType) {
+        self.attr_type = Some(attr_type);
     }
 }
 

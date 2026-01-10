@@ -364,6 +364,7 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
                 crate::register::RegisterResource::new(resource_uuid, resource_xml.properties.name);
             let resource_type = parse_type_xml(&resource_xml.properties.resource_type)?;
             resource.set_type_str(format!("{:?}", resource_type));
+            resource.set_attr_type(resource_type);
 
             resources.push(resource);
         }
@@ -377,6 +378,7 @@ fn parse_register_xml(xml: &str, mdo_type: MdoType) -> Result<Register> {
                 crate::register::RegisterAttribute::new(attr_uuid, attr_xml.properties.name);
             let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
             attribute.set_type_str(format!("{:?}", attr_type));
+            attribute.set_attr_type(attr_type);
 
             attributes.push(attribute);
         }

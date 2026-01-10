@@ -82,6 +82,25 @@ impl SdblType {
         Self::Ref(MdoRef { mdo_type, name: name.into() })
     }
 
+    /// Convert from bsl-metadata AttributeType to SdblType.
+    pub fn from_attribute_type(attr_type: &bsl_metadata::AttributeType) -> Self {
+        use bsl_metadata::AttributeType;
+
+        match attr_type {
+            AttributeType::String { .. } => Self::String,
+            AttributeType::Number { precision, scale } => {
+                Self::Number { precision: Some(*precision), scale: Some(*scale) }
+            }
+            AttributeType::Boolean => Self::Boolean,
+            AttributeType::Date => Self::Date,
+            AttributeType::DateTime => Self::DateTime,
+            AttributeType::Ref { mdo_type, name } => {
+                Self::Ref(MdoRef { mdo_type: *mdo_type, name: name.clone() })
+            }
+            AttributeType::Unknown => Self::Unknown,
+        }
+    }
+
     /// Check if type is unknown or error.
     pub fn is_unknown_or_error(&self) -> bool {
         matches!(self, Self::Unknown | Self::Error)
