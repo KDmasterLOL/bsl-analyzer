@@ -244,7 +244,10 @@ impl<'a> LoweringContext<'a> {
             | MdoType::AccumulationRegister
             | MdoType::AccountingRegister
             | MdoType::CalculationRegister => {
-                if let Some(register) = metadata.find_register(object_name) {
+                // Use find_register_by_type_and_name to ensure we get the correct register type
+                if let Some(register) =
+                    metadata.find_register_by_type_and_name(mdo_type, object_name)
+                {
                     let initial_count = fields.len();
 
                     // Add dimensions
@@ -273,10 +276,10 @@ impl<'a> LoweringContext<'a> {
                         "Added metadata fields to register"
                     );
                 } else {
-                    tracing::debug!(
+                    tracing::warn!(
                         mdo_type = ?mdo_type,
                         object_name = object_name,
-                        "Register not found in metadata"
+                        "Register not found in metadata (type mismatch or missing)"
                     );
                 }
             }
