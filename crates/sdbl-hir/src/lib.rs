@@ -461,17 +461,25 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
     // DEBUG: Show literal text around offset_in_literal
     let lit_offset_usize: usize = offset_in_literal.into();
 
-    // Find char boundaries
-    let lit_start = (lit_offset_usize.saturating_sub(50)..=lit_offset_usize)
+    // Find nearest char boundary to offset (for safe slicing)
+    let safe_offset = if literal_text.is_char_boundary(lit_offset_usize) {
+        lit_offset_usize
+    } else {
+        // Walk backwards to find char boundary
+        (0..lit_offset_usize).rev().find(|&i| literal_text.is_char_boundary(i)).unwrap_or(0)
+    };
+
+    // Find char boundaries for context window
+    let lit_start = (safe_offset.saturating_sub(50)..=safe_offset)
         .rev()
         .find(|&i| literal_text.is_char_boundary(i))
         .unwrap_or(0);
-    let lit_end = (lit_offset_usize..=(lit_offset_usize + 50).min(literal_text.len()))
+    let lit_end = (safe_offset..=(safe_offset + 50).min(literal_text.len()))
         .find(|&i| literal_text.is_char_boundary(i))
         .unwrap_or(literal_text.len());
 
-    let lit_before = &literal_text[lit_start..lit_offset_usize];
-    let lit_after = &literal_text[lit_offset_usize..lit_end];
+    let lit_before = &literal_text[lit_start..safe_offset];
+    let lit_after = &literal_text[safe_offset..lit_end];
 
     tracing::info!(
         "detect_sdbl_at_position: offset={:?}, literal_start={:?}, offset_in_literal={:?}, literal_text_len={}, lit_before={:?}, lit_after={:?}",
