@@ -809,11 +809,17 @@ fn get_sdbl_scope(
     // 1. Get all SDBL queries from HIR to find ExprId by BSL range
     let all_sdbl = db.all_sdbl_in_file(file_id);
 
+    tracing::info!(
+        total_queries = all_sdbl.len(),
+        bsl_offset = u32::from(bsl_offset),
+        "get_sdbl_scope: searching for query containing cursor"
+    );
+
     // 2. Find the ExprId of the query containing the cursor
     // Use bsl_literal_range (BSL-space) for reliable matching
     let target_expr_id = all_sdbl.iter().find_map(|(expr_id, qinfo)| {
         let contains = qinfo.bsl_literal_range.contains(bsl_offset);
-        tracing::debug!(
+        tracing::info!(
             expr_id = ?expr_id,
             bsl_range_start = u32::from(qinfo.bsl_literal_range.start()),
             bsl_range_end = u32::from(qinfo.bsl_literal_range.end()),
