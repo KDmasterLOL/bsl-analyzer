@@ -353,7 +353,7 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
                 detail: Some(format!("{}{}", type_desc, standard_marker)),
                 kind: CompletionItemKind::Field,
                 insert_text: field_name,
-                documentation: Some(format!("Поле из таблицы {}", col.table_name.as_str())),
+                documentation: Some(format!("Таблица: {}", col.table_name.as_str())),
             }
         })
         .collect();

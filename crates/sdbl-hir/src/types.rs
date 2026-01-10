@@ -270,16 +270,15 @@ impl std::fmt::Display for SdblType {
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
             Self::Composite { types } => {
-                // Display all types on separate lines with indent
+                // Display all types on separate lines at same level
                 if types.is_empty() {
                     write!(f, "Составной тип (пусто)")
                 } else if types.len() == 1 {
                     write!(f, "{}", types[0])
                 } else {
-                    // Multiple types - first on same line, rest with indent
-                    write!(f, "{}", types[0])?;
-                    for ty in types.iter().skip(1) {
-                        write!(f, "\n  {}", ty)?;
+                    // Multiple types - all on new lines at same level
+                    for ty in types.iter() {
+                        write!(f, "\n{}", ty)?;
                     }
                     Ok(())
                 }
