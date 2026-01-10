@@ -90,11 +90,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         MdoType::ChartOfCharacteristicTypes,
     )?;
     load_simple_metadata_objects(&path.join("ExchangePlans"), &mut config, MdoType::ExchangePlan)?;
-    load_simple_metadata_objects(
-        &path.join("BusinessProcesses"),
-        &mut config,
-        MdoType::BusinessProcess,
-    )?;
+    load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
     load_simple_metadata_objects(&path.join("Enums"), &mut config, MdoType::Enum)?;
     load_simple_metadata_objects(&path.join("Tasks"), &mut config, MdoType::Task)?;
     load_simple_metadata_objects(
@@ -272,6 +268,44 @@ fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
                     );
 
                     config.add_metadata_object(document);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load BusinessProcesses from directory
+fn load_business_processes(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_business_processes", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let business_process_dir = entry.path();
+
+        // Look for directories
+        if business_process_dir.is_dir() {
+            if let Some(name) = business_process_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    // Parse XML to get business process with attributes
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let business_process = xml_parser::parse_business_process_xml(&xml)?;
+
+                    tracing::debug!(
+                        business_process = %name,
+                        attributes = business_process.attributes.len(),
+                        "loaded business process"
+                    );
+
+                    config.add_metadata_object(business_process);
                 }
             }
         }

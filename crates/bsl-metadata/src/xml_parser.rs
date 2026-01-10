@@ -615,6 +615,13 @@ struct DocumentRoot {
     document: MetadataObjectXml,
 }
 
+/// Root XML structure for BusinessProcess
+#[derive(Debug, Deserialize)]
+struct BusinessProcessRoot {
+    #[serde(rename = "BusinessProcess")]
+    business_process: MetadataObjectXml,
+}
+
 /// Generic metadata object XML structure (Catalog, Document, etc.)
 #[derive(Debug, Deserialize)]
 struct MetadataObjectXml {
@@ -802,6 +809,15 @@ pub fn parse_document_xml(xml: &str) -> Result<crate::metadata_object::MetadataO
     let root: DocumentRoot = quick_xml::de::from_str(xml)?;
 
     parse_metadata_object(root.document, MdoType::Document)
+}
+
+/// Parse BusinessProcess XML from Designer format
+pub fn parse_business_process_xml(xml: &str) -> Result<crate::metadata_object::MetadataObject> {
+    let _span = tracing::debug_span!("parse_business_process_xml").entered();
+
+    let root: BusinessProcessRoot = quick_xml::de::from_str(xml)?;
+
+    parse_metadata_object(root.business_process, MdoType::BusinessProcess)
 }
 
 /// Internal helper to parse metadata object XML
