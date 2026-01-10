@@ -299,10 +299,10 @@ fn load_business_processes(dir: &Path, config: &mut Configuration) -> Result<()>
                     let xml = fs::read_to_string(&xml_path)?;
                     let business_process = xml_parser::parse_business_process_xml(&xml)?;
 
-                    tracing::debug!(
+                    tracing::info!(
                         business_process = %name,
                         attributes = business_process.attributes.len(),
-                        "loaded business process"
+                        "loaded business process with attributes"
                     );
 
                     config.add_metadata_object(business_process);

@@ -1099,17 +1099,23 @@ fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::Attrib
     // These are typically used in event subscriptions and represent "any object of this type"
     match type_str {
         "cfg:CatalogObject" => {
-            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog })
+            tracing::info!(type_str = %type_str, "Matched CatalogObject special case");
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Catalog });
         }
         "cfg:DocumentObject" => {
-            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Document })
+            tracing::info!(type_str = %type_str, "Matched DocumentObject special case");
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Document });
         }
         "cfg:BusinessProcessObject" => {
-            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess })
+            tracing::info!(type_str = %type_str, "Matched BusinessProcessObject special case");
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess });
         }
-        "cfg:TaskObject" => return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Task }),
+        "cfg:TaskObject" => {
+            tracing::info!(type_str = %type_str, "Matched TaskObject special case");
+            return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::Task });
+        }
         "cfg:BusinessProcessRoutePointRef" => {
-            // Route points are specific to business processes - treat as any BP ref
+            tracing::info!(type_str = %type_str, "Matched BusinessProcessRoutePointRef special case");
             return Ok(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess });
         }
         _ => {}
@@ -1140,7 +1146,7 @@ fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::Attrib
         "cfg:ChartOfAccountsRef" => MdoType::ChartOfAccounts,
         "cfg:ChartOfCalculationTypesRef" => MdoType::ChartOfCalculationTypes,
         _ => {
-            tracing::warn!(ref_type = %ref_type, "unsupported reference type");
+            tracing::warn!(ref_type = %ref_type, full_type_str = %type_str, "unsupported reference type - CHECK IF THIS SHOULD BE HANDLED IN SPECIAL CASES");
             return Ok(AttributeType::Unknown);
         }
     };
