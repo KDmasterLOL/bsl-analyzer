@@ -85,6 +85,15 @@ pub enum SdblType {
     /// Wraps the inner type (e.g., SUM(Number) -> Aggregate(Number)).
     Aggregate(Box<SdblType>),
 
+    /// Composite type (union of multiple types).
+    ///
+    /// Field can hold values of different types.
+    /// Example: Dimension can be one of several enum types.
+    Composite {
+        /// List of allowed types
+        types: Vec<SdblType>,
+    },
+
     /// Unknown type (inference failed or not attempted).
     #[default]
     Unknown,
@@ -141,12 +150,18 @@ impl SdblType {
                 Self::DefinedType { name: name.clone(), underlying_type: None }
             }
             AttributeType::Composite { types } => {
-                // For composite types, use first type (for now)
-                // TODO: Consider representing composite types in SdblType
-                if let Some(first_type) = types.first() {
-                    Self::from_attribute_type(first_type)
-                } else {
+                // Convert all types in composite
+                let sdbl_types: Vec<SdblType> =
+                    types.iter().map(Self::from_attribute_type).collect();
+
+                if sdbl_types.is_empty() {
                     Self::Unknown
+                } else if sdbl_types.len() == 1 {
+                    // Single type - unwrap it
+                    sdbl_types.into_iter().next().unwrap()
+                } else {
+                    // Multiple types - create Composite
+                    Self::Composite { types: sdbl_types }
                 }
             }
             AttributeType::Unknown => Self::Unknown,
@@ -211,6 +226,10 @@ impl SdblType {
             (ValueStorage, ValueStorage) => true,
             (ValueTable, ValueTable) => true,
 
+            // Composite types - compatible if any of the types is compatible
+            (Composite { types }, other) => types.iter().any(|t| t.is_compatible_with(other)),
+            (other, Composite { types }) => types.iter().any(|t| other.is_compatible_with(t)),
+
             _ => false,
         }
     }
@@ -250,6 +269,17 @@ impl std::fmt::Display for SdblType {
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
+            Self::Composite { types } => {
+                // Display all types separated by " | "
+                if types.is_empty() {
+                    write!(f, "Составной тип (пусто)")
+                } else if types.len() == 1 {
+                    write!(f, "{}", types[0])
+                } else {
+                    let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+                    write!(f, "{}", type_strings.join(" | "))
+                }
+            }
             Self::Unknown => write!(f, "Неизвестно"),
             Self::Error => write!(f, "Ошибка"),
         }
@@ -358,5 +388,59 @@ mod tests {
 
         assert!(!SdblType::string().is_numeric());
         assert!(!SdblType::Boolean.is_numeric());
+    }
+
+    #[test]
+    fn test_composite_type_display() {
+        use bsl_metadata::MdoType;
+
+        // Single type should unwrap
+        let single = SdblType::Composite {
+            types: vec![SdblType::reference(MdoType::Enum, "ВидДействия1")],
+        };
+        assert_eq!(single.to_string(), "Перечисление.ВидДействия1");
+
+        // Multiple types should show all with separator
+        let composite = SdblType::Composite {
+            types: vec![
+                SdblType::reference(MdoType::Enum, "ВидыУсловийОтбораИсходящихПисем"),
+                SdblType::reference(MdoType::Enum, "ВидыДействийПриОбработкеИсходящихПисем"),
+                SdblType::reference(MdoType::Enum, "ВидыУсловийОтбораВходящихПисем"),
+                SdblType::reference(MdoType::Enum, "ВидыДействийПриОбработкеВходящихПисем"),
+            ],
+        };
+
+        let display = composite.to_string();
+        assert!(display.contains("ВидыУсловийОтбораИсходящихПисем"));
+        assert!(display.contains("ВидыДействийПриОбработкеИсходящихПисем"));
+        assert!(display.contains("ВидыУсловийОтбораВходящихПисем"));
+        assert!(display.contains("ВидыДействийПриОбработкеВходящихПисем"));
+        assert!(display.contains(" | "));
+
+        // Verify all 4 types are shown
+        let parts: Vec<&str> = display.split(" | ").collect();
+        assert_eq!(parts.len(), 4);
+    }
+
+    #[test]
+    fn test_composite_type_compatibility() {
+        use bsl_metadata::MdoType;
+
+        let composite = SdblType::Composite {
+            types: vec![
+                SdblType::reference(MdoType::Enum, "Enum1"),
+                SdblType::reference(MdoType::Enum, "Enum2"),
+                SdblType::Boolean,
+            ],
+        };
+
+        // Composite is compatible with any of its types
+        assert!(composite.is_compatible_with(&SdblType::reference(MdoType::Enum, "Enum1")));
+        assert!(composite.is_compatible_with(&SdblType::reference(MdoType::Enum, "Enum2")));
+        assert!(composite.is_compatible_with(&SdblType::Boolean));
+
+        // Not compatible with types not in the composite
+        assert!(!composite.is_compatible_with(&SdblType::string()));
+        assert!(!composite.is_compatible_with(&SdblType::number()));
     }
 }

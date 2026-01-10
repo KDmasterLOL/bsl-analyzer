@@ -391,6 +391,49 @@ impl MetadataObject {
     }
 }
 
+impl std::fmt::Display for AttributeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String { length } => {
+                write!(f, "Строка")?;
+                if let Some(len) = length {
+                    write!(f, "({})", len)?;
+                }
+                Ok(())
+            }
+            Self::Number { precision, scale } => {
+                write!(f, "Число({}, {})", precision, scale)
+            }
+            Self::Boolean => write!(f, "Булево"),
+            Self::Date => write!(f, "Дата"),
+            Self::DateTime => write!(f, "ДатаВремя"),
+            Self::Ref { mdo_type, name } => {
+                write!(f, "{}.{}", mdo_type.russian_name(), name)
+            }
+            Self::AnyRef => write!(f, "ЛюбаяСсылка"),
+            Self::Uuid => write!(f, "УникальныйИдентификатор"),
+            Self::ValueStorage => write!(f, "ХранилищеЗначения"),
+            Self::DefinedType { name } => {
+                write!(f, "ОпределяемыйТип.{}", name)
+            }
+            Self::Composite { types } => {
+                // Display all types separated by " | "
+                if types.is_empty() {
+                    write!(f, "Составной тип (пусто)")
+                } else if types.len() == 1 {
+                    // Single type - just display it
+                    write!(f, "{}", types[0])
+                } else {
+                    // Multiple types - join with " | "
+                    let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+                    write!(f, "{}", type_strings.join(" | "))
+                }
+            }
+            Self::Unknown => write!(f, "Неизвестно"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +584,53 @@ mod tests {
 
         let attr_unknown = AttributeType::Unknown;
         assert_eq!(attr_unknown, AttributeType::Unknown);
+    }
+
+    #[test]
+    fn test_composite_type_display() {
+        // Single type composite should display as single type
+        let single = AttributeType::Composite {
+            types: vec![AttributeType::Ref {
+                mdo_type: MdoType::Enum,
+                name: "ВидДействия".to_string(),
+            }],
+        };
+        assert_eq!(single.to_string(), "Перечисление.ВидДействия");
+
+        // Multiple types composite should show all types with separator
+        let composite = AttributeType::Composite {
+            types: vec![
+                AttributeType::Ref {
+                    mdo_type: MdoType::Enum,
+                    name: "ВидыУсловийОтбораИсходящихПисем".to_string(),
+                },
+                AttributeType::Ref {
+                    mdo_type: MdoType::Enum,
+                    name: "ВидыДействийПриОбработкеИсходящихПисем".to_string(),
+                },
+                AttributeType::Ref {
+                    mdo_type: MdoType::Enum,
+                    name: "ВидыУсловийОтбораВходящихПисем".to_string(),
+                },
+                AttributeType::Ref {
+                    mdo_type: MdoType::Enum,
+                    name: "ВидыДействийПриОбработкеВходящихПисем".to_string(),
+                },
+            ],
+        };
+
+        let display = composite.to_string();
+        println!("\nComposite type display:\n{}", display);
+
+        // Verify all 4 types are present
+        assert!(display.contains("ВидыУсловийОтбораИсходящихПисем"));
+        assert!(display.contains("ВидыДействийПриОбработкеИсходящихПисем"));
+        assert!(display.contains("ВидыУсловийОтбораВходящихПисем"));
+        assert!(display.contains("ВидыДействийПриОбработкеВходящихПисем"));
+        assert!(display.contains(" | "));
+
+        // Verify exactly 4 parts
+        let parts: Vec<&str> = display.split(" | ").collect();
+        assert_eq!(parts.len(), 4);
     }
 }
