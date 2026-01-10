@@ -80,6 +80,9 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load EventSubscriptions
     load_event_subscriptions(&path.join("EventSubscriptions"), &mut config)?;
 
+    // Load DefinedTypes
+    load_defined_types(&path.join("DefinedTypes"), &mut config)?;
+
     // Load other metadata types (simplified - name only, for SDBL completion)
     load_simple_metadata_objects(
         &path.join("ChartsOfCharacteristicTypes"),
@@ -115,6 +118,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         metadata_objects = config.metadata_objects().len(),
         registers = config.registers().len(),
         event_subscriptions = config.event_subscriptions().len(),
+        defined_types = config.defined_types().len(),
         "configuration loaded"
     );
 
@@ -369,6 +373,42 @@ fn load_event_subscriptions(dir: &Path, config: &mut Configuration) -> Result<()
             );
 
             config.add_event_subscription(subscription);
+        }
+    }
+
+    Ok(())
+}
+
+/// Load DefinedTypes from directory
+///
+/// **CRITICAL:** DefinedTypes have NO code files - only XML!
+///
+/// Designer format structure:
+/// - XML: `DefinedTypes/<Name>.xml` (NO folders, NO code files)
+fn load_defined_types(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_defined_types", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process .xml files (DefinedTypes have no code)
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
+            let xml = fs::read_to_string(&path)?;
+            let defined_type = xml_parser::parse_defined_type_xml(&xml)?;
+
+            tracing::debug!(
+                defined_type_name = %defined_type.name(),
+                underlying_type = ?defined_type.underlying_type(),
+                "loaded defined type"
+            );
+
+            config.add_defined_type(defined_type);
         }
     }
 

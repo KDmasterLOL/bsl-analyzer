@@ -300,7 +300,7 @@ impl<'a> LoweringContext<'a> {
                     for dimension in register.dimensions() {
                         let ty = dimension
                             .attr_type()
-                            .map(SdblType::from_attribute_type)
+                            .map(|attr_type| self.resolve_attribute_type(attr_type))
                             .unwrap_or(SdblType::Unknown);
                         fields.push(FieldDef::new(dimension.name(), ty));
                     }
@@ -309,7 +309,7 @@ impl<'a> LoweringContext<'a> {
                     for resource in register.resources() {
                         let ty = resource
                             .attr_type()
-                            .map(SdblType::from_attribute_type)
+                            .map(|attr_type| self.resolve_attribute_type(attr_type))
                             .unwrap_or(SdblType::Unknown);
                         fields.push(FieldDef::new(resource.name(), ty));
                     }
@@ -318,7 +318,7 @@ impl<'a> LoweringContext<'a> {
                     for attribute in register.attributes() {
                         let ty = attribute
                             .attr_type()
-                            .map(SdblType::from_attribute_type)
+                            .map(|attr_type| self.resolve_attribute_type(attr_type))
                             .unwrap_or(SdblType::Unknown);
                         fields.push(FieldDef::new(attribute.name(), ty));
                     }
@@ -356,7 +356,7 @@ impl<'a> LoweringContext<'a> {
                     let initial_count = fields.len();
 
                     for attribute in &obj.attributes {
-                        let ty = SdblType::from_attribute_type(&attribute.attr_type);
+                        let ty = self.resolve_attribute_type(&attribute.attr_type);
                         fields.push(FieldDef::new(attribute.name.clone(), ty));
                     }
 
@@ -379,6 +379,27 @@ impl<'a> LoweringContext<'a> {
             }
 
             _ => {}
+        }
+    }
+
+    /// Resolve AttributeType to SdblType, resolving DefinedType through metadata if needed.
+    fn resolve_attribute_type(&self, attr_type: &bsl_metadata::AttributeType) -> SdblType {
+        use bsl_metadata::AttributeType;
+
+        match attr_type {
+            AttributeType::DefinedType { name } => {
+                // Try to resolve DefinedType through metadata
+                if let Some(metadata) = &self.metadata {
+                    if let Some(defined_type) = metadata.find_defined_type(name) {
+                        // Recursively resolve the underlying type
+                        return self.resolve_attribute_type(defined_type.underlying_type());
+                    }
+                }
+                // If not found, fallback to showing DefinedType as is
+                SdblType::DefinedType(name.clone())
+            }
+            // For all other types, use standard conversion
+            _ => SdblType::from_attribute_type(attr_type),
         }
     }
 }

@@ -1044,6 +1044,63 @@ fn parse_reference_type(type_str: &str) -> Result<crate::metadata_object::Attrib
     Ok(AttributeType::Ref { mdo_type, name })
 }
 
+/// Root XML structure for DefinedType
+#[derive(Debug, Deserialize)]
+struct DefinedTypeRoot {
+    #[serde(rename = "DefinedType")]
+    defined_type: DefinedTypeXml,
+}
+
+/// DefinedType XML structure
+#[derive(Debug, Deserialize)]
+struct DefinedTypeXml {
+    #[serde(rename = "@uuid")]
+    uuid: String,
+
+    #[serde(rename = "Properties")]
+    properties: DefinedTypeProperties,
+}
+
+/// DefinedType properties
+#[derive(Debug, Deserialize)]
+struct DefinedTypeProperties {
+    #[serde(rename = "Name")]
+    name: String,
+
+    #[serde(rename = "Type")]
+    defined_type: TypeXml,
+}
+
+/// Parse DefinedType XML from Designer format
+pub fn parse_defined_type_xml(xml: &str) -> Result<crate::defined_type::DefinedType> {
+    let _span = tracing::debug_span!("parse_defined_type_xml").entered();
+
+    let root: DefinedTypeRoot = quick_xml::de::from_str(xml)?;
+
+    let uuid =
+        root.defined_type.uuid.parse::<Uuid>().map_err(|e| {
+            crate::error::MetadataError::InvalidFormat(format!("Invalid UUID: {}", e))
+        })?;
+
+    let name = root.defined_type.properties.name;
+    let underlying_type = parse_type_xml(&root.defined_type.properties.defined_type)?;
+
+    let defined_type = crate::defined_type::DefinedType::builder()
+        .uuid(uuid)
+        .name(name.clone())
+        .underlying_type(underlying_type.clone())
+        .build();
+
+    tracing::debug!(
+        defined_type_name = %name,
+        uuid = %uuid,
+        underlying_type = ?underlying_type,
+        "parsed defined type"
+    );
+
+    Ok(defined_type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1919,6 +1976,41 @@ mod tests {
                 assert_eq!(name, "ОтметкаВремени");
             }
             _ => panic!("Expected DefinedType, got {:?}", dim_type),
+        }
+    }
+
+    #[test]
+    fn test_parse_defined_type_xml() {
+        use crate::metadata_object::AttributeType;
+
+        // Test parsing DefinedType XML (based on real example from doc3)
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <DefinedType uuid="b4407946-85d9-4f8d-9c0f-7e4c2852275e">
+        <Properties>
+            <Name>ОтметкаВремени</Name>
+            <Type>
+                <v8:Type>xs:string</v8:Type>
+                <v8:StringQualifiers>
+                    <v8:Length>17</v8:Length>
+                    <v8:AllowedLength>Fixed</v8:AllowedLength>
+                </v8:StringQualifiers>
+            </Type>
+        </Properties>
+    </DefinedType>
+</MetaDataObject>"#;
+
+        let defined_type = parse_defined_type_xml(xml).unwrap();
+
+        assert_eq!(defined_type.name(), "ОтметкаВремени");
+        assert_eq!(defined_type.uuid().to_string(), "b4407946-85d9-4f8d-9c0f-7e4c2852275e");
+
+        // Check underlying type
+        match defined_type.underlying_type() {
+            AttributeType::String { length } => {
+                assert_eq!(*length, Some(17));
+            }
+            _ => panic!("Expected String type, got {:?}", defined_type.underlying_type()),
         }
     }
 }

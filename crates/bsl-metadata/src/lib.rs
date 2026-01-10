@@ -94,6 +94,7 @@
 
 pub mod common_module;
 pub mod configuration;
+pub mod defined_type;
 pub mod dimension;
 pub mod enums;
 pub mod error;
@@ -107,6 +108,7 @@ pub mod xml_parser;
 
 pub use common_module::{CommonModule, CommonModuleBuilder};
 pub use configuration::Configuration;
+pub use defined_type::{DefinedType, DefinedTypeBuilder};
 pub use dimension::{Dimension, DimensionBuilder};
 pub use enums::{ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant};
 pub use error::{MetadataError, Result};

@@ -3,6 +3,7 @@
 //! Ported from <https://github.com/1c-syntax/mdclasses>
 
 use crate::common_module::CommonModule;
+use crate::defined_type::DefinedType;
 use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::metadata_object::{MdoType, MetadataObject};
@@ -42,6 +43,10 @@ pub struct Configuration {
     #[serde(rename = "eventSubscriptions", default)]
     event_subscriptions: Vec<EventSubscription>,
 
+    /// Defined types (ОпределяемыеТипы)
+    #[serde(rename = "definedTypes", default)]
+    defined_types: Vec<DefinedType>,
+
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
@@ -57,6 +62,10 @@ pub struct Configuration {
     /// Cache: Name -> EventSubscription index mapping (not serialized)
     #[serde(skip)]
     name_to_event_subscription: HashMap<String, usize>,
+
+    /// Cache: Name -> DefinedType index mapping (not serialized)
+    #[serde(skip)]
+    name_to_defined_type: HashMap<String, usize>,
 
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
@@ -76,6 +85,7 @@ impl PartialEq for Configuration {
             && self.metadata_objects == other.metadata_objects
             && self.registers == other.registers
             && self.event_subscriptions == other.event_subscriptions
+            && self.defined_types == other.defined_types
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -93,10 +103,12 @@ impl Configuration {
             metadata_objects: Vec::new(),
             registers: Vec::new(),
             event_subscriptions: Vec::new(),
+            defined_types: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
             name_to_event_subscription: HashMap::new(),
+            name_to_defined_type: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
         }
@@ -124,6 +136,7 @@ impl Configuration {
         self.name_to_common_module.clear();
         self.name_to_register.clear();
         self.name_to_event_subscription.clear();
+        self.name_to_defined_type.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -138,6 +151,10 @@ impl Configuration {
 
         for (idx, event_sub) in self.event_subscriptions.iter().enumerate() {
             self.name_to_event_subscription.insert(event_sub.name().to_lowercase(), idx);
+        }
+
+        for (idx, defined_type) in self.defined_types.iter().enumerate() {
+            self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
         }
     }
 
@@ -304,6 +321,24 @@ impl Configuration {
         let idx = self.event_subscriptions.len();
         self.name_to_event_subscription.insert(subscription.name().to_lowercase(), idx);
         self.event_subscriptions.push(subscription);
+    }
+
+    /// Get all defined types
+    pub fn defined_types(&self) -> &[DefinedType] {
+        &self.defined_types
+    }
+
+    /// Find defined type by name (case-insensitive)
+    pub fn find_defined_type(&self, name: &str) -> Option<&DefinedType> {
+        let name_lower = name.to_lowercase();
+        self.name_to_defined_type.get(&name_lower).and_then(|&idx| self.defined_types.get(idx))
+    }
+
+    /// Add defined type
+    pub(crate) fn add_defined_type(&mut self, defined_type: DefinedType) {
+        let idx = self.defined_types.len();
+        self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
+        self.defined_types.push(defined_type);
     }
 }
 
