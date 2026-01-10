@@ -74,6 +74,15 @@ pub fn lower_sdbl_to_hir(
 
     let root = sdbl_ast.syntax_node();
 
+    // DEBUG: Log the actual text being lowered
+    let text = root.text().to_string();
+    let text_preview: String = text.chars().take(200).collect();
+    tracing::info!(
+        text_len = text.len(),
+        text_preview = %text_preview,
+        "lower_sdbl_to_hir: starting with AST text"
+    );
+
     // Try to cast root as query package
     let Some(package) = SdblQueryPackage::cast(root) else {
         tracing::debug!("Failed to cast root as SdblQueryPackage");

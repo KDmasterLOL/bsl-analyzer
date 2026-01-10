@@ -447,6 +447,15 @@ fn column_or_function(p: &mut Parser) {
                 break; // Stop parsing column ref, let clause parser handle it
             }
 
+            // ERROR RECOVERY: Check if next token is comma or EOF
+            // This prevents "Очередь.," from consuming the comma
+            if p.at(TokenKind::Comma) || p.at_end() {
+                // Incomplete column ref - create ERROR but DON'T consume comma
+                let err = p.start();
+                err.complete(p, NodeKind::Error); // Empty ERROR node
+                break; // Let selected_fields() see the comma
+            }
+
             if !p.expect(TokenKind::Ident) {
                 // Error recovery (p.expect already created ERROR node)
                 break;

@@ -729,4 +729,56 @@ mod tests {
             text
         );
     }
+
+    #[test]
+    fn test_error_recovery_incomplete_field_in_middle_of_list() {
+        // Real-world case: incomplete field IN THE MIDDLE of field list (not at the end)
+        // User types: "Очередь.," - comma after dot without field name
+        let input = r#"ВЫБРАТЬ ПЕРВЫЕ 500
+    Очередь.,
+    Очередь.ЗависимыйОбъектМетаданных КАК ЗависимыйОбъектМетаданных
+ИЗ
+    РегистрСведений.ОчередьОбновленияКэширующихДанных КАК Очередь
+ГДЕ
+    Очередь.Попыток < 3"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should have ERROR node for incomplete field
+        assert!(
+            text.contains("ERROR"),
+            "Expected ERROR node for incomplete field.\nTree: {}",
+            text
+        );
+
+        // But FROM clause should still be parsed!
+        assert!(
+            text.contains("SDBL_FROM_CLAUSE"),
+            "FROM clause should be parsed despite incomplete field in middle of list.\nTree: {}",
+            text
+        );
+
+        // Should have SDBL_DATA_SOURCE (table reference)
+        assert!(
+            text.contains("SDBL_DATA_SOURCE"),
+            "Data source should be in FROM clause.\nTree: {}",
+            text
+        );
+
+        // Should have WHERE clause
+        assert!(
+            text.contains("SDBL_WHERE_CLAUSE"),
+            "WHERE clause should be parsed.\nTree: {}",
+            text
+        );
+
+        // Should have multiple SDBL_SELECTED_FIELD (both incomplete and complete fields)
+        let field_count = text.matches("SDBL_SELECTED_FIELD").count();
+        assert!(
+            field_count >= 2,
+            "Should have at least 2 selected fields (incomplete + complete). Got: {}",
+            field_count
+        );
+    }
 }
