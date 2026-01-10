@@ -40,13 +40,13 @@ pub(super) fn sdbl_completions(
     );
 
     // Try to get Scope for the query at cursor position
-    tracing::info!(
+    tracing::warn!(
         file_id = ?file_id,
         bsl_offset = u32::from(offset),
-        "calling get_sdbl_scope"
+        "ABOUT TO CALL get_sdbl_scope"
     );
     let scope = get_sdbl_scope(db, file_id, offset);
-    tracing::info!(scope_is_some = scope.is_some(), "get_sdbl_scope returned");
+    tracing::warn!(scope_is_some = scope.is_some(), "get_sdbl_scope RETURNED");
     if scope.is_some() {
         tracing::debug!("successfully built Scope from query HIR");
     } else {

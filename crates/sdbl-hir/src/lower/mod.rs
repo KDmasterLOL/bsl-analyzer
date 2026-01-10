@@ -93,20 +93,39 @@ pub fn lower_sdbl_to_hir(
     let mut ctx = LoweringContext::new(metadata);
 
     // Lower ALL SELECT queries in the package
-    let mut queries = package.queries();
-    let Some(first_query) = queries.next() else {
+    let all_queries: Vec<_> = package.queries().collect();
+
+    if all_queries.is_empty() {
         tracing::debug!("No queries in package");
         return SdblLowerResult { hir: SdblHir::empty(), source_map: SdblSourceMap::new() };
-    };
-
-    // Lower first query
-    let mut hir = ctx.lower_select_query(&first_query);
-
-    // Lower remaining queries and merge diagnostics
-    for select_query in queries {
-        let additional = ctx.lower_select_query(&select_query);
-        hir.diagnostics.extend(additional.diagnostics);
     }
+
+    tracing::debug!(query_count = all_queries.len(), "lower_sdbl_to_hir: found queries in package");
+
+    // Lower ALL queries and collect diagnostics
+    let mut all_hirs = Vec::new();
+    for (index, select_query) in all_queries.iter().enumerate() {
+        let query_hir = ctx.lower_select_query(select_query);
+        tracing::debug!(
+            query_index = index,
+            from_tables = query_hir.from.len(),
+            join_tables = query_hir.joins.len(),
+            "lowered query in package"
+        );
+        all_hirs.push(query_hir);
+    }
+
+    // Collect ALL diagnostics from ALL queries (preserving order)
+    let mut all_diagnostics = Vec::new();
+    for query_hir in &all_hirs {
+        all_diagnostics.extend(query_hir.diagnostics.clone());
+    }
+
+    // Use the LAST query's HIR (most common use case for completion)
+    let mut hir = all_hirs.pop().unwrap();
+
+    // Replace diagnostics with ALL collected diagnostics
+    hir.diagnostics = all_diagnostics;
 
     // Finalize source map (sort token lists)
     ctx.source_map.finalize();
