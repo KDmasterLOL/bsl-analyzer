@@ -281,21 +281,15 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                     query_pos
                 );
             } else {
-                // Continuation line: skip whitespace + | prefix + whitespace after |
+                // Continuation line: skip whitespace before | and the | itself
+                // BUT: whitespace AFTER | is part of query text (for formatting)!
                 let trimmed = line.trim_start();
                 let skip_whitespace_before = line.len() - trimmed.len();
 
-                let (skip_pipe, after_pipe) = if let Some(stripped) = trimmed.strip_prefix('|') {
-                    (1, stripped)
-                } else {
-                    (0, trimmed)
-                };
+                let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
 
-                // Skip whitespace AFTER the pipe
-                let content = after_pipe.trim_start();
-                let skip_whitespace_after = after_pipe.len() - content.len();
-
-                let skip_total = skip_whitespace_before + skip_pipe + skip_whitespace_after;
+                // Only skip whitespace before | and the | itself
+                let skip_total = skip_whitespace_before + skip_pipe;
 
                 // Add newline before this line's content
                 query_pos += 1;
@@ -304,11 +298,10 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
                     query_pos += offset_in_line - skip_total;
                 }
                 tracing::info!(
-                    "  -> FOUND on continuation line: offset_in_line={}, skip_ws_before={}, skip_pipe={}, skip_ws_after={}, skip_total={}, final query_pos={}",
+                    "  -> FOUND on continuation line: offset_in_line={}, skip_ws_before={}, skip_pipe={}, skip_total={}, final query_pos={}",
                     offset_in_line,
                     skip_whitespace_before,
                     skip_pipe,
-                    skip_whitespace_after,
                     skip_total,
                     query_pos
                 );
@@ -332,17 +325,11 @@ fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSize) -> TextS
             let trimmed = line.trim_start();
             let skip_whitespace_before = line.len() - trimmed.len();
 
-            let (skip_pipe, after_pipe) = if let Some(stripped) = trimmed.strip_prefix('|') {
-                (1, stripped)
-            } else {
-                (0, trimmed)
-            };
+            let skip_pipe = if trimmed.starts_with('|') { 1 } else { 0 };
 
-            // Skip whitespace AFTER the pipe
-            let content = after_pipe.trim_start();
-            let skip_whitespace_after = after_pipe.len() - content.len();
-
-            let skip_total = skip_whitespace_before + skip_pipe + skip_whitespace_after;
+            // Only skip whitespace before | and the | itself
+            // Whitespace AFTER | is part of query text!
+            let skip_total = skip_whitespace_before + skip_pipe;
             query_pos += line_len - skip_total;
         }
     }
