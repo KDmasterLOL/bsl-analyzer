@@ -270,14 +270,18 @@ impl std::fmt::Display for SdblType {
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
             Self::Composite { types } => {
-                // Display all types separated by " | "
+                // Display all types on separate lines with indent
                 if types.is_empty() {
                     write!(f, "Составной тип (пусто)")
                 } else if types.len() == 1 {
                     write!(f, "{}", types[0])
                 } else {
-                    let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-                    write!(f, "{}", type_strings.join(" | "))
+                    // Multiple types - each on new line with 2-space indent
+                    // Start with newline so "Тип: " and types are on separate lines
+                    for ty in types.iter() {
+                        write!(f, "\n  {}", ty)?;
+                    }
+                    Ok(())
                 }
             }
             Self::Unknown => write!(f, "Неизвестно"),
@@ -415,11 +419,13 @@ mod tests {
         assert!(display.contains("ВидыДействийПриОбработкеИсходящихПисем"));
         assert!(display.contains("ВидыУсловийОтбораВходящихПисем"));
         assert!(display.contains("ВидыДействийПриОбработкеВходящихПисем"));
-        assert!(display.contains(" | "));
 
-        // Verify all 4 types are shown
-        let parts: Vec<&str> = display.split(" | ").collect();
-        assert_eq!(parts.len(), 4);
+        // Verify newlines are present (multiline format)
+        assert!(display.contains('\n'));
+
+        // Verify all 4 types are shown on separate lines (excluding empty lines)
+        let lines: Vec<&str> = display.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 4, "Expected 4 non-empty lines in composite type display");
     }
 
     #[test]
