@@ -289,6 +289,12 @@ pub enum AttributeType {
         /// Referenced metadata object name
         name: String,
     },
+    /// Any reference (ЛюбаяСсылка)
+    AnyRef,
+    /// UUID
+    Uuid,
+    /// ValueStorage (ХранилищеЗначения)
+    ValueStorage,
     /// Unknown or unsupported type
     Unknown,
 }

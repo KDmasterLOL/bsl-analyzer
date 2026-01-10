@@ -924,11 +924,20 @@ fn parse_type_xml(type_xml: &TypeXml) -> Result<crate::metadata_object::Attribut
         tracing::debug!(
             type_set = %type_set,
             type_sets_count = type_xml.type_sets.len(),
-            "parse_type_xml: parsing TypeSet (DefinedType)"
+            "parse_type_xml: parsing TypeSet"
         );
-        // DefinedType reference: cfg:DefinedType.Name
-        // For now, treat as Unknown since we don't resolve DefinedType yet
-        return Ok(AttributeType::Unknown);
+
+        // Handle special TypeSet values
+        match type_set.as_str() {
+            "cfg:AnyIBRef" => return Ok(AttributeType::AnyRef),
+            // DefinedType reference: cfg:DefinedType.Name
+            // For now, treat as Unknown since we don't resolve DefinedType yet
+            _ if type_set.starts_with("cfg:DefinedType.") => return Ok(AttributeType::Unknown),
+            _ => {
+                tracing::warn!(type_set = %type_set, "unknown TypeSet value");
+                return Ok(AttributeType::Unknown);
+            }
+        }
     }
 
     // If no types specified, return Unknown

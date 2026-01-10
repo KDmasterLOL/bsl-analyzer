@@ -45,6 +45,11 @@ pub enum SdblType {
     /// Used for: Ссылка, Владелец, Родитель, etc.
     Ref(MdoRef),
 
+    /// Any reference (ЛюбаяСсылка).
+    ///
+    /// Can hold reference to any metadata object.
+    AnyRef,
+
     /// Value table (ТаблицаЗначений).
     ///
     /// Result of subquery or temporary table.
@@ -97,6 +102,9 @@ impl SdblType {
             AttributeType::Ref { mdo_type, name } => {
                 Self::Ref(MdoRef { mdo_type: *mdo_type, name: name.clone() })
             }
+            AttributeType::AnyRef => Self::AnyRef,
+            // UUID and ValueStorage - treat as Unknown for now
+            AttributeType::Uuid | AttributeType::ValueStorage => Self::Unknown,
             AttributeType::Unknown => Self::Unknown,
         }
     }
@@ -147,6 +155,10 @@ impl SdblType {
             // References are compatible if they point to same MDO type
             (Ref(a), Ref(b)) => a.mdo_type == b.mdo_type,
 
+            // AnyRef is compatible with any Ref and vice versa
+            (AnyRef, Ref(_)) | (Ref(_), AnyRef) => true,
+            (AnyRef, AnyRef) => true,
+
             // ValueTable comparison
             (ValueTable, ValueTable) => true,
 
@@ -170,6 +182,7 @@ impl std::fmt::Display for SdblType {
             Self::Date => write!(f, "Дата"),
             Self::DateTime => write!(f, "ДатаВремя"),
             Self::Ref(mdo_ref) => write!(f, "{}", mdo_ref),
+            Self::AnyRef => write!(f, "ЛюбаяСсылка"),
             Self::ValueTable => write!(f, "ТаблицаЗначений"),
             Self::Null => write!(f, "NULL"),
             Self::Aggregate(inner) => write!(f, "Агрегат({})", inner),
