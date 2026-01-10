@@ -545,13 +545,22 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
 
     // DEBUG: Show query text around mapped offset
     let offset_q_usize: usize = offset_in_query.into();
-    let q_start = offset_q_usize.saturating_sub(30);
-    let q_end = (offset_q_usize + 30).min(query_text.len());
-    let query_before = if query_text.is_char_boundary(offset_q_usize) {
-        &query_text[q_start..offset_q_usize]
-    } else {
-        "<not char boundary>"
-    };
+
+    // Find char boundaries for safe slicing
+    let q_start = (offset_q_usize.saturating_sub(30)..=offset_q_usize)
+        .rev()
+        .find(|&i| query_text.is_char_boundary(i))
+        .unwrap_or(0);
+    let q_end = (offset_q_usize..=(offset_q_usize + 30).min(query_text.len()))
+        .find(|&i| query_text.is_char_boundary(i))
+        .unwrap_or(query_text.len());
+
+    let query_before =
+        if offset_q_usize <= query_text.len() && query_text.is_char_boundary(offset_q_usize) {
+            &query_text[q_start..offset_q_usize]
+        } else {
+            "<not char boundary>"
+        };
     let query_after =
         if offset_q_usize < query_text.len() && query_text.is_char_boundary(offset_q_usize) {
             &query_text[offset_q_usize..q_end]
