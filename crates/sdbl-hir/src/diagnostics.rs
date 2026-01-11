@@ -279,13 +279,13 @@ impl SdblDiagnostic {
             }
             Self::FieldsFromJoinWithoutNullCheck { join_type, .. } => {
                 let join_str = match join_type {
-                    crate::hir::JoinType::Left => "LEFT JOIN",
-                    crate::hir::JoinType::Right => "RIGHT JOIN",
-                    crate::hir::JoinType::Full => "FULL JOIN",
-                    _ => "JOIN",
+                    crate::hir::JoinType::Left => "ЛЕВОГО СОЕДИНЕНИЯ",
+                    crate::hir::JoinType::Right => "ПРАВОГО СОЕДИНЕНИЯ",
+                    crate::hir::JoinType::Full => "ПОЛНОГО СОЕДИНЕНИЯ",
+                    _ => "СОЕДИНЕНИЯ",
                 };
                 format!(
-                    "For fields from {} add field checks via IS NULL or use conversion via ISNULL or use INNER JOIN",
+                    "Для полей из {} добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ",
                     join_str
                 )
             }

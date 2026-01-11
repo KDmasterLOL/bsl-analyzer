@@ -100,14 +100,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             } = hir_diag
             {
                 let join_type_str = match join_type {
-                    sdbl_hir::JoinType::Left => "LEFT JOIN",
-                    sdbl_hir::JoinType::Right => "RIGHT JOIN",
-                    sdbl_hir::JoinType::Full => "FULL JOIN",
-                    _ => "JOIN",
+                    sdbl_hir::JoinType::Left => "ЛЕВОГО СОЕДИНЕНИЯ",
+                    sdbl_hir::JoinType::Right => "ПРАВОГО СОЕДИНЕНИЯ",
+                    sdbl_hir::JoinType::Full => "ПОЛНОГО СОЕДИНЕНИЯ",
+                    _ => "СОЕДИНЕНИЯ",
                 };
 
                 let message = format!(
-                    "For fields from {} add field checks via IS NULL or use conversion via ISNULL or use INNER JOIN",
+                    "Для полей из {} добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ",
                     join_type_str
                 );
 
