@@ -130,7 +130,8 @@ impl GlobalState {
     /// This method:
     /// 1. Takes all pending changes from VFS
     /// 2. Applies them to the Salsa database
-    /// 3. Returns true if any changes were processed
+    /// 3. Ensures files are mapped to SourceRoot
+    /// 4. Returns true if any changes were processed
     ///
     /// Should be called after receiving loader messages or LSP file changes.
     pub fn process_changes(&mut self) -> bool {
@@ -144,12 +145,16 @@ impl GlobalState {
         tracing::info!(file_count = changed_files.len(), "processing VFS changes");
 
         let db = self.analysis_host.raw_database_mut();
+        let source_root_id = base_db::SourceRootId(0);
 
         for file in changed_files {
             let text = match file.change {
                 vfs::Change::Create(content, _) | vfs::Change::Modify(content, _) => Some(content),
                 vfs::Change::Delete => None,
             };
+
+            // Ensure file is mapped to SourceRoot (important for files opened via LSP)
+            db.set_file_source_root(file.file_id, source_root_id);
 
             if let Some(text) = text {
                 db.set_file_text(file.file_id, &text);

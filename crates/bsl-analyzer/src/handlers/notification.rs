@@ -57,9 +57,8 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
 ///
 /// When a document is opened in the editor:
 /// 1. Store the full text in MemDocs
-/// 2. Add the file to VFS
-/// 3. Initialize SourceRoot if needed
-/// 4. Update the Salsa database with the file content
+/// 2. Update VFS with file content
+/// 3. Sync changes to Salsa database via process_changes()
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
 
@@ -73,7 +72,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     state.mem_docs.insert(uri.clone(), text.clone(), version);
 
     // Get or create FileId
-    let file_id = state.vfs_file_for_url(&uri)?;
+    let _file_id = state.vfs_file_for_url(&uri)?;
 
     // Update VFS with file content
     {
@@ -82,32 +81,10 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Update Salsa database with SourceRoot setup
-    {
-        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    // Process VFS changes and sync to Salsa database
+    state.process_changes();
 
-        let db = state.analysis_host.raw_database_mut();
-        let source_root_id = SourceRootId(0);
-        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
-
-        // Create FileSet with this file
-        // NOTE: For now we create a simple FileSet. In the future, we may need to
-        // maintain a global FileSet with all open files.
-        let mut file_set = vfs::FileSet::new();
-        file_set.insert(file_id, vfs_path);
-
-        // Update SourceRoot with new FileSet
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(source_root_id, source_root);
-
-        // Associate file with SourceRoot
-        db.set_file_source_root(file_id, source_root_id);
-
-        // Set file content
-        db.set_file_text(file_id, &text);
-    }
-
-    tracing::debug!("Document opened successfully: {} (FileId: {:?})", uri, file_id);
+    tracing::debug!("Document opened successfully: {}", uri);
 
     // Publish diagnostics
     publish_diagnostics(state, &uri)?;
@@ -120,7 +97,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 /// When a document is modified:
 /// 1. Apply incremental changes to MemDocs
 /// 2. Update VFS with new content
-/// 3. Update Salsa database (triggers incremental recomputation)
+/// 3. Sync changes to Salsa database via process_changes() (triggers incremental recomputation)
 pub fn handle_did_change(
     state: &mut GlobalState,
     params: DidChangeTextDocumentParams,
@@ -146,9 +123,6 @@ pub fn handle_did_change(
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
 
-    // Get FileId
-    let file_id = crate::lsp::file_id(state, &uri)?;
-
     // Update VFS
     {
         let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
@@ -156,30 +130,10 @@ pub fn handle_did_change(
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
 
-    // Update Salsa database (this triggers incremental recomputation)
-    {
-        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    // Process VFS changes and sync to Salsa database (triggers incremental recomputation)
+    state.process_changes();
 
-        let db = state.analysis_host.raw_database_mut();
-        let source_root_id = SourceRootId(0);
-        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
-
-        // Update FileSet (ensure file path is registered)
-        let mut file_set = vfs::FileSet::new();
-        file_set.insert(file_id, vfs_path);
-
-        // Update SourceRoot with FileSet
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(source_root_id, source_root);
-
-        // Ensure file is associated with SourceRoot
-        db.set_file_source_root(file_id, source_root_id);
-
-        // Set file content (triggers incremental recomputation)
-        db.set_file_text(file_id, &text);
-    }
-
-    tracing::debug!("Document updated successfully: {} (FileId: {:?})", uri, file_id);
+    tracing::debug!("Document updated successfully: {}", uri);
 
     // Publish diagnostics
     publish_diagnostics(state, &uri)?;
@@ -246,7 +200,17 @@ mod tests {
 
     fn create_test_state() -> (GlobalState, Receiver<Message>) {
         let (sender, receiver) = unbounded();
-        (GlobalState::new(sender), receiver)
+        let mut state = GlobalState::new(sender);
+
+        // Initialize SourceRoot for tests (normally done by VFS loader)
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        let db = state.analysis_host.raw_database_mut();
+        let source_root_id = SourceRootId(0);
+        let file_set = vfs::FileSet::new();
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(source_root_id, source_root);
+
+        (state, receiver)
     }
 
     #[test]
