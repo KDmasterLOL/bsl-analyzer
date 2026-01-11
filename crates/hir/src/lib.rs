@@ -2,7 +2,7 @@
 //!
 //! This crate provides a high-level API for semantic analysis.
 
-use hir_def::{DefDatabase, Name};
+use hir_def::{DefDatabase, Name, PathResolution, QualifiedName};
 
 pub use hir_def::{
     MethodData, MethodId, ModuleData, ModuleId, ParameterData, VariableData, VariableId,
@@ -11,7 +11,7 @@ pub use hir_def::{
 // Re-export HIR body types for diagnostics
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
-use syntax::TextRange;
+use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 
 /// A symbol in the source code (for navigation and references).
@@ -341,12 +341,16 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     /// This is used for Go to Definition and other navigation features.
     /// Returns the symbol (method, variable, or parameter) at the cursor position.
     ///
-    /// For Iteration 8, this is a simplified implementation that looks at identifier tokens.
+    /// Supports:
+    /// - Same-file navigation: simple names (MyMethod, MyVariable)
+    /// - Cross-file navigation: qualified names (CommonModule.Method)
     pub fn symbol_at_position(
         &self,
         file_id: FileId,
         offset: syntax::TextSize,
     ) -> Option<Symbol<'db, DB>> {
+        use syntax::ast::AstNode;
+
         // Parse the file
         let parse = self.db.parse(file_id);
         let root = parse.syntax_node();
@@ -359,10 +363,31 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return None;
         }
 
+        // Check if this identifier is part of a FieldExpr (qualified name)
+        // Walk up the syntax tree to find a potential FieldExpr parent
+        let parent = token.parent()?;
+
+        // Try to find FieldExpr ancestor
+        for ancestor in parent.ancestors() {
+            if let Some(field_expr) = syntax::ast::FieldExpr::cast(ancestor.clone()) {
+                // This is a qualified name (e.g., Module.Method)
+                return self.resolve_qualified_name(file_id, field_expr);
+            }
+
+            // Stop if we hit a statement or top-level boundary
+            match ancestor.kind() {
+                syntax::SyntaxKind::STMT_LIST
+                | syntax::SyntaxKind::SOURCE_FILE
+                | syntax::SyntaxKind::PROCEDURE_DEF
+                | syntax::SyntaxKind::FUNCTION_DEF => break,
+                _ => {}
+            }
+        }
+
+        // Not a qualified name - use simple name resolution (same-file)
         let name_text = token.text();
         let name = Name::new(name_text);
 
-        // Try to resolve it as a module method
         let module_id = ModuleId::new(file_id);
         let resolver = hir_def::resolver::Resolver::for_module(module_id);
 
@@ -370,13 +395,42 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Some(Symbol::Method(Method::new(self.db, method_id)));
         }
 
-        // Try to resolve it as a module variable
         if let Some(var_id) = resolver.resolve_module_variable(self.db, &name) {
             return Some(Symbol::Variable(Variable::new(self.db, var_id)));
         }
 
-        // Could be a parameter (not fully implemented in Iteration 8)
+        // Could be a parameter (not fully implemented)
         None
+    }
+
+    /// Resolve a qualified name from a FieldExpr (e.g., Module.Method).
+    ///
+    /// Uses workspace scope resolution for cross-file navigation.
+    fn resolve_qualified_name(
+        &self,
+        file_id: FileId,
+        field_expr: syntax::ast::FieldExpr,
+    ) -> Option<Symbol<'db, DB>> {
+        // Extract qualified name from FieldExpr
+        let qualified_name = self.extract_qualified_name_from_field_expr(field_expr)?;
+
+        // Use workspace scope resolver for cross-file resolution
+        let module_id = ModuleId::new(file_id);
+        let resolver = hir_def::resolver::Resolver::with_workspace_scope(module_id);
+
+        // Resolve the qualified path
+        let resolution = resolver.resolve_path(self.db, &qualified_name);
+
+        // Convert PathResolution to Symbol
+        match resolution {
+            PathResolution::Method(method_id) => {
+                Some(Symbol::Method(Method::new(self.db, method_id)))
+            }
+            PathResolution::Variable(var_id) => {
+                Some(Symbol::Variable(Variable::new(self.db, var_id)))
+            }
+            PathResolution::Unresolved(_) => None,
+        }
     }
 
     /// Find all references to a method within a file.
@@ -433,6 +487,87 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         }
 
         references
+    }
+
+    /// Extract qualified name from a FieldExpr node by walking up the tree.
+    ///
+    /// Examples:
+    /// - `Module.Method` → `QualifiedName([Module, Method])`
+    /// - `Documents.PKO.Create` → `QualifiedName([Documents, PKO, Create])`
+    ///
+    /// Returns None if the FieldExpr structure is invalid or incomplete.
+    fn extract_qualified_name_from_field_expr(
+        &self,
+        field_expr: syntax::ast::FieldExpr,
+    ) -> Option<QualifiedName> {
+        use syntax::SyntaxKind;
+
+        let mut segments = Vec::new();
+
+        // Extract the field name (rightmost segment)
+        let field_token = field_expr
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::IDENT)?;
+        segments.push(Name::new(field_token.text()));
+
+        // Walk up to extract base segments
+        let base = field_expr.syntax().children().next()?;
+        extract_segments_from_expr(&base, &mut segments)?;
+
+        // Reverse to get left-to-right order
+        segments.reverse();
+
+        Some(QualifiedName::from_segments(segments))
+    }
+}
+
+/// Recursively extract name segments from an expression node.
+///
+/// Appends segments in reverse order (rightmost first).
+/// This is a free function to avoid clippy::only_used_in_recursion warning.
+fn extract_segments_from_expr(
+    expr_node: &syntax::SyntaxNode,
+    segments: &mut Vec<Name>,
+) -> Option<()> {
+    use syntax::SyntaxKind;
+
+    match expr_node.kind() {
+        SyntaxKind::FIELD_EXPR => {
+            // Nested field access (e.g., A.B in A.B.C)
+            let field_expr = syntax::ast::FieldExpr::cast(expr_node.clone())?;
+
+            // Extract the field name
+            let field_token = field_expr
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|it| it.into_token())
+                .find(|it| it.kind() == SyntaxKind::IDENT)?;
+            segments.push(Name::new(field_token.text()));
+
+            // Recurse on base
+            let base = field_expr.syntax().children().next()?;
+            extract_segments_from_expr(&base, segments)
+        }
+        SyntaxKind::IDENT | SyntaxKind::EXPR => {
+            // Simple identifier or expression containing identifier (leftmost segment)
+            let ident_token = expr_node
+                .children_with_tokens()
+                .filter_map(|it| it.into_token())
+                .find(|it| it.kind() == SyntaxKind::IDENT)?;
+            segments.push(Name::new(ident_token.text()));
+            Some(())
+        }
+        _ => {
+            // Fallback: check if this node directly contains an IDENT token
+            let ident_token = expr_node
+                .children_with_tokens()
+                .filter_map(|it| it.into_token())
+                .find(|it| it.kind() == SyntaxKind::IDENT)?;
+            segments.push(Name::new(ident_token.text()));
+            Some(())
+        }
     }
 }
 

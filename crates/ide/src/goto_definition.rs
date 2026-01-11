@@ -227,4 +227,179 @@ mod tests {
         let target = target.unwrap();
         assert_eq!(target.name, "МояПроцедура");
     }
+
+    /// Helper function to create a database with multiple files
+    fn create_multi_file_db(files: &[(&str, &str)]) -> (RootDatabaseImpl, Vec<FileId>) {
+        let mut db = RootDatabaseImpl::default();
+        let mut file_ids = Vec::new();
+
+        let mut file_set = FileSet::new();
+        for (idx, (path, _)) in files.iter().enumerate() {
+            let file_id = FileId(idx as u32);
+            file_set.insert(file_id, VfsPath::new(path));
+            file_ids.push(file_id);
+        }
+
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+
+        for (file_id, (_, source)) in file_ids.iter().zip(files.iter()) {
+            db.set_file_source_root(*file_id, SourceRootId(0));
+            db.set_file_text(*file_id, source);
+        }
+
+        (db, file_ids)
+    }
+
+    #[test]
+    fn test_goto_definition_cross_file() {
+        // File 1: CommonModule with export method
+        let common_module = r#"
+Функция ЭкспортнаяФункция() Экспорт
+    Возврат 42;
+КонецФункции
+        "#;
+
+        // File 2: Form module calling the common module method
+        let form_module = r#"
+Процедура Тест()
+    Результат = ОбщийМодуль.ЭкспортнаяФункция();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/ОбщийМодуль/Ext/Module.bsl", common_module),
+            ("Forms/Form1/Ext/Form/Module.bsl", form_module),
+        ];
+
+        let (db, file_ids) = create_multi_file_db(files);
+
+        // Find the position of "ЭкспортнаяФункция" in the call (file 2)
+        let call_offset = form_module.rfind("ЭкспортнаяФункция").unwrap();
+        let offset = TextSize::from(call_offset as u32);
+
+        let target = goto_definition(&db, file_ids[1], offset);
+        assert!(target.is_some(), "Should resolve cross-file method call");
+
+        let target = target.unwrap();
+        assert_eq!(target.file_id, file_ids[0], "Should navigate to CommonModule file");
+        assert_eq!(target.name, "ЭкспортнаяФункция");
+        assert_eq!(target.kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_goto_definition_cross_file_case_insensitive() {
+        let common_module = r#"
+Функция МояФункция() Экспорт
+    Возврат 1;
+КонецФункции
+        "#;
+
+        let form_module = r#"
+Процедура Тест()
+    общиймодуль.мояфункция();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/ОбщийМодуль/Ext/Module.bsl", common_module),
+            ("Forms/Form1/Ext/Form/Module.bsl", form_module),
+        ];
+
+        let (db, file_ids) = create_multi_file_db(files);
+
+        // Find lowercase method name in call
+        let call_offset = form_module.find("мояфункция").unwrap();
+        let offset = TextSize::from(call_offset as u32);
+
+        let target = goto_definition(&db, file_ids[1], offset);
+        assert!(target.is_some(), "Should resolve case-insensitive");
+
+        let target = target.unwrap();
+        assert_eq!(target.file_id, file_ids[0]);
+        assert_eq!(target.name, "МояФункция"); // Original case preserved
+    }
+
+    #[test]
+    fn test_goto_definition_cross_file_not_found() {
+        let common_module = r#"
+Функция СуществуетМетод() Экспорт
+    Возврат 1;
+КонецФункции
+        "#;
+
+        let form_module = r#"
+Процедура Тест()
+    ОбщийМодуль.НеСуществуетМетод();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/ОбщийМодуль/Ext/Module.bsl", common_module),
+            ("Forms/Form1/Ext/Form/Module.bsl", form_module),
+        ];
+
+        let (db, file_ids) = create_multi_file_db(files);
+
+        let call_offset = form_module.find("НеСуществуетМетод").unwrap();
+        let offset = TextSize::from(call_offset as u32);
+
+        let target = goto_definition(&db, file_ids[1], offset);
+        // Should return None for non-existent method
+        assert!(target.is_none(), "Should not resolve non-existent method");
+    }
+
+    #[test]
+    fn test_goto_definition_non_export_method() {
+        let common_module = r#"
+Функция ВнутренняяФункция()
+    Возврат 1;
+КонецФункции
+        "#;
+
+        let form_module = r#"
+Процедура Тест()
+    ОбщийМодуль.ВнутренняяФункция();
+КонецПроцедуры
+        "#;
+
+        let files = &[
+            ("CommonModules/ОбщийМодуль/Ext/Module.bsl", common_module),
+            ("Forms/Form1/Ext/Form/Module.bsl", form_module),
+        ];
+
+        let (db, file_ids) = create_multi_file_db(files);
+
+        let call_offset = form_module.find("ВнутренняяФункция").unwrap();
+        let offset = TextSize::from(call_offset as u32);
+
+        let target = goto_definition(&db, file_ids[1], offset);
+        // Should return None for non-export method
+        assert!(target.is_none(), "Should not navigate to non-export method");
+    }
+
+    #[test]
+    fn test_goto_definition_same_file_still_works() {
+        // Ensure backward compatibility - same-file navigation still works
+        let source = r#"
+Процедура МояПроцедура()
+КонецПроцедуры
+
+Функция Тест()
+    МояПроцедура();
+КонецФункции
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+
+        let call_offset = source.rfind("МояПроцедура").unwrap();
+        let offset = TextSize::from(call_offset as u32);
+
+        let target = goto_definition(&db, file_id, offset);
+        assert!(target.is_some(), "Same-file navigation should still work");
+
+        let target = target.unwrap();
+        assert_eq!(target.file_id, file_id);
+        assert_eq!(target.name, "МояПроцедура");
+    }
 }

@@ -276,11 +276,31 @@ impl Resolver {
         // Get workspace symbols (this will be cached by Salsa query in the future)
         let workspace_symbols = db.workspace_symbols(&files);
 
-        // Lookup CommonModule by name (case-insensitive via Name's Eq impl)
-        if let Some(common_module_info) = workspace_symbols.common_modules.get(module_name) {
-            // Search for method in the module
+        // Lookup CommonModule by name (case-insensitive search)
+        // Note: HashMap.get() uses case-sensitive Hash/Eq, so we iterate instead
+        let common_module_info = workspace_symbols
+            .common_modules
+            .iter()
+            .find(|(name, _)| name.eq_ignore_case(module_name))
+            .map(|(_, info)| info);
+
+        if let Some(common_module_info) = common_module_info {
+            // Search for method in the module (case-insensitive)
             for method_symbol in &common_module_info.methods {
-                if method_symbol.name == *method_name {
+                if method_symbol.name.eq_ignore_case(method_name) {
+                    // Check if method is exported
+                    if !method_symbol.is_export {
+                        tracing::debug!(
+                            module = %module_name,
+                            method = %method_name,
+                            "Method found but not exported"
+                        );
+                        return PathResolution::Unresolved(QualifiedName::from_segments([
+                            module_name.clone(),
+                            method_name.clone(),
+                        ]));
+                    }
+
                     tracing::debug!(
                         module = %module_name,
                         method = %method_name,
