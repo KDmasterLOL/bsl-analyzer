@@ -5,6 +5,7 @@
 //! - Platform methods (after DOT operator)
 //! - BSL code (variables, functions, etc.) - TODO
 
+mod bsl_completion;
 mod platform_completion;
 mod sdbl_completion;
 
@@ -84,7 +85,13 @@ pub fn completions(db: &dyn RootDatabase, position: CompletionPosition) -> Vec<C
         return items;
     }
 
-    // TODO: BSL completion (variables, functions, etc.)
+    // Try BSL completion (global functions, keywords, etc.)
+    if let Some(items) = bsl_completion::bsl_completions(db, position.clone()) {
+        tracing::debug!(items = items.len(), "returning BSL completions");
+        return items;
+    }
+
+    // TODO: BSL user-defined symbols (variables, local functions, etc.)
     tracing::trace!("no completions available");
 
     Vec::new()
