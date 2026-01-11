@@ -197,7 +197,12 @@ impl<'a> LoweringContext<'a> {
         let object_name = &parts[1];
 
         // Check if this is a 3-part name (tabular section reference)
-        let tabular_section_name = if parts.len() == 3 { Some(parts[2].as_str()) } else { None };
+        // But NOT if the third part is a virtual table name (СрезПоследних, Остатки, etc.)
+        let tabular_section_name = if parts.len() == 3 && !is_virtual_table_name(&parts[2]) {
+            Some(parts[2].as_str())
+        } else {
+            None
+        };
 
         // Check metadata if available
         if let Some(metadata) = self.metadata {
