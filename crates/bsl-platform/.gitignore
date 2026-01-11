@@ -1,5 +1,5 @@
 # Build artifacts
-/target/
+target/
 
 # Generated data (extracted from local 1C installation)
 /data/platform_data.json
