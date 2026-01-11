@@ -123,14 +123,6 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
 
-    // For cross-file goto definition, ensure CommonModules are loaded
-    // This happens lazily on first use (~100-200 files, much faster than all 6540)
-    if req.method == "textDocument/definition" {
-        if let Err(e) = state.ensure_common_modules_loaded() {
-            tracing::warn!("Failed to load CommonModules: {}", e);
-        }
-    }
-
     RequestDispatcher { req: Some(req), global_state: state }
         .on_sync_mut::<Shutdown>(|state, ()| {
             state.shutdown_requested = true;

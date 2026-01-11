@@ -7,14 +7,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use ide::Analysis;
 use ide_db::RootDatabaseImpl;
 use lsp_server::{Message, ReqQueue, Response};
 use lsp_types::Url;
 use parking_lot::RwLock;
 use project_model::Project;
-use vfs::{FileId, Vfs, VfsPath};
+use vfs::loader::Handle;
+use vfs::{loader, FileId, Vfs, VfsPath};
 
 use crate::mem_docs::MemDocs;
 
@@ -55,11 +56,27 @@ pub struct GlobalState {
 
     /// Whether shutdown has been requested.
     pub shutdown_requested: bool,
+
+    /// Handle to VFS loader thread for background file loading.
+    pub loader: Box<dyn loader::Handle>,
+
+    /// Receiver for loader messages (file loaded/changed/progress).
+    pub loader_receiver: Receiver<loader::Message>,
+
+    /// VFS loading progress state (config version counter).
+    pub vfs_progress_config_version: u32,
+
+    /// Whether VFS has finished initial loading.
+    pub vfs_done: bool,
 }
 
 impl GlobalState {
     /// Creates a new GlobalState with the given sender.
     pub fn new(sender: Sender<Message>) -> Self {
+        // Create loader thread for background file loading
+        let (loader_sender, loader_receiver) = crossbeam_channel::unbounded();
+        let loader = vfs_notify::NotifyHandle::spawn(loader_sender);
+
         Self {
             sender,
             req_queue: ReqQueue::default(),
@@ -69,6 +86,10 @@ impl GlobalState {
             workspace_root: None,
             project: None,
             shutdown_requested: false,
+            loader: Box::new(loader),
+            loader_receiver,
+            vfs_progress_config_version: 0,
+            vfs_done: false,
         }
     }
 
@@ -87,64 +108,93 @@ impl GlobalState {
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
-        // Load all .bsl files from workspace into VFS for cross-file resolution
-        self.load_workspace_files(&root);
+        // Configure VFS loader to scan workspace in background thread
+        self.vfs_progress_config_version += 1;
+        self.loader.set_config(loader::Config {
+            load: vec![loader::Entry::Directories(loader::Directories {
+                extensions: vec!["bsl".to_string(), "os".to_string()],
+                include: vec![paths::AbsPathBuf::assert_utf8(root.clone())],
+                exclude: vec![
+                    paths::AbsPathBuf::assert_utf8(root.join(".git")),
+                    paths::AbsPathBuf::assert_utf8(root.join("build")),
+                    paths::AbsPathBuf::assert_utf8(root.join(".vscode")),
+                ],
+            })],
+            watch: vec![0], // Watch first entry for file changes
+            version: self.vfs_progress_config_version,
+        });
     }
 
-    /// Scans workspace directory structure and indexes all .bsl files.
+    /// Process VFS changes and sync to Salsa database.
     ///
-    /// This creates FileId mappings WITHOUT loading file contents into memory.
-    /// Files are loaded lazily when first accessed.
+    /// This method:
+    /// 1. Takes all pending changes from VFS
+    /// 2. Applies them to the Salsa database
+    /// 3. Returns true if any changes were processed
     ///
-    /// Memory efficient: ~1KB per file for metadata vs ~20KB per file for content.
-    fn load_workspace_files(&mut self, root: &PathBuf) {
-        use walkdir::WalkDir;
+    /// Should be called after receiving loader messages or LSP file changes.
+    pub fn process_changes(&mut self) -> bool {
+        use base_db::SourceDatabase;
 
-        tracing::info!("Indexing workspace files from {:?}", root);
+        let changed_files = self.vfs.write().take_changes();
+        if changed_files.is_empty() {
+            return false;
+        }
 
-        let mut file_count = 0;
-        let start = std::time::Instant::now();
+        tracing::info!(file_count = changed_files.len(), "processing VFS changes");
 
-        // Collect all .bsl file paths first
-        let mut file_set = vfs::file_set::FileSet::new();
-        let mut vfs = self.vfs.write();
+        let db = self.analysis_host.raw_database_mut();
 
-        for entry in WalkDir::new(root).follow_links(true).into_iter().filter_map(|e| e.ok()) {
-            let path = entry.path();
-
-            // Only process .bsl files
-            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("bsl") {
-                continue;
-            }
-
-            // Convert to VfsPath
-            let vfs_path = VfsPath::new(path);
-
-            // Allocate FileId (cheap - just increments counter)
-            let file_id = if let Some(existing_id) = vfs.file_id(&vfs_path) {
-                existing_id
-            } else {
-                vfs.alloc_file_id(vfs_path.clone())
+        for file in changed_files {
+            let text = match file.change {
+                vfs::Change::Create(content, _) | vfs::Change::Modify(content, _) => Some(content),
+                vfs::Change::Delete => None,
             };
 
-            // Add to file set (for SourceRoot)
-            file_set.insert(file_id, vfs_path);
-
-            file_count += 1;
-
-            if file_count % 1000 == 0 {
-                tracing::info!("Indexed {} files...", file_count);
+            if let Some(text) = text {
+                db.set_file_text(file.file_id, &text);
             }
         }
 
-        drop(vfs); // Release VFS lock
+        true
+    }
 
-        // Create source root with all indexed files
+    /// Initialize SourceRoot after VFS loading completes.
+    ///
+    /// This creates a single SourceRoot containing all files loaded by the VFS loader.
+    /// Should be called once after vfs_done becomes true.
+    pub fn init_source_root(&mut self) {
+        use base_db::SourceDatabase;
+
+        // Collect all files that exist in VFS by checking which files have been registered
+        // We need to iterate through all FileIds and check if they exist
+        let vfs = self.vfs.read();
+        let mut file_set = vfs::file_set::FileSet::new();
+
+        // Find the maximum FileId by checking what's been allocated
+        // We'll iterate through FileIds and check if they exist
+        for file_id_raw in 0..10000u32 {
+            // Reasonable upper limit
+            let file_id = FileId(file_id_raw);
+            if vfs.exists(file_id) {
+                let path = vfs.file_path(file_id);
+                file_set.insert(file_id, path.clone());
+            }
+        }
+
+        let file_count = file_set.len();
+        drop(vfs);
+
+        if file_count == 0 {
+            tracing::warn!("No files found in VFS during init_source_root");
+            return;
+        }
+
+        // Create single source root for all files
         let db = self.analysis_host.raw_database_mut();
         let source_root_id = base_db::SourceRootId(0);
         let source_root = base_db::SourceRoot::new_local(file_set);
 
-        use base_db::SourceDatabase;
         db.set_source_root(source_root_id, source_root);
 
         // Set source root mapping for all files
@@ -155,12 +205,7 @@ impl GlobalState {
             db.set_file_source_root(file_id, source_root_id);
         }
 
-        let elapsed = start.elapsed();
-        tracing::info!(
-            "Indexed {} .bsl files in {:?} (content will be loaded on demand)",
-            file_count,
-            elapsed
-        );
+        tracing::info!(file_count, "initialized source root");
     }
 
     /// Creates an immutable snapshot for thread-safe access.
@@ -220,77 +265,6 @@ impl GlobalState {
 
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
-    }
-
-    /// Loads all CommonModules files into memory for cross-file resolution.
-    ///
-    /// This is called lazily before the first cross-file goto definition.
-    /// Only CommonModules files are loaded (not Forms, Documents, etc.) to minimize memory usage.
-    ///
-    /// Subsequent calls are no-op.
-    pub fn ensure_common_modules_loaded(&mut self) -> Result<()> {
-        use base_db::SourceDatabase;
-
-        tracing::info!("Loading CommonModules for cross-file resolution");
-        let start = std::time::Instant::now();
-
-        // Get all files from source root 0
-        let db = self.analysis_host.raw_database_mut();
-        let source_root_id = base_db::SourceRootId(0);
-        let source_root_input = db.source_root_input(source_root_id);
-        let all_files: Vec<_> = source_root_input.root(db).iter().collect();
-
-        let mut loaded_count = 0;
-        let mut skipped_count = 0;
-
-        for file_id in all_files {
-            // Get file path and clone it before dropping VFS lock
-            let (std_path_buf, should_load) = {
-                let vfs = self.vfs.read();
-                let vfs_path = vfs.file_path(file_id);
-                let std_path = vfs_path.as_path();
-                let is_common_module = std_path.to_string_lossy().contains("CommonModules");
-                (std_path.to_path_buf(), is_common_module)
-            }; // VFS lock released here
-
-            // Skip non-CommonModules files
-            if !should_load {
-                skipped_count += 1;
-                continue;
-            }
-
-            // Check if already loaded (in MemDocs or database)
-            if let Ok(url) = Url::from_file_path(&std_path_buf) {
-                if self.mem_docs.get(&url).is_some() {
-                    continue; // Already loaded
-                }
-            }
-
-            // Read from disk and load
-            match std::fs::read_to_string(&std_path_buf) {
-                Ok(content) => {
-                    db.set_file_text(file_id, &content);
-                    loaded_count += 1;
-
-                    if loaded_count % 100 == 0 {
-                        tracing::info!("Loaded {} CommonModules files...", loaded_count);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load file {:?}: {}", std_path_buf, e);
-                }
-            }
-        }
-
-        let elapsed = start.elapsed();
-        tracing::info!(
-            "Loaded {} CommonModules files in {:?} (skipped {} non-CommonModules)",
-            loaded_count,
-            elapsed,
-            skipped_count
-        );
-
-        Ok(())
     }
 }
 
