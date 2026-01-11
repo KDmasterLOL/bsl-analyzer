@@ -16,6 +16,7 @@ stdx.workspace = true
 sdbl-hir.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+project-model.workspace = true
 triomphe.workspace = true
 tracing.workspace = true
 serde_json.workspace = true

@@ -801,6 +801,7 @@ dependencies = [
  "ide-assists",
  "ide-db",
  "ide-diagnostics",
+ "project-model",
  "rustc-hash 2.1.1",
  "sdbl-hir",
  "serde_json",
@@ -1455,6 +1456,7 @@ dependencies = [
  "expect-test",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -123,20 +123,24 @@ impl GlobalState {
         // Load project configuration from workspace root
         let project = Project::new(&root);
 
+        // Get source path (configuration directory or project root)
+        let source_path = project.source_path().to_path_buf();
+
         tracing::info!(
-            configuration_root = ?project.config.configuration_root,
-            "loaded project configuration"
+            ?source_path,
+            configuration_found = project.configuration_path().is_some(),
+            "loaded project, scanning source path"
         );
 
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
-        // Configure VFS loader to scan workspace in background thread
+        // Configure VFS loader to scan source path in background thread
         self.vfs_progress_config_version += 1;
         self.loader.set_config(loader::Config {
             load: vec![loader::Entry::Directories(loader::Directories {
                 extensions: vec!["bsl".to_string(), "os".to_string()],
-                include: vec![paths::AbsPathBuf::assert_utf8(root.clone())],
+                include: vec![paths::AbsPathBuf::assert_utf8(source_path)],
                 exclude: vec![
                     paths::AbsPathBuf::assert_utf8(root.join(".git")),
                     paths::AbsPathBuf::assert_utf8(root.join("build")),
