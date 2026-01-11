@@ -52,6 +52,8 @@ fn main() {
     let timestamp_path = crate_root.join(".platform_cache_timestamp");
 
     // Check if we can skip regeneration
+    let platform_found = find_1c_help_file_paths().is_some();
+
     if let Some(hbk_files) = find_1c_help_file_paths() {
         let (shcntx_path, shlang_path) = hbk_files;
 
@@ -64,7 +66,7 @@ fn main() {
             if let Ok(stored_timestamp) = fs::read_to_string(&timestamp_path) {
                 let current_timestamp = get_files_timestamp(&shcntx_path, &shlang_path);
                 if stored_timestamp == current_timestamp {
-                    // No changes detected, skip regeneration
+                    // No changes detected, skip regeneration (silent - this is the normal case)
                     println!("cargo:rustc-cfg=feature=\"platform_docs\"");
                     return;
                 }
@@ -73,7 +75,7 @@ fn main() {
 
         // Extract and generate
         if let Some(json_path) = extract_both_help_files(&shcntx_path, &shlang_path) {
-            println!("cargo:warning=Found 1C platform, building with full documentation");
+            // Success - no warning needed, this is the expected path
             println!("cargo:rustc-cfg=feature=\"platform_docs\"");
             generate_code_from_json(&json_path, &generated_path, true);
 
@@ -82,11 +84,14 @@ fn main() {
             let _ = fs::write(&timestamp_path, timestamp);
             return;
         }
+        // If extraction failed, fall through to fallback (warnings already printed by extract_both_help_files)
     }
 
     // Fallback: no platform found or extraction failed
-    println!("cargo:warning=1C platform not found, building without documentation");
-    println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
+    if !platform_found {
+        println!("cargo:warning=1C platform not found, building without documentation");
+        println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
+    }
 
     // Check if minimal data exists
     let minimal_path = PathBuf::from("data/platform_minimal.json");
@@ -182,32 +187,21 @@ fn extract_hbk_file(hbk_path: &Path, name: &str) -> Option<PathBuf> {
     if let Ok(entries) = fs::read_dir(&temp_dir) {
         let file_count = entries.count();
         if file_count > 0 {
-            println!("cargo:warning=Extracted {} files from {}", file_count, name);
             return Some(temp_dir);
         }
     }
 
-    println!("cargo:warning=No files extracted from {}", name);
+    println!("cargo:warning=Failed to extract files from {}", name);
     None
 }
 
 /// Extracts both help files and combines data.
 fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<PathBuf> {
-    // Get parent directory for display
-    let platform_dir = shcntx_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-
-    println!("cargo:warning=Found 1C platform at: {}", platform_dir);
-    println!("cargo:warning=Extracting platform help files...");
-    println!("cargo:warning=  shcntx_ru.hbk: {}", shcntx_path.display());
-    println!("cargo:warning=  shlang_ru.hbk: {}", shlang_path.display());
-
     // Extract shlang_ru.hbk (keywords) - small file, extract first
     let shlang_dir = extract_hbk_file(shlang_path, "shlang")?;
-    println!("cargo:warning=Extracted shlang to: {}", shlang_dir.display());
 
     // Extract shcntx_ru.hbk (platform types/methods) - large file
     let shcntx_dir = extract_hbk_file(shcntx_path, "shcntx")?;
-    println!("cargo:warning=Extracted shcntx to: {}", shcntx_dir.display());
 
     // Check if HTML parser tool exists
     let parser_binary = PathBuf::from("tools/html-parser/target/release/html-parser");
@@ -232,17 +226,17 @@ fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<Pat
         .ok()?;
 
     // Clean up temporary extraction directories
-    println!("cargo:warning=Cleaning up temporary files...");
     let _ = fs::remove_dir_all(&shlang_dir);
     let _ = fs::remove_dir_all(&shcntx_dir);
 
     if !output.status.success() {
-        println!("cargo:warning=Failed to parse HTML files");
-        println!("cargo:warning=Parser stderr: {}", String::from_utf8_lossy(&output.stderr));
+        println!("cargo:warning=Failed to parse platform HTML files");
+        if !output.stderr.is_empty() {
+            println!("cargo:warning=Parser error: {}", String::from_utf8_lossy(&output.stderr));
+        }
         return None;
     }
 
-    println!("cargo:warning=Generated platform data: {}", json_output.display());
     Some(json_output)
 }
 
@@ -860,7 +854,6 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     }
 
     fs::write(output_path, code).expect("Failed to write generated.rs");
-    println!("cargo:warning=Generated code at: {}", output_path.display());
 }
 
 /// Generates empty structures when no data is available.
@@ -878,5 +871,4 @@ pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];
 "#;
 
     fs::write(output_path, code).expect("Failed to write generated.rs");
-    println!("cargo:warning=Generated empty structures (no platform data)");
 }
