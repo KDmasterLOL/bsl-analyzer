@@ -30,6 +30,10 @@ pub struct PlatformDataInner {
     global_functions: Vec<GlobalFunction>,
     /// Global functions indexed by lowercase name (both Russian and English)
     global_functions_by_name: FxHashMap<SmolStr, usize>,
+    /// Method documentation indexed by method ID
+    method_docs_by_id: FxHashMap<u32, usize>,
+    /// Global function documentation indexed by function ID
+    global_function_docs_by_id: FxHashMap<u32, usize>,
 }
 
 impl PlatformDataInner {
@@ -89,6 +93,18 @@ impl PlatformDataInner {
             global_functions_by_name.insert(en_key, idx);
         }
 
+        // Index method documentation by ID
+        let mut method_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::METHOD_DOCS.iter().enumerate() {
+            method_docs_by_id.insert(docs.method_id, idx);
+        }
+
+        // Index global function documentation by ID
+        let mut global_function_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::GLOBAL_FUNCTION_DOCS.iter().enumerate() {
+            global_function_docs_by_id.insert(docs.method_id, idx);
+        }
+
         Self {
             types,
             types_by_name,
@@ -96,6 +112,8 @@ impl PlatformDataInner {
             methods_by_name,
             global_functions,
             global_functions_by_name,
+            method_docs_by_id,
+            global_function_docs_by_id,
         }
     }
 
@@ -142,17 +160,18 @@ impl PlatformDataInner {
         &self.global_functions
     }
 
-    /// Get method documentation (only available with platform_docs feature).
-    #[cfg(feature = "platform_docs")]
-    pub fn get_method_docs(&self, _method_id: u32) -> Option<crate::types::MethodDocs> {
-        // TODO: Load from generated docs
-        None
+    /// Get method documentation by method ID.
+    pub fn get_method_docs(&self, method_id: u32) -> Option<crate::types::MethodDocs> {
+        let idx = *self.method_docs_by_id.get(&method_id)?;
+        let raw_docs = crate::generated::METHOD_DOCS.get(idx)?;
+        Some(crate::types::MethodDocs::from(raw_docs))
     }
 
-    /// Get method documentation (stub when platform_docs is disabled).
-    #[cfg(not(feature = "platform_docs"))]
-    pub fn get_method_docs(&self, _method_id: u32) -> Option<()> {
-        None
+    /// Get global function documentation by function ID.
+    pub fn get_global_function_docs(&self, function_id: u32) -> Option<crate::types::MethodDocs> {
+        let idx = *self.global_function_docs_by_id.get(&function_id)?;
+        let raw_docs = crate::generated::GLOBAL_FUNCTION_DOCS.get(idx)?;
+        Some(crate::types::MethodDocs::from(raw_docs))
     }
 }
 

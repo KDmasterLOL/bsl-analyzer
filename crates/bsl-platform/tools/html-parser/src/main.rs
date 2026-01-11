@@ -71,6 +71,9 @@ struct MethodInfo {
     /// Context availability
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<ContextAvailability>,
+    /// Full documentation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<MethodDocumentation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +96,9 @@ struct GlobalFunctionInfo {
     /// Context availability
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<ContextAvailability>,
+    /// Full documentation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<MethodDocumentation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +110,41 @@ struct MethodParameter {
     param_type: Option<String>,
     /// Is parameter optional
     is_optional: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MethodDocumentation {
+    /// Syntax description
+    syntax: String,
+    /// Detailed description
+    description: String,
+    /// Parameter descriptions
+    param_descriptions: Vec<ParamDescription>,
+    /// Code examples
+    examples: Vec<CodeExampleInfo>,
+    /// Notes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+    /// See also links
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    see_also: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ParamDescription {
+    /// Parameter name
+    name: String,
+    /// Full description
+    description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CodeExampleInfo {
+    /// Code text
+    code: String,
+    /// Optional description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +508,9 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             let min_version = scraper_parser::extract_version(&html_content);
                             let context = scraper_parser::extract_context(&html_content);
 
+                            // Extract full documentation
+                            let documentation = extract_method_documentation(&html_content);
+
                             return Ok(Some(MethodInfo {
                                 id,
                                 type_name: type_name.to_string(),
@@ -476,6 +520,7 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                                 parameters,
                                 min_version,
                                 context,
+                                documentation,
                             }));
                         }
                     }
@@ -485,6 +530,49 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
     }
 
     Ok(None)
+}
+
+/// Extracts full method documentation from HTML content
+fn extract_method_documentation(html_content: &str) -> Option<MethodDocumentation> {
+    let syntax = scraper_parser::extract_syntax(html_content).unwrap_or_default();
+    let description = scraper_parser::extract_description(html_content);
+
+    // Return None only if description is completely absent
+    if description.is_none() {
+        return None;
+    }
+
+    let description = description.unwrap();
+
+    let param_descriptions_raw = scraper_parser::extract_parameter_descriptions(html_content);
+    let param_descriptions = param_descriptions_raw
+        .into_iter()
+        .map(|p| ParamDescription {
+            name: p.name,
+            description: p.description,
+        })
+        .collect();
+
+    let examples_raw = scraper_parser::extract_examples(html_content);
+    let examples = examples_raw
+        .into_iter()
+        .map(|e| CodeExampleInfo {
+            code: e.code,
+            description: e.description,
+        })
+        .collect();
+
+    let notes = scraper_parser::extract_notes(html_content);
+
+    // Return documentation even if description is empty string (shouldn't happen, but just in case)
+    Some(MethodDocumentation {
+        syntax,
+        description,
+        param_descriptions,
+        examples,
+        notes,
+        see_also: Vec::new(), // TODO: extract "См. также"
+    })
 }
 
 /// Parses global functions from "Global context" directory.
@@ -578,6 +666,9 @@ fn parse_global_function_html(
                         let min_version = scraper_parser::extract_version(&html_content);
                         let context = scraper_parser::extract_context(&html_content);
 
+                        // Extract full documentation
+                        let documentation = extract_method_documentation(&html_content);
+
                         println!("  Found global function: {} / {}", russian_function, english_function);
 
                         return Ok(Some(GlobalFunctionInfo {
@@ -588,6 +679,7 @@ fn parse_global_function_html(
                             parameters,
                             min_version,
                             context,
+                            documentation,
                         }));
                     }
                 }
