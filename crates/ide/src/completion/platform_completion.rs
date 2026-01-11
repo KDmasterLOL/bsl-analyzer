@@ -234,12 +234,7 @@ fn format_method_documentation_full(
     if !docs.examples.is_empty() {
         if let Some(example) = docs.examples.first() {
             doc.push_str("Пример:\n");
-            // Limit example size for completion popup
-            let code_lines: Vec<&str> = example.code.lines().take(5).collect();
-            doc.push_str(&code_lines.join("\n"));
-            if example.code.lines().count() > 5 {
-                doc.push_str("\n...");
-            }
+            doc.push_str(&example.code);
             doc.push_str("\n\n");
         }
     }
