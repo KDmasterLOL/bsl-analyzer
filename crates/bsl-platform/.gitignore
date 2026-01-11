@@ -8,3 +8,4 @@
 
 # Build script output
 /src/generated.rs
+.platform_cache_timestamp

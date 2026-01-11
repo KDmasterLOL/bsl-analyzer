@@ -47,7 +47,10 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let generated_path = out_dir.join("generated.rs");
-    let timestamp_path = out_dir.join(".platform_timestamp");
+
+    // Store timestamp in crate root (stable location across builds)
+    let crate_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let timestamp_path = crate_root.join(".platform_cache_timestamp");
 
     // Check if we can skip regeneration
     if let Some(hbk_files) = find_1c_help_file_paths() {
