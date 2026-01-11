@@ -303,6 +303,37 @@ pub(crate) struct BusinessProcessRoot {
     pub business_process: MetadataObjectXml,
 }
 
+/// Root XML structure for ChartOfCharacteristicTypes
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartOfCharacteristicTypesRoot {
+    #[serde(rename = "ChartOfCharacteristicTypes")]
+    pub chart_of_characteristic_types: MetadataObjectXml,
+}
+
+/// Root XML structure for Constant
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConstantRoot {
+    #[serde(rename = "Constant")]
+    pub constant: ConstantXml,
+}
+
+/// Constant XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConstantXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: ConstantProperties,
+}
+
+/// Constant properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConstantProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+}
+
 /// Generic metadata object XML structure (Catalog, Document, etc.)
 #[derive(Debug, Deserialize)]
 pub(crate) struct MetadataObjectXml {

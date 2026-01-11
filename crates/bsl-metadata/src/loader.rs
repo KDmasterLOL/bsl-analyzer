@@ -83,12 +83,13 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load DefinedTypes
     load_defined_types(&path.join("DefinedTypes"), &mut config)?;
 
+    // Load ChartsOfCharacteristicTypes (with full parsing for tabular sections)
+    load_charts_of_characteristic_types(&path.join("ChartsOfCharacteristicTypes"), &mut config)?;
+
+    // Load Constants
+    load_constants(&path.join("Constants"), &mut config)?;
+
     // Load other metadata types (simplified - name only, for SDBL completion)
-    load_simple_metadata_objects(
-        &path.join("ChartsOfCharacteristicTypes"),
-        &mut config,
-        MdoType::ChartOfCharacteristicTypes,
-    )?;
     load_simple_metadata_objects(&path.join("ExchangePlans"), &mut config, MdoType::ExchangePlan)?;
     load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
     load_simple_metadata_objects(&path.join("Enums"), &mut config, MdoType::Enum)?;
@@ -308,6 +309,78 @@ fn load_business_processes(dir: &Path, config: &mut Configuration) -> Result<()>
                     config.add_metadata_object(business_process);
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load ChartsOfCharacteristicTypes from directory
+fn load_charts_of_characteristic_types(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_charts_of_characteristic_types", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let chart_dir = entry.path();
+
+        // Look for directories
+        if chart_dir.is_dir() {
+            if let Some(name) = chart_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    // Parse XML to get chart with attributes and tabular sections
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let chart = xml_parser::parse_chart_of_characteristic_types_xml(&xml)?;
+
+                    tracing::debug!(
+                        chart = %name,
+                        attributes = chart.attributes.len(),
+                        tabular_sections = chart.tabular_sections.len(),
+                        "loaded chart of characteristic types"
+                    );
+
+                    config.add_metadata_object(chart);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load Constants from directory
+///
+/// Constants are stored as individual XML files directly in the Constants folder,
+/// without subdirectories.
+fn load_constants(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_constants", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Constants are stored as XML files directly (no subdirectories)
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "xml") {
+            let xml = fs::read_to_string(&path)?;
+            let constant = xml_parser::parse_constant_xml(&xml)?;
+
+            tracing::debug!(
+                constant = %constant.name,
+                "loaded constant"
+            );
+
+            config.add_metadata_object(constant);
         }
     }
 

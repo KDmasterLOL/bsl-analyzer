@@ -4,6 +4,7 @@
 
 mod catalog;
 mod common_module;
+mod constant;
 mod defined_type;
 mod event_subscription;
 mod helpers;
@@ -13,8 +14,12 @@ mod standard_attributes;
 mod type_parser;
 
 // Re-export public API
-pub use catalog::{parse_business_process_xml, parse_catalog_xml, parse_document_xml};
+pub use catalog::{
+    parse_business_process_xml, parse_catalog_xml, parse_chart_of_characteristic_types_xml,
+    parse_document_xml,
+};
 pub use common_module::parse_common_module_xml;
+pub use constant::parse_constant_xml;
 pub use defined_type::parse_defined_type_xml;
 pub use event_subscription::parse_event_subscription_xml;
 pub use register::{

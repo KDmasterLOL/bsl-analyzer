@@ -1,4 +1,4 @@
-//! Catalog, Document, BusinessProcess XML parser
+//! Catalog, Document, BusinessProcess, ChartOfCharacteristicTypes XML parser
 
 use crate::error::Result;
 use crate::metadata_object::{Attribute, MdoType, MetadataObject};
@@ -6,8 +6,8 @@ use crate::tabular_section::{TabularSection, TabularSectionAttribute};
 
 use super::helpers::parse_uuid;
 use super::serde_types::{
-    AttributeXml, BusinessProcessRoot, CatalogRoot, DocumentRoot, MetadataObjectXml,
-    TabularSectionXml,
+    AttributeXml, BusinessProcessRoot, CatalogRoot, ChartOfCharacteristicTypesRoot, DocumentRoot,
+    MetadataObjectXml, TabularSectionXml,
 };
 use super::standard_attributes::{
     add_catalog_standard_attributes, add_information_register_standard_attributes_as_attrs,
@@ -53,6 +53,14 @@ pub fn parse_business_process_xml(xml: &str) -> Result<MetadataObject> {
 
     let root: BusinessProcessRoot = quick_xml::de::from_str(xml)?;
     parse_metadata_object(root.business_process, MdoType::BusinessProcess)
+}
+
+/// Parse ChartOfCharacteristicTypes XML from Designer format
+pub fn parse_chart_of_characteristic_types_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_chart_of_characteristic_types_xml").entered();
+
+    let root: ChartOfCharacteristicTypesRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.chart_of_characteristic_types, MdoType::ChartOfCharacteristicTypes)
 }
 
 /// Internal helper to parse metadata object XML

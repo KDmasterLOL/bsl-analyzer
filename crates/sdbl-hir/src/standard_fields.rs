@@ -206,8 +206,7 @@ pub const VIRTUAL_TABLES: &[(&str, &str)] = &[
     ("движениясостороккорреспонденциями", "recordswithextdimensions"),
     ("движениясубконто", "extdimensiondr"),
     ("субконто", "extdimensions"),
-    ("обороты", "turnovers"),
-    ("остатки", "balance"),
+    ("изменения", "changes"),
 ];
 
 /// Check if table name part is a virtual table.
@@ -260,6 +259,8 @@ mod tests {
         assert!(is_virtual_table_name("slicelast"));
         assert!(is_virtual_table_name("Остатки"));
         assert!(is_virtual_table_name("Balance"));
+        assert!(is_virtual_table_name("Изменения"));
+        assert!(is_virtual_table_name("Changes"));
 
         assert!(!is_virtual_table_name("Справочник"));
         assert!(!is_virtual_table_name("Random"));
