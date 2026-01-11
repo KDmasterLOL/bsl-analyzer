@@ -462,27 +462,30 @@ fn extract_version(html: &str) -> Option<String> {
 }
 
 /// Extracts context availability from HTML content
-/// Looks for: "Доступность: Тонкий клиент, веб-клиент, сервер..."
+/// Looks for: "<p class="V8SH_chapter">Доступность: </p><p>Тонкий клиент, сервер...</p>"
 fn extract_context(html: &str) -> Option<ContextAvailability> {
-    if let Some(start) = html.find("Доступность: ") {
-        let after_start = &html[start + "Доступность: ".len()..];
-        let context_text = if let Some(end) = after_start.find("</p>") {
-            after_start[..end].to_lowercase()
-        } else {
-            return None;
-        };
-
-        Some(ContextAvailability {
-            thick_client: context_text.contains("толстый клиент"),
-            thin_client: context_text.contains("тонкий клиент"),
-            web_client: context_text.contains("веб-клиент"),
-            server: context_text.contains("сервер"),
-            mobile_client: context_text.contains("мобильный клиент"),
-            external_connection: context_text.contains("внешнее соединение"),
-        })
-    } else {
-        None
+    if let Some(start) = html.find("Доступность:") {
+        let after_start = &html[start..];
+        if let Some(p_start) = after_start.find("</p>") {
+            let after_p = &after_start[p_start + "</p>".len()..];
+            if let Some(next_p_start) = after_p.find("<p>") {
+                let content_start = &after_p[next_p_start + "<p>".len()..];
+                if let Some(p_end) = content_start.find("</p>") {
+                    let context_text = content_start[..p_end].to_lowercase();
+                    return Some(ContextAvailability {
+                        thick_client: context_text.contains("толстый клиент"),
+                        thin_client: context_text.contains("тонкий клиент"),
+                        web_client: context_text.contains("веб-клиент"),
+                        server: context_text.contains("сервер"),
+                        mobile_client: context_text.contains("мобильный клиент"),
+                        external_connection: context_text.contains("внешнее соединение")
+                            || context_text.contains("интеграция"),
+                    });
+                }
+            }
+        }
     }
+    None
 }
 
 /// Extracts return type from HTML content
@@ -532,22 +535,35 @@ fn extract_parameters(html: &str) -> Vec<MethodParameter> {
                     // Check if optional: (необязательный) or (обязательный)
                     let is_optional = param_block.contains("(необязательный)");
 
-                    // Extract type: "Тип: Число."
-                    let param_type = if let Some(type_start) = param_block.find("Тип: ") {
-                        let after_type = &param_block[type_start + "Тип: ".len()..];
+                    // Extract type: "Тип: Число." or "Тип: <a>Число</a>."
+                    // Type can be after </div>, search in first 600 chars max
+                    let search_limit = param_block.len().min(
+                        param_block.char_indices()
+                            .nth(600)
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(param_block.len())
+                    );
+                    let search_area = &param_block[..search_limit];
+
+                    let param_type = if let Some(type_start) = search_area.find("Тип: ") {
+                        let after_type = &search_area[type_start + "Тип: ".len()..];
+                        // Find end: <br> is safer than period (which can be in href)
                         let type_end = after_type
-                            .find('.')
-                            .or_else(|| after_type.find("<br>"))
+                            .find("<br>")
                             .or_else(|| after_type.find('\n'))
+                            .or_else(|| after_type.find("<p"))
                             .unwrap_or_else(|| {
-                                // Take first 100 chars safely
-                                after_type.char_indices()
-                                    .nth(100)
-                                    .map(|(idx, _)| idx)
-                                    .unwrap_or(after_type.len())
+                                // Fallback: take until period or 200 chars
+                                after_type.find('.').unwrap_or_else(|| {
+                                    after_type.char_indices()
+                                        .nth(200)
+                                        .map(|(idx, _)| idx)
+                                        .unwrap_or(after_type.len())
+                                })
                             });
                         let type_text = &after_type[..type_end];
-                        let cleaned = strip_html_tags(type_text).trim().to_string();
+                        // Clean HTML and remove trailing period
+                        let cleaned = strip_html_tags(type_text).trim().trim_end_matches('.').trim().to_string();
                         if !cleaned.is_empty() {
                             Some(cleaned)
                         } else {
