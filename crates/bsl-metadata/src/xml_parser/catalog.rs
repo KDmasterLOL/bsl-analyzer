@@ -1,0 +1,163 @@
+//! Catalog, Document, BusinessProcess XML parser
+
+use crate::error::Result;
+use crate::metadata_object::{Attribute, MdoType, MetadataObject};
+use crate::tabular_section::{TabularSection, TabularSectionAttribute};
+
+use super::helpers::parse_uuid;
+use super::serde_types::{
+    AttributeXml, BusinessProcessRoot, CatalogRoot, DocumentRoot, MetadataObjectXml,
+    TabularSectionXml,
+};
+use super::standard_attributes::{
+    add_catalog_standard_attributes, add_information_register_standard_attributes_as_attrs,
+};
+use super::type_parser::parse_type_xml;
+
+/// Parse Catalog XML from Designer format
+///
+/// # Arguments
+///
+/// * `xml` - XML content as string
+///
+/// # Returns
+///
+/// Parsed `MetadataObject` structure with attributes
+///
+/// # Example
+///
+/// ```no_run
+/// # use bsl_metadata::xml_parser::parse_catalog_xml;
+/// let xml = std::fs::read_to_string("Catalogs/Валюты.xml")?;
+/// let catalog = parse_catalog_xml(&xml)?;
+/// # Ok::<(), bsl_metadata::MetadataError>(())
+/// ```
+pub fn parse_catalog_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_catalog_xml").entered();
+
+    let root: CatalogRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.catalog, MdoType::Catalog)
+}
+
+/// Parse Document XML from Designer format
+pub fn parse_document_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_document_xml").entered();
+
+    let root: DocumentRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.document, MdoType::Document)
+}
+
+/// Parse BusinessProcess XML from Designer format
+pub fn parse_business_process_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_business_process_xml").entered();
+
+    let root: BusinessProcessRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.business_process, MdoType::BusinessProcess)
+}
+
+/// Internal helper to parse metadata object XML
+fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Result<MetadataObject> {
+    let mut attributes = Vec::new();
+    let mut tabular_sections = Vec::new();
+
+    // Add standard attributes FIRST based on object type
+    match mdo_type {
+        MdoType::Catalog | MdoType::Document => {
+            add_catalog_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::InformationRegister => {
+            add_information_register_standard_attributes_as_attrs(
+                &mut attributes,
+                &obj_xml.properties,
+                mdo_type,
+            );
+        }
+        _ => {
+            // Other types don't have standard attributes yet
+        }
+    }
+
+    // Parse child objects if present
+    if let Some(child_objects) = obj_xml.child_objects {
+        // Parse regular Attributes (for Catalog, Document)
+        for attr_xml in child_objects.attributes {
+            attributes.push(parse_attribute(attr_xml)?);
+        }
+
+        // Parse Resources (for InformationRegister - treated as attributes)
+        for resource_xml in child_objects.resources {
+            attributes.push(parse_attribute(resource_xml)?);
+        }
+
+        // Parse Dimensions (for InformationRegister - treated as attributes)
+        for dim_xml in child_objects.dimensions_as_attributes {
+            attributes.push(parse_attribute(dim_xml)?);
+        }
+
+        // Parse Tabular Sections
+        for ts_xml in child_objects.tabular_sections {
+            tabular_sections.push(parse_tabular_section(ts_xml)?);
+        }
+    }
+
+    let mut mdo = MetadataObject::new(mdo_type, obj_xml.properties.name);
+    for attr in attributes {
+        mdo.add_attribute(attr);
+    }
+    for ts in tabular_sections {
+        mdo.add_tabular_section(ts);
+    }
+
+    tracing::debug!(
+        mdo_name = %mdo.name,
+        mdo_type = ?mdo.mdo_type,
+        attributes = mdo.attributes.len(),
+        tabular_sections = mdo.tabular_sections.len(),
+        "parsed metadata object"
+    );
+
+    Ok(mdo)
+}
+
+/// Parse single attribute from XML
+fn parse_attribute(attr_xml: AttributeXml) -> Result<Attribute> {
+    let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
+    Ok(Attribute { name: attr_xml.properties.name, name_en: None, attr_type })
+}
+
+/// Parse TabularSection XML into TabularSection
+fn parse_tabular_section(ts_xml: TabularSectionXml) -> Result<TabularSection> {
+    let uuid = parse_uuid(&ts_xml.uuid, "tabular section")?;
+    let mut tabular_section = TabularSection::new(uuid, ts_xml.properties.name);
+
+    // Set synonym if present
+    if let Some(synonym_xml) = ts_xml.properties.synonym {
+        if let Some(synonym_value) = synonym_xml.value {
+            tabular_section.set_synonym(Some(synonym_value));
+        }
+    }
+
+    // Set use mode if present
+    tabular_section.set_use_mode(ts_xml.properties.use_mode);
+
+    // Parse attributes of the tabular section
+    let Some(child_objects) = ts_xml.child_objects else {
+        return Ok(tabular_section);
+    };
+
+    let mut ts_attributes = Vec::new();
+    for attr_xml in child_objects.attributes {
+        let attr_uuid = parse_uuid(&attr_xml._uuid, "tabular section attribute")?;
+        let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
+        let type_str = format!("{}", attr_type);
+
+        ts_attributes.push(TabularSectionAttribute::new(
+            attr_uuid,
+            attr_xml.properties.name,
+            type_str,
+        ));
+    }
+
+    tabular_section.set_attributes(ts_attributes);
+    Ok(tabular_section)
+}
