@@ -61,6 +61,8 @@ pub enum HlTag {
     Operator,
     /// Unresolved reference (identifier not found in metadata)
     UnresolvedReference,
+    /// Built-in platform function (НачатьТранзакцию, Формат, Сообщить, etc.)
+    BuiltinFunction,
 }
 
 impl HlTag {
@@ -81,6 +83,7 @@ impl HlTag {
             HlTag::Property => "property",
             HlTag::Operator => "operator",
             HlTag::UnresolvedReference => "unresolvedReference",
+            HlTag::BuiltinFunction => "function",
         }
     }
 }
@@ -373,10 +376,11 @@ fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut
 /// This function resolves the identifier to determine if it's a:
 /// - Parameter reference (via ExprScopes)
 /// - Local variable reference (via ExprScopes)
+/// - Built-in platform function (НачатьТранзакцию, Формат, etc.)
 /// - Function/procedure call (via module-level Resolver)
 /// - Module variable reference (via module-level Resolver)
 ///
-/// Resolution priority: Local -> Module
+/// Resolution priority: Local -> Builtin -> Module
 fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
     let range = token.text_range();
     let name_text = token.text();
@@ -385,6 +389,16 @@ fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> 
     // Try local resolution FIRST (parameters and local variables)
     if let Some(hl) = highlight_local_symbol(ctx, token, &name) {
         return Some(hl);
+    }
+
+    // Check if it's a built-in platform function (global context)
+    if let Some(_func) = bsl_platform::PlatformDataInner::instance().get_global_function(name_text)
+    {
+        return Some(HlRange {
+            range,
+            tag: HlTag::BuiltinFunction,
+            modifiers: HlMod::new().with(HlMod::EXPORT), // EXPORT modifier → "defaultLibrary" in LSP
+        });
     }
 
     // Fall back to module-level resolution (methods and module variables)
@@ -962,5 +976,91 @@ mod tests {
 
         // Should find 2 AS keywords (1 in field alias + 1 in table alias)
         assert_eq!(as_keywords.len(), 2, "Expected 2 AS keywords, got {}", as_keywords.len());
+    }
+
+    #[test]
+    fn test_builtin_function_highlighting() {
+        let code = r#"
+Функция Тест()
+    НачатьТранзакцию();
+    Сообщить("Привет");
+    Результат = Формат(123, "ЧГ=0");
+    Возврат Результат;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Check НачатьТранзакцию - should be highlighted as BuiltinFunction with EXPORT modifier
+        let begin_trans = highlights.iter().find(|hl| {
+            hl.tag == HlTag::BuiltinFunction
+                && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
+        });
+
+        assert!(begin_trans.is_some(), "НачатьТранзакцию should be highlighted as BuiltinFunction");
+        assert!(
+            begin_trans.unwrap().modifiers.contains(HlMod::EXPORT),
+            "BuiltinFunction should have EXPORT modifier (defaultLibrary)"
+        );
+
+        // Check Сообщить
+        let message_fn = highlights.iter().find(|hl| {
+            hl.tag == HlTag::BuiltinFunction
+                && code[hl.range.start().into()..hl.range.end().into()] == *"Сообщить"
+        });
+
+        assert!(message_fn.is_some(), "Сообщить should be highlighted as BuiltinFunction");
+
+        // Check Формат
+        let format_fn = highlights.iter().find(|hl| {
+            hl.tag == HlTag::BuiltinFunction
+                && code[hl.range.start().into()..hl.range.end().into()] == *"Формат"
+        });
+
+        assert!(format_fn.is_some(), "Формат should be highlighted as BuiltinFunction");
+    }
+
+    #[test]
+    fn test_builtin_vs_user_function() {
+        let code = r#"
+Функция МояФункция()
+    Возврат 42;
+КонецФункции
+
+Функция Тест()
+    // User-defined function call - should be Function (not BuiltinFunction)
+    Результат1 = МояФункция();
+
+    // Built-in platform function - should be BuiltinFunction
+    Результат2 = НачатьТранзакцию();
+
+    Возврат Результат1 + Результат2;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // МояФункция should be Function (user-defined)
+        let my_func_call = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Function
+                && code[hl.range.start().into()..hl.range.end().into()] == *"МояФункция"
+                && !hl.modifiers.contains(HlMod::EXPORT)
+        });
+
+        assert!(
+            my_func_call.is_some(),
+            "МояФункция should be highlighted as Function (not builtin)"
+        );
+
+        // НачатьТранзакцию should be BuiltinFunction
+        let builtin_call = highlights.iter().find(|hl| {
+            hl.tag == HlTag::BuiltinFunction
+                && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
+        });
+
+        assert!(
+            builtin_call.is_some(),
+            "НачатьТранзакцию should be highlighted as BuiltinFunction"
+        );
     }
 }

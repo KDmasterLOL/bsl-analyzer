@@ -1,0 +1,17 @@
+[package]
+name = "html-parser"
+version = "0.1.0"
+edition = "2021"
+
+# Not part of workspace - standalone tool
+[workspace]
+
+[[bin]]
+name = "html-parser"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+scraper = "0.25.0"

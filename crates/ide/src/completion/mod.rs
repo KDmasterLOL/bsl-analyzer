@@ -2,8 +2,11 @@
 //!
 //! This module provides completion suggestions for:
 //! - SDBL queries (FROM clause, metadata objects)
+//! - Platform methods (after DOT operator)
 //! - BSL code (variables, functions, etc.) - TODO
 
+mod bsl_completion;
+mod platform_completion;
 mod sdbl_completion;
 
 use ide_db::RootDatabase;
@@ -49,6 +52,8 @@ pub enum CompletionItemKind {
     Field,
     /// Function
     Function,
+    /// Method (platform or user-defined)
+    Method,
     /// Keyword
     Keyword,
 }
@@ -69,12 +74,24 @@ pub fn completions(db: &dyn RootDatabase, position: CompletionPosition) -> Vec<C
     let _p = tracing::info_span!("completions", ?position).entered();
 
     // Try SDBL completion first
-    if let Some(items) = sdbl_completion::sdbl_completions(db, position) {
+    if let Some(items) = sdbl_completion::sdbl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning SDBL completions");
         return items;
     }
 
-    // TODO: BSL completion (variables, functions, etc.)
+    // Try platform method completion
+    if let Some(items) = platform_completion::platform_completions(db, position.clone()) {
+        tracing::debug!(items = items.len(), "returning platform method completions");
+        return items;
+    }
+
+    // Try BSL completion (global functions, keywords, etc.)
+    if let Some(items) = bsl_completion::bsl_completions(db, position.clone()) {
+        tracing::debug!(items = items.len(), "returning BSL completions");
+        return items;
+    }
+
+    // TODO: BSL user-defined symbols (variables, local functions, etc.)
     tracing::trace!("no completions available");
 
     Vec::new()

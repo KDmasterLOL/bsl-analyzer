@@ -21,6 +21,7 @@ parser = { path = "crates/parser" }
 lexer = { path = "crates/lexer" }
 base-db = { path = "crates/base-db" }
 bsl-metadata = { path = "crates/bsl-metadata" }
+bsl-platform = { path = "crates/bsl-platform" }
 cfg = { path = "crates/cfg" }
 dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }

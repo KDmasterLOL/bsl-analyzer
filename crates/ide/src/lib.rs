@@ -5,6 +5,7 @@
 mod completion;
 pub mod config_finder;
 mod goto_definition;
+mod hover;
 mod references;
 mod syntax_highlighting;
 
@@ -94,9 +95,19 @@ impl Analysis {
     }
 
     /// Returns hover information at the position.
-    pub fn hover(&self, _file_id: FileId, _offset: u32) -> Option<HoverResult> {
-        // TODO: Implement
-        None
+    ///
+    /// Provides contextual information for:
+    /// - Platform types (Строка, Число, Массив, etc.)
+    /// - Platform methods with signatures and documentation
+    /// - User-defined symbols (future)
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File identifier
+    /// * `offset` - Byte offset in the file (0-based)
+    pub fn hover(&self, file_id: FileId, offset: u32) -> Option<HoverResult> {
+        let offset = TextSize::from(offset);
+        hover::hover(self.db.as_ref(), file_id, offset)
     }
 
     /// Returns document symbols.

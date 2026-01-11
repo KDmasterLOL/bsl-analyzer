@@ -1,0 +1,11 @@
+# Build artifacts
+/target/
+
+# Generated data (extracted from local 1C installation)
+/data/platform_data.json
+/data/platform_full.json
+/data/extracted/
+
+# Build script output
+/src/generated.rs
+.platform_cache_timestamp

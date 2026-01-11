@@ -181,6 +181,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsl-platform"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "rustc-hash 2.1.1",
+ "salsa",
+ "serde",
+ "serde_json",
+ "smol_str",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -733,6 +745,7 @@ name = "ide"
 version = "0.1.0"
 dependencies = [
  "bsl-metadata",
+ "bsl-platform",
  "either",
  "expect-test",
  "hir",
@@ -742,6 +755,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "sdbl-hir",
  "serde_json",
+ "smol_str",
  "stdx",
  "syntax",
  "test-fixture",
@@ -770,6 +784,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
+ "bsl-platform",
  "cfg",
  "criterion",
  "dashmap",

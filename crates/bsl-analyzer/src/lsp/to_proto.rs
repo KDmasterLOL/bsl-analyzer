@@ -160,7 +160,7 @@ pub fn semantic_tokens_legend() -> SemanticTokensLegend {
 fn token_type_index(tag: HlTag) -> u32 {
     match tag {
         HlTag::Keyword | HlTag::BooleanLiteral => 0,
-        HlTag::Function | HlTag::Procedure => 1,
+        HlTag::Function | HlTag::Procedure | HlTag::BuiltinFunction => 1,
         HlTag::Parameter => 2,
         HlTag::Variable => 3,
         HlTag::StringLiteral => 4,
