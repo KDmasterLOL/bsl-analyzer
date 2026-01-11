@@ -8,39 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=data/platform_minimal.json");
-    println!("cargo:rerun-if-env-changed=BSL_PLATFORM_PATH");
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let generated_path = out_dir.join("generated.rs");
-
-    // Try to find 1C platform and extract documentation
-    match find_and_extract_platform_data() {
-        Some(json_path) => {
-            println!("cargo:warning=Found 1C platform, building with full documentation");
-            println!("cargo:rustc-cfg=feature=\"platform_docs\"");
-            generate_code_from_json(&json_path, &generated_path, true);
-        }
-        None => {
-            println!("cargo:warning=1C platform not found, building without documentation");
-            println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
-
-            // Check if minimal data exists
-            let minimal_path = PathBuf::from("data/platform_minimal.json");
-            if minimal_path.exists() {
-                generate_code_from_json(&minimal_path, &generated_path, false);
-            } else {
-                // Generate empty structures
-                generate_empty_structures(&generated_path);
-            }
-        }
-    }
-}
-
-/// Finds 1C platform installation and extracts documentation.
-fn find_and_extract_platform_data() -> Option<PathBuf> {
+/// Finds paths to 1C help files without extracting them.
+fn find_1c_help_file_paths() -> Option<(PathBuf, PathBuf)> {
     // Check environment variable first
     if let Ok(path) = env::var("BSL_PLATFORM_PATH") {
         let base_path = PathBuf::from(path);
@@ -48,17 +17,87 @@ fn find_and_extract_platform_data() -> Option<PathBuf> {
         let shlang_path = base_path.join("shlang_ru.hbk");
 
         if shcntx_path.exists() && shlang_path.exists() {
-            return extract_both_help_files(&shcntx_path, &shlang_path);
+            return Some((shcntx_path, shlang_path));
         }
     }
 
     // Try to find 1C installation
-    let (shcntx_path, shlang_path) = find_1c_help_files()?;
-    extract_both_help_files(&shcntx_path, &shlang_path)
+    find_1c_help_files()
+}
+
+/// Gets a timestamp string for the .hbk files (modification times).
+fn get_files_timestamp(shcntx_path: &Path, shlang_path: &Path) -> String {
+    let shcntx_time = fs::metadata(shcntx_path)
+        .and_then(|m| m.modified())
+        .map(|t| format!("{:?}", t))
+        .unwrap_or_default();
+
+    let shlang_time = fs::metadata(shlang_path)
+        .and_then(|m| m.modified())
+        .map(|t| format!("{:?}", t))
+        .unwrap_or_default();
+
+    format!("{}|{}", shcntx_time, shlang_time)
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=data/platform_minimal.json");
+    println!("cargo:rerun-if-env-changed=BSL_PLATFORM_PATH");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let generated_path = out_dir.join("generated.rs");
+    let timestamp_path = out_dir.join(".platform_timestamp");
+
+    // Check if we can skip regeneration
+    if let Some(hbk_files) = find_1c_help_file_paths() {
+        let (shcntx_path, shlang_path) = hbk_files;
+
+        // Tell Cargo to rerun if .hbk files change
+        println!("cargo:rerun-if-changed={}", shcntx_path.display());
+        println!("cargo:rerun-if-changed={}", shlang_path.display());
+
+        // Check if generated.rs exists and .hbk files haven't changed
+        if generated_path.exists() && timestamp_path.exists() {
+            if let Ok(stored_timestamp) = fs::read_to_string(&timestamp_path) {
+                let current_timestamp = get_files_timestamp(&shcntx_path, &shlang_path);
+                if stored_timestamp == current_timestamp {
+                    // No changes detected, skip regeneration
+                    println!("cargo:rustc-cfg=feature=\"platform_docs\"");
+                    return;
+                }
+            }
+        }
+
+        // Extract and generate
+        if let Some(json_path) = extract_both_help_files(&shcntx_path, &shlang_path) {
+            println!("cargo:warning=Found 1C platform, building with full documentation");
+            println!("cargo:rustc-cfg=feature=\"platform_docs\"");
+            generate_code_from_json(&json_path, &generated_path, true);
+
+            // Save timestamp for future builds
+            let timestamp = get_files_timestamp(&shcntx_path, &shlang_path);
+            let _ = fs::write(&timestamp_path, timestamp);
+            return;
+        }
+    }
+
+    // Fallback: no platform found or extraction failed
+    println!("cargo:warning=1C platform not found, building without documentation");
+    println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
+
+    // Check if minimal data exists
+    let minimal_path = PathBuf::from("data/platform_minimal.json");
+    if minimal_path.exists() {
+        generate_code_from_json(&minimal_path, &generated_path, false);
+    } else {
+        // Generate empty structures
+        generate_empty_structures(&generated_path);
+    }
 }
 
 /// Searches for 1C help files in standard installation locations.
-/// Returns (shcntx_ru.hbk, shlang_ru.hbk) paths.
+/// Returns (shcntx_ru.hbk, shlang_ru.hbk) paths without printing anything.
 fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
     // Linux: /opt/1cv8/x86_64/*/
     #[cfg(target_os = "linux")]
@@ -69,7 +108,6 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
                 let shlang_path = entry.path().join("shlang_ru.hbk");
 
                 if shcntx_path.exists() && shlang_path.exists() {
-                    println!("cargo:warning=Found 1C help files at: {}", entry.path().display());
                     return Some((shcntx_path, shlang_path));
                 }
             }
@@ -97,7 +135,6 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
                 let shlang_path = path.join("shlang_ru.hbk");
 
                 if shcntx_path.exists() && shlang_path.exists() {
-                    println!("cargo:warning=Found 1C help files at: {}", path.display());
                     return Some((shcntx_path, shlang_path));
                 }
             }
@@ -117,7 +154,6 @@ fn find_1c_help_files() -> Option<(PathBuf, PathBuf)> {
                 let shlang_path = entry.path().join("shlang_ru.hbk");
 
                 if shcntx_path.exists() && shlang_path.exists() {
-                    println!("cargo:warning=Found 1C help files at: {}", entry.path().display());
                     return Some((shcntx_path, shlang_path));
                 }
             }
@@ -155,6 +191,10 @@ fn extract_hbk_file(hbk_path: &Path, name: &str) -> Option<PathBuf> {
 
 /// Extracts both help files and combines data.
 fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<PathBuf> {
+    // Get parent directory for display
+    let platform_dir = shcntx_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+
+    println!("cargo:warning=Found 1C platform at: {}", platform_dir);
     println!("cargo:warning=Extracting platform help files...");
     println!("cargo:warning=  shcntx_ru.hbk: {}", shcntx_path.display());
     println!("cargo:warning=  shlang_ru.hbk: {}", shlang_path.display());
@@ -174,6 +214,9 @@ fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<Pat
         println!(
             "cargo:warning=Run: cargo build --release --manifest-path tools/html-parser/Cargo.toml"
         );
+        // Clean up temp directories
+        let _ = fs::remove_dir_all(&shlang_dir);
+        let _ = fs::remove_dir_all(&shcntx_dir);
         return None;
     }
 
@@ -185,6 +228,11 @@ fn extract_both_help_files(shcntx_path: &Path, shlang_path: &Path) -> Option<Pat
         .arg(&json_output)
         .output()
         .ok()?;
+
+    // Clean up temporary extraction directories
+    println!("cargo:warning=Cleaning up temporary files...");
+    let _ = fs::remove_dir_all(&shlang_dir);
+    let _ = fs::remove_dir_all(&shcntx_dir);
 
     if !output.status.success() {
         println!("cargo:warning=Failed to parse HTML files");
