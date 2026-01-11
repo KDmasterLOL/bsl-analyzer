@@ -12,18 +12,19 @@
 //! # Usage
 //!
 //! ```
-//! use bsl_platform::PlatformData;
+//! use bsl_platform::PlatformDataInner;
 //!
-//! let data = PlatformData::instance();
-//!
-//! // Look up a platform type
-//! if let Some(ty) = data.get_type("Массив") {
-//!     println!("Found type: {} / {}", ty.name, ty.english_name);
-//! }
+//! let data = PlatformDataInner::instance();
 //!
 //! // Get all platform types
 //! for ty in data.all_types() {
 //!     println!("{} / {}", ty.name, ty.english_name);
+//! }
+//!
+//! // Get methods for a type
+//! let methods = data.get_type_methods("Строка");
+//! for method in methods {
+//!     println!("Method: {}", method.name);
 //! }
 //! ```
 
@@ -38,7 +39,11 @@ mod generated {
     use super::types::*;
 }
 
-pub use db::PlatformData;
+// Re-export public API
+pub use db::{
+    platform_method_query, platform_type_query, type_methods_query, MethodLookupInput,
+    PlatformData, PlatformDataInner, TypeNameInput,
+};
 pub use types::*;
 
 #[cfg(test)]
