@@ -414,6 +414,7 @@ See `docs/planning/ROADMAP.md` for details.
 
 - **docs/contributing/DEVELOPMENT_RULES.md** - Development guidelines
 - **docs/contributing/CONTRIBUTING.md** - Contribution process
+- **docs/contributing/LOGGING.md** - Logging and profiling guide
 
 ## Compatibility Requirements
 

@@ -23,9 +23,7 @@
 //! **Metadata:**
 //! - [`module_metadata_query`] - Module type and execution context
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use base_db::FileIdInput;
 use vfs::FileId;
@@ -40,60 +38,6 @@ pub use crate::conditional_tree::conditional_tree_query;
 pub use crate::item_tree::item_tree_query;
 pub use crate::region_tree::region_tree_query;
 pub use crate::symbol_tree::symbol_tree_query;
-
-// ============================================================================
-// Profiling counters for module_bodies_query cache behavior
-// ============================================================================
-
-/// Total number of module_bodies_query calls
-pub static MODULE_BODIES_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Number of unique ModuleIds requested (tracked via counter)
-pub static MODULE_BODIES_UNIQUE_MODULES: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent in module_bodies_query (including cache hits)
-pub static MODULE_BODIES_QUERY_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent in actual lowering (cache misses)
-pub static MODULE_BODIES_LOWERING_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-pub fn reset_module_bodies_counters() {
-    MODULE_BODIES_QUERY_CALLS.store(0, Ordering::Relaxed);
-    MODULE_BODIES_UNIQUE_MODULES.store(0, Ordering::Relaxed);
-    MODULE_BODIES_QUERY_TIME_NS.store(0, Ordering::Relaxed);
-    MODULE_BODIES_LOWERING_TIME_NS.store(0, Ordering::Relaxed);
-}
-
-pub fn print_module_bodies_counters() {
-    let calls = MODULE_BODIES_QUERY_CALLS.load(Ordering::Relaxed);
-    let unique = MODULE_BODIES_UNIQUE_MODULES.load(Ordering::Relaxed);
-    let query_time_ms = MODULE_BODIES_QUERY_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
-    let lowering_time_ms = MODULE_BODIES_LOWERING_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
-
-    eprintln!("\n=== module_bodies Query Profiling ===");
-    eprintln!("  query_calls:          {:>12}", calls);
-    eprintln!("  unique_modules:       {:>12}", unique);
-    eprintln!("  query_time_ms:        {:>12}", query_time_ms);
-    eprintln!("  lowering_time_ms:     {:>12}", lowering_time_ms);
-
-    if calls > 0 {
-        let cache_overhead_ms = query_time_ms.saturating_sub(lowering_time_ms);
-        let cache_hit_rate =
-            if calls > unique { ((calls - unique) as f64 / calls as f64) * 100.0 } else { 0.0 };
-
-        eprintln!("  cache_overhead_ms:    {:>12}", cache_overhead_ms);
-        eprintln!("  cache_hit_rate:       {:>11.1}%", cache_hit_rate);
-        eprintln!(
-            "  avg_query_time_us:    {:>12.1}",
-            (query_time_ms as f64 * 1000.0) / calls as f64
-        );
-        if unique > 0 {
-            eprintln!("  avg_lowering_time_ms: {:>12.2}", lowering_time_ms as f64 / unique as f64);
-        }
-    }
-
-    eprintln!("  LRU size:             {:>12}", 128);
-}
 
 /// Get module data (derived from ItemTree).
 ///
@@ -158,25 +102,12 @@ pub fn module_bodies_query<'db>(
     db: &'db dyn DefDatabase,
     file_id_input: FileIdInput<'db>,
 ) -> Arc<ModuleBodies> {
-    MODULE_BODIES_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
-    let query_start = Instant::now();
-
     let _span = tracing::info_span!("module_bodies", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
     let module_id = ModuleId::new(file_id);
 
     // Lower all method bodies
-    let lowering_start = Instant::now();
     let result = crate::lower_module_bodies(db, module_id);
-    let lowering_time = lowering_start.elapsed();
-
-    // Track lowering time (only happens on cache miss)
-    MODULE_BODIES_LOWERING_TIME_NS.fetch_add(lowering_time.as_nanos() as u64, Ordering::Relaxed);
-    MODULE_BODIES_UNIQUE_MODULES.fetch_add(1, Ordering::Relaxed);
-
-    // Track total query time
-    MODULE_BODIES_QUERY_TIME_NS
-        .fetch_add(query_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Note: Metadata is NOT attached here - it's attached by the DefDatabase
     // implementation in ide-db where VFS access is available for loading Configuration.

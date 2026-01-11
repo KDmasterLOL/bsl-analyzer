@@ -4,13 +4,20 @@ use tracing_subscriber::{
     Registry,
 };
 
-use crate::tracing::hprof;
+use crate::tracing::{hprof, json};
 
 #[derive(Debug)]
 pub struct Config<T> {
     pub writer: T,
+    /// Log filter in tracing-subscriber targets syntax.
+    /// Example: "debug", "hir_def=debug,cfg=warn", "parser=trace"
     pub filter: String,
+    /// Hierarchical profiling filter.
+    /// Example: "*", "parse|analyze", "*@3>50"
     pub profile_filter: Option<String>,
+    /// JSON profiling filter. Outputs newline-delimited JSON to stderr.
+    /// Example: "*", "parse|analyze"
+    pub json_profile_filter: Option<String>,
 }
 
 impl<T> Config<T>
@@ -31,14 +38,16 @@ where
             .with_writer(writer)
             .with_filter(targets_filter);
 
-        match self.profile_filter {
-            Some(spec) => {
-                Registry::default().with(fmt_layer).with(hprof::SpanTree::new(&spec)).init();
-            }
-            None => {
-                Registry::default().with(fmt_layer).init();
-            }
-        }
+        // Build optional layers
+        let hprof_layer = self.profile_filter.as_ref().map(|spec| hprof::SpanTree::new(spec));
+
+        let json_layer = self
+            .json_profile_filter
+            .as_ref()
+            .map(|spec| json::TimingLayer::new(spec, std::io::stderr));
+
+        // Compose all layers
+        Registry::default().with(fmt_layer).with(hprof_layer).with(json_layer).init();
 
         Ok(())
     }

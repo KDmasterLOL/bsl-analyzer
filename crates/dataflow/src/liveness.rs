@@ -57,65 +57,7 @@ use hir_def::ExprId;
 use la_arena::RawIdx;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-
-// ============================================================================
-// Profiling counters for performance analysis
-// ============================================================================
-
-/// Counter for get_index() calls (each involves to_lowercase + SmolStr allocation)
-pub static GET_INDEX_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter for is_live() calls
-pub static IS_LIVE_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter for insert() calls
-pub static INSERT_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter for remove() calls
-pub static REMOVE_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter for collect_expr_vars() calls
-pub static COLLECT_EXPR_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Counter for VariableIndex::from_body() calls
-pub static FROM_BODY_CALLS: AtomicU64 = AtomicU64::new(0);
-
-/// Total time spent in VariableIndex::from_body() (nanoseconds)
-pub static FROM_BODY_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Reset all profiling counters to zero.
-pub fn reset_counters() {
-    GET_INDEX_CALLS.store(0, Ordering::Relaxed);
-    IS_LIVE_CALLS.store(0, Ordering::Relaxed);
-    INSERT_CALLS.store(0, Ordering::Relaxed);
-    REMOVE_CALLS.store(0, Ordering::Relaxed);
-    COLLECT_EXPR_CALLS.store(0, Ordering::Relaxed);
-    FROM_BODY_CALLS.store(0, Ordering::Relaxed);
-    FROM_BODY_TIME_NS.store(0, Ordering::Relaxed);
-}
-
-/// Print profiling counters.
-pub fn print_counters() {
-    let get_index = GET_INDEX_CALLS.load(Ordering::Relaxed);
-    let is_live = IS_LIVE_CALLS.load(Ordering::Relaxed);
-    let insert = INSERT_CALLS.load(Ordering::Relaxed);
-    let remove = REMOVE_CALLS.load(Ordering::Relaxed);
-    let collect_expr = COLLECT_EXPR_CALLS.load(Ordering::Relaxed);
-    let from_body = FROM_BODY_CALLS.load(Ordering::Relaxed);
-    let from_body_ms = FROM_BODY_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
-
-    eprintln!("\n=== Liveness Profiling ===");
-    eprintln!("  get_index_calls:      {:>12}", get_index);
-    eprintln!("  is_live_calls:        {:>12}", is_live);
-    eprintln!("  insert_calls:         {:>12}", insert);
-    eprintln!("  remove_calls:         {:>12}", remove);
-    eprintln!("  collect_expr_calls:   {:>12}", collect_expr);
-    eprintln!("  from_body_calls:      {:>12}", from_body);
-    eprintln!("  from_body_time_ms:    {:>12}", from_body_ms);
-}
 
 /// Maps variable names to compact indices for BitSet representation.
 ///
@@ -141,9 +83,6 @@ impl VariableIndex {
     /// Extracts all variable names (bindings + implicit variables from assignments)
     /// and assigns sequential indices.
     pub fn from_body(body: &Body) -> Arc<Self> {
-        FROM_BODY_CALLS.fetch_add(1, Ordering::Relaxed);
-        let start = Instant::now();
-
         let mut name_to_idx = FxHashMap::default();
         let mut idx_to_name = Vec::new();
 
@@ -230,8 +169,6 @@ impl VariableIndex {
             }
         }
 
-        FROM_BODY_TIME_NS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
         Arc::new(Self { name_to_idx, idx_to_name, expr_idx_cache, binding_idx_cache })
     }
 
@@ -240,7 +177,6 @@ impl VariableIndex {
     /// **Performance:** This method allocates a SmolStr for lowercase conversion.
     /// For hot paths, prefer `get_index_by_smolstr` with pre-computed lowercase.
     pub fn get_index(&self, var_name: &str) -> Option<usize> {
-        GET_INDEX_CALLS.fetch_add(1, Ordering::Relaxed);
         let lowercase: SmolStr = var_name.to_lowercase().into();
         self.name_to_idx.get(&lowercase).copied()
     }
@@ -312,7 +248,6 @@ impl Liveness {
     ///
     /// **Performance:** Allocates for lowercase conversion. Use `is_live_by_idx` in hot paths.
     pub fn is_live(&self, var_name: &str) -> bool {
-        IS_LIVE_CALLS.fetch_add(1, Ordering::Relaxed);
         self.var_index.get_index(var_name).map(|idx| self.live_vars.contains(idx)).unwrap_or(false)
     }
 
@@ -328,7 +263,6 @@ impl Liveness {
     ///
     /// **Performance:** Allocates for lowercase conversion. Use `insert_by_idx` in hot paths.
     pub fn insert(&mut self, var_name: &str) {
-        INSERT_CALLS.fetch_add(1, Ordering::Relaxed);
         if let Some(idx) = self.var_index.get_index(var_name) {
             self.live_vars.insert(idx);
         }
@@ -339,7 +273,6 @@ impl Liveness {
     /// **Performance:** O(1), no allocation.
     #[inline]
     pub fn insert_by_idx(&mut self, idx: usize) {
-        INSERT_CALLS.fetch_add(1, Ordering::Relaxed);
         self.live_vars.insert(idx);
     }
 
@@ -347,7 +280,6 @@ impl Liveness {
     ///
     /// **Performance:** Allocates for lowercase conversion. Use `remove_by_idx` in hot paths.
     pub fn remove(&mut self, var_name: &str) {
-        REMOVE_CALLS.fetch_add(1, Ordering::Relaxed);
         if let Some(idx) = self.var_index.get_index(var_name) {
             self.live_vars.set(idx, false);
         }
@@ -358,7 +290,6 @@ impl Liveness {
     /// **Performance:** O(1), no allocation.
     #[inline]
     pub fn remove_by_idx(&mut self, idx: usize) {
-        REMOVE_CALLS.fetch_add(1, Ordering::Relaxed);
         self.live_vars.set(idx, false);
     }
 
@@ -693,8 +624,6 @@ impl Transfer<Liveness> for LivenessTransfer {
 /// Uses pre-computed expr_idx_cache for O(1) Path lookups without string allocation.
 /// Falls back to string-based lookup for expressions not in cache.
 fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
-    COLLECT_EXPR_CALLS.fetch_add(1, Ordering::Relaxed);
-
     // Fast path: check expr_idx_cache first (O(1), no allocation)
     if let Some(idx) = liveness.var_index().get_index_by_expr(expr_id) {
         liveness.insert_by_idx(idx);

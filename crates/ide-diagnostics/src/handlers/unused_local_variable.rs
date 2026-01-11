@@ -40,52 +40,6 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticTag, DiagnosticsContext, Severity};
 use hir_def::ModuleId;
 use ide_db::{base_db, RootDatabase, TextRange};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
-// ============================================================================
-// Profiling for UnusedLocalVariable diagnostic
-// ============================================================================
-
-/// Total time spent in liveness analysis (nanoseconds)
-pub static LIVENESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Total time spent checking implicit variables (nanoseconds)
-pub static IMPLICIT_CHECK_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Total methods analyzed
-pub static METHODS_ANALYZED: AtomicU64 = AtomicU64::new(0);
-
-/// Total implicit variables checked
-pub static IMPLICIT_VARS_CHECKED: AtomicU64 = AtomicU64::new(0);
-
-/// Total blocks iterated for implicit var check
-pub static BLOCKS_ITERATED: AtomicU64 = AtomicU64::new(0);
-
-/// Reset profiling counters.
-pub fn reset_profiling() {
-    LIVENESS_TIME_NS.store(0, Ordering::Relaxed);
-    IMPLICIT_CHECK_TIME_NS.store(0, Ordering::Relaxed);
-    METHODS_ANALYZED.store(0, Ordering::Relaxed);
-    IMPLICIT_VARS_CHECKED.store(0, Ordering::Relaxed);
-    BLOCKS_ITERATED.store(0, Ordering::Relaxed);
-}
-
-/// Print profiling stats.
-pub fn print_profiling() {
-    let liveness_ms = LIVENESS_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
-    let implicit_ms = IMPLICIT_CHECK_TIME_NS.load(Ordering::Relaxed) / 1_000_000;
-    let methods = METHODS_ANALYZED.load(Ordering::Relaxed);
-    let implicit_vars = IMPLICIT_VARS_CHECKED.load(Ordering::Relaxed);
-    let blocks = BLOCKS_ITERATED.load(Ordering::Relaxed);
-
-    eprintln!("\n=== UnusedLocalVariable Profiling ===");
-    eprintln!("  liveness_time_ms:     {:>12}", liveness_ms);
-    eprintln!("  implicit_check_ms:    {:>12}", implicit_ms);
-    eprintln!("  methods_analyzed:     {:>12}", methods);
-    eprintln!("  implicit_vars:        {:>12}", implicit_vars);
-    eprintln!("  blocks_iterated:      {:>12}", blocks);
-}
 
 /// Collect UnusedLocalVariable diagnostics using liveness analysis.
 ///
@@ -146,7 +100,6 @@ fn check_method_with_module_liveness(
     module_cfgs: &cfg::ModuleCfgs,
     _ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    METHODS_ANALYZED.fetch_add(1, Ordering::Relaxed);
     let mut diagnostics = Vec::new();
 
     // Get source_map
@@ -165,7 +118,6 @@ fn check_method_with_module_liveness(
     };
 
     // Get liveness result from module-level collection (cheap HashMap lookup)
-    let liveness_start = Instant::now();
     let liveness_result = match module_liveness.get(local_id) {
         Some(result) => result,
         None => {
@@ -173,7 +125,6 @@ fn check_method_with_module_liveness(
             return diagnostics;
         }
     };
-    LIVENESS_TIME_NS.fetch_add(liveness_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Get CFG entry point
     let entry = match cfg.entry_point() {
@@ -304,22 +255,16 @@ fn check_method_with_module_liveness(
     // Instead of O(V × B) iteration, we create a union of all live sets ONCE: O(B)
     // Then check each variable against this union: O(V)
     // Total: O(B + V) instead of O(V × B)
-    let implicit_start = Instant::now();
-    let implicit_var_count = implicit_vars.len();
-    let mut blocks_counted = 0u64;
 
     // Create union of all live sets ONCE (O(B) - iterate all blocks once)
     let mut all_live_union = fixedbitset::FixedBitSet::with_capacity(var_index.size());
     for (_, in_state, out_state) in liveness_result.blocks() {
-        blocks_counted += 1;
         all_live_union.union_with(in_state.live_vars());
         all_live_union.union_with(out_state.live_vars());
     }
 
     // Check each implicit variable against union (O(V) - one lookup per variable)
     for (lowercase_name, (original_name, range)) in implicit_vars {
-        IMPLICIT_VARS_CHECKED.fetch_add(1, Ordering::Relaxed);
-
         // Fast path: check against pre-computed union (O(1) per variable)
         let is_live_anywhere = if let Some(idx) = var_index.get_index(&lowercase_name) {
             all_live_union.contains(idx)
@@ -331,20 +276,6 @@ fn check_method_with_module_liveness(
         if !is_live_anywhere {
             diagnostics.push(create_diagnostic(&original_name, range));
         }
-    }
-
-    BLOCKS_ITERATED.fetch_add(blocks_counted, Ordering::Relaxed);
-    let implicit_elapsed = implicit_start.elapsed();
-    IMPLICIT_CHECK_TIME_NS.fetch_add(implicit_elapsed.as_nanos() as u64, Ordering::Relaxed);
-
-    // Log if this method's implicit check is slow
-    if implicit_elapsed.as_micros() > 100 && implicit_var_count > 0 {
-        tracing::debug!(
-            implicit_vars = implicit_var_count,
-            blocks_per_var = blocks_counted / implicit_var_count.max(1) as u64,
-            elapsed_us = implicit_elapsed.as_micros(),
-            "Slow implicit var check"
-        );
     }
 
     diagnostics

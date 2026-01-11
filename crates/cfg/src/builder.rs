@@ -124,11 +124,6 @@ impl CfgBuilder {
         body: &Body,
         _source_map: Option<&BodySourceMap>,
     ) -> ControlFlowGraph {
-        use std::time::Instant;
-
-        crate::CFG_BUILD_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let start = Instant::now();
-
         // Create entry block
         let entry = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
         self.cfg.set_entry_point(entry);
@@ -156,9 +151,6 @@ impl CfgBuilder {
                 let _ = self.cfg.add_edge(block_idx, exit, CfgEdgeType::Direct);
             }
         }
-
-        crate::CFG_BUILD_TIME_NS
-            .fetch_add(start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
         self.cfg
     }
@@ -223,57 +215,21 @@ impl CfgBuilder {
     ///
     /// Pattern matches on Stmt enum - no AST traversal needed.
     fn walk_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
-        crate::CFG_WALK_STMT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let stmt = body.stmt(stmt_id);
         match stmt {
-            Stmt::Return { .. } => {
-                crate::CFG_WALK_RETURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_return_statement_hir(stmt_id, body)
-            }
-            Stmt::Raise { .. } => {
-                crate::CFG_WALK_RAISE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_raise_statement_hir(stmt_id, body)
-            }
-            Stmt::If { .. } => {
-                crate::CFG_WALK_IF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_if_statement_hir(stmt_id, body)
-            }
-            Stmt::While { .. } => {
-                crate::CFG_WALK_WHILE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_while_statement_hir(stmt_id, body)
-            }
-            Stmt::For { .. } => {
-                crate::CFG_WALK_FOR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_for_statement_hir(stmt_id, body)
-            }
-            Stmt::ForEach { .. } => {
-                crate::CFG_WALK_FOREACH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_foreach_statement_hir(stmt_id, body)
-            }
-            Stmt::Try { .. } => {
-                crate::CFG_WALK_TRY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_try_statement_hir(stmt_id, body)
-            }
-            Stmt::Break => {
-                crate::CFG_WALK_BREAK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_break_statement_hir(stmt_id)
-            }
-            Stmt::Continue => {
-                crate::CFG_WALK_CONTINUE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_continue_statement_hir(stmt_id)
-            }
-            Stmt::Goto(_) => {
-                crate::CFG_WALK_GOTO_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_goto_statement_hir(stmt_id, body)
-            }
-            Stmt::Label(_) => {
-                crate::CFG_WALK_LABEL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.walk_label_statement_hir(stmt_id, body)
-            }
+            Stmt::Return { .. } => self.walk_return_statement_hir(stmt_id, body),
+            Stmt::Raise { .. } => self.walk_raise_statement_hir(stmt_id, body),
+            Stmt::If { .. } => self.walk_if_statement_hir(stmt_id, body),
+            Stmt::While { .. } => self.walk_while_statement_hir(stmt_id, body),
+            Stmt::For { .. } => self.walk_for_statement_hir(stmt_id, body),
+            Stmt::ForEach { .. } => self.walk_foreach_statement_hir(stmt_id, body),
+            Stmt::Try { .. } => self.walk_try_statement_hir(stmt_id, body),
+            Stmt::Break => self.walk_break_statement_hir(stmt_id),
+            Stmt::Continue => self.walk_continue_statement_hir(stmt_id),
+            Stmt::Goto(_) => self.walk_goto_statement_hir(stmt_id, body),
+            Stmt::Label(_) => self.walk_label_statement_hir(stmt_id, body),
             _ => {
                 // Regular statement (Assign, Expr, VarDecl, etc.) - add to current block
-                crate::CFG_WALK_OTHER_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.add_to_current_block_hir(stmt_id);
             }
         }

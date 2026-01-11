@@ -22,7 +22,6 @@
 //! **Line Index:**
 //! - [`line_index_query`] - Convert byte offsets to line/column positions (LRU: 256)
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use base_db::FileIdInput;
@@ -32,99 +31,6 @@ use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 
 // Re-export query from metadata module
 pub use crate::metadata::load_configuration;
-
-// ============================================================================
-// Profiling counters for liveness_analysis_query breakdown
-// ============================================================================
-
-pub static LIVENESS_MODULE_BODIES_NS: AtomicU64 = AtomicU64::new(0);
-pub static LIVENESS_METHOD_CFG_NS: AtomicU64 = AtomicU64::new(0);
-pub static LIVENESS_VAR_INDEX_NS: AtomicU64 = AtomicU64::new(0);
-pub static LIVENESS_SOLVER_NS: AtomicU64 = AtomicU64::new(0);
-pub static LIVENESS_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
-
-// ============================================================================
-// Profiling counters for method_cfg_query breakdown
-// ============================================================================
-
-pub static CFG_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_METHOD_ID_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_MODULE_BODIES_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_BODY_LOOKUP_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_BUILD_CFG_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_ARC_ALLOC_NS: AtomicU64 = AtomicU64::new(0);
-pub static CFG_QUERY_NO_BODY_COUNT: AtomicU64 = AtomicU64::new(0);
-
-pub fn reset_liveness_query_counters() {
-    LIVENESS_MODULE_BODIES_NS.store(0, Ordering::Relaxed);
-    LIVENESS_METHOD_CFG_NS.store(0, Ordering::Relaxed);
-    LIVENESS_VAR_INDEX_NS.store(0, Ordering::Relaxed);
-    LIVENESS_SOLVER_NS.store(0, Ordering::Relaxed);
-    LIVENESS_QUERY_CALLS.store(0, Ordering::Relaxed);
-
-    // Reset CFG query counters too
-    CFG_QUERY_CALLS.store(0, Ordering::Relaxed);
-    CFG_QUERY_TOTAL_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_METHOD_ID_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_MODULE_BODIES_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_BODY_LOOKUP_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_BUILD_CFG_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_ARC_ALLOC_NS.store(0, Ordering::Relaxed);
-    CFG_QUERY_NO_BODY_COUNT.store(0, Ordering::Relaxed);
-}
-
-pub fn print_liveness_query_counters() {
-    let module_bodies_ms = LIVENESS_MODULE_BODIES_NS.load(Ordering::Relaxed) / 1_000_000;
-    let method_cfg_ms = LIVENESS_METHOD_CFG_NS.load(Ordering::Relaxed) / 1_000_000;
-    let var_index_ms = LIVENESS_VAR_INDEX_NS.load(Ordering::Relaxed) / 1_000_000;
-    let solver_ms = LIVENESS_SOLVER_NS.load(Ordering::Relaxed) / 1_000_000;
-    let calls = LIVENESS_QUERY_CALLS.load(Ordering::Relaxed);
-
-    eprintln!("\n=== Liveness Query Breakdown ===");
-    eprintln!("  query_calls:          {:>12}", calls);
-    eprintln!("  module_bodies_ms:     {:>12}", module_bodies_ms);
-    eprintln!("  method_cfg_ms:        {:>12}", method_cfg_ms);
-    eprintln!("  var_index_ms:         {:>12}", var_index_ms);
-    eprintln!("  solver_ms:            {:>12}", solver_ms);
-    eprintln!(
-        "  total_ms:             {:>12}",
-        module_bodies_ms + method_cfg_ms + var_index_ms + solver_ms
-    );
-
-    // Print CFG query breakdown
-    let cfg_calls = CFG_QUERY_CALLS.load(Ordering::Relaxed);
-    let cfg_total_ms = CFG_QUERY_TOTAL_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_method_id_ms = CFG_QUERY_METHOD_ID_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_module_bodies_ms = CFG_QUERY_MODULE_BODIES_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_body_lookup_ms = CFG_QUERY_BODY_LOOKUP_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_build_cfg_ms = CFG_QUERY_BUILD_CFG_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_arc_alloc_ms = CFG_QUERY_ARC_ALLOC_NS.load(Ordering::Relaxed) / 1_000_000;
-    let cfg_no_body = CFG_QUERY_NO_BODY_COUNT.load(Ordering::Relaxed);
-
-    eprintln!("\n=== method_cfg Query Breakdown ===");
-    eprintln!("  query_calls:          {:>12}", cfg_calls);
-    eprintln!("  no_body_count:        {:>12}", cfg_no_body);
-    eprintln!("  total_time_ms:        {:>12}", cfg_total_ms);
-    if cfg_calls > 0 {
-        eprintln!("  avg_time_per_call:    {:>12.2} ms", cfg_total_ms as f64 / cfg_calls as f64);
-    }
-    eprintln!("\n  --- Breakdown ---");
-    eprintln!("  method_id_resolve_ms: {:>12}", cfg_method_id_ms);
-    eprintln!("  module_bodies_ms:     {:>12}", cfg_module_bodies_ms);
-    eprintln!("  body_lookup_ms:       {:>12}", cfg_body_lookup_ms);
-    eprintln!("  build_cfg_ms:         {:>12}", cfg_build_cfg_ms);
-    eprintln!("  arc_alloc_ms:         {:>12}", cfg_arc_alloc_ms);
-    eprintln!(
-        "  salsa_overhead_ms:    {:>12}",
-        cfg_total_ms
-            - (cfg_method_id_ms
-                + cfg_module_bodies_ms
-                + cfg_body_lookup_ms
-                + cfg_build_cfg_ms
-                + cfg_arc_alloc_ms)
-    );
-}
 
 // Helper types for internal use
 type SdblInFile = Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>;

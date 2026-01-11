@@ -632,76 +632,6 @@ pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> 
     ExecutionContext::Unknown
 }
 
-// ============================================================================
-// Profiling counters for lowering operations
-// ============================================================================
-
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
-/// Time spent collecting module variables (first pass)
-pub static LOWERING_MODULE_VARS_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent deduplicating module variables
-pub static LOWERING_DEDUP_VARS_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent lowering all methods (second pass)
-pub static LOWERING_METHODS_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent lowering module-level code (third pass)
-pub static LOWERING_MODULE_CODE_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Time spent checking unused variables (fourth pass)
-pub static LOWERING_UNUSED_CHECK_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Number of methods lowered
-pub static LOWERING_METHOD_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Number of modules processed
-pub static LOWERING_MODULE_COUNT: AtomicU64 = AtomicU64::new(0);
-
-pub fn reset_lowering_counters() {
-    LOWERING_MODULE_VARS_NS.store(0, Ordering::Relaxed);
-    LOWERING_DEDUP_VARS_NS.store(0, Ordering::Relaxed);
-    LOWERING_METHODS_NS.store(0, Ordering::Relaxed);
-    LOWERING_MODULE_CODE_NS.store(0, Ordering::Relaxed);
-    LOWERING_UNUSED_CHECK_NS.store(0, Ordering::Relaxed);
-    LOWERING_METHOD_COUNT.store(0, Ordering::Relaxed);
-    LOWERING_MODULE_COUNT.store(0, Ordering::Relaxed);
-}
-
-pub fn print_lowering_counters() {
-    let module_vars_ms = LOWERING_MODULE_VARS_NS.load(Ordering::Relaxed) / 1_000_000;
-    let dedup_vars_ms = LOWERING_DEDUP_VARS_NS.load(Ordering::Relaxed) / 1_000_000;
-    let methods_ms = LOWERING_METHODS_NS.load(Ordering::Relaxed) / 1_000_000;
-    let module_code_ms = LOWERING_MODULE_CODE_NS.load(Ordering::Relaxed) / 1_000_000;
-    let unused_check_ms = LOWERING_UNUSED_CHECK_NS.load(Ordering::Relaxed) / 1_000_000;
-    let method_count = LOWERING_METHOD_COUNT.load(Ordering::Relaxed);
-    let module_count = LOWERING_MODULE_COUNT.load(Ordering::Relaxed);
-
-    let total_ms = module_vars_ms + dedup_vars_ms + methods_ms + module_code_ms + unused_check_ms;
-
-    eprintln!("\n=== Lowering Profiling ===");
-    eprintln!("  modules_processed:    {:>12}", module_count);
-    eprintln!("  methods_lowered:      {:>12}", method_count);
-    eprintln!("  module_vars_ms:       {:>12}", module_vars_ms);
-    eprintln!("  dedup_vars_ms:        {:>12}", dedup_vars_ms);
-    eprintln!("  methods_ms:           {:>12}", methods_ms);
-    eprintln!("  module_code_ms:       {:>12}", module_code_ms);
-    eprintln!("  unused_check_ms:      {:>12}", unused_check_ms);
-    eprintln!("  total_ms:             {:>12}", total_ms);
-
-    if module_count > 0 {
-        eprintln!("  avg_module_time_ms:   {:>12.2}", total_ms as f64 / module_count as f64);
-    }
-    if method_count > 0 {
-        eprintln!(
-            "  avg_method_time_us:   {:>12.1}",
-            (methods_ms as f64 * 1000.0) / method_count as f64
-        );
-    }
-}
-
 /// Lower all method bodies in a module.
 ///
 /// This function walks the AST and lowers each procedure/function body to HIR.
@@ -709,8 +639,6 @@ pub fn print_lowering_counters() {
 pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
     use rustc_hash::FxHashSet;
     use syntax::SyntaxKind;
-
-    LOWERING_MODULE_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let parse = db.parse(module_id.file_id);
     let root = parse.syntax_node();
@@ -720,7 +648,6 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
 
     // Optimization: Single pass to collect both module variables and method nodes
     // This avoids two separate root.descendants() traversals
-    let t0 = Instant::now();
     let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
 
     for node in root.descendants() {
@@ -744,10 +671,8 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
             _ => {}
         }
     }
-    LOWERING_MODULE_VARS_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Deduplicate module variables (matching Java behavior)
-    let t1 = Instant::now();
     {
         let mut seen_names: FxHashSet<String> = FxHashSet::default();
         result.module_vars.retain(|var| {
@@ -759,10 +684,8 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     // Create set of module variable names for method lowering
     let module_var_names: FxHashSet<String> =
         result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
-    LOWERING_DEDUP_VARS_NS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Lower all collected methods
-    let t2 = Instant::now();
     for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
         let method_idx = method_idx as u32;
         let lower_result =
@@ -778,12 +701,9 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
         all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
 
         result.bodies.insert(method_idx, lower_result);
-        LOWERING_METHOD_COUNT.fetch_add(1, Ordering::Relaxed);
     }
-    LOWERING_METHODS_NS.fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Third pass: lower module-level code (statements outside procedures)
-    let t3 = Instant::now();
     let module_code_result = body::lower_module_code(&root);
 
     // Collect diagnostics from module-level code
@@ -797,10 +717,8 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
 
     result.module_code = Some(module_code_result);
-    LOWERING_MODULE_CODE_NS.fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     // Fourth pass: check for unused module variables
-    let t4 = Instant::now();
     for var in &result.module_vars {
         // Skip exported variables (externally visible)
         if var.is_export {
@@ -816,7 +734,6 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
             ));
         }
     }
-    LOWERING_UNUSED_CHECK_NS.fetch_add(t4.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
     result
 }

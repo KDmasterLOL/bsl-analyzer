@@ -191,17 +191,6 @@ fn analyze(
 
     let _span = tracing::info_span!("cli_analyze").entered();
 
-    // Reset profiling counters at the start of analysis
-    hir_def::queries::reset_module_bodies_counters();
-    hir_def::reset_lowering_counters();
-    hir_def::body::lower::reset_lower_method_counters();
-    hir_def::body::lower::reset_stmt_lowering_counters();
-    cfg::reset_cfg_counters();
-    dataflow::reset_solver_counters();
-    dataflow::liveness::reset_counters();
-    ide_db::queries::reset_liveness_query_counters();
-    ide_diagnostics::handlers::unused_local_variable::reset_profiling();
-
     tracing::info!("Analyzing project: {:?}", source_dir);
     tracing::info!("Reporters: {:?}", reporters);
     tracing::info!("Quiet mode: {}", quiet);
@@ -441,17 +430,6 @@ fn analyze(
 
     tracing::info!("Analysis complete");
 
-    // Print profiling statistics
-    hir_def::queries::print_module_bodies_counters();
-    hir_def::print_lowering_counters();
-    hir_def::body::lower::print_lower_method_counters();
-    hir_def::body::lower::print_stmt_lowering_counters();
-    cfg::print_cfg_counters();
-    dataflow::print_solver_counters();
-    dataflow::liveness::print_counters();
-    ide_db::queries::print_liveness_query_counters();
-    ide_diagnostics::handlers::unused_local_variable::print_profiling();
-
     Ok(())
 }
 
@@ -505,6 +483,7 @@ fn setup_logging(log_file: Option<PathBuf>) -> anyhow::Result<()> {
         writer,
         filter: env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned()),
         profile_filter: env::var("BSL_PROFILE").ok(),
+        json_profile_filter: env::var("BSL_PROFILE_JSON").ok(),
     }
     .init()?;
 

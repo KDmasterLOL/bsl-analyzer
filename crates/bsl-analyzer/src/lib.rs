@@ -1,7 +1,8 @@
 pub mod tracing {
     pub mod config;
-    pub use config::Config;
     pub mod hprof;
+    pub mod json;
+    pub use config::Config;
 }
 
 pub mod config;

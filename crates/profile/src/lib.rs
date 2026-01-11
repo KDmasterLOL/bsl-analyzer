@@ -3,35 +3,15 @@
 //! This crate provides profiling and timing utilities for measuring
 //! performance of various operations.
 
-use std::time::{Duration, Instant};
+mod memory_usage;
+mod stop_watch;
 
-/// A simple profiling scope that measures elapsed time.
-pub struct Profile {
-    label: &'static str,
-    start: Instant,
-}
+pub use crate::{
+    memory_usage::{Bytes, MemoryUsage},
+    stop_watch::{StopWatch, StopWatchSpan},
+};
 
-impl Profile {
-    pub fn new(label: &'static str) -> Self {
-        Self { label, start: Instant::now() }
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.start.elapsed()
-    }
-}
-
-impl Drop for Profile {
-    fn drop(&mut self) {
-        let elapsed = self.elapsed();
-        if elapsed.as_millis() > 10 {
-            eprintln!("{}: {:?}", self.label, elapsed);
-        }
-    }
-}
-
-/// Measures the time it takes to execute a closure.
-pub fn measure<T>(label: &'static str, f: impl FnOnce() -> T) -> T {
-    let _p = Profile::new(label);
-    f()
+/// Returns the current memory usage.
+pub fn memory_usage() -> MemoryUsage {
+    MemoryUsage::now()
 }
