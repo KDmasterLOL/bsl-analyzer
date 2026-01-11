@@ -551,11 +551,13 @@ impl DefDatabase for RootDatabaseImpl {
         hir_def::docs::method_docs_query(self, method)
     }
 
-    fn workspace_symbols(&self, files: &[FileId]) -> hir_def::WorkspaceSymbols {
-        // Call workspace_symbols_query from hir-def
-        // NOTE: Not yet Salsa-tracked in Phase 2 MVP
-        // TODO: Add proper Salsa tracking in future iteration
-        hir_def::workspace_symbols_query(self, files)
+    fn workspace_symbols(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir_def::WorkspaceSymbols> {
+        // Call Salsa-tracked workspace_symbols_query from hir-def
+        let source_root_input = self.source_root_input(source_root_id);
+        hir_def::workspace_symbols_query(self, source_root_input)
     }
 }
 

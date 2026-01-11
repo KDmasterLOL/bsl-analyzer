@@ -37,6 +37,7 @@
 use hir_def::resolver::Resolver;
 use hir_def::ty::{FunctionSignature, Ty};
 use hir_def::{DefDatabase, MethodId, Name};
+#[cfg(test)]
 use vfs::FileId;
 
 use crate::infer::UnresolvedMethodKind;
@@ -112,7 +113,7 @@ pub fn resolve_qualified_call(
     module_name: &Name,
     method_name: &Name,
     resolver: &Resolver,
-    all_files: &[FileId],
+    source_root_id: base_db::SourceRootId,
 ) -> Result<MethodResolution, UnresolvedMethodKind> {
     // 1. Check shadowing: is module_name a local variable?
     //
@@ -122,8 +123,8 @@ pub fn resolve_qualified_call(
         return Err(UnresolvedMethodKind::ReceiverNotResolved);
     }
 
-    // 2. Get workspace symbols (all CommonModules)
-    let workspace_symbols = db.workspace_symbols(all_files);
+    // 2. Get workspace symbols (all CommonModules) - Salsa cached
+    let workspace_symbols = db.workspace_symbols(source_root_id);
 
     // 3. Find CommonModule by name
     let common_module = workspace_symbols

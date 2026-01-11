@@ -26,7 +26,6 @@
 use std::sync::Arc;
 
 use base_db::FileIdInput;
-use vfs::FileId;
 
 use crate::{
     ty::infer::InferenceResult, DefDatabase, ModuleBodies, ModuleData, ModuleId, ModuleMetadata,
@@ -185,27 +184,36 @@ pub fn infer_types_query<'db>(
 
 /// Build workspace-wide symbol index for CommonModules.
 ///
-/// This function creates a global index of all CommonModules in the provided files,
+/// This function creates a global index of all CommonModules in the source root,
 /// enabling O(1) lookup for qualified name resolution (e.g., `ОбщийМодуль.Метод()`).
 ///
 /// ## Performance
 /// - **Computation:** O(n×m) where n = files, m = avg methods per file
 /// - **Memory:** ~1-5 KB per module (signatures only)
-/// - **Typical time:** ~100ms for 6,540 files
-/// - **Caching:** Not yet Salsa-tracked (TODO: Phase 2 optimization)
+/// - **Typical time:** ~100ms for 6,540 files (first call)
+/// - **Caching:** Salsa-tracked via SourceRootInput, subsequent calls are O(1)
+///
+/// ## Salsa caching
+/// - LRU: 16 (typically one source root per workspace)
+/// - Invalidation: When SourceRoot changes (files added/removed)
+/// - First call: builds full index
+/// - Subsequent calls: returns cached result
 ///
 /// ## Usage
 /// ```ignore
 /// // In DefDatabase implementation:
-/// fn workspace_symbols(&self, files: &[FileId]) -> WorkspaceSymbols {
-///     workspace_symbols_query(self, files)
+/// fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<WorkspaceSymbols> {
+///     let source_root_input = self.source_root_input(source_root_id);
+///     workspace_symbols_query(self, source_root_input)
 /// }
 /// ```
-///
-/// ## TODO
-/// Add Salsa tracking for better caching. Currently recomputes on every call.
-/// Future optimization: per-module tracking instead of whole-workspace invalidation.
-pub fn workspace_symbols_query(db: &dyn DefDatabase, files: &[FileId]) -> WorkspaceSymbols {
+#[salsa::tracked(lru = 16)]
+pub fn workspace_symbols_query(
+    db: &dyn DefDatabase,
+    source_root_input: base_db::SourceRootInput,
+) -> Arc<WorkspaceSymbols> {
+    let source_root = source_root_input.root(db);
+    let files: Vec<_> = source_root.iter().collect();
     let _span = tracing::info_span!("workspace_symbols", file_count = files.len()).entered();
-    crate::workspace::workspace_symbols(db, files)
+    Arc::new(crate::workspace::workspace_symbols(db, &files))
 }

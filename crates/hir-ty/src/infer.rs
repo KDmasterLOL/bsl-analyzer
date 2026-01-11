@@ -148,15 +148,12 @@ impl<'db> InferenceContext<'db> {
         self.result
     }
 
-    /// Get all files in the workspace for symbol resolution.
+    /// Get source root ID for the current file.
     ///
-    /// This collects all files from the current file's source root.
-    fn get_workspace_files(&self) -> Vec<FileId> {
+    /// Used for workspace symbol resolution (Salsa-cached).
+    fn get_source_root_id(&self) -> base_db::SourceRootId {
         let file_source_root_input = self.db.file_source_root_input(self.file_id);
-        let source_root_id = file_source_root_input.source_root_id(self.db);
-        let source_root_input = self.db.source_root_input(source_root_id);
-        let source_root = source_root_input.root(self.db);
-        source_root.iter().collect()
+        file_source_root_input.source_root_id(self.db)
     }
 
     /// Get resolver for the current module.
@@ -443,8 +440,8 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(*arg);
         }
 
-        // Get workspace files and resolver
-        let workspace_files = self.get_workspace_files();
+        // Get source root and resolver
+        let source_root_id = self.get_source_root_id();
         let resolver = self.get_resolver();
 
         // Resolve the qualified call
@@ -453,7 +450,7 @@ impl<'db> InferenceContext<'db> {
             module_name,
             method_name,
             &resolver,
-            &workspace_files,
+            source_root_id,
         ) {
             Ok(resolution) => {
                 // Method found!

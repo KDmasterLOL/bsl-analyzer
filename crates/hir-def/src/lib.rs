@@ -44,6 +44,7 @@ pub mod workspace;
 
 use std::sync::Arc;
 
+use base_db::SourceRootId;
 use vfs::FileId;
 
 pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, LowerResult};
@@ -278,12 +279,12 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Performance
     /// - **Computation:** O(n×m) where n = files, m = avg methods per file (~100ms for 6,540 files)
     /// - **Memory:** ~1-5 KB per module (signatures only, not bodies)
-    /// - **Caching:** Salsa-tracked, recomputed when any file in the list changes
+    /// - **Caching:** Salsa-tracked via SourceRootInput, invalidated when source root changes
     ///
     /// # Usage
     /// ```ignore
-    /// let all_files: Vec<FileId> = source_root.files().collect();
-    /// let symbols = db.workspace_symbols(&all_files);
+    /// let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
+    /// let symbols = db.workspace_symbols(source_root_id);
     ///
     /// if let Some(module_info) = symbols.common_modules().get(&Name::new("ОбщегоНазначения")) {
     ///     // Found CommonModule, access its methods
@@ -294,9 +295,8 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// Should delegate to [`workspace_symbols_query`].
     ///
     /// # Note
-    /// This is a workspace-level query. Invalidation happens when any file in the
-    /// workspace changes. For large workspaces, consider optimizing with finer-grained tracking.
-    fn workspace_symbols(&self, files: &[FileId]) -> WorkspaceSymbols;
+    /// This is a workspace-level query. Invalidation happens when the source root changes.
+    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<WorkspaceSymbols>;
 }
 
 /// Module identifier.

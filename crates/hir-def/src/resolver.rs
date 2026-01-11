@@ -244,6 +244,9 @@ impl Resolver {
         module_name: &Name,
         method_name: &Name,
     ) -> PathResolution {
+        let _span =
+            tracing::info_span!("resolve_cross_module", %module_name, %method_name).entered();
+
         // Get current module to determine source root
         let module_id = match self.module_id() {
             Some(id) => id,
@@ -260,21 +263,9 @@ impl Resolver {
         let file_id = module_id.file_id;
         let file_source_root_input = db.file_source_root_input(file_id);
         let source_root_id = file_source_root_input.source_root_id(db);
-        let source_root_input = db.source_root_input(source_root_id);
-        let source_root = source_root_input.root(db);
 
-        // Collect all files from the source root
-        let files: Vec<_> = source_root.iter().collect();
-
-        tracing::info!(
-            "resolve_cross_module: module={}, method={}, file_count={}",
-            module_name,
-            method_name,
-            files.len()
-        );
-
-        // Get workspace symbols (this will be cached by Salsa query in the future)
-        let workspace_symbols = db.workspace_symbols(&files);
+        // Get workspace symbols (Salsa-cached via SourceRootInput)
+        let workspace_symbols = db.workspace_symbols(source_root_id);
 
         tracing::info!(
             "resolve_cross_module: workspace has {} common modules",

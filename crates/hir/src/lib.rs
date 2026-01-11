@@ -349,10 +349,14 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         offset: syntax::TextSize,
     ) -> Option<Symbol<'db, DB>> {
+        let _span = tracing::info_span!("symbol_at_position", ?file_id).entered();
         use syntax::ast::AstNode;
 
         // Parse the file
-        let parse = self.db.parse(file_id);
+        let parse = {
+            let _span = tracing::debug_span!("parse").entered();
+            self.db.parse(file_id)
+        };
         let root = parse.syntax_node();
 
         // Find the token at the offset
@@ -416,17 +420,25 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         field_expr: syntax::ast::FieldExpr,
     ) -> Option<Symbol<'db, DB>> {
+        let _span = tracing::info_span!("resolve_qualified_name").entered();
+
         // Extract qualified name from FieldExpr
         let qualified_name = self.extract_qualified_name_from_field_expr(field_expr)?;
-        tracing::info!("resolve_qualified_name: extracted qualified_name={:?}", qualified_name);
+        tracing::debug!(?qualified_name, "extracted qualified name");
 
         // Use workspace scope resolver for cross-file resolution
         let module_id = ModuleId::new(file_id);
-        let resolver = hir_def::resolver::Resolver::with_workspace_scope(module_id);
+        let resolver = {
+            let _span = tracing::debug_span!("create_workspace_resolver").entered();
+            hir_def::resolver::Resolver::with_workspace_scope(module_id)
+        };
 
         // Resolve the qualified path
-        let resolution = resolver.resolve_path(self.db, &qualified_name);
-        tracing::info!("resolve_qualified_name: resolution result={:?}", resolution);
+        let resolution = {
+            let _span = tracing::debug_span!("resolve_path").entered();
+            resolver.resolve_path(self.db, &qualified_name)
+        };
+        tracing::debug!(?resolution, "resolution result");
 
         // Convert PathResolution to Symbol
         match resolution {

@@ -22,10 +22,16 @@ pub fn goto_definition<DB: RootDatabase>(
     file_id: FileId,
     offset: TextSize,
 ) -> Option<NavigationTarget> {
+    let _span =
+        tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
+
     let sema = Semantics::new(db);
 
     // Get the symbol at the cursor position
-    let symbol = sema.symbol_at_position(file_id, offset)?;
+    let symbol = {
+        let _span = tracing::debug_span!("symbol_at_position").entered();
+        sema.symbol_at_position(file_id, offset)?
+    };
 
     // Convert the symbol to a navigation target
     match symbol {
