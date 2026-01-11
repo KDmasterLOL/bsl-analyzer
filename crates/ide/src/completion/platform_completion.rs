@@ -4,7 +4,7 @@
 //! - Method completion after DOT (e.g., `Строка.` shows ВРег, НРег, etc.)
 //! - Snippets with parameter placeholders
 
-use bsl_platform::{type_methods_query, PlatformMethod, TypeNameInput};
+use bsl_platform::{type_methods_query, PlatformData, PlatformMethod, TypeNameInput};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxToken};
 
@@ -190,6 +190,60 @@ fn generate_method_snippet(method: &PlatformMethod) -> String {
 /// Возвращает: Строка
 /// ```
 fn format_method_documentation(method: &PlatformMethod) -> String {
+    // Try to get full documentation
+    if let Some(full_docs) = PlatformData::instance().get_method_docs(method.id) {
+        return format_method_documentation_full(method, &full_docs);
+    }
+
+    // Fallback to basic documentation
+    format_method_documentation_basic(method)
+}
+
+/// Formats platform method with full documentation from platform data.
+fn format_method_documentation_full(
+    method: &PlatformMethod,
+    docs: &bsl_platform::MethodDocs,
+) -> String {
+    let mut doc = format!("{} / {}\n\n", method.name, method.english_name);
+
+    // Description
+    if !docs.description.is_empty() {
+        doc.push_str(&docs.description);
+        doc.push_str("\n\n");
+    }
+
+    // Parameters with detailed descriptions
+    if !docs.params.is_empty() {
+        doc.push_str("Параметры:\n");
+        for param in &docs.params {
+            doc.push_str(&format!("- {}", param.name));
+            if !param.description.is_empty() {
+                doc.push_str(&format!(": {}", param.description));
+            }
+            doc.push('\n');
+        }
+        doc.push('\n');
+    }
+
+    // Return type
+    if let Some(ret_type) = &method.return_type {
+        doc.push_str(&format!("Возвращает: {}\n\n", ret_type));
+    }
+
+    // Examples (first example only for completion)
+    if !docs.examples.is_empty() {
+        if let Some(example) = docs.examples.first() {
+            doc.push_str("Пример:\n");
+            doc.push_str(&example.code);
+            doc.push_str("\n\n");
+        }
+    }
+
+    doc
+}
+
+/// Formats platform method with basic documentation (fallback).
+fn format_method_documentation_basic(method: &PlatformMethod) -> String {
     let mut doc = format!("{} / {}\n\n", method.name, method.english_name);
 
     if !method.parameters.is_empty() {
@@ -216,7 +270,7 @@ mod tests {
 
     fn create_test_method() -> PlatformMethod {
         PlatformMethod {
-            id: 1,
+            id: 999999, // Use invalid ID to ensure fallback to basic docs
             type_name: "Строка".into(),
             name: "ВРег".into(),
             english_name: "Upper".into(),
@@ -257,7 +311,7 @@ mod tests {
     #[test]
     fn test_generate_snippet_no_params() {
         let method = PlatformMethod {
-            id: 2,
+            id: 999998,
             type_name: "Число".into(),
             name: "Цел".into(),
             english_name: "Int".into(),
@@ -275,7 +329,7 @@ mod tests {
     #[test]
     fn test_generate_snippet_optional_param() {
         let method = PlatformMethod {
-            id: 3,
+            id: 999997,
             type_name: "Строка".into(),
             name: "Лев".into(),
             english_name: "Left".into(),
@@ -306,7 +360,9 @@ mod tests {
         let method = create_test_method();
         let doc = format_method_documentation(&method);
 
+        // Should contain method name
         assert!(doc.contains("ВРег / Upper"));
+        // Should use fallback docs (since id=999999 doesn't exist)
         assert!(doc.contains("Параметры:"));
         assert!(doc.contains("Значение: Строка"));
         assert!(doc.contains("Возвращает: Строка"));

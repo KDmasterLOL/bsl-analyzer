@@ -117,7 +117,9 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
-    use lsp_types::request::{Completion, GotoDefinition, References, SemanticTokensFullRequest};
+    use lsp_types::request::{
+        Completion, GotoDefinition, HoverRequest, References, SemanticTokensFullRequest,
+    };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
 
@@ -128,6 +130,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         })
         .on_sync::<GotoDefinition>(crate::handlers::handle_goto_definition)
         .on_sync::<References>(crate::handlers::handle_find_references)
+        .on_sync::<HoverRequest>(crate::handlers::handle_hover)
         .on_sync::<Completion>(crate::handlers::handle_completion)
         .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
         .finish();
@@ -174,6 +177,9 @@ fn server_capabilities() -> ServerCapabilities {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
 
+        // Hover information
+        hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+
         // Code completion
         completion_provider: Some(lsp_types::CompletionOptions {
             resolve_provider: None,
@@ -194,7 +200,6 @@ fn server_capabilities() -> ServerCapabilities {
         )),
 
         // Future capabilities will be added here:
-        // - hover_provider
         // - diagnostic_provider
         ..Default::default()
     }

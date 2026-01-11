@@ -7,7 +7,8 @@
 
 use bsl_platform::{
     global_function_query, platform_method_query, platform_type_query, type_methods_query,
-    ContextAvailability, GlobalFunction, MethodLookupInput, PlatformMethod, TypeNameInput,
+    ContextAvailability, GlobalFunction, MethodDocs, MethodLookupInput, PlatformData,
+    PlatformMethod, TypeNameInput,
 };
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxToken, TextRange, TextSize};
@@ -37,8 +38,12 @@ pub(crate) fn hover(
         return Some(result);
     }
 
+    // Try keyword hover
+    if let Some(result) = hover_keyword(&token) {
+        return Some(result);
+    }
+
     // TODO: Add hover for user-defined symbols
-    // TODO: Add hover for keywords
     // TODO: Add hover for literals
 
     None
@@ -212,42 +217,17 @@ fn hover_for_platform_method(
     let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
     let method = platform_method_query(db, input)?;
 
+    // Try to get full documentation
+    let docs = PlatformData::instance().get_method_docs(method.id);
+
     let mut markup = String::new();
 
-    // Method header
-    markup.push_str(&format!(
-        "**Метод:** {} / {}\n\n**Тип:** {}\n\n",
-        method.name, method.english_name, method.type_name
-    ));
-
-    // Syntax (bilingual)
-    markup.push_str("**Синтаксис:**\n```bsl\n");
-    markup.push_str(&format!("{}\n", format_method_signature(&method)));
-
-    // English variant
-    let english_sig = format_method_signature_english(&method);
-    markup.push_str(&format!("{}\n", english_sig));
-    markup.push_str("```\n\n");
-
-    // Parameters
-    if !method.parameters.is_empty() {
-        markup.push_str("**Параметры:**\n");
-        for param in &method.parameters {
-            let optional = if param.is_optional { " (необязательный)" } else { "" };
-            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-            markup.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
-        }
-        markup.push('\n');
-    }
-
-    // Return type
-    if let Some(ret_type) = &method.return_type {
-        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
-    }
-
-    // Context availability
-    if let Some(ctx) = &method.context {
-        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    if let Some(docs) = docs {
+        // Format with full documentation
+        format_method_with_full_docs(&mut markup, &method, &docs);
+    } else {
+        // Fallback to basic information
+        format_method_basic(&mut markup, &method);
     }
 
     Some(HoverResult { markup, range: Some(range) })
@@ -278,42 +258,17 @@ fn hover_for_global_function(
     let input = TypeNameInput::new(db, function_name.to_string());
     let function = global_function_query(db, input)?;
 
+    // Try to get full documentation
+    let docs = PlatformData::instance().get_global_function_docs(function.id);
+
     let mut markup = String::new();
 
-    // Function header
-    markup.push_str(&format!(
-        "**Глобальная функция:** {} / {}\n\n",
-        function.name, function.english_name
-    ));
-
-    // Syntax (bilingual)
-    markup.push_str("**Синтаксис:**\n```bsl\n");
-    markup.push_str(&format!("{}\n", format_global_function_signature(&function)));
-
-    // English variant
-    let english_sig = format_global_function_signature_english(&function);
-    markup.push_str(&format!("{}\n", english_sig));
-    markup.push_str("```\n\n");
-
-    // Parameters
-    if !function.parameters.is_empty() {
-        markup.push_str("**Параметры:**\n");
-        for param in &function.parameters {
-            let optional = if param.is_optional { " (необязательный)" } else { "" };
-            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-            markup.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
-        }
-        markup.push('\n');
-    }
-
-    // Return type
-    if let Some(ret_type) = &function.return_type {
-        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
-    }
-
-    // Context availability
-    if let Some(ctx) = &function.context {
-        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    if let Some(docs) = docs {
+        // Format with full documentation
+        format_global_function_with_full_docs(&mut markup, &function, &docs);
+    } else {
+        // Fallback to basic information
+        format_global_function_basic(&mut markup, &function);
     }
 
     Some(HoverResult { markup, range: Some(range) })
@@ -440,6 +395,270 @@ fn format_context_availability(ctx: &ContextAvailability) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+/// Formats a method with full documentation.
+fn format_method_with_full_docs(markup: &mut String, method: &PlatformMethod, docs: &MethodDocs) {
+    // Method header
+    markup.push_str(&format!(
+        "**Метод:** {} / {}\n**Тип:** {}\n\n",
+        method.name, method.english_name, method.type_name
+    ));
+
+    // Syntax from documentation
+    if !docs.syntax.is_empty() {
+        markup.push_str("**Синтаксис:**\n```bsl\n");
+        markup.push_str(&docs.syntax);
+        markup.push_str("\n```\n\n");
+    }
+
+    // Description
+    if !docs.description.is_empty() {
+        markup.push_str("**Описание:**\n");
+        markup.push_str(&docs.description);
+        markup.push_str("\n\n");
+    }
+
+    // Parameters with detailed descriptions
+    if !docs.params.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &docs.params {
+            markup.push_str(&format!("- **{}**", param.name));
+            if !param.description.is_empty() {
+                markup.push_str(&format!(": {}", param.description));
+            }
+            markup.push('\n');
+        }
+        markup.push('\n');
+    }
+
+    // Return type
+    if let Some(ref ret_type) = method.return_type {
+        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
+    }
+
+    // Examples
+    if !docs.examples.is_empty() {
+        markup.push_str("**Примеры:**\n");
+        for (idx, example) in docs.examples.iter().enumerate() {
+            if let Some(ref desc) = example.description {
+                markup.push_str(&format!("{}. {}\n", idx + 1, desc));
+            }
+            markup.push_str("```bsl\n");
+            markup.push_str(&example.code);
+            markup.push_str("\n```\n\n");
+        }
+    }
+
+    // Notes
+    if let Some(ref notes) = docs.notes {
+        markup.push_str("**Примечание:**\n");
+        markup.push_str(notes);
+        markup.push_str("\n\n");
+    }
+
+    // Context availability
+    if let Some(ref ctx) = method.context {
+        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    }
+}
+
+/// Formats a method with basic information (fallback when no full docs available).
+fn format_method_basic(markup: &mut String, method: &PlatformMethod) {
+    // Method header
+    markup.push_str(&format!(
+        "**Метод:** {} / {}\n\n**Тип:** {}\n\n",
+        method.name, method.english_name, method.type_name
+    ));
+
+    // Syntax (bilingual)
+    markup.push_str("**Синтаксис:**\n```bsl\n");
+    markup.push_str(&format!("{}\n", format_method_signature(method)));
+
+    // English variant
+    let english_sig = format_method_signature_english(method);
+    markup.push_str(&format!("{}\n", english_sig));
+    markup.push_str("```\n\n");
+
+    // Parameters
+    if !method.parameters.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &method.parameters {
+            let optional = if param.is_optional { " (необязательный)" } else { "" };
+            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
+            markup.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
+        }
+        markup.push('\n');
+    }
+
+    // Return type
+    if let Some(ret_type) = &method.return_type {
+        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
+    }
+
+    // Context availability
+    if let Some(ctx) = &method.context {
+        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    }
+}
+
+/// Formats a global function with full documentation.
+fn format_global_function_with_full_docs(
+    markup: &mut String,
+    function: &GlobalFunction,
+    docs: &MethodDocs,
+) {
+    // Function header
+    markup.push_str(&format!(
+        "**Глобальная функция:** {} / {}\n\n",
+        function.name, function.english_name
+    ));
+
+    // Syntax from documentation
+    if !docs.syntax.is_empty() {
+        markup.push_str("**Синтаксис:**\n```bsl\n");
+        markup.push_str(&docs.syntax);
+        markup.push_str("\n```\n\n");
+    }
+
+    // Description
+    if !docs.description.is_empty() {
+        markup.push_str("**Описание:**\n");
+        markup.push_str(&docs.description);
+        markup.push_str("\n\n");
+    }
+
+    // Parameters with detailed descriptions
+    if !docs.params.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &docs.params {
+            markup.push_str(&format!("- **{}**", param.name));
+            if !param.description.is_empty() {
+                markup.push_str(&format!(": {}", param.description));
+            }
+            markup.push('\n');
+        }
+        markup.push('\n');
+    }
+
+    // Return type
+    if let Some(ref ret_type) = function.return_type {
+        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
+    }
+
+    // Examples
+    if !docs.examples.is_empty() {
+        markup.push_str("**Примеры:**\n");
+        for (idx, example) in docs.examples.iter().enumerate() {
+            if let Some(ref desc) = example.description {
+                markup.push_str(&format!("{}. {}\n", idx + 1, desc));
+            }
+            markup.push_str("```bsl\n");
+            markup.push_str(&example.code);
+            markup.push_str("\n```\n\n");
+        }
+    }
+
+    // Notes
+    if let Some(ref notes) = docs.notes {
+        markup.push_str("**Примечание:**\n");
+        markup.push_str(notes);
+        markup.push_str("\n\n");
+    }
+
+    // Context availability
+    if let Some(ref ctx) = function.context {
+        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    }
+}
+
+/// Formats a global function with basic information (fallback when no full docs available).
+fn format_global_function_basic(markup: &mut String, function: &GlobalFunction) {
+    // Function header
+    markup.push_str(&format!(
+        "**Глобальная функция:** {} / {}\n\n",
+        function.name, function.english_name
+    ));
+
+    // Syntax (bilingual)
+    markup.push_str("**Синтаксис:**\n```bsl\n");
+    markup.push_str(&format!("{}\n", format_global_function_signature(function)));
+
+    // English variant
+    let english_sig = format_global_function_signature_english(function);
+    markup.push_str(&format!("{}\n", english_sig));
+    markup.push_str("```\n\n");
+
+    // Parameters
+    if !function.parameters.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &function.parameters {
+            let optional = if param.is_optional { " (необязательный)" } else { "" };
+            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
+            markup.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
+        }
+        markup.push('\n');
+    }
+
+    // Return type
+    if let Some(ret_type) = &function.return_type {
+        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
+    }
+
+    // Context availability
+    if let Some(ctx) = &function.context {
+        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    }
+}
+
+/// Provides hover information for BSL keywords.
+fn hover_keyword(token: &SyntaxToken) -> Option<HoverResult> {
+    // Check if this is a keyword token
+    if !token.kind().is_keyword() {
+        return None;
+    }
+
+    let keyword_text = token.text();
+
+    // Try to get keyword documentation
+    let keyword_docs = bsl_platform::PlatformData::instance().get_keyword_docs(keyword_text)?;
+
+    let mut markup = String::new();
+
+    // Header
+    markup.push_str(&format!(
+        "**{}** / **{}**\n\n",
+        keyword_docs.keyword_ru, keyword_docs.keyword_en
+    ));
+
+    // Syntax
+    if !keyword_docs.syntax.is_empty() {
+        markup.push_str("**Синтаксис:**\n```bsl\n");
+        markup.push_str(&keyword_docs.syntax);
+        markup.push_str("\n```\n\n");
+    }
+
+    // Description
+    if !keyword_docs.description.is_empty() {
+        markup.push_str(&keyword_docs.description);
+        markup.push_str("\n\n");
+    }
+
+    // Parameters
+    if !keyword_docs.params.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &keyword_docs.params {
+            markup.push_str(&format!("- **{}**: {}\n", param.name, param.description));
+        }
+        markup.push('\n');
+    }
+
+    // Version
+    if let Some(ref version) = keyword_docs.min_version {
+        markup.push_str(&format!("**Доступен с версии:** {}", version));
+    }
+
+    Some(HoverResult { markup, range: Some(token.text_range()) })
 }
 
 #[cfg(test)]

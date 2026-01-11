@@ -609,6 +609,256 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         code.push_str("pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];\n");
     }
 
+    // Generate method documentation arrays
+    if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
+        // First pass: generate nested arrays for params and examples
+        let mut param_docs_names = Vec::new();
+        let mut examples_names = Vec::new();
+        let mut param_docs_counter = 0;
+        let mut examples_counter = 0;
+
+        for method in methods {
+            if let Some(docs) = method.get("documentation").and_then(|v| v.as_object()) {
+                // Generate param docs array
+                if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
+                    if !params.is_empty() {
+                        let param_array_name = format!("METHOD_PARAM_DOCS_{}", param_docs_counter);
+                        param_docs_counter += 1;
+
+                        code.push_str(&format!(
+                            "const {}: &[RawParamDocs] = &[\n",
+                            param_array_name
+                        ));
+                        for param in params {
+                            let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let description =
+                                param.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            code.push_str("    RawParamDocs {\n");
+                            code.push_str(&format!("        name: {:?},\n", name));
+                            code.push_str(&format!("        description: {:?},\n", description));
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+
+                        param_docs_names.push(Some(param_array_name));
+                    } else {
+                        param_docs_names.push(None);
+                    }
+                } else {
+                    param_docs_names.push(None);
+                }
+
+                // Generate examples array
+                if let Some(examples) = docs.get("examples").and_then(|v| v.as_array()) {
+                    if !examples.is_empty() {
+                        let examples_array_name = format!("METHOD_EXAMPLES_{}", examples_counter);
+                        examples_counter += 1;
+
+                        code.push_str(&format!(
+                            "const {}: &[RawCodeExample] = &[\n",
+                            examples_array_name
+                        ));
+                        for example in examples {
+                            let code_text =
+                                example.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            let description = example.get("description").and_then(|v| v.as_str());
+                            code.push_str("    RawCodeExample {\n");
+                            code.push_str(&format!("        code: {:?},\n", code_text));
+                            if let Some(desc) = description {
+                                code.push_str(&format!("        description: Some({:?}),\n", desc));
+                            } else {
+                                code.push_str("        description: None,\n");
+                            }
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+
+                        examples_names.push(Some(examples_array_name));
+                    } else {
+                        examples_names.push(None);
+                    }
+                } else {
+                    examples_names.push(None);
+                }
+            } else {
+                param_docs_names.push(None);
+                examples_names.push(None);
+            }
+        }
+
+        // Second pass: generate METHOD_DOCS array
+        code.push_str("pub const METHOD_DOCS: &[RawMethodDocs] = &[\n");
+        let mut docs_idx = 0;
+        for method in methods {
+            if let Some(docs) = method.get("documentation").and_then(|v| v.as_object()) {
+                let method_id = method.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let syntax = docs.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let description = docs.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let notes = docs.get("notes").and_then(|v| v.as_str());
+
+                code.push_str("    RawMethodDocs {\n");
+                code.push_str(&format!("        method_id: {},\n", method_id));
+                code.push_str(&format!("        syntax: {:?},\n", syntax));
+                code.push_str(&format!("        description: {:?},\n", description));
+
+                // params
+                if let Some(param_name) = &param_docs_names[docs_idx] {
+                    code.push_str(&format!("        params: {},\n", param_name));
+                } else {
+                    code.push_str("        params: &[],\n");
+                }
+
+                // examples
+                if let Some(examples_name) = &examples_names[docs_idx] {
+                    code.push_str(&format!("        examples: {},\n", examples_name));
+                } else {
+                    code.push_str("        examples: &[],\n");
+                }
+
+                // notes
+                if let Some(notes_text) = notes {
+                    code.push_str(&format!("        notes: Some({:?}),\n", notes_text));
+                } else {
+                    code.push_str("        notes: None,\n");
+                }
+
+                // see_also
+                code.push_str("        see_also: &[],\n");
+
+                code.push_str("    },\n");
+                docs_idx += 1;
+            }
+        }
+        code.push_str("];\n\n");
+    } else {
+        code.push_str("pub const METHOD_DOCS: &[RawMethodDocs] = &[];\n\n");
+    }
+
+    // Generate global function documentation arrays
+    if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
+        // First pass: generate nested arrays for params and examples
+        let mut gf_param_docs_names = Vec::new();
+        let mut gf_examples_names = Vec::new();
+        let mut gf_param_docs_counter = 0;
+        let mut gf_examples_counter = 0;
+
+        for function in global_functions {
+            if let Some(docs) = function.get("documentation").and_then(|v| v.as_object()) {
+                // Generate param docs array
+                if let Some(params) = docs.get("param_descriptions").and_then(|v| v.as_array()) {
+                    if !params.is_empty() {
+                        let param_array_name = format!("GF_PARAMS_{}", gf_param_docs_counter);
+                        gf_param_docs_counter += 1;
+
+                        code.push_str(&format!(
+                            "const {}: &[RawParamDocs] = &[\n",
+                            param_array_name
+                        ));
+                        for param in params {
+                            let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let description =
+                                param.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            code.push_str("    RawParamDocs {\n");
+                            code.push_str(&format!("        name: {:?},\n", name));
+                            code.push_str(&format!("        description: {:?},\n", description));
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+
+                        gf_param_docs_names.push(Some(param_array_name));
+                    } else {
+                        gf_param_docs_names.push(None);
+                    }
+                } else {
+                    gf_param_docs_names.push(None);
+                }
+
+                // Generate examples array
+                if let Some(examples) = docs.get("examples").and_then(|v| v.as_array()) {
+                    if !examples.is_empty() {
+                        let examples_array_name = format!("GF_EXAMPLES_{}", gf_examples_counter);
+                        gf_examples_counter += 1;
+
+                        code.push_str(&format!(
+                            "const {}: &[RawCodeExample] = &[\n",
+                            examples_array_name
+                        ));
+                        for example in examples {
+                            let code_text =
+                                example.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                            let description = example.get("description").and_then(|v| v.as_str());
+                            code.push_str("    RawCodeExample {\n");
+                            code.push_str(&format!("        code: {:?},\n", code_text));
+                            if let Some(desc) = description {
+                                code.push_str(&format!("        description: Some({:?}),\n", desc));
+                            } else {
+                                code.push_str("        description: None,\n");
+                            }
+                            code.push_str("    },\n");
+                        }
+                        code.push_str("];\n\n");
+
+                        gf_examples_names.push(Some(examples_array_name));
+                    } else {
+                        gf_examples_names.push(None);
+                    }
+                } else {
+                    gf_examples_names.push(None);
+                }
+            } else {
+                gf_param_docs_names.push(None);
+                gf_examples_names.push(None);
+            }
+        }
+
+        // Second pass: generate GLOBAL_FUNCTION_DOCS array
+        code.push_str("pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[\n");
+        let mut docs_idx = 0;
+        for function in global_functions {
+            if let Some(docs) = function.get("documentation").and_then(|v| v.as_object()) {
+                let function_id = function.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let syntax = docs.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let description = docs.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let notes = docs.get("notes").and_then(|v| v.as_str());
+
+                code.push_str("    RawMethodDocs {\n");
+                code.push_str(&format!("        method_id: {},\n", function_id));
+                code.push_str(&format!("        syntax: {:?},\n", syntax));
+                code.push_str(&format!("        description: {:?},\n", description));
+
+                // params
+                if let Some(param_name) = &gf_param_docs_names[docs_idx] {
+                    code.push_str(&format!("        params: {},\n", param_name));
+                } else {
+                    code.push_str("        params: &[],\n");
+                }
+
+                // examples
+                if let Some(examples_name) = &gf_examples_names[docs_idx] {
+                    code.push_str(&format!("        examples: {},\n", examples_name));
+                } else {
+                    code.push_str("        examples: &[],\n");
+                }
+
+                // notes
+                if let Some(notes_text) = notes {
+                    code.push_str(&format!("        notes: Some({:?}),\n", notes_text));
+                } else {
+                    code.push_str("        notes: None,\n");
+                }
+
+                // see_also
+                code.push_str("        see_also: &[],\n");
+
+                code.push_str("    },\n");
+                docs_idx += 1;
+            }
+        }
+        code.push_str("];\n\n");
+    } else {
+        code.push_str("pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];\n\n");
+    }
+
     fs::write(output_path, code).expect("Failed to write generated.rs");
     println!("cargo:warning=Generated code at: {}", output_path.display());
 }
@@ -623,6 +873,8 @@ use super::types::*;
 pub const PLATFORM_TYPES: &[RawPlatformType] = &[];
 pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];
 pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];
+pub const METHOD_DOCS: &[RawMethodDocs] = &[];
+pub const GLOBAL_FUNCTION_DOCS: &[RawMethodDocs] = &[];
 "#;
 
     fs::write(output_path, code).expect("Failed to write generated.rs");

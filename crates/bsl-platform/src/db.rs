@@ -30,6 +30,10 @@ pub struct PlatformDataInner {
     global_functions: Vec<GlobalFunction>,
     /// Global functions indexed by lowercase name (both Russian and English)
     global_functions_by_name: FxHashMap<SmolStr, usize>,
+    /// Method documentation indexed by method ID
+    method_docs_by_id: FxHashMap<u32, usize>,
+    /// Global function documentation indexed by function ID
+    global_function_docs_by_id: FxHashMap<u32, usize>,
 }
 
 impl PlatformDataInner {
@@ -89,6 +93,18 @@ impl PlatformDataInner {
             global_functions_by_name.insert(en_key, idx);
         }
 
+        // Index method documentation by ID
+        let mut method_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::METHOD_DOCS.iter().enumerate() {
+            method_docs_by_id.insert(docs.method_id, idx);
+        }
+
+        // Index global function documentation by ID
+        let mut global_function_docs_by_id = FxHashMap::default();
+        for (idx, docs) in crate::generated::GLOBAL_FUNCTION_DOCS.iter().enumerate() {
+            global_function_docs_by_id.insert(docs.method_id, idx);
+        }
+
         Self {
             types,
             types_by_name,
@@ -96,6 +112,8 @@ impl PlatformDataInner {
             methods_by_name,
             global_functions,
             global_functions_by_name,
+            method_docs_by_id,
+            global_function_docs_by_id,
         }
     }
 
@@ -142,17 +160,89 @@ impl PlatformDataInner {
         &self.global_functions
     }
 
-    /// Get method documentation (only available with platform_docs feature).
-    #[cfg(feature = "platform_docs")]
-    pub fn get_method_docs(&self, _method_id: u32) -> Option<crate::types::MethodDocs> {
-        // TODO: Load from generated docs
-        None
+    /// Get method documentation by method ID.
+    pub fn get_method_docs(&self, method_id: u32) -> Option<crate::types::MethodDocs> {
+        let idx = *self.method_docs_by_id.get(&method_id)?;
+        let raw_docs = crate::generated::METHOD_DOCS.get(idx)?;
+        Some(crate::types::MethodDocs::from(raw_docs))
     }
 
-    /// Get method documentation (stub when platform_docs is disabled).
-    #[cfg(not(feature = "platform_docs"))]
-    pub fn get_method_docs(&self, _method_id: u32) -> Option<()> {
-        None
+    /// Get global function documentation by function ID.
+    pub fn get_global_function_docs(&self, function_id: u32) -> Option<crate::types::MethodDocs> {
+        let idx = *self.global_function_docs_by_id.get(&function_id)?;
+        let raw_docs = crate::generated::GLOBAL_FUNCTION_DOCS.get(idx)?;
+        Some(crate::types::MethodDocs::from(raw_docs))
+    }
+
+    /// Returns keyword documentation by name (case-insensitive).
+    ///
+    /// Examples: "ВызватьИсключение", "Для", "Если"
+    pub fn get_keyword_docs(&self, keyword: &str) -> Option<crate::types::KeywordDocs> {
+        get_keyword_docs_static(keyword)
+    }
+}
+
+/// Static keyword documentation (hardcoded for proof-of-concept).
+///
+/// TODO: Generate from shlang_ru.hbk HTML files in build.rs
+fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
+    use crate::types::{KeywordDocs, ParamDocs};
+    use smol_str::SmolStr;
+
+    let keyword_lower = keyword.to_lowercase();
+
+    match keyword_lower.as_str() {
+        "вызватьисключение" | "raise" => Some(KeywordDocs {
+            keyword_ru: SmolStr::new("ВызватьИсключение"),
+            keyword_en: SmolStr::new("Raise"),
+            syntax: "ВызватьИсключение;".to_string(),
+            description: "Оператор позволяет вызвать исключение в тех случаях, когда несмотря на отработку исключительной ситуации операторами исключения необходимо прервать выполнение модуля с ошибкой времени выполнения.\n\nОператор допустим только внутри операторных скобок Исключение – КонецПопытки.\n\nВыполнение данного оператора прекращает выполнение последовательности операторов исключения и производит поиск более \"внешнего\" обработчика исключения (при вложенных попытках). Если таковой есть, то управление передается на его первый оператор. Если нет, то исключительная ситуация обрабатывается системно, выдается сообщение о первоначально возникшей ошибке, а выполнение модуля прекращается.".to_string(),
+            params: vec![],
+            min_version: Some("8.0".to_string()),
+        }),
+        "для" | "for" => Some(KeywordDocs {
+            keyword_ru: SmolStr::new("Для"),
+            keyword_en: SmolStr::new("For"),
+            syntax: "Для <Имя переменной> = <Выражение 1> По <Выражение 2> Цикл\n    // Операторы\n    [Прервать;]\n    [Продолжить;]\nКонецЦикла;".to_string(),
+            description: "Оператор цикла Для предназначен для циклического повторения операторов, находящихся внутри конструкции Цикл – КонецЦикла.\n\nПеред началом выполнения цикла значение <Выражение 1> присваивается переменной <Имя переменной>. Значение <Имя переменной> автоматически увеличивается при каждом проходе цикла. Величина приращения счетчика при каждом выполнении цикла равна 1.\n\nЦикл выполняется, пока значение переменной меньше или равно значению <Выражение 2>. Условие выполнения цикла всегда проверяется в начале, перед выполнением цикла.".to_string(),
+            params: vec![
+                ParamDocs {
+                    name: SmolStr::new("Имя переменной"),
+                    description: "Идентификатор переменной (счетчика цикла), значение которой автоматически увеличивается на 1 при каждом повторении цикла.".to_string(),
+                },
+                ParamDocs {
+                    name: SmolStr::new("Выражение 1"),
+                    description: "Числовое выражение, которое задает начальное значение, присваиваемое счетчику цикла при первом проходе цикла.".to_string(),
+                },
+                ParamDocs {
+                    name: SmolStr::new("Выражение 2"),
+                    description: "Максимальное значение счетчика цикла. Когда переменная становится больше чем <Выражение 2>, выполнение оператора цикла Для прекращается.".to_string(),
+                },
+            ],
+            min_version: Some("8.0".to_string()),
+        }),
+        "если" | "if" => Some(KeywordDocs {
+            keyword_ru: SmolStr::new("Если"),
+            keyword_en: SmolStr::new("If"),
+            syntax: "Если <Условие> Тогда\n    // Операторы\n[ИначеЕсли <Условие> Тогда]\n    // Операторы\n[Иначе]\n    // Операторы\nКонецЕсли;".to_string(),
+            description: "Условный оператор Если предназначен для организации выполнения или невыполнения некоторого набора операторов в зависимости от заданных условий.\n\nУсловие – это выражение булева типа. Если значение выражения равно Истина, то выполняются операторы, следующие за ключевым словом Тогда до ближайшего ключевого слова ИначеЕсли, Иначе или КонецЕсли.".to_string(),
+            params: vec![
+                ParamDocs {
+                    name: SmolStr::new("Условие"),
+                    description: "Выражение булева типа. Если значение равно Истина, выполняются операторы в соответствующем блоке.".to_string(),
+                },
+            ],
+            min_version: Some("8.0".to_string()),
+        }),
+        "попытка" | "try" => Some(KeywordDocs {
+            keyword_ru: SmolStr::new("Попытка"),
+            keyword_en: SmolStr::new("Try"),
+            syntax: "Попытка\n    // Операторы попытки\nИсключение\n    // Операторы исключения\n    [ВызватьИсключение;]\nКонецПопытки;".to_string(),
+            description: "Оператор Попытка управляет выполнением программы, основываясь на возникающих при выполнении модуля ошибочных (исключительных) ситуациях, и определяет обработку этих ситуаций.\n\nЕсли при выполнении последовательности операторов попытки произошла ошибка времени выполнения, то выполнение оператора, вызвавшего ошибку, прерывается и управление передается на первый оператор последовательности операторов исключения.\n\nКонструкции Попытка – Исключение – КонецПопытки могут быть вложенными.".to_string(),
+            params: vec![],
+            min_version: Some("8.0".to_string()),
+        }),
+        _ => None,
     }
 }
 

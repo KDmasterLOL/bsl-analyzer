@@ -333,6 +333,306 @@ fn strip_html_tags(html: &str) -> String {
     result
 }
 
+/// Extracts syntax from HTML content using scraper
+/// Looks for: "<p class="V8SH_chapter">Синтаксис:</p><p>...</p>"
+pub fn extract_syntax(html_content: &str) -> Option<String> {
+    extract_chapter_content(html_content, "Синтаксис")
+}
+
+/// Extracts description from HTML content using scraper
+/// Looks for: "<p class="V8SH_chapter">Описание:</p><p>...</p>"
+pub fn extract_description(html_content: &str) -> Option<String> {
+    extract_chapter_content(html_content, "Описание")
+}
+
+/// Extracts notes from HTML content using scraper
+/// Looks for: "<p class="V8SH_chapter">Примечание:</p><p>...</p>" or "Примечания:"
+pub fn extract_notes(html_content: &str) -> Option<String> {
+    extract_chapter_content(html_content, "Примечание")
+        .or_else(|| extract_chapter_content(html_content, "Примечания"))
+}
+
+/// Generic function to extract content from a chapter section
+fn extract_chapter_content(html_content: &str, chapter_title: &str) -> Option<String> {
+    let html = Html::parse_fragment(html_content);
+    let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
+
+    for chapter in html.select(&chapter_sel) {
+        let text = chapter.text().collect::<String>();
+        if text.contains(chapter_title) {
+            // Collect content after chapter until next chapter
+            let mut content = String::new();
+            let mut node = chapter.next_sibling();
+
+            while let Some(n) = node {
+                // Stop if we hit another chapter
+                if let Some(elem) = n.value().as_element() {
+                    if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                        break;
+                    }
+                }
+
+                // Collect text from text nodes
+                if let Some(text_node) = n.value().as_text() {
+                    content.push_str(&text_node.text);
+                } else if let Some(elem_ref) = ElementRef::wrap(n) {
+                    // Collect text from elements
+                    let elem_text = elem_ref.text().collect::<String>();
+                    if !elem_text.trim().is_empty() {
+                        if !content.is_empty() && !content.ends_with('\n') {
+                            content.push('\n');
+                        }
+                        content.push_str(&elem_text);
+                    }
+                }
+
+                node = n.next_sibling();
+            }
+
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parameter description with full text
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ParamDescription {
+    pub name: String,
+    pub description: String,
+}
+
+/// Extracts detailed parameter descriptions from HTML content
+/// Looks for: "<p class="V8SH_chapter">Параметры:</p><div class="V8SH_rubric">..."
+pub fn extract_parameter_descriptions(html_content: &str) -> Vec<ParamDescription> {
+    let html = Html::parse_fragment(html_content);
+    let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
+
+    let mut param_descriptions = Vec::new();
+
+    // Find "Параметры:" chapter
+    for chapter in html.select(&chapter_sel) {
+        let text = chapter.text().collect::<String>();
+        if text.contains("Параметры") {
+            // Collect all rubrics after this chapter
+            let mut node = chapter.next_sibling();
+
+            while let Some(n) = node {
+                // Stop if we hit another chapter
+                if let Some(elem) = n.value().as_element() {
+                    if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                        break;
+                    }
+                }
+
+                // Check if this is a rubric element
+                if let Some(elem_ref) = ElementRef::wrap(n) {
+                    if elem_ref.value().attr("class") == Some("V8SH_rubric") {
+                        // Extract parameter name from rubric
+                        let inner = elem_ref.inner_html();
+                        if let Some(param_name) = extract_param_name(&inner) {
+                            // Collect all text after this rubric until next rubric or chapter
+                            let description = collect_param_description(elem_ref);
+
+                            param_descriptions.push(ParamDescription {
+                                name: param_name,
+                                description,
+                            });
+                        }
+                    }
+                }
+
+                node = n.next_sibling();
+            }
+            break;
+        }
+    }
+
+    param_descriptions
+}
+
+/// Collects parameter description text after a rubric element
+fn collect_param_description(rubric: ElementRef) -> String {
+    let mut description = String::new();
+    let mut node = rubric.next_sibling();
+    let mut depth = 0;
+
+    while let Some(n) = node {
+        // Limit depth to avoid going too far
+        if depth > 20 {
+            break;
+        }
+        depth += 1;
+
+        // Stop if we hit another rubric or chapter
+        if let Some(elem) = n.value().as_element() {
+            if elem.attr("class") == Some("V8SH_rubric") {
+                break;
+            }
+            if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                break;
+            }
+        }
+
+        // Collect text from text nodes
+        if let Some(text_node) = n.value().as_text() {
+            description.push_str(&text_node.text);
+        } else if let Some(elem_ref) = ElementRef::wrap(n) {
+            // Collect text from elements
+            let elem_text = elem_ref.text().collect::<String>();
+            if !elem_text.trim().is_empty() {
+                description.push_str(&elem_text);
+                description.push(' ');
+            }
+        }
+
+        node = n.next_sibling();
+    }
+
+    description.trim().to_string()
+}
+
+/// Code example with optional description
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CodeExample {
+    pub code: String,
+    pub description: Option<String>,
+}
+
+/// Extracts code examples from HTML content
+/// Looks for: "<p class="V8SH_chapter">Пример:</p>" or "Примеры:"
+pub fn extract_examples(html_content: &str) -> Vec<CodeExample> {
+    let html = Html::parse_fragment(html_content);
+    let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
+    let pre_sel = Selector::parse("pre").unwrap();
+
+    let mut examples = Vec::new();
+
+    // Find "Пример:" or "Примеры:" chapter
+    for chapter in html.select(&chapter_sel) {
+        let text = chapter.text().collect::<String>();
+        if text.contains("Пример") {
+            // Collect content after chapter until next chapter
+            let mut node = chapter.next_sibling();
+            let mut current_description = String::new();
+
+            while let Some(n) = node {
+                // Stop if we hit another chapter
+                if let Some(elem) = n.value().as_element() {
+                    if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                        break;
+                    }
+                }
+
+                // Check for code tables or pre tags
+                if let Some(elem_ref) = ElementRef::wrap(n) {
+                    // Check if this is a TABLE with code
+                    if elem_ref.value().name() == "table" ||
+                       elem_ref.value().attr("bgcolor") == Some("#f7f7f7") {
+                        // First try to extract from <pre> tags inside table
+                        let mut found_code = false;
+                        for pre in elem_ref.select(&pre_sel) {
+                            let code = pre.text().collect::<String>();
+                            if !code.trim().is_empty() {
+                                let desc = if current_description.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(current_description.trim().to_string())
+                                };
+
+                                examples.push(CodeExample {
+                                    code: code.trim().to_string(),
+                                    description: desc,
+                                });
+
+                                current_description.clear();
+                                found_code = true;
+                            }
+                        }
+
+                        // If no <pre> found, extract all text from table (1C uses <font> tags)
+                        if !found_code {
+                            let mut code_text = String::new();
+
+                            // Extract text content, preserving line breaks
+                            for node in elem_ref.descendants() {
+                                if let Some(text) = node.value().as_text() {
+                                    code_text.push_str(&text.text);
+                                } else if let Some(elem) = node.value().as_element() {
+                                    // BR tags become newlines
+                                    if elem.name() == "br" {
+                                        code_text.push('\n');
+                                    }
+                                }
+                            }
+
+                            let cleaned_code = code_text.trim();
+                            if !cleaned_code.is_empty() {
+                                let desc = if current_description.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(current_description.trim().to_string())
+                                };
+
+                                examples.push(CodeExample {
+                                    code: cleaned_code.to_string(),
+                                    description: desc,
+                                });
+
+                                current_description.clear();
+                            }
+                        }
+                    }
+                    // Check if this is a pre tag directly
+                    else if elem_ref.value().name() == "pre" {
+                        let code = elem_ref.text().collect::<String>();
+                        if !code.trim().is_empty() {
+                            let desc = if current_description.trim().is_empty() {
+                                None
+                            } else {
+                                Some(current_description.trim().to_string())
+                            };
+
+                            examples.push(CodeExample {
+                                code: code.trim().to_string(),
+                                description: desc,
+                            });
+
+                            current_description.clear();
+                        }
+                    }
+                    // Otherwise, collect text as potential description
+                    else if elem_ref.value().name() != "table" {
+                        let elem_text = elem_ref.text().collect::<String>();
+                        if !elem_text.trim().is_empty() {
+                            if !current_description.is_empty() {
+                                current_description.push(' ');
+                            }
+                            current_description.push_str(&elem_text);
+                        }
+                    }
+                } else if let Some(text_node) = n.value().as_text() {
+                    // Collect text nodes as potential description
+                    if !text_node.text.trim().is_empty() {
+                        if !current_description.is_empty() {
+                            current_description.push(' ');
+                        }
+                        current_description.push_str(&text_node.text);
+                    }
+                }
+
+                node = n.next_sibling();
+            }
+            break;
+        }
+    }
+
+    examples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,4 +779,261 @@ mod tests {
         let version = extract_version(html);
         assert_eq!(version, None);
     }
+
+    #[test]
+    fn test_extract_syntax() {
+        let html = r#"
+            <p class="V8SH_chapter">Синтаксис:</p>
+            <p>НачатьТранзакцию(&lt;РежимБлокировок&gt;)</p>
+        "#;
+
+        let syntax = extract_syntax(html).unwrap();
+        assert!(syntax.contains("НачатьТранзакцию"));
+        assert!(syntax.contains("РежимБлокировок"));
+    }
+
+    #[test]
+    fn test_extract_description() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>
+            <p>Открывает транзакцию. Транзакция предназначена для записи в информационную базу согласованных изменений.</p>
+        "#;
+
+        let desc = extract_description(html).unwrap();
+        assert!(desc.contains("Открывает транзакцию"));
+        assert!(desc.contains("согласованных изменений"));
+    }
+
+    #[test]
+    fn test_extract_description_multiline() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>
+            <p>Первый параграф описания.</p>
+            <p>Второй параграф описания.</p>
+            <p class="V8SH_chapter">Следующая секция:</p>
+        "#;
+
+        let desc = extract_description(html).unwrap();
+        assert!(desc.contains("Первый параграф"));
+        assert!(desc.contains("Второй параграф"));
+        assert!(!desc.contains("Следующая секция"));
+    }
+
+    #[test]
+    fn test_extract_parameter_descriptions() {
+        let html = r#"
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric">
+                <p>&lt;РежимБлокировок&gt;</p>
+            </div>
+            Тип: РежимУправленияБлокировкойДанных.<br>
+            Установка параметра имеет смысл, если для свойства конфигурации "Режим управления блокировкой данных" выбрано значение "Автоматический и Управляемый".
+        "#;
+
+        let params = extract_parameter_descriptions(html);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "РежимБлокировок");
+        assert!(params[0].description.contains("РежимУправленияБлокировкойДанных"));
+        assert!(params[0].description.contains("Автоматический и Управляемый"));
+    }
+
+    #[test]
+    fn test_extract_parameter_descriptions_multiple() {
+        let html = r#"
+            <p class="V8SH_chapter">Параметры:</p>
+            <div class="V8SH_rubric">
+                <p>&lt;Строка&gt;</p>
+            </div>
+            Тип: Строка. Первый параметр.
+            <div class="V8SH_rubric">
+                <p>&lt;Число&gt;</p>
+            </div>
+            Тип: Число. Второй параметр.
+        "#;
+
+        let params = extract_parameter_descriptions(html);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "Строка");
+        assert!(params[0].description.contains("Первый параметр"));
+        assert_eq!(params[1].name, "Число");
+        assert!(params[1].description.contains("Второй параметр"));
+    }
+
+    #[test]
+    fn test_extract_examples() {
+        let html = r##"
+            <p class="V8SH_chapter">Пример:</p>
+            <p>Увеличение закупочной цены на 5%</p>
+            <TABLE bgColor="#f7f7f7">
+                <TR><TD><pre>НачатьТранзакцию();
+ВыборкаТоваров = Справочники.Номенклатура.Выбрать();
+ЗафиксироватьТранзакцию();</pre></TD></TR>
+            </TABLE>
+        "##;
+
+        let examples = extract_examples(html);
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].code.contains("НачатьТранзакцию"));
+        assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
+        assert!(examples[0].description.as_ref().unwrap().contains("закупочной цены"));
+    }
+
+    #[test]
+    fn test_extract_examples_multiple() {
+        let html = r#"
+            <p class="V8SH_chapter">Примеры:</p>
+            <p>Первый пример</p>
+            <pre>Пример1();</pre>
+            <p>Второй пример</p>
+            <pre>Пример2();</pre>
+        "#;
+
+        let examples = extract_examples(html);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0].code, "Пример1();");
+        assert_eq!(examples[0].description.as_ref().unwrap(), "Первый пример");
+        assert_eq!(examples[1].code, "Пример2();");
+        assert_eq!(examples[1].description.as_ref().unwrap(), "Второй пример");
+    }
+
+    #[test]
+    fn test_extract_examples_without_description() {
+        let html = r#"
+            <p class="V8SH_chapter">Пример:</p>
+            <pre>КодБезОписания();</pre>
+        "#;
+
+        let examples = extract_examples(html);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].code, "КодБезОписания();");
+        assert!(examples[0].description.is_none());
+    }
+
+    #[test]
+    fn test_extract_notes() {
+        let html = r#"
+            <p class="V8SH_chapter">Примечание:</p>
+            <p>Это важное примечание о методе.</p>
+        "#;
+
+        let notes = extract_notes(html).unwrap();
+        assert!(notes.contains("важное примечание"));
+    }
+
+    #[test]
+    fn test_extract_notes_plural() {
+        let html = r#"
+            <p class="V8SH_chapter">Примечания:</p>
+            <p>Первое примечание.</p>
+            <p>Второе примечание.</p>
+        "#;
+
+        let notes = extract_notes(html).unwrap();
+        assert!(notes.contains("Первое примечание"));
+        assert!(notes.contains("Второе примечание"));
+    }
+
+    #[test]
+    fn test_real_begin_transaction_html() {
+        // Real HTML from 1C platform for BeginTransaction
+        let html = std::fs::read_to_string("/tmp/BeginTransaction.html");
+
+        if html.is_err() {
+            println!("Skipping test: /tmp/BeginTransaction.html not found");
+            return;
+        }
+
+        let html = html.unwrap();
+
+        // Test syntax extraction
+        let syntax = extract_syntax(&html);
+        println!("Syntax: {:?}", syntax);
+        assert!(syntax.is_some());
+        assert!(syntax.unwrap().contains("НачатьТранзакцию"));
+
+        // Test description extraction
+        let description = extract_description(&html);
+        println!("Description: {:?}", description);
+        assert!(description.is_some());
+        let desc = description.unwrap();
+        assert!(desc.contains("Открывает транзакцию"));
+
+        // Test parameter descriptions
+        let params = extract_parameter_descriptions(&html);
+        println!("Params count: {}", params.len());
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "РежимБлокировок");
+        assert!(params[0].description.contains("РежимУправленияБлокировкойДанных"));
+
+        // Test examples
+        let examples = extract_examples(&html);
+        println!("Examples count: {}", examples.len());
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].code.contains("НачатьТранзакцию"));
+        assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
+    }
+}
+
+/// Keyword documentation structure (intermediate format for JSON)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KeywordDocumentation {
+    pub keyword_ru: String,
+    pub keyword_en: String,
+    pub syntax: String,
+    pub description: String,
+    pub params: Vec<ParamDescription>,
+    pub min_version: Option<String>,
+}
+
+/// Extracts keyword name from H1 title.
+///
+/// Format: "Для (For)" or "Процедура (Procedure)"
+/// Returns (русское, english) tuple
+pub fn extract_keyword_name(html_content: &str) -> Option<(String, String)> {
+    let html = Html::parse_fragment(html_content);
+    let h1_selector = Selector::parse("h1.V8SH_pagetitle").ok()?;
+
+    for h1 in html.select(&h1_selector) {
+        let text = h1.text().collect::<String>();
+        // Parse format: "Для (For)" or "Для&nbsp;(For)"
+        // Replace &nbsp; with space
+        let text = text.replace('\u{00A0}', " ");
+
+        if let Some(open_paren) = text.find('(') {
+            if let Some(close_paren) = text.find(')') {
+                let russian = text[..open_paren].trim().to_string();
+                let english = text[open_paren + 1..close_paren].trim().to_string();
+
+                if !russian.is_empty() && !english.is_empty() {
+                    return Some((russian, english));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parses keyword HTML file and extracts full documentation.
+pub fn parse_keyword_html(html_content: &str) -> Option<KeywordDocumentation> {
+    let (keyword_ru, keyword_en) = extract_keyword_name(html_content)?;
+
+    let syntax = extract_syntax(html_content).unwrap_or_default();
+    let description = extract_description(html_content).unwrap_or_default();
+    let params = extract_parameter_descriptions(html_content);
+    let min_version = extract_version(html_content);
+
+    // Only return docs if we have at least description
+    if description.is_empty() {
+        return None;
+    }
+
+    Some(KeywordDocumentation {
+        keyword_ru,
+        keyword_en,
+        syntax,
+        description,
+        params,
+        min_version,
+    })
 }

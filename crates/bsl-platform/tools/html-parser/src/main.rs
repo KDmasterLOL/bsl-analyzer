@@ -7,6 +7,7 @@
 mod scraper_parser;
 
 use anyhow::{Context, Result};
+use scraper_parser::{CodeExample, ParamDescription}; // Reuse from scraper_parser
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,18 +22,23 @@ struct PlatformData {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct KeywordInfo {
-    /// Russian name (e.g., "Функция")
-    russian: String,
-    /// English name (e.g., "Function")
-    english: String,
-    /// Snippet template in Russian
-    snippet_ru: String,
-    /// Snippet template in English
-    snippet_en: String,
-    /// HTML documentation
-    documentation: String,
-    /// Category (def, struct, root, etc.)
-    category: String,
+    /// Russian name (e.g., "Для", "ВызватьИсключение")
+    keyword_ru: String,
+    /// English name (e.g., "For", "Raise")
+    keyword_en: String,
+    /// Full documentation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<KeywordDocumentation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct KeywordDocumentation {
+    syntax: String,
+    description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    param_descriptions: Vec<ParamDescription>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,6 +77,9 @@ struct MethodInfo {
     /// Context availability
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<ContextAvailability>,
+    /// Full documentation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<MethodDocumentation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +102,9 @@ struct GlobalFunctionInfo {
     /// Context availability
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<ContextAvailability>,
+    /// Full documentation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<MethodDocumentation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +116,24 @@ struct MethodParameter {
     param_type: Option<String>,
     /// Is parameter optional
     is_optional: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MethodDocumentation {
+    /// Syntax description
+    syntax: String,
+    /// Detailed description
+    description: String,
+    /// Parameter descriptions
+    param_descriptions: Vec<ParamDescription>,
+    /// Code examples
+    examples: Vec<CodeExample>,
+    /// Notes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+    /// See also links
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    see_also: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,11 +167,18 @@ fn main() -> Result<()> {
     println!("Parsing shlang from: {}", shlang_dir.display());
     println!("Parsing shcntx from: {}", shcntx_dir.display());
 
-    // Parse keywords from shlang
-    let keywords = parse_shlang_keywords(&shlang_dir)
-        .context("Failed to parse shlang keywords")?;
-
-    println!("Parsed {} keywords", keywords.len());
+    // Parse keywords from shlang (non-fatal if this fails)
+    let keywords = match parse_shlang_keywords(&shlang_dir) {
+        Ok(kw) => {
+            println!("Parsed {} keywords", kw.len());
+            kw
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to parse shlang keywords: {}", e);
+            eprintln!("Continuing with empty keyword list...");
+            Vec::new()
+        }
+    };
 
     // Parse platform types and methods from shcntx
     let (types, methods, global_functions) = parse_shcntx_data(&shcntx_dir)
@@ -171,6 +208,8 @@ fn main() -> Result<()> {
 /// Parses shlang directory for BSL keywords.
 fn parse_shlang_keywords(shlang_dir: &Path) -> Result<Vec<KeywordInfo>> {
     let mut keywords = Vec::new();
+    let mut st_file_count = 0;
+    let mut html_found_count = 0;
 
     // Find all .st files (snippet templates)
     for entry in fs::read_dir(shlang_dir)? {
@@ -178,49 +217,49 @@ fn parse_shlang_keywords(shlang_dir: &Path) -> Result<Vec<KeywordInfo>> {
         let path = entry.path();
 
         if path.extension().and_then(|s| s.to_str()) == Some("st") {
+            st_file_count += 1;
             if let Some(keyword) = parse_keyword_file(&path)? {
+                html_found_count += 1;
                 keywords.push(keyword);
             }
         }
     }
+
+    println!("Found {} .st files, {} with HTML documentation", st_file_count, html_found_count);
 
     Ok(keywords)
 }
 
 /// Parses a single keyword file (.st + corresponding HTML file).
 fn parse_keyword_file(st_path: &Path) -> Result<Option<KeywordInfo>> {
-    let file_name = st_path.file_stem().unwrap().to_string_lossy();
-
-    // Parse category and base name from filename
-    // Examples: "def_Func", "struct_For", "root_New"
-    let parts: Vec<&str> = file_name.split('_').collect();
-    if parts.len() < 2 {
+    // Load corresponding HTML documentation (same name without .st extension)
+    let html_path = st_path.with_extension("");
+    if !html_path.exists() {
+        // No HTML file - skip this keyword
         return Ok(None);
     }
 
-    let category = parts[0].to_string();
-    let _base_name = parts[1..].join("_");
+    let html_content = fs::read_to_string(&html_path)?;
 
-    // Parse .st file to get snippets
-    let st_content = fs::read_to_string(st_path)?;
-    let (snippet_ru, snippet_en, russian, english) = parse_st_snippet(&st_content)?;
+    // Use scraper parser to extract full documentation
+    if let Some(keyword_doc) = scraper_parser::parse_keyword_html(&html_content) {
+        // Convert scraper_parser::KeywordDocumentation to our KeywordDocumentation
+        let documentation = KeywordDocumentation {
+            syntax: keyword_doc.syntax,
+            description: keyword_doc.description,
+            param_descriptions: keyword_doc.params,
+            min_version: keyword_doc.min_version,
+        };
 
-    // Load corresponding HTML documentation
-    let html_path = st_path.with_extension("");
-    let documentation = if html_path.exists() {
-        fs::read_to_string(&html_path).unwrap_or_default()
+        Ok(Some(KeywordInfo {
+            keyword_ru: keyword_doc.keyword_ru,
+            keyword_en: keyword_doc.keyword_en,
+            documentation: Some(documentation),
+        }))
     } else {
-        String::new()
-    };
-
-    Ok(Some(KeywordInfo {
-        russian,
-        english,
-        snippet_ru,
-        snippet_en,
-        documentation,
-        category,
-    }))
+        // Failed to parse - skip
+        Ok(None)
+    }
 }
 
 /// Parses .st file to extract snippet templates.
@@ -467,6 +506,9 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                             let min_version = scraper_parser::extract_version(&html_content);
                             let context = scraper_parser::extract_context(&html_content);
 
+                            // Extract full documentation
+                            let documentation = extract_method_documentation(&html_content);
+
                             return Ok(Some(MethodInfo {
                                 id,
                                 type_name: type_name.to_string(),
@@ -476,6 +518,7 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                                 parameters,
                                 min_version,
                                 context,
+                                documentation,
                             }));
                         }
                     }
@@ -485,6 +528,42 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
     }
 
     Ok(None)
+}
+
+/// Extracts full method documentation from HTML content
+fn extract_method_documentation(html_content: &str) -> Option<MethodDocumentation> {
+    let syntax = scraper_parser::extract_syntax(html_content).unwrap_or_default();
+    let description = scraper_parser::extract_description(html_content);
+
+    // Return None only if description is completely absent
+    if description.is_none() {
+        return None;
+    }
+
+    let description = description.unwrap();
+
+    let param_descriptions_raw = scraper_parser::extract_parameter_descriptions(html_content);
+    let param_descriptions = param_descriptions_raw
+        .into_iter()
+        .map(|p| ParamDescription {
+            name: p.name,
+            description: p.description,
+        })
+        .collect();
+
+    let examples = scraper_parser::extract_examples(html_content);
+
+    let notes = scraper_parser::extract_notes(html_content);
+
+    // Return documentation even if description is empty string (shouldn't happen, but just in case)
+    Some(MethodDocumentation {
+        syntax,
+        description,
+        param_descriptions,
+        examples,
+        notes,
+        see_also: Vec::new(), // TODO: extract "См. также"
+    })
 }
 
 /// Parses global functions from "Global context" directory.
@@ -578,6 +657,9 @@ fn parse_global_function_html(
                         let min_version = scraper_parser::extract_version(&html_content);
                         let context = scraper_parser::extract_context(&html_content);
 
+                        // Extract full documentation
+                        let documentation = extract_method_documentation(&html_content);
+
                         println!("  Found global function: {} / {}", russian_function, english_function);
 
                         return Ok(Some(GlobalFunctionInfo {
@@ -588,6 +670,7 @@ fn parse_global_function_html(
                             parameters,
                             min_version,
                             context,
+                            documentation,
                         }));
                     }
                 }
