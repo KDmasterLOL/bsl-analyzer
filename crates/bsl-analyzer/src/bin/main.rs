@@ -497,13 +497,12 @@ fn setup_logging(
         None => BoxMakeWriter::new(io::stderr),
     };
 
-    bsl_analyzer::tracing::Config {
-        writer,
-        filter: env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned()),
-        profile_filter,
-        json_profile_filter,
-    }
-    .init()?;
+    // Build filter: user filter + suppress noisy Salsa internal logs
+    // Salsa logs "new_revision: R85 -> R86" at INFO level on every input change
+    let user_filter = env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned());
+    let filter = format!("{},salsa=warn", user_filter);
+
+    bsl_analyzer::tracing::Config { writer, filter, profile_filter, json_profile_filter }.init()?;
 
     Ok(())
 }
