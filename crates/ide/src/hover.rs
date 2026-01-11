@@ -38,8 +38,12 @@ pub(crate) fn hover(
         return Some(result);
     }
 
+    // Try keyword hover
+    if let Some(result) = hover_keyword(&token) {
+        return Some(result);
+    }
+
     // TODO: Add hover for user-defined symbols
-    // TODO: Add hover for keywords
     // TODO: Add hover for literals
 
     None
@@ -605,6 +609,56 @@ fn format_global_function_basic(markup: &mut String, function: &GlobalFunction) 
     if let Some(ctx) = &function.context {
         markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
     }
+}
+
+/// Provides hover information for BSL keywords.
+fn hover_keyword(token: &SyntaxToken) -> Option<HoverResult> {
+    // Check if this is a keyword token
+    if !token.kind().is_keyword() {
+        return None;
+    }
+
+    let keyword_text = token.text();
+
+    // Try to get keyword documentation
+    let keyword_docs = bsl_platform::PlatformData::instance().get_keyword_docs(keyword_text)?;
+
+    let mut markup = String::new();
+
+    // Header
+    markup.push_str(&format!(
+        "**{}** / **{}**\n\n",
+        keyword_docs.keyword_ru, keyword_docs.keyword_en
+    ));
+
+    // Syntax
+    if !keyword_docs.syntax.is_empty() {
+        markup.push_str("**Синтаксис:**\n```bsl\n");
+        markup.push_str(&keyword_docs.syntax);
+        markup.push_str("\n```\n\n");
+    }
+
+    // Description
+    if !keyword_docs.description.is_empty() {
+        markup.push_str(&keyword_docs.description);
+        markup.push_str("\n\n");
+    }
+
+    // Parameters
+    if !keyword_docs.params.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &keyword_docs.params {
+            markup.push_str(&format!("- **{}**: {}\n", param.name, param.description));
+        }
+        markup.push('\n');
+    }
+
+    // Version
+    if let Some(ref version) = keyword_docs.min_version {
+        markup.push_str(&format!("**Доступен с версии:** {}", version));
+    }
+
+    Some(HoverResult { markup, range: Some(token.text_range()) })
 }
 
 #[cfg(test)]

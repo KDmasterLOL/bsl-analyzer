@@ -375,20 +375,43 @@ fn format_function_documentation_basic(function: &GlobalFunction) -> String {
 }
 
 /// Returns detail and documentation for a BSL keyword.
-///
-/// TODO: Extract real documentation from shlang_ru.hbk (syntax help).
-/// Currently returns minimal info. Full docs should be parsed from platform help files.
 fn get_keyword_info(keyword: &str) -> (String, String) {
-    // For now, just return basic info
-    // TODO: Parse shlang_ru.hbk to get full documentation like:
-    // - Multiple syntax variants
-    // - Parameter descriptions
-    // - Examples
-    // - Version info
-    (
-        "Оператор BSL".to_string(),
-        format!("**{}**\n\nОператор языка BSL.\n\n*Полная документация будет добавлена после парсинга shlang_ru.hbk*", keyword),
-    )
+    // Try to get full keyword documentation from platform data
+    if let Some(keyword_docs) = bsl_platform::PlatformData::instance().get_keyword_docs(keyword) {
+        let mut doc = format!("{} / {}\n\n", keyword_docs.keyword_ru, keyword_docs.keyword_en);
+
+        // Syntax
+        if !keyword_docs.syntax.is_empty() {
+            doc.push_str("**Синтаксис:**\n```bsl\n");
+            doc.push_str(&keyword_docs.syntax);
+            doc.push_str("\n```\n\n");
+        }
+
+        // Description
+        if !keyword_docs.description.is_empty() {
+            doc.push_str(&keyword_docs.description);
+            doc.push_str("\n\n");
+        }
+
+        // Parameters
+        if !keyword_docs.params.is_empty() {
+            doc.push_str("**Параметры:**\n");
+            for param in &keyword_docs.params {
+                doc.push_str(&format!("- **{}**: {}\n", param.name, param.description));
+            }
+            doc.push('\n');
+        }
+
+        // Version
+        if let Some(ref version) = keyword_docs.min_version {
+            doc.push_str(&format!("**Доступен с версии:** {}", version));
+        }
+
+        return ("Ключевое слово BSL".to_string(), doc);
+    }
+
+    // Fallback for keywords without documentation
+    ("Ключевое слово BSL".to_string(), format!("**{}**\n\nКлючевое слово языка BSL.", keyword))
 }
 
 #[cfg(test)]

@@ -399,7 +399,7 @@ fn extract_chapter_content(html_content: &str, chapter_title: &str) -> Option<St
 }
 
 /// Parameter description with full text
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ParamDescription {
     pub name: String,
     pub description: String,
@@ -496,7 +496,7 @@ fn collect_param_description(rubric: ElementRef) -> String {
 }
 
 /// Code example with optional description
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CodeExample {
     pub code: String,
     pub description: Option<String>,
@@ -972,4 +972,68 @@ mod tests {
         assert!(examples[0].code.contains("НачатьТранзакцию"));
         assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
     }
+}
+
+/// Keyword documentation structure (intermediate format for JSON)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KeywordDocumentation {
+    pub keyword_ru: String,
+    pub keyword_en: String,
+    pub syntax: String,
+    pub description: String,
+    pub params: Vec<ParamDescription>,
+    pub min_version: Option<String>,
+}
+
+/// Extracts keyword name from H1 title.
+///
+/// Format: "Для (For)" or "Процедура (Procedure)"
+/// Returns (русское, english) tuple
+pub fn extract_keyword_name(html_content: &str) -> Option<(String, String)> {
+    let html = Html::parse_fragment(html_content);
+    let h1_selector = Selector::parse("h1.V8SH_pagetitle").ok()?;
+
+    for h1 in html.select(&h1_selector) {
+        let text = h1.text().collect::<String>();
+        // Parse format: "Для (For)" or "Для&nbsp;(For)"
+        // Replace &nbsp; with space
+        let text = text.replace('\u{00A0}', " ");
+
+        if let Some(open_paren) = text.find('(') {
+            if let Some(close_paren) = text.find(')') {
+                let russian = text[..open_paren].trim().to_string();
+                let english = text[open_paren + 1..close_paren].trim().to_string();
+
+                if !russian.is_empty() && !english.is_empty() {
+                    return Some((russian, english));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parses keyword HTML file and extracts full documentation.
+pub fn parse_keyword_html(html_content: &str) -> Option<KeywordDocumentation> {
+    let (keyword_ru, keyword_en) = extract_keyword_name(html_content)?;
+
+    let syntax = extract_syntax(html_content).unwrap_or_default();
+    let description = extract_description(html_content).unwrap_or_default();
+    let params = extract_parameter_descriptions(html_content);
+    let min_version = extract_version(html_content);
+
+    // Only return docs if we have at least description
+    if description.is_empty() {
+        return None;
+    }
+
+    Some(KeywordDocumentation {
+        keyword_ru,
+        keyword_en,
+        syntax,
+        description,
+        params,
+        min_version,
+    })
 }
