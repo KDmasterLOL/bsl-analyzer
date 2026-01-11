@@ -7,7 +7,7 @@ use crate::tabular_section::{TabularSection, TabularSectionAttribute};
 use super::helpers::parse_uuid;
 use super::serde_types::{
     AttributeXml, BusinessProcessRoot, CatalogRoot, ChartOfCharacteristicTypesRoot, DocumentRoot,
-    MetadataObjectXml, TabularSectionXml,
+    ExchangePlanRoot, MetadataObjectXml, TabularSectionXml, TaskRoot,
 };
 use super::standard_attributes::{
     add_catalog_standard_attributes, add_information_register_standard_attributes_as_attrs,
@@ -61,6 +61,22 @@ pub fn parse_chart_of_characteristic_types_xml(xml: &str) -> Result<MetadataObje
 
     let root: ChartOfCharacteristicTypesRoot = quick_xml::de::from_str(xml)?;
     parse_metadata_object(root.chart_of_characteristic_types, MdoType::ChartOfCharacteristicTypes)
+}
+
+/// Parse Task XML from Designer format
+pub fn parse_task_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_task_xml").entered();
+
+    let root: TaskRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.task, MdoType::Task)
+}
+
+/// Parse ExchangePlan XML from Designer format
+pub fn parse_exchange_plan_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_exchange_plan_xml").entered();
+
+    let root: ExchangePlanRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.exchange_plan, MdoType::ExchangePlan)
 }
 
 /// Internal helper to parse metadata object XML
@@ -129,6 +145,8 @@ fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Resul
 
 /// Parse single attribute from XML
 fn parse_attribute(attr_xml: AttributeXml) -> Result<Attribute> {
+    let _span =
+        tracing::debug_span!("parse_attribute", attr_name = %attr_xml.properties.name).entered();
     let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
     Ok(Attribute { name: attr_xml.properties.name, name_en: None, attr_type })
 }
@@ -155,6 +173,12 @@ fn parse_tabular_section(ts_xml: TabularSectionXml) -> Result<TabularSection> {
 
     let mut ts_attributes = Vec::new();
     for attr_xml in child_objects.attributes {
+        let _attr_span = tracing::debug_span!(
+            "parse_ts_attribute",
+            ts_name = %tabular_section.name(),
+            attr_name = %attr_xml.properties.name
+        )
+        .entered();
         let attr_uuid = parse_uuid(&attr_xml._uuid, "tabular section attribute")?;
         let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
         let type_str = format!("{}", attr_type);

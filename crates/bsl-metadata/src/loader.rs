@@ -89,11 +89,11 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load Constants
     load_constants(&path.join("Constants"), &mut config)?;
 
-    // Load other metadata types (simplified - name only, for SDBL completion)
-    load_simple_metadata_objects(&path.join("ExchangePlans"), &mut config, MdoType::ExchangePlan)?;
+    // Load other metadata types
+    load_exchange_plans(&path.join("ExchangePlans"), &mut config)?;
     load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
     load_simple_metadata_objects(&path.join("Enums"), &mut config, MdoType::Enum)?;
-    load_simple_metadata_objects(&path.join("Tasks"), &mut config, MdoType::Task)?;
+    load_tasks(&path.join("Tasks"), &mut config)?;
     load_simple_metadata_objects(
         &path.join("ChartsOfAccounts"),
         &mut config,
@@ -300,13 +300,91 @@ fn load_business_processes(dir: &Path, config: &mut Configuration) -> Result<()>
                     let xml = fs::read_to_string(&xml_path)?;
                     let business_process = xml_parser::parse_business_process_xml(&xml)?;
 
-                    tracing::info!(
+                    tracing::debug!(
                         business_process = %name,
                         attributes = business_process.attributes.len(),
                         "loaded business process with attributes"
                     );
 
                     config.add_metadata_object(business_process);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load Tasks from directory
+fn load_tasks(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_tasks", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let task_dir = entry.path();
+
+        // Look for directories
+        if task_dir.is_dir() {
+            if let Some(name) = task_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    // Parse XML to get task with attributes and tabular sections
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let task = xml_parser::parse_task_xml(&xml)?;
+
+                    tracing::debug!(
+                        task = %name,
+                        attributes = task.attributes.len(),
+                        tabular_sections = task.tabular_sections.len(),
+                        "loaded task"
+                    );
+
+                    config.add_metadata_object(task);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load ExchangePlans from directory
+fn load_exchange_plans(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_exchange_plans", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let exchange_plan_dir = entry.path();
+
+        // Look for directories
+        if exchange_plan_dir.is_dir() {
+            if let Some(name) = exchange_plan_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    // Parse XML to get exchange plan with attributes and tabular sections
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let exchange_plan = xml_parser::parse_exchange_plan_xml(&xml)?;
+
+                    tracing::debug!(
+                        exchange_plan = %name,
+                        attributes = exchange_plan.attributes.len(),
+                        tabular_sections = exchange_plan.tabular_sections.len(),
+                        "loaded exchange plan"
+                    );
+
+                    config.add_metadata_object(exchange_plan);
                 }
             }
         }

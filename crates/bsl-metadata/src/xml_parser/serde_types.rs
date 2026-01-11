@@ -310,6 +310,20 @@ pub(crate) struct ChartOfCharacteristicTypesRoot {
     pub chart_of_characteristic_types: MetadataObjectXml,
 }
 
+/// Root XML structure for Task
+#[derive(Debug, Deserialize)]
+pub(crate) struct TaskRoot {
+    #[serde(rename = "Task")]
+    pub task: MetadataObjectXml,
+}
+
+/// Root XML structure for ExchangePlan
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExchangePlanRoot {
+    #[serde(rename = "ExchangePlan")]
+    pub exchange_plan: MetadataObjectXml,
+}
+
 /// Root XML structure for Constant
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConstantRoot {

@@ -9,12 +9,12 @@ use super::type_parser::parse_type_xml;
 
 /// Parse DefinedType XML from Designer format
 pub fn parse_defined_type_xml(xml: &str) -> Result<DefinedType> {
-    let _span = tracing::debug_span!("parse_defined_type_xml").entered();
-
     let root: DefinedTypeRoot = quick_xml::de::from_str(xml)?;
-    let uuid = parse_uuid(&root.defined_type.uuid, "defined type")?;
-
     let name = root.defined_type.properties.name;
+
+    let _span = tracing::debug_span!("parse_defined_type_xml", defined_type_name = %name).entered();
+
+    let uuid = parse_uuid(&root.defined_type.uuid, "defined type")?;
     let underlying_type = parse_type_xml(&root.defined_type.properties.defined_type)?;
 
     let defined_type = DefinedType::builder()

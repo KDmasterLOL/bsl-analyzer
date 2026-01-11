@@ -284,7 +284,7 @@ impl<'a> LoweringContext<'a> {
                 &mut fields,
             );
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 full_name = %full_name_for_logging,
                 "resolve_table: No metadata available, cannot add custom fields"
             );
@@ -380,22 +380,26 @@ impl<'a> LoweringContext<'a> {
                         "Added metadata fields to register"
                     );
                 } else {
-                    tracing::warn!(
+                    tracing::debug!(
                         full_name = %full_name,
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
-                        "Register not found in metadata (type mismatch or missing)"
+                        "Register not found in metadata (may be from extension)"
                     );
                 }
             }
 
-            // For catalogs, documents, business processes, and tasks - add attributes
-            MdoType::Catalog | MdoType::Document | MdoType::BusinessProcess | MdoType::Task => {
+            // For catalogs, documents, business processes, tasks, exchange plans - add attributes
+            MdoType::Catalog
+            | MdoType::Document
+            | MdoType::BusinessProcess
+            | MdoType::Task
+            | MdoType::ExchangePlan => {
                 tracing::info!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,
                     object_name = %object_name,
-                    "add_metadata_fields: Looking up catalog/document/business process/task in metadata"
+                    "add_metadata_fields: Looking up metadata object"
                 );
 
                 if let Some(obj) = metadata.find_metadata_object(mdo_type, object_name) {
@@ -415,11 +419,11 @@ impl<'a> LoweringContext<'a> {
                         "Added metadata fields to object"
                     );
                 } else {
-                    tracing::warn!(
+                    tracing::debug!(
                         full_name = %full_name,
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
-                        "Metadata object not found"
+                        "Metadata object not found (may be from extension)"
                     );
                 }
             }
@@ -456,12 +460,13 @@ impl<'a> LoweringContext<'a> {
             | MdoType::Document
             | MdoType::BusinessProcess
             | MdoType::Task
+            | MdoType::ExchangePlan
             | MdoType::ChartOfCharacteristicTypes
             | MdoType::ChartOfAccounts => {
                 // Valid - continue
             }
             _ => {
-                tracing::warn!(
+                tracing::debug!(
                     mdo_type = ?mdo_type,
                     object_name = %object_name,
                     tabular_section_name = %tabular_section_name,
@@ -472,25 +477,27 @@ impl<'a> LoweringContext<'a> {
         }
 
         // 2. Find parent object in metadata
+        // Note: parent object may come from extension (not loaded)
         let Some(parent_obj) = metadata.find_metadata_object(mdo_type, object_name) else {
-            tracing::warn!(
+            tracing::debug!(
                 mdo_type = ?mdo_type,
                 object_name = %object_name,
-                "Parent object not found in metadata"
+                "Parent object not found in metadata (may be from extension)"
             );
             return;
         };
 
         // 3. Find tabular section by name
+        // Note: tabular section may come from extension (not loaded)
         let Some(tabular_section) = parent_obj.find_tabular_section(tabular_section_name) else {
-            tracing::warn!(
+            tracing::debug!(
                 mdo_type = ?mdo_type,
                 object_name = %object_name,
                 tabular_section_name = %tabular_section_name,
                 available_sections = ?parent_obj.tabular_sections.iter()
                     .map(|ts| ts.name())
                     .collect::<Vec<_>>(),
-                "Tabular section not found in parent object"
+                "Tabular section not found in parent object (may be from extension)"
             );
             return;
         };

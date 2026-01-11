@@ -114,6 +114,11 @@ fn parse_dimensions(children: &RegisterChildObjects) -> Result<Vec<Dimension>> {
     let mut dimensions = Vec::new();
 
     for dim_xml in &children.dimensions {
+        let _span = tracing::debug_span!(
+            "parse_dimension",
+            dim_name = %dim_xml.properties.name
+        )
+        .entered();
         let dim_uuid = parse_uuid(&dim_xml.uuid, "dimension")?;
 
         let mut dimension = Dimension::builder()
@@ -141,6 +146,11 @@ fn parse_resources(children: &RegisterChildObjects) -> Result<Vec<RegisterResour
     let mut resources = Vec::new();
 
     for resource_xml in &children.resources {
+        let _span = tracing::debug_span!(
+            "parse_resource",
+            resource_name = %resource_xml.properties.name
+        )
+        .entered();
         let resource_uuid = parse_uuid(&resource_xml.uuid, "resource")?;
 
         let mut resource =
@@ -161,6 +171,11 @@ fn parse_custom_attributes(
     attributes: &mut Vec<RegisterAttribute>,
 ) -> Result<()> {
     for attr_xml in &children.attributes {
+        let _span = tracing::debug_span!(
+            "parse_register_attr",
+            attr_name = %attr_xml.properties.name
+        )
+        .entered();
         let attr_uuid = parse_uuid(&attr_xml.uuid, "attribute")?;
 
         let mut attribute = RegisterAttribute::new(attr_uuid, attr_xml.properties.name.clone());

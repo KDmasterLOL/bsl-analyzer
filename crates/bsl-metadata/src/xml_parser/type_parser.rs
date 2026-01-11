@@ -8,19 +8,32 @@ use super::serde_types::TypeXml;
 /// Mapping from reference type prefix to MdoType
 static REF_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:CatalogRef", MdoType::Catalog),
+    ("cfg:CatalogObject", MdoType::Catalog),
     ("cfg:DocumentRef", MdoType::Document),
+    ("cfg:DocumentObject", MdoType::Document),
     ("cfg:InformationRegisterRef", MdoType::InformationRegister),
     ("cfg:AccumulationRegisterRef", MdoType::AccumulationRegister),
     ("cfg:AccountingRegisterRef", MdoType::AccountingRegister),
     ("cfg:CalculationRegisterRef", MdoType::CalculationRegister),
     ("cfg:EnumRef", MdoType::Enum),
     ("cfg:TaskRef", MdoType::Task),
+    ("cfg:TaskObject", MdoType::Task),
     ("cfg:ExchangePlanRef", MdoType::ExchangePlan),
+    ("cfg:ExchangePlanObject", MdoType::ExchangePlan),
     ("cfg:BusinessProcessRef", MdoType::BusinessProcess),
+    ("cfg:BusinessProcessObject", MdoType::BusinessProcess),
     ("cfg:BusinessProcessRoutePointRef", MdoType::BusinessProcess),
     ("cfg:ChartOfCharacteristicTypesRef", MdoType::ChartOfCharacteristicTypes),
+    ("cfg:ChartOfCharacteristicTypesObject", MdoType::ChartOfCharacteristicTypes),
     ("cfg:ChartOfAccountsRef", MdoType::ChartOfAccounts),
+    ("cfg:ChartOfAccountsObject", MdoType::ChartOfAccounts),
     ("cfg:ChartOfCalculationTypesRef", MdoType::ChartOfCalculationTypes),
+    ("cfg:ChartOfCalculationTypesObject", MdoType::ChartOfCalculationTypes),
+    ("cfg:ConstantValueManager", MdoType::Constant),
+    ("cfg:InformationRegisterRecordSet", MdoType::InformationRegister),
+    ("cfg:AccumulationRegisterRecordSet", MdoType::AccumulationRegister),
+    ("cfg:AccountingRegisterRecordSet", MdoType::AccountingRegister),
+    ("cfg:CalculationRegisterRecordSet", MdoType::CalculationRegister),
 ];
 
 /// Mapping from TypeSet string to AttributeType for "any object of type" patterns
@@ -76,7 +89,11 @@ pub(crate) fn parse_type_xml(type_xml: &TypeXml) -> Result<AttributeType> {
     // 3. Return based on collected types
     match all_types.len() {
         0 => {
-            tracing::warn!("parse_type_xml: no types collected, returning Unknown");
+            tracing::warn!(
+                types = ?type_xml.types,
+                type_sets = ?type_xml.type_sets,
+                "parse_type_xml: no types collected, returning Unknown"
+            );
             Ok(AttributeType::Unknown)
         }
         1 => {
@@ -97,9 +114,22 @@ fn parse_type_set(type_set: &str) -> Option<AttributeType> {
         return Some(AttributeType::AnyRef);
     }
 
+    // cfg:BusinessProcessRoutePointRef -> any route point
+    if type_set == "cfg:BusinessProcessRoutePointRef" {
+        return Some(AttributeType::AnyObjectRef { mdo_type: MdoType::BusinessProcess });
+    }
+
     // DefinedType reference: cfg:DefinedType.Name
     if let Some(name) = type_set.strip_prefix("cfg:DefinedType.") {
         return Some(AttributeType::DefinedType { name: name.to_string() });
+    }
+
+    // Characteristic reference: cfg:Characteristic.Name -> ChartOfCharacteristicTypes
+    if let Some(name) = type_set.strip_prefix("cfg:Characteristic.") {
+        return Some(AttributeType::Ref {
+            mdo_type: MdoType::ChartOfCharacteristicTypes,
+            name: name.to_string(),
+        });
     }
 
     // Check TYPE_SET_MAP for "any object of specific type"
