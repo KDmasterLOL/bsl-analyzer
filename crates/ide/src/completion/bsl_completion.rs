@@ -5,7 +5,7 @@
 //! - BSL keywords (Процедура, Функция, Если, etc.)
 //! - User-defined symbols (module functions, variables) - TODO
 
-use bsl_platform::{GlobalFunction, PlatformDataInner};
+use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
 use ide_db::RootDatabase;
 use syntax::SyntaxKind;
 
@@ -247,6 +247,92 @@ fn generate_function_snippet(function: &GlobalFunction) -> String {
 /// Доступность: Сервер, Толстый клиент, Внешнее соединение
 /// ```
 fn format_function_documentation(function: &GlobalFunction) -> String {
+    // Try to get full documentation
+    if let Some(full_docs) = PlatformData::instance().get_global_function_docs(function.id) {
+        return format_function_documentation_full(function, &full_docs);
+    }
+
+    // Fallback to basic documentation
+    format_function_documentation_basic(function)
+}
+
+/// Formats global function with full documentation from platform data.
+fn format_function_documentation_full(
+    function: &GlobalFunction,
+    docs: &bsl_platform::MethodDocs,
+) -> String {
+    let mut doc = format!("{} / {}\n\n", function.name, function.english_name);
+
+    // Description
+    if !docs.description.is_empty() {
+        doc.push_str(&docs.description);
+        doc.push_str("\n\n");
+    }
+
+    // Parameters with detailed descriptions
+    if !docs.params.is_empty() {
+        doc.push_str("Параметры:\n");
+        for param in &docs.params {
+            doc.push_str(&format!("- {}", param.name));
+            if !param.description.is_empty() {
+                doc.push_str(&format!(": {}", param.description));
+            }
+            doc.push('\n');
+        }
+        doc.push('\n');
+    }
+
+    // Return type
+    if let Some(ret_type) = &function.return_type {
+        doc.push_str(&format!("Возвращает: {}\n\n", ret_type));
+    }
+
+    // Examples (first example only for completion)
+    if !docs.examples.is_empty() {
+        if let Some(example) = docs.examples.first() {
+            doc.push_str("Пример:\n");
+            // Limit example size for completion popup
+            let code_lines: Vec<&str> = example.code.lines().take(5).collect();
+            doc.push_str(&code_lines.join("\n"));
+            if example.code.lines().count() > 5 {
+                doc.push_str("\n...");
+            }
+            doc.push_str("\n\n");
+        }
+    }
+
+    // Context availability
+    if let Some(ctx) = &function.context {
+        let mut parts = Vec::new();
+        if ctx.thick_client {
+            parts.push("Толстый клиент");
+        }
+        if ctx.thin_client {
+            parts.push("Тонкий клиент");
+        }
+        if ctx.web_client {
+            parts.push("Веб-клиент");
+        }
+        if ctx.server {
+            parts.push("Сервер");
+        }
+        if ctx.mobile_client {
+            parts.push("Мобильный клиент");
+        }
+        if ctx.external_connection {
+            parts.push("Внешнее соединение");
+        }
+
+        if !parts.is_empty() {
+            doc.push_str(&format!("Доступность: {}", parts.join(", ")));
+        }
+    }
+
+    doc
+}
+
+/// Formats global function with basic documentation (fallback).
+fn format_function_documentation_basic(function: &GlobalFunction) -> String {
     let mut doc = format!("{} / {}\n\n", function.name, function.english_name);
 
     if !function.parameters.is_empty() {
