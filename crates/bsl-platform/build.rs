@@ -42,7 +42,6 @@ fn get_files_timestamp(shcntx_path: &Path, shlang_path: &Path) -> String {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=data/platform_minimal.json");
     println!("cargo:rerun-if-env-changed=BSL_PLATFORM_PATH");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
