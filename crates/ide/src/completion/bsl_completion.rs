@@ -39,11 +39,51 @@ pub(super) fn bsl_completions(
         }
     }
 
-    // Check if we're typing an identifier (partial function name)
-    if token.kind() == SyntaxKind::IDENT {
-        let prefix = token.text().to_string();
-        tracing::debug!(prefix = ?prefix, "Completing identifier with prefix");
-        return Some(complete_global_functions(&prefix));
+    // Check if we're typing something that could be a global function or keyword
+    // This includes:
+    // - IDENT tokens (user typing a new identifier)
+    // - Keyword tokens (user typing inside a keyword like "ВызватьИсключение")
+    let token_text = token.text();
+
+    // Check if cursor is inside the token (not at the end)
+    // This handles the case where user is typing "ВызватьИ" and lexer already
+    // recognized full "ВызватьИсключение" as KW_RAISE
+    let is_typing = if token.kind() == SyntaxKind::IDENT {
+        // For identifiers, always provide completions
+        true
+    } else if token.kind().is_keyword() {
+        // For keywords, check if cursor is inside the token (partial typing)
+        let token_start = token.text_range().start();
+        let cursor_in_token = position.offset.checked_sub(token_start);
+        if let Some(offset_in_token) = cursor_in_token {
+            // Cursor is inside the token if it's not at the end
+            let offset_in_token: usize = offset_in_token.into();
+            offset_in_token < token_text.len()
+        } else {
+            false
+        }
+    } else {
+        // Other tokens - no completion
+        false
+    };
+
+    if is_typing {
+        // Extract the prefix (text before cursor)
+        let token_start = token.text_range().start();
+        let cursor_in_token = position.offset.checked_sub(token_start).unwrap_or_default();
+        let cursor_in_token: usize = cursor_in_token.into();
+
+        // Get prefix (text from token start to cursor)
+        let prefix = &token_text[..cursor_in_token.min(token_text.len())];
+
+        tracing::debug!(
+            prefix = ?prefix,
+            token_kind = ?token.kind(),
+            full_text = ?token_text,
+            "Completing with prefix"
+        );
+
+        return Some(complete_global_functions(prefix));
     }
 
     // No BSL completion context
