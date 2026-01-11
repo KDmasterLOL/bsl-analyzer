@@ -11,6 +11,7 @@ base-db.workspace = true
 syntax.workspace = true
 vfs.workspace = true
 stdx.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

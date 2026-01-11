@@ -84,8 +84,83 @@ impl GlobalState {
             "loaded project configuration"
         );
 
-        self.workspace_root = Some(root);
+        self.workspace_root = Some(root.clone());
         self.project = Some(project);
+
+        // Load all .bsl files from workspace into VFS for cross-file resolution
+        self.load_workspace_files(&root);
+    }
+
+    /// Scans workspace directory structure and indexes all .bsl files.
+    ///
+    /// This creates FileId mappings WITHOUT loading file contents into memory.
+    /// Files are loaded lazily when first accessed.
+    ///
+    /// Memory efficient: ~1KB per file for metadata vs ~20KB per file for content.
+    fn load_workspace_files(&mut self, root: &PathBuf) {
+        use walkdir::WalkDir;
+
+        tracing::info!("Indexing workspace files from {:?}", root);
+
+        let mut file_count = 0;
+        let start = std::time::Instant::now();
+
+        // Collect all .bsl file paths first
+        let mut file_set = vfs::file_set::FileSet::new();
+        let mut vfs = self.vfs.write();
+
+        for entry in WalkDir::new(root).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            // Only process .bsl files
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("bsl") {
+                continue;
+            }
+
+            // Convert to VfsPath
+            let vfs_path = VfsPath::new(path);
+
+            // Allocate FileId (cheap - just increments counter)
+            let file_id = if let Some(existing_id) = vfs.file_id(&vfs_path) {
+                existing_id
+            } else {
+                vfs.alloc_file_id(vfs_path.clone())
+            };
+
+            // Add to file set (for SourceRoot)
+            file_set.insert(file_id, vfs_path);
+
+            file_count += 1;
+
+            if file_count % 1000 == 0 {
+                tracing::info!("Indexed {} files...", file_count);
+            }
+        }
+
+        drop(vfs); // Release VFS lock
+
+        // Create source root with all indexed files
+        let db = self.analysis_host.raw_database_mut();
+        let source_root_id = base_db::SourceRootId(0);
+        let source_root = base_db::SourceRoot::new_local(file_set);
+
+        use base_db::SourceDatabase;
+        db.set_source_root(source_root_id, source_root);
+
+        // Set source root mapping for all files
+        let source_root_input = db.source_root_input(source_root_id);
+        let indexed_files: Vec<_> = source_root_input.root(db).iter().collect();
+
+        for file_id in indexed_files {
+            db.set_file_source_root(file_id, source_root_id);
+        }
+
+        let elapsed = start.elapsed();
+        tracing::info!(
+            "Indexed {} .bsl files in {:?} (content will be loaded on demand)",
+            file_count,
+            elapsed
+        );
     }
 
     /// Creates an immutable snapshot for thread-safe access.
@@ -145,6 +220,77 @@ impl GlobalState {
 
         Url::from_file_path(std_path)
             .map_err(|_| anyhow!("Failed to convert path to URL: {:?}", std_path))
+    }
+
+    /// Loads all CommonModules files into memory for cross-file resolution.
+    ///
+    /// This is called lazily before the first cross-file goto definition.
+    /// Only CommonModules files are loaded (not Forms, Documents, etc.) to minimize memory usage.
+    ///
+    /// Subsequent calls are no-op.
+    pub fn ensure_common_modules_loaded(&mut self) -> Result<()> {
+        use base_db::SourceDatabase;
+
+        tracing::info!("Loading CommonModules for cross-file resolution");
+        let start = std::time::Instant::now();
+
+        // Get all files from source root 0
+        let db = self.analysis_host.raw_database_mut();
+        let source_root_id = base_db::SourceRootId(0);
+        let source_root_input = db.source_root_input(source_root_id);
+        let all_files: Vec<_> = source_root_input.root(db).iter().collect();
+
+        let mut loaded_count = 0;
+        let mut skipped_count = 0;
+
+        for file_id in all_files {
+            // Get file path and clone it before dropping VFS lock
+            let (std_path_buf, should_load) = {
+                let vfs = self.vfs.read();
+                let vfs_path = vfs.file_path(file_id);
+                let std_path = vfs_path.as_path();
+                let is_common_module = std_path.to_string_lossy().contains("CommonModules");
+                (std_path.to_path_buf(), is_common_module)
+            }; // VFS lock released here
+
+            // Skip non-CommonModules files
+            if !should_load {
+                skipped_count += 1;
+                continue;
+            }
+
+            // Check if already loaded (in MemDocs or database)
+            if let Ok(url) = Url::from_file_path(&std_path_buf) {
+                if self.mem_docs.get(&url).is_some() {
+                    continue; // Already loaded
+                }
+            }
+
+            // Read from disk and load
+            match std::fs::read_to_string(&std_path_buf) {
+                Ok(content) => {
+                    db.set_file_text(file_id, &content);
+                    loaded_count += 1;
+
+                    if loaded_count % 100 == 0 {
+                        tracing::info!("Loaded {} CommonModules files...", loaded_count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load file {:?}: {}", std_path_buf, e);
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        tracing::info!(
+            "Loaded {} CommonModules files in {:?} (skipped {} non-CommonModules)",
+            loaded_count,
+            elapsed,
+            skipped_count
+        );
+
+        Ok(())
     }
 }
 

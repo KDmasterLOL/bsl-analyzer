@@ -4,6 +4,7 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
+use base_db::SourceDatabase;
 use ide::Location as IdeLocation;
 use line_index::LineIndex;
 use lsp_types::{
@@ -50,12 +51,31 @@ pub fn handle_goto_definition(
     // Convert result
     match target {
         Some(nav_target) => {
-            // For simplicity, assume the target is in the same file
-            // In the future, we'll need to map FileId back to URL
-            let target_range = crate::lsp::range(&line_index, &text, nav_target.range)
-                .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
+            // Get URL for target file (may be different from source file)
+            let target_url = snap.url_for_file_id(nav_target.file_id)?;
 
-            let location = Location { uri: uri.clone(), range: target_range };
+            // Get text and line index for target file
+            let target_text = if nav_target.file_id == file_id {
+                // Same file - reuse current text
+                text.clone()
+            } else {
+                // Different file - read from MemDocs or database
+                snap.mem_docs.get(&target_url).unwrap_or_else(|| {
+                    // File not in MemDocs - read from database
+                    let db = snap.analysis.database();
+                    let file_text_input = db.file_text_input(nav_target.file_id);
+                    file_text_input.text(db).clone()
+                })
+            };
+
+            let target_line_index = LineIndex::new(&target_text);
+
+            // Convert range
+            let target_range =
+                crate::lsp::range(&target_line_index, &target_text, nav_target.range)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to convert range"))?;
+
+            let location = Location { uri: target_url, range: target_range };
 
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }

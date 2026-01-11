@@ -612,6 +612,7 @@ dependencies = [
  "ide-db",
  "stdx",
  "syntax",
+ "tracing",
  "vfs",
 ]
 

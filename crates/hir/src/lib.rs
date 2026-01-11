@@ -369,6 +369,8 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         // Try to find FieldExpr ancestor
         for ancestor in parent.ancestors() {
+            tracing::debug!("symbol_at_position: checking ancestor kind={:?}", ancestor.kind());
+
             if let Some(field_expr) = syntax::ast::FieldExpr::cast(ancestor.clone()) {
                 // This is a qualified name (e.g., Module.Method)
                 return self.resolve_qualified_name(file_id, field_expr);
@@ -379,7 +381,10 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
                 syntax::SyntaxKind::STMT_LIST
                 | syntax::SyntaxKind::SOURCE_FILE
                 | syntax::SyntaxKind::PROCEDURE_DEF
-                | syntax::SyntaxKind::FUNCTION_DEF => break,
+                | syntax::SyntaxKind::FUNCTION_DEF => {
+                    tracing::debug!("symbol_at_position: hit boundary {:?}", ancestor.kind());
+                    break;
+                }
                 _ => {}
             }
         }
@@ -413,6 +418,7 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     ) -> Option<Symbol<'db, DB>> {
         // Extract qualified name from FieldExpr
         let qualified_name = self.extract_qualified_name_from_field_expr(field_expr)?;
+        tracing::info!("resolve_qualified_name: extracted qualified_name={:?}", qualified_name);
 
         // Use workspace scope resolver for cross-file resolution
         let module_id = ModuleId::new(file_id);
@@ -420,16 +426,22 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         // Resolve the qualified path
         let resolution = resolver.resolve_path(self.db, &qualified_name);
+        tracing::info!("resolve_qualified_name: resolution result={:?}", resolution);
 
         // Convert PathResolution to Symbol
         match resolution {
             PathResolution::Method(method_id) => {
+                tracing::info!("resolve_qualified_name: resolved to Method {:?}", method_id);
                 Some(Symbol::Method(Method::new(self.db, method_id)))
             }
             PathResolution::Variable(var_id) => {
+                tracing::info!("resolve_qualified_name: resolved to Variable {:?}", var_id);
                 Some(Symbol::Variable(Variable::new(self.db, var_id)))
             }
-            PathResolution::Unresolved(_) => None,
+            PathResolution::Unresolved(_) => {
+                tracing::info!("resolve_qualified_name: unresolved");
+                None
+            }
         }
     }
 

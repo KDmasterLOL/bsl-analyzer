@@ -196,6 +196,13 @@ impl Files {
         self.file_texts.get(&file_id).map(|entry| *entry.value()).expect("file text not set")
     }
 
+    /// Try to get the Salsa input for file text.
+    ///
+    /// Returns None if the file has not been loaded yet.
+    pub fn try_file_text(&self, file_id: FileId) -> Option<FileTextInput> {
+        self.file_texts.get(&file_id).map(|entry| *entry.value())
+    }
+
     /// Set the text for a file.
     ///
     /// This creates or updates a Salsa input. Salsa automatically invalidates

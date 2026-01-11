@@ -266,15 +266,20 @@ impl Resolver {
         // Collect all files from the source root
         let files: Vec<_> = source_root.iter().collect();
 
-        tracing::debug!(
-            module = %module_name,
-            method = %method_name,
-            file_count = files.len(),
-            "Cross-module resolution"
+        tracing::info!(
+            "resolve_cross_module: module={}, method={}, file_count={}",
+            module_name,
+            method_name,
+            files.len()
         );
 
         // Get workspace symbols (this will be cached by Salsa query in the future)
         let workspace_symbols = db.workspace_symbols(&files);
+
+        tracing::info!(
+            "resolve_cross_module: workspace has {} common modules",
+            workspace_symbols.common_modules.len()
+        );
 
         // Lookup CommonModule by name (case-insensitive search)
         // Note: HashMap.get() uses case-sensitive Hash/Eq, so we iterate instead
@@ -285,15 +290,20 @@ impl Resolver {
             .map(|(_, info)| info);
 
         if let Some(common_module_info) = common_module_info {
+            tracing::info!(
+                "resolve_cross_module: found module '{}' with {} methods",
+                module_name,
+                common_module_info.methods.len()
+            );
             // Search for method in the module (case-insensitive)
             for method_symbol in &common_module_info.methods {
                 if method_symbol.name.eq_ignore_case(method_name) {
                     // Check if method is exported
                     if !method_symbol.is_export {
-                        tracing::debug!(
-                            module = %module_name,
-                            method = %method_name,
-                            "Method found but not exported"
+                        tracing::info!(
+                            "resolve_cross_module: method '{}' found in '{}' but NOT exported",
+                            method_name,
+                            module_name
                         );
                         return PathResolution::Unresolved(QualifiedName::from_segments([
                             module_name.clone(),
@@ -301,26 +311,26 @@ impl Resolver {
                         ]));
                     }
 
-                    tracing::debug!(
-                        module = %module_name,
-                        method = %method_name,
-                        is_export = method_symbol.is_export,
-                        "Found method in workspace"
+                    tracing::info!(
+                        "resolve_cross_module: SUCCESS - found exported method '{}' in module '{}'",
+                        method_name,
+                        module_name
                     );
                     return PathResolution::Method(method_symbol.id);
                 }
             }
 
-            tracing::debug!(
-                module = %module_name,
-                method = %method_name,
-                "Module found but method not found"
+            tracing::info!(
+                "resolve_cross_module: module '{}' found but method '{}' NOT found. Methods in module: {:?}",
+                module_name,
+                method_name,
+                common_module_info.methods.iter().map(|m| &m.name).collect::<Vec<_>>()
             );
         } else {
-            tracing::debug!(
-                module = %module_name,
-                available_modules = ?workspace_symbols.common_modules.keys().collect::<Vec<_>>(),
-                "Module not found in workspace"
+            tracing::info!(
+                "resolve_cross_module: module '{}' NOT found. Available modules: {:?}",
+                module_name,
+                workspace_symbols.common_modules.keys().collect::<Vec<_>>()
             );
         }
 
