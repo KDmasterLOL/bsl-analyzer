@@ -84,7 +84,7 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
 /// Runs the main event loop.
 ///
-/// Handles incoming LSP messages until shutdown is requested.
+/// Handles incoming LSP messages and VFS loader messages until shutdown is requested.
 fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Result<()> {
     loop {
         select! {
@@ -109,8 +109,81 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
                     break;
                 }
             }
+
+            recv(&state.loader_receiver) -> msg => {
+                match msg? {
+                    vfs::loader::Message::Progress { n_total, n_done, config_version, dir } => {
+                        use vfs::loader::LoadingProgress;
+                        match n_done {
+                            LoadingProgress::Finished => {
+                                state.vfs_done = true;
+                                tracing::info!("VFS loading complete");
+
+                                // Initialize SourceRoot after loading completes
+                                state.init_source_root();
+                            }
+                            LoadingProgress::Started => {
+                                tracing::info!("VFS loading started: {} entries", n_total);
+                            }
+                            LoadingProgress::Progress(done) => {
+                                tracing::debug!(
+                                    "VFS loading progress: {}/{} (config v{})",
+                                    done, n_total, config_version
+                                );
+                                if let Some(dir) = dir {
+                                    tracing::debug!("  processing: {:?}", dir);
+                                }
+                            }
+                        }
+                    }
+                    vfs::loader::Message::Loaded { files } |
+                    vfs::loader::Message::Changed { files } => {
+                        handle_vfs_msg(state, files)?;
+                    }
+                }
+            }
         }
     }
+
+    Ok(())
+}
+
+/// Handle VFS messages from the loader thread.
+///
+/// This function processes file contents received from the background loader thread
+/// and updates the VFS and Salsa database accordingly.
+fn handle_vfs_msg(
+    state: &mut GlobalState,
+    files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
+) -> Result<()> {
+    use std::sync::Arc;
+
+    let mut vfs = state.vfs.write();
+
+    for (path, contents) in files {
+        // Convert AbsPathBuf to std::path::Path for VfsPath
+        let std_path: &std::path::Path = path.as_ref();
+        let vfs_path = vfs::VfsPath::new(std_path);
+
+        // Skip files that are managed by the LSP client (in MemDocs)
+        // These files' content comes from didOpen/didChange, not disk
+        if let Ok(url) = lsp_types::Url::from_file_path(std_path) {
+            if state.mem_docs.contains(&url) {
+                continue;
+            }
+        }
+
+        // Convert Vec<u8> to Arc<str>
+        let contents_str =
+            contents.and_then(|bytes| String::from_utf8(bytes).ok().map(|s| Arc::from(s.as_str())));
+
+        vfs.set_file_contents(vfs_path, contents_str);
+    }
+
+    drop(vfs); // Release VFS lock before processing changes
+
+    // Process changes and sync to Salsa database
+    state.process_changes();
 
     Ok(())
 }
