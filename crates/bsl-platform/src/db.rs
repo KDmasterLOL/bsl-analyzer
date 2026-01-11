@@ -247,6 +247,26 @@ pub fn type_methods_query<'db>(
     Arc::new(data.get_type_methods(&type_name).into_iter().cloned().collect())
 }
 
+/// Lookup global function by name (case-insensitive, bilingual).
+///
+/// This Salsa query provides cached access to global platform functions.
+///
+/// # Example
+/// ```ignore
+/// let input = TypeNameInput::new(db, "НачатьТранзакцию".to_string());
+/// let function = global_function_query(db, input);
+/// assert_eq!(function.unwrap().english_name.as_str(), "BeginTransaction");
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn global_function_query<'db>(
+    db: &'db dyn salsa::Database,
+    input: TypeNameInput<'db>,
+) -> Option<GlobalFunction> {
+    let name = input.name(db);
+    let data = PlatformDataInner::instance();
+    data.get_global_function(&name).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

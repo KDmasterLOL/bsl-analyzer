@@ -6,8 +6,8 @@
 //! - User-defined symbols (future)
 
 use bsl_platform::{
-    platform_method_query, platform_type_query, type_methods_query, ContextAvailability,
-    MethodLookupInput, PlatformMethod, TypeNameInput,
+    global_function_query, platform_method_query, platform_type_query, type_methods_query,
+    ContextAvailability, GlobalFunction, MethodLookupInput, PlatformMethod, TypeNameInput,
 };
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxToken, TextRange, TextSize};
@@ -62,6 +62,11 @@ fn hover_platform(db: &dyn RootDatabase, token: &SyntaxToken) -> Option<HoverRes
     // Check if it's a method call (e.g., Строка.ВРег())
     if let Some((type_name, method_name)) = try_extract_method_call(token) {
         return hover_for_platform_method(db, &type_name, &method_name, token.text_range());
+    }
+
+    // Check if it's a global function (e.g., НачатьТранзакцию())
+    if let Some(result) = hover_for_global_function(db, token_text, token.text_range()) {
+        return Some(result);
     }
 
     // Check if it's a type reference (e.g., variable declaration type)
@@ -248,6 +253,72 @@ fn hover_for_platform_method(
     Some(HoverResult { markup, range: Some(range) })
 }
 
+/// Generates hover information for global platform functions.
+///
+/// Example output:
+/// ```markdown
+/// **Глобальная функция:** НачатьТранзакцию / BeginTransaction
+///
+/// **Синтаксис:**
+/// ```bsl
+/// НачатьТранзакцию([РежимБлокировок])
+/// BeginTransaction([DataLockControlMode])
+/// ```
+///
+/// **Параметры:**
+/// - РежимБлокировок: РежимУправленияБлокировкойДанных (необязательный)
+///
+/// **Доступность:** Сервер, Толстый клиент, Внешнее соединение
+/// ```
+fn hover_for_global_function(
+    db: &dyn RootDatabase,
+    function_name: &str,
+    range: TextRange,
+) -> Option<HoverResult> {
+    let input = TypeNameInput::new(db, function_name.to_string());
+    let function = global_function_query(db, input)?;
+
+    let mut markup = String::new();
+
+    // Function header
+    markup.push_str(&format!(
+        "**Глобальная функция:** {} / {}\n\n",
+        function.name, function.english_name
+    ));
+
+    // Syntax (bilingual)
+    markup.push_str("**Синтаксис:**\n```bsl\n");
+    markup.push_str(&format!("{}\n", format_global_function_signature(&function)));
+
+    // English variant
+    let english_sig = format_global_function_signature_english(&function);
+    markup.push_str(&format!("{}\n", english_sig));
+    markup.push_str("```\n\n");
+
+    // Parameters
+    if !function.parameters.is_empty() {
+        markup.push_str("**Параметры:**\n");
+        for param in &function.parameters {
+            let optional = if param.is_optional { " (необязательный)" } else { "" };
+            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
+            markup.push_str(&format!("- {}: {}{}\n", param.name, param_type, optional));
+        }
+        markup.push('\n');
+    }
+
+    // Return type
+    if let Some(ret_type) = &function.return_type {
+        markup.push_str(&format!("**Возвращает:** {}\n\n", ret_type));
+    }
+
+    // Context availability
+    if let Some(ctx) = &function.context {
+        markup.push_str(&format!("**Доступность:** {}", format_context_availability(ctx)));
+    }
+
+    Some(HoverResult { markup, range: Some(range) })
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -294,6 +365,50 @@ fn format_method_signature_english(method: &PlatformMethod) -> String {
     let ret_part = method.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
 
     format!("{}({}){}", method.english_name, params.join(", "), ret_part)
+}
+
+/// Formats global function signature in Russian.
+///
+/// Example: `НачатьТранзакцию([РежимБлокировок])`
+fn format_global_function_signature(function: &GlobalFunction) -> String {
+    let params: Vec<_> = function
+        .parameters
+        .iter()
+        .map(|p| {
+            let ty = p.param_type.as_deref().unwrap_or("Произвольный");
+            if p.is_optional {
+                format!("[{}]", ty)
+            } else {
+                format!("<{}>", ty)
+            }
+        })
+        .collect();
+
+    let ret_part = function.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+
+    format!("{}({}){}", function.name, params.join(", "), ret_part)
+}
+
+/// Formats global function signature in English.
+///
+/// Example: `BeginTransaction([DataLockControlMode])`
+fn format_global_function_signature_english(function: &GlobalFunction) -> String {
+    let params: Vec<_> = function
+        .parameters
+        .iter()
+        .map(|p| {
+            let ty = p.param_type.as_deref().unwrap_or("Arbitrary");
+            if p.is_optional {
+                format!("[{}]", ty)
+            } else {
+                format!("<{}>", ty)
+            }
+        })
+        .collect();
+
+    let ret_part = function.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+
+    format!("{}({}){}", function.english_name, params.join(", "), ret_part)
 }
 
 /// Formats context availability as human-readable string.
@@ -389,5 +504,36 @@ mod tests {
         let formatted = format_context_availability(&ctx);
 
         assert_eq!(formatted, "Недоступно");
+    }
+
+    #[test]
+    fn test_format_global_function_signature() {
+        use bsl_platform::PlatformDataInner;
+
+        // Skip if no platform data available
+        let data = PlatformDataInner::instance();
+        if data.all_global_functions().is_empty() {
+            println!("Skipping test: no global functions available");
+            return;
+        }
+
+        // Get НачатьТранзакцию function
+        let function = data.get_global_function("НачатьТранзакцию");
+        assert!(function.is_some(), "Should find НачатьТранзакцию");
+
+        let function = function.unwrap();
+        let sig = format_global_function_signature(function);
+
+        // Should contain function name and parentheses
+        assert!(sig.contains("НачатьТранзакцию"));
+        assert!(sig.contains('('));
+        assert!(sig.contains(')'));
+
+        println!("Russian signature: {}", sig);
+
+        // Test English signature
+        let sig_en = format_global_function_signature_english(function);
+        assert!(sig_en.contains("BeginTransaction"));
+        println!("English signature: {}", sig_en);
     }
 }
