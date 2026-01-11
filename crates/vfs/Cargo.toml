@@ -10,3 +10,5 @@ rustc-hash.workspace = true
 indexmap.workspace = true
 stdx.workspace = true
 tracing.workspace = true
+crossbeam-channel.workspace = true
+paths.workspace = true

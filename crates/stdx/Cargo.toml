@@ -7,3 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 itertools.workspace = true
+crossbeam-channel.workspace = true
+crossbeam-utils.workspace = true
+jod-thread.workspace = true
+libc.workspace = true

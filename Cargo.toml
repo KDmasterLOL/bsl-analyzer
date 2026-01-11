@@ -41,6 +41,8 @@ profile = { path = "crates/profile" }
 test-fixture = { path = "crates/test-fixture" }
 test-utils = { path = "crates/test-utils" }
 line-index = { path = "crates/line-index" }
+paths = { path = "crates/paths" }
+vfs-notify = { path = "crates/vfs-notify" }
 
 # Salsa for incremental computation
 salsa = { version = "0.25.2", features = ["rayon", "macros"] }
@@ -97,11 +99,16 @@ smallvec = "1.13"
 triomphe = { version = "0.1.14", default-features = false, features = ["std"] }
 rustc-hash = "2.0"
 crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+jod-thread = "0.1"
+libc = "0.2"
 regex = "1.10"
 unicase = "2.7"
 fixedbitset = "0.5"
 ordered-float = "5.1"
 walkdir = "2.4"
+notify = "6.1"
+camino = "1.1"
 
 # Testing
 expect-test = "1.4"

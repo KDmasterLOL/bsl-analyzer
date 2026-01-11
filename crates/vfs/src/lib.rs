@@ -13,6 +13,7 @@ use indexmap::IndexMap;
 use rustc_hash::{FxBuildHasher, FxHasher};
 
 pub mod file_set;
+pub mod loader;
 mod path_interner;
 
 pub use file_set::FileSet;
