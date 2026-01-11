@@ -309,6 +309,8 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
     let mut param_counter = 0;
     let mut method_param_names = Vec::new();
     let mut method_context_names = Vec::new();
+    let mut global_function_param_names: Vec<Option<String>> = Vec::new();
+    let mut global_function_context_names: Vec<Option<String>> = Vec::new();
 
     if let Some(methods) = data.get("methods").and_then(|v| v.as_array()) {
         for method in methods {
@@ -393,6 +395,90 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
         }
     }
 
+    // Generate global function parameter arrays and context availability constants
+    if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
+        for function in global_functions {
+            // Generate parameters array
+            if let Some(params) = function.get("parameters").and_then(|v| v.as_array()) {
+                if !params.is_empty() {
+                    let param_name = format!("GLOBAL_FUNC_PARAMS_{}", param_counter);
+                    param_counter += 1;
+
+                    code.push_str(&format!("const {}: &[RawMethodParam] = &[\n", param_name));
+                    for param in params {
+                        code.push_str("    RawMethodParam {\n");
+                        code.push_str(&format!(
+                            "        name: {:?},\n",
+                            param.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                        ));
+
+                        if let Some(param_type) = param.get("param_type").and_then(|v| v.as_str()) {
+                            code.push_str(&format!(
+                                "        param_type: Some({:?}),\n",
+                                param_type
+                            ));
+                        } else {
+                            code.push_str("        param_type: None,\n");
+                        }
+
+                        code.push_str(&format!(
+                            "        is_optional: {},\n",
+                            param.get("is_optional").and_then(|v| v.as_bool()).unwrap_or(false)
+                        ));
+                        code.push_str("    },\n");
+                    }
+                    code.push_str("];\n\n");
+
+                    global_function_param_names.push(Some(param_name));
+                } else {
+                    global_function_param_names.push(None);
+                }
+            } else {
+                global_function_param_names.push(None);
+            }
+
+            // Generate context availability
+            if let Some(context) = function.get("context").and_then(|v| v.as_object()) {
+                let context_name = format!("GLOBAL_FUNC_CONTEXT_{}", context_counter);
+                context_counter += 1;
+
+                code.push_str(&format!(
+                    "const {}: RawContextAvailability = RawContextAvailability {{\n",
+                    context_name
+                ));
+                code.push_str(&format!(
+                    "    thick_client: {},\n",
+                    context.get("thick_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    thin_client: {},\n",
+                    context.get("thin_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    web_client: {},\n",
+                    context.get("web_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    server: {},\n",
+                    context.get("server").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    mobile_client: {},\n",
+                    context.get("mobile_client").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str(&format!(
+                    "    external_connection: {},\n",
+                    context.get("external_connection").and_then(|v| v.as_bool()).unwrap_or(false)
+                ));
+                code.push_str("};\n\n");
+
+                global_function_context_names.push(Some(context_name));
+            } else {
+                global_function_context_names.push(None);
+            }
+        }
+    }
+
     // Generate platform types array
     if let Some(types) = data.get("types").and_then(|v| v.as_array()) {
         code.push_str("pub const PLATFORM_TYPES: &[RawPlatformType] = &[\n");
@@ -470,9 +556,57 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
 
             code.push_str("    },\n");
         }
+        code.push_str("];\n\n");
+    } else {
+        code.push_str("pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];\n\n");
+    }
+
+    // Generate platform global functions array
+    if let Some(global_functions) = data.get("global_functions").and_then(|v| v.as_array()) {
+        code.push_str("pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[\n");
+        for (idx, function) in global_functions.iter().enumerate() {
+            let id = function.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let english_name = function.get("english_name").and_then(|v| v.as_str()).unwrap_or("");
+
+            code.push_str("    RawGlobalFunction {\n");
+            code.push_str(&format!("        id: {},\n", id));
+            code.push_str(&format!("        name: {:?},\n", name));
+            code.push_str(&format!("        english_name: {:?},\n", english_name));
+
+            // return_type
+            if let Some(return_type) = function.get("return_type").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        return_type: Some({:?}),\n", return_type));
+            } else {
+                code.push_str("        return_type: None,\n");
+            }
+
+            // parameters
+            if let Some(param_name) = &global_function_param_names[idx] {
+                code.push_str(&format!("        parameters: {},\n", param_name));
+            } else {
+                code.push_str("        parameters: &[],\n");
+            }
+
+            // min_version
+            if let Some(min_version) = function.get("min_version").and_then(|v| v.as_str()) {
+                code.push_str(&format!("        min_version: Some({:?}),\n", min_version));
+            } else {
+                code.push_str("        min_version: None,\n");
+            }
+
+            // context
+            if let Some(context_name) = &global_function_context_names[idx] {
+                code.push_str(&format!("        context: Some({}),\n", context_name));
+            } else {
+                code.push_str("        context: None,\n");
+            }
+
+            code.push_str("    },\n");
+        }
         code.push_str("];\n");
     } else {
-        code.push_str("pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];\n");
+        code.push_str("pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];\n");
     }
 
     fs::write(output_path, code).expect("Failed to write generated.rs");
@@ -488,6 +622,7 @@ use super::types::*;
 
 pub const PLATFORM_TYPES: &[RawPlatformType] = &[];
 pub const PLATFORM_METHODS: &[RawPlatformMethod] = &[];
+pub const PLATFORM_GLOBAL_FUNCTIONS: &[RawGlobalFunction] = &[];
 "#;
 
     fs::write(output_path, code).expect("Failed to write generated.rs");

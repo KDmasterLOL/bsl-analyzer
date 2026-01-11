@@ -16,6 +16,7 @@ struct PlatformData {
     keywords: Vec<KeywordInfo>,
     types: Vec<TypeInfo>,
     methods: Vec<MethodInfo>,
+    global_functions: Vec<GlobalFunctionInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +63,28 @@ struct MethodInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     return_type: Option<String>,
     /// Method parameters
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    parameters: Vec<MethodParameter>,
+    /// Minimum version (e.g., "8.0")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    /// Context availability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<ContextAvailability>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GlobalFunctionInfo {
+    /// Function ID
+    id: u32,
+    /// Russian function name (e.g., "НачатьТранзакцию")
+    name: String,
+    /// English function name (e.g., "BeginTransaction")
+    english_name: String,
+    /// Return type (e.g., "Число", "Неопределено")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_type: Option<String>,
+    /// Function parameters
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     parameters: Vec<MethodParameter>,
     /// Minimum version (e.g., "8.0")
@@ -121,16 +144,18 @@ fn main() -> Result<()> {
     println!("Parsed {} keywords", keywords.len());
 
     // Parse platform types and methods from shcntx
-    let (types, methods) = parse_shcntx_data(&shcntx_dir)
+    let (types, methods, global_functions) = parse_shcntx_data(&shcntx_dir)
         .context("Failed to parse shcntx data")?;
 
-    println!("Parsed {} types and {} methods", types.len(), methods.len());
+    println!("Parsed {} types, {} methods, and {} global functions",
+             types.len(), methods.len(), global_functions.len());
 
     // Generate JSON
     let platform_data = PlatformData {
         keywords,
         types,
         methods,
+        global_functions,
     };
 
     let json = serde_json::to_string_pretty(&platform_data)
@@ -257,15 +282,24 @@ fn parse_st_snippet(content: &str) -> Result<(String, String, String, String)> {
     Ok((snippet_ru, snippet_en, russian_name, english_name))
 }
 
-/// Parses shcntx directory for platform types and methods.
-fn parse_shcntx_data(shcntx_dir: &Path) -> Result<(Vec<TypeInfo>, Vec<MethodInfo>)> {
+/// Parses shcntx directory for platform types, methods, and global functions.
+fn parse_shcntx_data(shcntx_dir: &Path) -> Result<(Vec<TypeInfo>, Vec<MethodInfo>, Vec<GlobalFunctionInfo>)> {
     let mut types = Vec::new();
     let mut methods = Vec::new();
+    let mut global_functions = Vec::new();
     let mut method_id_counter = 0u32;
+    let mut function_id_counter = 0u32;
 
     let objects_dir = shcntx_dir.join("objects");
     if !objects_dir.exists() {
-        return Ok((types, methods));
+        return Ok((types, methods, global_functions));
+    }
+
+    // Check for "Global context" directory
+    let global_context_dir = objects_dir.join("Global context");
+    if global_context_dir.exists() {
+        println!("Parsing Global context directory...");
+        global_functions = parse_global_functions(&global_context_dir, &mut function_id_counter)?;
     }
 
     // Iterate through catalog directories
@@ -277,11 +311,16 @@ fn parse_shcntx_data(shcntx_dir: &Path) -> Result<(Vec<TypeInfo>, Vec<MethodInfo
             continue;
         }
 
+        // Skip "Global context" directory (already processed)
+        if catalog_path.file_name().unwrap().to_string_lossy() == "Global context" {
+            continue;
+        }
+
         // Recursively parse this catalog
         parse_catalog_directory(&catalog_path, &mut types, &mut methods, &mut method_id_counter)?;
     }
 
-    Ok((types, methods))
+    Ok((types, methods, global_functions))
 }
 
 /// Recursively parses a catalog directory for types and methods.
@@ -439,6 +478,117 @@ fn parse_method_html(html_path: &Path, type_name: &str, method_id_counter: &mut 
                                 context,
                             }));
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Parses global functions from "Global context" directory.
+fn parse_global_functions(
+    global_context_dir: &Path,
+    function_id_counter: &mut u32,
+) -> Result<Vec<GlobalFunctionInfo>> {
+    let mut functions = Vec::new();
+
+    let methods_dir = global_context_dir.join("methods");
+    if !methods_dir.exists() {
+        return Ok(functions);
+    }
+
+    // Iterate through catalog directories in methods/
+    for catalog_entry in fs::read_dir(&methods_dir)? {
+        let catalog_entry = catalog_entry?;
+        let catalog_path = catalog_entry.path();
+
+        if !catalog_path.is_dir() {
+            continue;
+        }
+
+        let dir_name = catalog_path.file_name().unwrap().to_string_lossy().to_string();
+
+        // Only process catalog directories
+        if !dir_name.starts_with("catalog") {
+            continue;
+        }
+
+        // Parse all function HTML files in this catalog
+        for function_entry in fs::read_dir(&catalog_path)? {
+            let function_entry = function_entry?;
+            let function_path = function_entry.path();
+
+            // Only process .html files
+            if function_path.extension().and_then(|s| s.to_str()) != Some("html") {
+                continue;
+            }
+
+            if let Some(function_info) = parse_global_function_html(&function_path, function_id_counter)? {
+                functions.push(function_info);
+            }
+        }
+    }
+
+    Ok(functions)
+}
+
+/// Parses global function HTML file to extract function information.
+///
+/// Expected title format: "Глобальный контекст.НачатьТранзакцию (Global context.BeginTransaction)"
+fn parse_global_function_html(
+    html_path: &Path,
+    function_id_counter: &mut u32,
+) -> Result<Option<GlobalFunctionInfo>> {
+    let html_content = fs::read_to_string(html_path)?;
+
+    // Extract function names from <h1 class="V8SH_pagetitle">Глобальный контекст.Формат (Global context.Format)</h1>
+    if let Some(title_start) = html_content.find(r#"<h1 class="V8SH_pagetitle">"#) {
+        let after_title = &html_content[title_start + r#"<h1 class="V8SH_pagetitle">"#.len()..];
+        if let Some(title_end) = after_title.find("</h1>") {
+            let title = &after_title[..title_end];
+
+            // Parse "Глобальный контекст.Формат (Global context.Format)" format
+            // Extract function names (after "Глобальный контекст." and "Global context.")
+
+            // Find the dot after "Глобальный контекст"
+            if let Some(first_dot) = title.find('.') {
+                let after_first_dot = &title[first_dot + 1..];
+
+                // Russian function name (before space and opening paren)
+                let russian_function = if let Some(space_pos) = after_first_dot.find(" (") {
+                    after_first_dot[..space_pos].trim().to_string()
+                } else {
+                    return Ok(None);
+                };
+
+                // English function name (inside parentheses, after "Global context.")
+                if let Some(paren_start) = title.find("Global context.") {
+                    let after_global_context = &title[paren_start + "Global context.".len()..];
+                    if let Some(paren_end) = after_global_context.find(')') {
+                        let english_function = after_global_context[..paren_end].trim().to_string();
+
+                        let id = *function_id_counter;
+                        *function_id_counter += 1;
+
+                        // Extract additional information using scraper
+                        let return_type = scraper_parser::extract_return_type(&html_content);
+                        let parameters = scraper_parser::extract_parameters(&html_content);
+                        let min_version = scraper_parser::extract_version(&html_content);
+                        let context = scraper_parser::extract_context(&html_content);
+
+                        println!("  Found global function: {} / {}", russian_function, english_function);
+
+                        return Ok(Some(GlobalFunctionInfo {
+                            id,
+                            name: russian_function,
+                            english_name: english_function,
+                            return_type,
+                            parameters,
+                            min_version,
+                            context,
+                        }));
                     }
                 }
             }

@@ -86,6 +86,52 @@ impl From<&RawPlatformMethod> for PlatformMethod {
     }
 }
 
+/// Global function
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalFunction {
+    /// Function ID (unique identifier)
+    pub id: u32,
+    /// Russian function name (e.g., "НачатьТранзакцию")
+    pub name: SmolStr,
+    /// English function name (e.g., "BeginTransaction")
+    pub english_name: SmolStr,
+    /// Return type (e.g., "Строка")
+    pub return_type: Option<SmolStr>,
+    /// Function parameters
+    pub parameters: Vec<MethodParam>,
+    /// Minimum version (e.g., "8.0")
+    pub min_version: Option<SmolStr>,
+    /// Context availability
+    pub context: Option<ContextAvailability>,
+}
+
+/// Raw global function for const initialization (internal use only)
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawGlobalFunction {
+    pub id: u32,
+    pub name: &'static str,
+    pub english_name: &'static str,
+    pub return_type: Option<&'static str>,
+    pub parameters: &'static [RawMethodParam],
+    pub min_version: Option<&'static str>,
+    pub context: Option<RawContextAvailability>,
+}
+
+impl From<&RawGlobalFunction> for GlobalFunction {
+    fn from(raw: &RawGlobalFunction) -> Self {
+        Self {
+            id: raw.id,
+            name: raw.name.into(),
+            english_name: raw.english_name.into(),
+            return_type: raw.return_type.map(SmolStr::from),
+            parameters: raw.parameters.iter().map(MethodParam::from).collect(),
+            min_version: raw.min_version.map(SmolStr::from),
+            context: raw.context.as_ref().map(ContextAvailability::from),
+        }
+    }
+}
+
 /// Method parameter
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodParam {

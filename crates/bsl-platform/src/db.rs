@@ -4,7 +4,7 @@
 //! - Salsa tracked queries for IDE integration with caching
 //! - A singleton for standalone usage
 
-use crate::types::{PlatformMethod, PlatformType};
+use crate::types::{GlobalFunction, PlatformMethod, PlatformType};
 use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
@@ -15,7 +15,7 @@ static PLATFORM_DATA_SINGLETON: OnceCell<PlatformDataInner> = OnceCell::new();
 /// Internal platform data implementation.
 ///
 /// This struct is not public API. Access it through:
-/// - Salsa tracked queries (`platform_type_query`, `platform_method_query`)
+/// - Salsa tracked queries (`platform_type_query`, `platform_method_query`, `global_function_query`)
 /// - `PlatformDataInner::instance()` for standalone usage
 pub struct PlatformDataInner {
     /// Converted platform types (from raw const data)
@@ -26,6 +26,10 @@ pub struct PlatformDataInner {
     methods: Vec<PlatformMethod>,
     /// Methods indexed by (type_name, method_name)
     methods_by_name: FxHashMap<(SmolStr, SmolStr), usize>,
+    /// Converted global functions (from raw const data)
+    global_functions: Vec<GlobalFunction>,
+    /// Global functions indexed by lowercase name (both Russian and English)
+    global_functions_by_name: FxHashMap<SmolStr, usize>,
 }
 
 impl PlatformDataInner {
@@ -68,7 +72,31 @@ impl PlatformDataInner {
             methods_by_name.insert((type_key, en_key), idx);
         }
 
-        Self { types, types_by_name, methods, methods_by_name }
+        // Convert raw global functions to SmolStr-based functions
+        let global_functions: Vec<GlobalFunction> =
+            crate::generated::PLATFORM_GLOBAL_FUNCTIONS.iter().map(GlobalFunction::from).collect();
+
+        let mut global_functions_by_name = FxHashMap::default();
+
+        // Index global functions by name (both Russian and English)
+        for (idx, function) in global_functions.iter().enumerate() {
+            let ru_key: SmolStr = function.name.to_lowercase().into();
+            let en_key: SmolStr = function.english_name.to_lowercase().into();
+
+            // Index by Russian name
+            global_functions_by_name.insert(ru_key, idx);
+            // Index by English name
+            global_functions_by_name.insert(en_key, idx);
+        }
+
+        Self {
+            types,
+            types_by_name,
+            methods,
+            methods_by_name,
+            global_functions,
+            global_functions_by_name,
+        }
     }
 
     /// Get platform type by name (case-insensitive, bilingual).
@@ -100,6 +128,18 @@ impl PlatformDataInner {
     pub fn get_type_methods(&self, type_name: &str) -> Vec<&PlatformMethod> {
         let type_key: SmolStr = type_name.to_lowercase().into();
         self.methods.iter().filter(|m| m.type_name.to_lowercase() == type_key.as_str()).collect()
+    }
+
+    /// Get global function by name (case-insensitive, bilingual).
+    pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {
+        let key: SmolStr = name.to_lowercase().into();
+        let idx = *self.global_functions_by_name.get(&key)?;
+        self.global_functions.get(idx)
+    }
+
+    /// Get all global functions.
+    pub fn all_global_functions(&self) -> &[GlobalFunction] {
+        &self.global_functions
     }
 
     /// Get method documentation (only available with platform_docs feature).
@@ -370,5 +410,36 @@ mod tests {
                 assert_eq!(method.type_name.to_lowercase(), "строка");
             }
         }
+    }
+
+    #[test]
+    fn test_global_functions() {
+        let data = PlatformDataInner::instance();
+
+        if data.all_global_functions().is_empty() {
+            println!("Skipping test: no global functions available");
+            return;
+        }
+
+        println!("Total global functions: {}", data.all_global_functions().len());
+
+        // Test НачатьТранзакцию
+        let func = data.get_global_function("НачатьТранзакцию");
+        assert!(func.is_some(), "Should find НачатьТранзакцию");
+
+        let func = func.unwrap();
+        assert_eq!(func.name.as_str(), "НачатьТранзакцию");
+        assert_eq!(func.english_name.as_str(), "BeginTransaction");
+        println!("Found function: {} / {}", func.name, func.english_name);
+
+        // Test with English name
+        let func_en = data.get_global_function("BeginTransaction");
+        assert!(func_en.is_some(), "Should find by English name");
+        assert_eq!(func_en.unwrap().id, func.id);
+
+        // Test case insensitivity
+        let func_upper = data.get_global_function("НАЧАТЬТРАНЗАКЦИЮ");
+        assert!(func_upper.is_some(), "Should be case-insensitive");
+        assert_eq!(func_upper.unwrap().id, func.id);
     }
 }
