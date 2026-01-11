@@ -16,6 +16,16 @@ struct Cli {
     #[arg(long)]
     stdio: bool,
 
+    /// Enable hierarchical profiling (filter syntax: pattern@depth>threshold_ms)
+    /// Example: '*>10' profiles all operations taking >10ms
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
+    /// Enable JSON profiling output (filter syntax: pattern)
+    /// Example: '*' outputs timing for all spans as JSON to stderr
+    #[arg(long, global = true)]
+    profile_json: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -85,10 +95,16 @@ enum Commands {
 }
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let cli = Cli::parse();
+
     let log_file = env::var("BSL_LOG_FILE").ok().map(PathBuf::from);
 
-    // Setup logging first, before any errors can occur
-    if let Err(e) = setup_logging(log_file.clone()) {
+    // Setup logging with CLI options (CLI args override env vars)
+    let profile_filter = cli.profile.clone().or_else(|| env::var("BSL_PROFILE").ok());
+    let json_profile_filter =
+        cli.profile_json.clone().or_else(|| env::var("BSL_PROFILE_JSON").ok());
+
+    if let Err(e) = setup_logging(log_file.clone(), profile_filter, json_profile_filter) {
         // If logging setup fails, write to stderr as fallback
         eprintln!("Failed to setup logging: {}", e);
         // Try to write to log file directly
@@ -101,8 +117,6 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!("BSL Analyzer starting (pid: {})", std::process::id());
     tracing::info!("Working directory: {:?}", env::current_dir().ok());
     tracing::info!("Command line args: {:?}", env::args().collect::<Vec<_>>());
-
-    let cli = Cli::parse();
 
     // --stdio flag is same as running without arguments (LSP mode)
     if cli.stdio && cli.command.is_some() {
@@ -471,7 +485,11 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     Ok(())
 }
 
-fn setup_logging(log_file: Option<PathBuf>) -> anyhow::Result<()> {
+fn setup_logging(
+    log_file: Option<PathBuf>,
+    profile_filter: Option<String>,
+    json_profile_filter: Option<String>,
+) -> anyhow::Result<()> {
     use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
     let writer: BoxMakeWriter = match log_file {
@@ -482,8 +500,8 @@ fn setup_logging(log_file: Option<PathBuf>) -> anyhow::Result<()> {
     bsl_analyzer::tracing::Config {
         writer,
         filter: env::var("BSL_LOG").ok().unwrap_or_else(|| "warn".to_owned()),
-        profile_filter: env::var("BSL_PROFILE").ok(),
-        json_profile_filter: env::var("BSL_PROFILE_JSON").ok(),
+        profile_filter,
+        json_profile_filter,
     }
     .init()?;
 
