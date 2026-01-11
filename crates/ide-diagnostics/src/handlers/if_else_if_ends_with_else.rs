@@ -211,7 +211,7 @@ mod tests {
     /// Expected: 1 diagnostic at line 20, columns 0-9 (КонецЕсли)
     #[test]
     fn test_if_else_if_ends_with_else() {
-        let code = include_str!("../../tests/fixtures/IfElseIfEndsWithElseDiagnostic.bsl");
+        let code = include_str!("../../test_data/IfElseIfEndsWithElseDiagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
         let endif_diags: Vec<_> =

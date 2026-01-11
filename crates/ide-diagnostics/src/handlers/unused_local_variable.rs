@@ -822,7 +822,7 @@ mod tests {
     /// - We may detect additional unused variables Java doesn't flag
     #[test]
     fn test_java_fixture_full() {
-        let code = include_str!("../../tests/fixtures/UnusedLocalVariableDiagnostic.bsl");
+        let code = include_str!("../../test_data/UnusedLocalVariableDiagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
         let unused_diags: Vec<_> =

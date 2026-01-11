@@ -189,44 +189,17 @@ fn has_builtin_annotations(annotations: &[Annotation]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::*, DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        check_diagnostic_with_config(code, DiagnosticsConfig::default())
-    }
-
-    fn check_diagnostic_with_config(code: &str, config: DiagnosticsConfig) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(config);
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        range_to_line_col,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_non_export_in_api_region() {
-        let code = include_str!("../../tests/fixtures/NonExportMethodsInApiRegionDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let code = include_str!("../../test_data/NonExportMethodsInApiRegionDiagnostic.bsl");
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics, got {}", diagnostics.len());
 
@@ -240,16 +213,16 @@ mod tests {
 
     #[test]
     fn test_skip_annotated_methods() {
-        let code = include_str!("../../tests/fixtures/NonExportMethodsInApiRegionDiagnostic.bsl");
+        let code = include_str!("../../test_data/NonExportMethodsInApiRegionDiagnostic.bsl");
 
-        let mut config = crate::DiagnosticsConfig::default();
+        let mut config = DiagnosticsConfig::default();
         let mut params = serde_json::Map::new();
         params.insert("skipAnnotatedMethods".to_string(), serde_json::Value::Bool(true));
         config
             .parameters
             .insert(DiagnosticCode::NonExportMethodsInApiRegion, serde_json::Value::Object(params));
 
-        let diagnostics = check_diagnostic_with_config(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should skip line 72 (МетодВместоРасширения with &Вместо built-in annotation)
         // But NOT skip line 68 (АннотированныйМетод with &Кастом custom annotation)
@@ -273,7 +246,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -288,7 +261,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 }

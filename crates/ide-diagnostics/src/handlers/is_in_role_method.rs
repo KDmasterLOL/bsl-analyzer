@@ -319,71 +319,24 @@ fn create_diagnostic(range: TextRange) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for HIR-based diagnostics
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::VfsPath;
-
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        // Set file content
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/IsInRoleMethodDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 3, "Should match Java: 3 diagnostics");
 
         // Line 33 (0-indexed 32), cols 9-35: Direct РольДоступна() in if
-        assert_diagnostic_range(&file_content, &diagnostics[0], 32, 9, 35);
+        assert_diagnostic_range(code, &diagnostics[0], 32, 9, 35);
 
         // Line 39 (0-indexed 38), cols 9-23: Variable ДоступРазрешен in if
-        assert_diagnostic_range(&file_content, &diagnostics[1], 38, 9, 23);
+        assert_diagnostic_range(code, &diagnostics[1], 38, 9, 23);
 
         // Line 57 (0-indexed 56), cols 14-40: Direct РольДоступна() in elsif
-        assert_diagnostic_range(&file_content, &diagnostics[2], 56, 14, 40);
+        assert_diagnostic_range(code, &diagnostics[2], 56, 14, 40);
     }
 
     #[test]
@@ -394,7 +347,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -406,7 +359,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -419,7 +372,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -432,7 +385,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -446,7 +399,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Reassignment should clear tracking");
     }
 
@@ -459,7 +412,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -471,7 +424,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -483,7 +436,7 @@ Procedure Test()
     EndIf;
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -496,7 +449,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "PrivilegedMode variable should protect");
     }
 }

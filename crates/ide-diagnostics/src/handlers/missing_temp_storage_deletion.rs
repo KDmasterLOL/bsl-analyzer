@@ -381,55 +381,24 @@ fn get_call_expression_range(call_token: &SyntaxToken) -> TextRange {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::check;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
 
     #[test]
     fn test_missing_temp_storage_deletion() {
         let code = include_str!("../../test_data/MissingTempStorageDeletionDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Expect 4 diagnostics
         assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics");
 
         // 0-indexed lines and columns (character positions)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 24, 77); // Line 4
-        assert_diagnostic_range(&file_content, &diagnostics[1], 13, 24, 77); // Line 14
-        assert_diagnostic_range(&file_content, &diagnostics[2], 21, 24, 77); // Line 22
-        assert_diagnostic_range(&file_content, &diagnostics[3], 33, 24, 77); // Line 34
+        assert_diagnostic_range(code, &diagnostics[0], 3, 24, 77); // Line 4
+        assert_diagnostic_range(code, &diagnostics[1], 13, 24, 77); // Line 14
+        assert_diagnostic_range(code, &diagnostics[2], 21, 24, 77); // Line 22
+        assert_diagnostic_range(code, &diagnostics[3], 33, 24, 77); // Line 34
     }
 
     #[test]
@@ -441,7 +410,7 @@ mod tests {
     УдалитьИзВременногоХранилища(Результат.АдресРезультата);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Member access should match structurally");
     }
 
@@ -453,7 +422,7 @@ mod tests {
     УдалитьИзВременногоХранилища(ДругойАдрес);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Different parameters should trigger error");
     }
 
@@ -466,7 +435,7 @@ Procedure Test()
     DeleteFromTempStorage(Address);
 EndProcedure
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "English keywords should work");
     }
 
@@ -480,7 +449,7 @@ EndProcedure
     УдалитьИзВременногоХранилища(Адрес);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should not report when data is deleted");
     }
 
@@ -493,7 +462,7 @@ EndProcedure
     ОбработатьДанные(Данные);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should report when data is not deleted");
     }
 
@@ -507,7 +476,7 @@ EndProcedure
     Данные = ПолучитьИзВременногоХранилища(Адрес);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Delete before get should trigger error");
     }
 
@@ -522,7 +491,7 @@ EndProcedure
     удалитьизвременногохранилища(АДРЕС);
 КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             0,

@@ -210,7 +210,7 @@ EndProcedure"#;
     /// - Line 51, col 10 → line 57, col 37
     #[test]
     fn test_if_condition_complexity() {
-        let code = include_str!("../../tests/fixtures/IfConditionComplexityDiagnostic.bsl");
+        let code = include_str!("../../test_data/IfConditionComplexityDiagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
         let if_diags: Vec<_> = diagnostics

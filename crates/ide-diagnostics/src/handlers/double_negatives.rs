@@ -250,48 +250,20 @@ fn check_not_on_left_neq_optimized(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, fixture.files[&file_id].content.to_string())
-    }
+    use super::check;
+    use crate::test_utils::check_ast_diagnostic;
 
     #[test]
     fn test_no_double_negative() {
         let code = "А = Не Значение;";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_double_not_russian() {
         let code = "Б = Не (Не Значение);";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -300,7 +272,7 @@ mod tests {
         // Pattern `Не Отказ <> Ложь` without parentheses
         // NOW DETECTED after parser improvements (typed expression nodes)
         let code = "А = Не Отказ <> Ложь;";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Parser improvement: now detects this pattern!
         assert_eq!(diagnostics.len(), 1);
@@ -309,7 +281,7 @@ mod tests {
     #[test]
     fn test_not_wrapping_neq() {
         let code = "А = Не (Отказ <> Ложь);";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -317,7 +289,7 @@ mod tests {
     fn test_not_equal_not_detected() {
         // Uses = instead of <>, should NOT detect
         let code = "А = Не Отказ = Ложь;";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -325,7 +297,7 @@ mod tests {
     fn test_with_logical_operators_inside() {
         // AND inside NOT expression, should skip
         let code = "А = Не (А <> Неопределено и Б = 5);";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -333,26 +305,26 @@ mod tests {
     fn test_double_not_with_and_inside() {
         // AND inside double NOT, should skip
         let code = "Б = Не (Не Значение И ДругоеЗначение);";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/DoubleNegativesDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Debug: Print all detected diagnostics with line numbers and text
         eprintln!("\n=== Detected {} diagnostics ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
-            let start_offset = diag.range.start().into();
-            let end_offset = diag.range.end().into();
+            let start_offset: usize = diag.range.start().into();
+            let end_offset: usize = diag.range.end().into();
 
             // Calculate line number (1-indexed)
-            let line_num = file_content[..start_offset].lines().count();
+            let line_num = code[..start_offset].lines().count();
 
             // Extract the text
-            let text = &file_content[start_offset..end_offset];
+            let text = &code[start_offset..end_offset];
             eprintln!("#{}: Line {} - {:?}", i + 1, line_num, text);
         }
         eprintln!("=================================\n");

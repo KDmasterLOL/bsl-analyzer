@@ -136,56 +136,28 @@ fn create_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::{check, scan_consecutive_empty_lines};
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use line_index::LineIndex;
 
     #[test]
     fn test_empty_file() {
         let code = "";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_single_empty_line() {
         let code = "Процедура А()\n\nКонецПроцедуры";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_two_empty_lines() {
         let code = "Процедура А()\n\n\nКонецПроцедуры";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 2, 0);
     }
@@ -193,7 +165,7 @@ mod tests {
     #[test]
     fn test_spaces_only_line() {
         let code = "Процедура А()\n  \n  \nКонецПроцедуры";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 

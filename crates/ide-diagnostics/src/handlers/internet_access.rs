@@ -184,53 +184,14 @@ fn check_body_for_internet_access(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for HIR-based diagnostics
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::VfsPath;
-
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        // Set file content
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/InternetAccessDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // 13 internet access detections (matching Java test: hasSize(13))
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
@@ -285,7 +246,7 @@ mod tests {
     HTTP = Новый HTTPСоединение("server", 80);
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::InternetAccess);
     }
@@ -297,7 +258,7 @@ Procedure Test()
     HTTP = New HTTPConnection("server", 80);
 EndProcedure
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::InternetAccess);
     }
@@ -311,7 +272,7 @@ EndProcedure
     H3 = Новый HttpСоединение("s", 80);      // mixed
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 3);
     }
 
@@ -339,7 +300,7 @@ EndProcedure
     P2 = Новый InternetProxy();
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 18, "All constructor types detected");
     }
 
@@ -352,7 +313,7 @@ EndProcedure
     Т = Новый ТаблицаЗначений();
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Standard types should be ignored");
     }
 
@@ -363,7 +324,7 @@ EndProcedure
     Профиль = Новый("InternetMail");
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "String constructor detected");
     }
 
@@ -378,7 +339,7 @@ EndProcedure
     P = Новый ИнтернетПрокси();
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 4);
     }
 }

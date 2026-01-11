@@ -314,79 +314,28 @@ fn report_diagnostic_at_except(try_node: &syntax::SyntaxNode, diagnostics: &mut 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let config = DiagnosticsConfig::default();
-        check_diagnostic_with_config(code, config)
-    }
-
-    fn check_diagnostic_with_config(
-        code: &str,
-        config: DiagnosticsConfig,
-    ) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for HIR-based diagnostics
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::VfsPath;
-
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        // Set file content
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn ide_db::RootDatabase>;
-        let config = Rc::new(config);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_missing_code_try_catch_ex() {
         let code = include_str!("../../test_data/MissingCodeTryCatchExDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java expects 3 diagnostics at specific positions
         assert_eq!(diagnostics.len(), 3, "Should detect 3 empty exception handlers");
 
         // Line 23, columns 4-14 (Исключение keyword in Проц2)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 23, 4, 14);
+        assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
 
         // Line 32, columns 4-14 (Исключение with only comments in Функ1)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 32, 4, 14);
+        assert_diagnostic_range(code, &diagnostics[1], 32, 4, 14);
 
         // Line 50, columns 8-18 (nested Исключение in Проц3)
-        assert_diagnostic_range(&file_content, &diagnostics[2], 50, 8, 18);
+        assert_diagnostic_range(code, &diagnostics[2], 50, 8, 18);
     }
 
     #[test]
@@ -401,16 +350,16 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::MissingCodeTryCatchEx, serde_json::Value::Object(params));
 
-        let (diagnostics, file_content) = check_diagnostic_with_config(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 2 diagnostics (line 32 is now suppressed because it has comments)
         assert_eq!(diagnostics.len(), 2, "Should detect only 2 when comments count as code");
 
         // Line 23 still reported (no comments)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 23, 4, 14);
+        assert_diagnostic_range(code, &diagnostics[0], 23, 4, 14);
 
         // Line 50 still reported (no comments)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 50, 8, 18);
+        assert_diagnostic_range(code, &diagnostics[1], 50, 8, 18);
     }
 
     #[test]
@@ -425,7 +374,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Valid exception handler should not trigger diagnostic");
     }
 }

@@ -105,18 +105,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
-
-    /// Helper to run diagnostic on BSL code
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        check_sdbl_diagnostic(code, check)
-    }
+    use crate::{DiagnosticCode, Severity};
 
     #[test]
     fn test_full_outer_join_query_from_fixture() {
         let code = include_str!("../../test_data/FullOuterJoinQueryDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         // Should detect exactly 1 FULL OUTER JOIN in the fixture
         assert_eq!(diagnostics.len(), 1, "Expected 1 FULL OUTER JOIN");
@@ -142,7 +138,7 @@ Procedure Test()
     Query = "SELECT * FROM T1 FULL JOIN T2 ON T1.ID = T2.ID";
 EndProcedure
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "FULL JOIN should trigger");
     }
 
@@ -153,7 +149,7 @@ EndProcedure
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ПОЛНОЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "ПОЛНОЕ СОЕДИНЕНИЕ should trigger");
     }
 
@@ -169,7 +165,7 @@ EndProcedure
                    |        ЛЕВОЕ СОЕДИНЕНИЕ ПланПродаж";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "LEFT JOIN should not trigger");
     }
 
@@ -180,7 +176,7 @@ EndProcedure
     Query = "SELECT * FROM T1 ПОЛНОЕ СОЕДИНЕНИЕ T2 ПО T1.ID = T2.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "FULL JOIN without OUTER should trigger");
     }
 
@@ -191,7 +187,7 @@ EndProcedure
     Query = "SELECT * FROM T1 FULL OUTER JOIN T2 ON T1.A = T2.A FULL OUTER JOIN T3 ON T1.B = T3.B";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 2, "Should detect multiple FULL JOINs");
     }
 
@@ -205,7 +201,7 @@ EndProcedure
              |    ПО Товары.ID = Продажи.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN in multiline query");
     }
 
@@ -219,7 +215,7 @@ EndProcedure
              |    ПО Товары.ID = Продажи.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN even with comment");
     }
 
@@ -238,7 +234,7 @@ EndProcedure
                    |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect nested FULL JOIN");
     }
 
@@ -256,7 +252,7 @@ EndProcedure
                    |        ПО Товары.ID = ПланПродаж.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect FULL JOIN with functions in SELECT");
     }
 }

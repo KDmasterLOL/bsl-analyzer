@@ -398,52 +398,20 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::check;
+    use crate::test_utils::{check_ast_diagnostic_with_config, range_to_line_col};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MissingSpaceDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // DEBUG: Print all diagnostic positions
         eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(&file_content, diag.range);
+            let (start_line, start_col, _end_line, end_col) = range_to_line_col(code, diag.range);
             eprintln!(
                 "#{}: Line {}, Col {}-{}: {}",
                 i, start_line, start_col, end_col, diag.message
@@ -464,7 +432,7 @@ mod tests {
 КонецПроцедуры
         ";
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With default config (checkSpaceToRightOfUnary = false):
         // - Unary minus: no error
@@ -489,7 +457,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With checkSpaceToRightOfUnary = true, should detect missing space after unary minus
         assert_eq!(
@@ -509,7 +477,7 @@ mod tests {
 КонецПроцедуры
         ";
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect missing space before "Тогда"
         // The comma and left paren should not trigger errors
@@ -524,7 +492,7 @@ mod tests {
 КонецПроцедуры
         ";
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect missing space after first comma (before second comma)
         assert!(!diagnostics.is_empty(), "Should detect missing space between commas by default");
@@ -545,7 +513,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With allowMultipleCommas = true, consecutive commas are allowed
         // But still should check other spacing rules
@@ -566,7 +534,7 @@ mod tests {
 КонецПроцедуры
         ";
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect multiple keyword spacing errors
         assert!(!diagnostics.is_empty(), "Should detect keyword spacing errors");
@@ -582,7 +550,7 @@ mod tests {
 КонецПроцедуры
         ";
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect missing spaces around operators
         assert!(!diagnostics.is_empty(), "Should detect operator spacing errors");
@@ -604,7 +572,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect missing spaces around = and +
         assert!(!diagnostics.is_empty(), "Should detect custom symbol spacing");

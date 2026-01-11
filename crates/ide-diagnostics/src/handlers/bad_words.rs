@@ -162,43 +162,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig};
-    use ide_db::{base_db::SourceDatabase, RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        // RootDatabase trait object is not Send/Sync (Salsa is single-threaded).
-        // Arc is used for trait object lifetime management in tests, not thread-safety.
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic_with_config};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_bad_words_disabled() {
@@ -208,7 +174,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should NOT detect - empty pattern (disabled)
         assert_eq!(diagnostics.len(), 0);
@@ -229,7 +195,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should NOT detect - no matches
         assert_eq!(diagnostics.len(), 0);
@@ -250,7 +216,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect TODO
         assert_eq!(diagnostics.len(), 1);
@@ -275,7 +241,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect all 3 variations (case insensitive)
         assert_eq!(diagnostics.len(), 3);
@@ -298,7 +264,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect all 3 bad words
         assert_eq!(diagnostics.len(), 3);
@@ -320,7 +286,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should NOT detect in comment (findInComments = false)
         assert_eq!(diagnostics.len(), 0);
@@ -339,34 +305,34 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 6 diagnostics with badWords="лотус|шмотус", findInComments=true
         assert_eq!(diagnostics.len(), 6, "Should match Java implementation (6 diagnostics)");
 
         // Verify exact positions
         // Line 0, cols 42-47: лотус (in comment)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 42, 47);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 42, 47);
         assert!(diagnostics[0].message.contains("лотус"));
 
         // Line 0, cols 48-54: шмотус (in comment)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 0, 48, 54);
+        assert_diagnostic_range(code, &diagnostics[1], 0, 48, 54);
         assert!(diagnostics[1].message.contains("шмотус"));
 
         // Line 4, cols 4-9: Лотус (SDBL query)
-        assert_diagnostic_range(&file_content, &diagnostics[2], 4, 4, 9);
+        assert_diagnostic_range(code, &diagnostics[2], 4, 4, 9);
         assert!(diagnostics[2].message.contains("Лотус"));
 
         // Line 6, cols 24-29: Лотус (SDBL identifier)
-        assert_diagnostic_range(&file_content, &diagnostics[3], 6, 24, 29);
+        assert_diagnostic_range(code, &diagnostics[3], 6, 24, 29);
         assert!(diagnostics[3].message.contains("Лотус"));
 
         // Line 6, cols 34-39: Лотус (SDBL alias)
-        assert_diagnostic_range(&file_content, &diagnostics[4], 6, 34, 39);
+        assert_diagnostic_range(code, &diagnostics[4], 6, 34, 39);
         assert!(diagnostics[4].message.contains("Лотус"));
 
         // Line 8, cols 4-10: Шмотуса (variable name)
-        assert_diagnostic_range(&file_content, &diagnostics[5], 8, 4, 10);
+        assert_diagnostic_range(code, &diagnostics[5], 8, 4, 10);
         assert!(diagnostics[5].message.contains("Шмотус"));
     }
 
@@ -383,7 +349,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 4 diagnostics with badWords="лотус|шмотус", findInComments=false
         // (excludes first two from comment line)
@@ -395,15 +361,15 @@ mod tests {
 
         // Verify exact positions (same as above, but without first two)
         // Line 4, cols 4-9: Лотус (SDBL query)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 4, 4, 9);
+        assert_diagnostic_range(code, &diagnostics[0], 4, 4, 9);
 
         // Line 6, cols 24-29: Лотус (SDBL identifier)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 6, 24, 29);
+        assert_diagnostic_range(code, &diagnostics[1], 6, 24, 29);
 
         // Line 6, cols 34-39: Лотус (SDBL alias)
-        assert_diagnostic_range(&file_content, &diagnostics[2], 6, 34, 39);
+        assert_diagnostic_range(code, &diagnostics[2], 6, 34, 39);
 
         // Line 8, cols 4-10: Шмотуса (variable name)
-        assert_diagnostic_range(&file_content, &diagnostics[3], 8, 4, 10);
+        assert_diagnostic_range(code, &diagnostics[3], 8, 4, 10);
     }
 }

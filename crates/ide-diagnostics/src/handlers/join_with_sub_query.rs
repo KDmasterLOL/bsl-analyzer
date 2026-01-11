@@ -103,18 +103,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
-
-    /// Helper to run diagnostic on BSL code
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        check_sdbl_diagnostic(code, check)
-    }
+    use crate::{DiagnosticCode, Severity};
 
     #[test]
     fn test_join_with_sub_query_from_fixture() {
         let code = include_str!("../../test_data/JoinWithSubQueryDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 7, "Expected 7 JoinWithSubQuery diagnostics");
 
@@ -132,7 +128,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ * ИЗ Т2) КАК С ПО Т1.ID = С.ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "LEFT JOIN with subquery should trigger");
     }
 
@@ -143,7 +139,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Справочник.Товары ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Цены ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "JOIN with table should not trigger");
     }
 
@@ -154,7 +150,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ (ВЫБРАТЬ * ИЗ Т1) КАК С1, (ВЫБРАТЬ * ИЗ Т2) КАК С2";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Subqueries in FROM without JOINs should not trigger");
     }
 
@@ -165,7 +161,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ПРАВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ * ИЗ Т2) КАК С ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "RIGHT JOIN with subquery should trigger");
     }
 
@@ -176,7 +172,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ Т1 ВНУТРЕННЕЕ СОЕДИНЕНИЕ (ВЫБРАТЬ * ИЗ Т2) ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "INNER JOIN with subquery should trigger");
     }
 
@@ -187,7 +183,7 @@ mod tests {
     Запрос = "ВЫБРАТЬ * ИЗ (ВЫБРАТЬ * ИЗ Т1) КАК С ЛЕВОЕ СОЕДИНЕНИЕ Т2 ПО ID";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Subquery in FROM with JOINs should trigger");
     }
 
@@ -202,7 +198,7 @@ mod tests {
     |По СПр.Поле1 = Т.Ссылка";
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             2,

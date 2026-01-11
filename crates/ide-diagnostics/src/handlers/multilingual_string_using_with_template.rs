@@ -368,55 +368,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic_with_config};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_only_ru() {
         let code =
             include_str!("../../test_data/MultilingualStringUsingWithTemplateDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 2 diagnostics with default config (declaredLanguages = "ru")
         // hasRange(19, 38, 19, 89) and hasRange(24, 31, 24, 82)
         assert_eq!(diagnostics.len(), 2, "Must match Java (2 diagnostics for ru only)");
 
         // Verify exact positions (0-indexed)
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 19, 38, 19, 89);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 24, 31, 24, 82);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 19, 38, 19, 89);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 24, 31, 24, 82);
     }
 
     #[test]
@@ -431,7 +399,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 4 diagnostics with declaredLanguages = "ru,en"
         // hasRange(18, 38, 18, 89)
@@ -440,10 +408,10 @@ mod tests {
         // hasRange(24, 31, 24, 82)
         assert_eq!(diagnostics.len(), 4, "Must match Java (4 diagnostics for ru,en)");
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 18, 38, 18, 89);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 19, 38, 19, 89);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 21, 28, 21, 79);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[3], 24, 31, 24, 82);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 18, 38, 18, 89);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 19, 38, 19, 89);
+        assert_diagnostic_range_multiline(code, &diagnostics[2], 21, 28, 21, 79);
+        assert_diagnostic_range_multiline(code, &diagnostics[3], 24, 31, 24, 82);
     }
 
     #[test]
@@ -461,7 +429,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 0, "Should not detect when all languages present");
     }
 
@@ -481,7 +449,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 0, "Should not fire when NStr is not in StrTemplate");
     }
 }

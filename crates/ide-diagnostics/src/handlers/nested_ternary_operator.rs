@@ -162,47 +162,16 @@ fn make_diagnostic(node: &SyntaxNode) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range_multiline, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NestedTernaryOperatorDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -210,10 +179,10 @@ mod tests {
             "Should find exactly 4 diagnostics (matching Java implementation)"
         );
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 2, 13, 8, 14);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 13, 5, 13, 50);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 13, 73, 13, 104);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[3], 22, 12, 22, 71);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 8, 14);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 5, 13, 50);
+        assert_diagnostic_range_multiline(code, &diagnostics[2], 13, 73, 13, 104);
+        assert_diagnostic_range_multiline(code, &diagnostics[3], 22, 12, 22, 71);
     }
 
     #[test]
@@ -221,7 +190,7 @@ mod tests {
         let code = r#"
 Результат = ?(Условие, Истина, Ложь);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert!(diagnostics.is_empty(), "Simple ternary should not trigger diagnostic");
     }
 
@@ -230,7 +199,7 @@ mod tests {
         let code = r#"
 Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Nested ternary in assignment should trigger diagnostic");
     }
 
@@ -241,7 +210,7 @@ mod tests {
     Х = 1;
 КонецЕсли;
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Ternary in if condition should trigger diagnostic");
     }
 
@@ -254,7 +223,7 @@ mod tests {
     Х = 2;
 КонецЕсли;
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Ternary in elsif condition should trigger diagnostic");
     }
 
@@ -263,30 +232,10 @@ mod tests {
         let code = r#"
 Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 "#;
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::NestedTernaryOperator);
 
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert!(diagnostics.is_empty(), "Disabled diagnostic should not find anything");
     }
 }

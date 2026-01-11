@@ -159,7 +159,7 @@ EndFunction"#;
     /// Java test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
     #[test]
     fn test_fixture_function_should_have_return() {
-        let code = include_str!("../../tests/fixtures/FunctionShouldHaveReturnDiagnostic.bsl");
+        let code = include_str!("../../test_data/FunctionShouldHaveReturnDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
 
         let return_diags: Vec<_> = diagnostics

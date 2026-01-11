@@ -202,91 +202,16 @@ fn create_diagnostic_hir<DB: hir_def::DefDatabase + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig};
-    use ide_db::RootDatabase;
-    use std::sync::Arc;
-
-    /// Helper to run diagnostic on test code
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::SourceDatabase;
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
-
-    /// Helper to run diagnostic with custom config
-    fn check_diagnostic_with_config(
-        code: &str,
-        config: &DiagnosticsConfig,
-    ) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::SourceDatabase;
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_function_without_comments() {
         let code = "Функция Example()\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Non-export function without comments should not trigger");
     }
 
@@ -294,7 +219,7 @@ mod tests {
     fn test_export_function_without_comments() {
         // Export function without any comments should trigger diagnostic
         let code = "Функция Example() Экспорт\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -304,36 +229,36 @@ mod tests {
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Добавьте описание"));
         // Line 0, function name
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 15);
     }
 
     #[test]
     fn test_function_with_description_no_return() {
         let code = "// Описание вроде\nФункция Example() Экспорт\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Добавьте описание"));
         // Line 1 (0-indexed), "Example" at columns 8-15
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 15);
     }
 
     #[test]
     fn test_function_with_empty_return_block() {
         let code =
             "// Описание вроде\n// Возвращаемое значение:\nФункция Example() Экспорт\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Добавьте описание"));
         // Line 2, "Example"
-        assert_diagnostic_range(&file_content, &diagnostics[0], 2, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[0], 2, 8, 15);
     }
 
     #[test]
     fn test_function_with_complete_description() {
         let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка - строка типа\nФункция Example()\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Function with complete description should be OK");
     }
 
@@ -341,25 +266,25 @@ mod tests {
     fn test_procedure_with_return_description() {
         let code =
             "// Описание вроде\n// Возвращаемое значение:\n// Строка - строка типа\nПроцедура Example()\nКонецПроцедуры";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Удалите описание"));
         // Line 3, "Example"
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 10, 17);
+        assert_diagnostic_range(code, &diagnostics[0], 3, 10, 17);
     }
 
     #[test]
     fn test_procedure_without_return() {
         let code = "// Описание вроде\nПроцедура Example()\nКонецПроцедуры";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Procedure without return description should be OK");
     }
 
     #[test]
     fn test_function_with_type_no_description_default_mode() {
         let code = "// Описание вроде\n// Возвращаемое значение:\n// Строка\nФункция Example()\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // Default mode (allowShortDescriptionReturnValues=true): type name alone is OK
         assert_eq!(diagnostics.len(), 0);
     }
@@ -374,18 +299,18 @@ mod tests {
             serde_json::json!({"allowShortDescriptionReturnValues": false}),
         );
 
-        let (diagnostics, file_content) = check_diagnostic_with_config(code, &config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Необходимо добавить описание типов"));
         assert!(diagnostics[0].message.contains("Строка"));
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[0], 3, 8, 15);
     }
 
     #[test]
     fn test_function_with_hyperlink_reference() {
         let code = "// См. Пример7()\nФункция Example()\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // Hyperlink references bypass validation
         assert_eq!(diagnostics.len(), 0);
     }
@@ -400,18 +325,18 @@ mod tests {
             serde_json::json!({"allowShortDescriptionReturnValues": false}),
         );
 
-        let (diagnostics, file_content) = check_diagnostic_with_config(code, &config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Строка"));
         assert!(diagnostics[0].message.contains("булево"));
-        assert_diagnostic_range(&file_content, &diagnostics[0], 4, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[0], 4, 8, 15);
     }
 
     #[test]
     fn test_english_keywords() {
         let code =
             "// Description\n// Returns:\n// String - result\nFunction Example()\nEndFunction";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "English keywords should work");
     }
 
@@ -435,7 +360,7 @@ mod tests {
     Структура.Вставить("Рецептура", "/hs/recipe/changestatus");
     Возврат Структура;
 КонецФункции"#;
-        let (diagnostics, _file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Should have NO diagnostics - return value is properly documented
         assert_eq!(
@@ -449,7 +374,7 @@ mod tests {
     fn test_diagnostic_range_for_export_function() {
         // Test that diagnostic highlights only the function name, not "() Экспорт"
         let code = "// Описание\nФункция ПубликацииERP() Экспорт\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
 
@@ -457,7 +382,7 @@ mod tests {
         let range = diagnostics[0].range;
         let start: usize = range.start().into();
         let end: usize = range.end().into();
-        let highlighted_text = &file_content[start..end];
+        let highlighted_text = &code[start..end];
 
         eprintln!("Highlighted text: '{}'", highlighted_text);
         eprintln!("Expected: 'ПубликацииERP'");
@@ -477,7 +402,7 @@ mod tests {
         // are due to LSP server not converting byte positions to UTF-16 code units.
         // See: crates/bsl-analyzer/src/lsp/to_proto.rs:range() - needs to use position_utf16()
         let code = "// Описание\nФункция ЗапросВERP(СервисПубликации, ПараметрыЗапроса, Сессия = Неопределено) Экспорт\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1, "Should have one diagnostic");
 
@@ -485,7 +410,7 @@ mod tests {
         let range = diagnostics[0].range;
         let start: usize = range.start().into();
         let end: usize = range.end().into();
-        let highlighted_text = &file_content[start..end];
+        let highlighted_text = &code[start..end];
 
         // Should highlight only the function name
         assert_eq!(
@@ -499,7 +424,7 @@ mod tests {
     fn test_non_export_function_no_diagnostic() {
         // Non-export (private) functions don't require return value documentation
         let code = "// Описание\nФункция НастройкиПодключения(СервисПубликации)\n\tВозврат Новый Структура;\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -513,7 +438,7 @@ mod tests {
         // Export functions must have return value documentation
         let code =
             "// Описание\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -523,14 +448,14 @@ mod tests {
         assert_eq!(diagnostics[0].code, DiagnosticCode::MissingReturnedValueDescription);
         assert!(diagnostics[0].message.contains("Добавьте описание"));
         // Line 1, function name
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 8, 28);
+        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 28);
     }
 
     #[test]
     fn test_export_function_with_complete_docs_ok() {
         // Export function with complete documentation should pass
         let code = "// Описание\n// Возвращаемое значение:\n//  Структура - настройки подключения\nФункция НастройкиПодключения(СервисПубликации) Экспорт\n\tВозврат Новый Структура;\nКонецФункции";
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Export function with return docs should be OK");
     }
@@ -567,7 +492,7 @@ mod tests {
 Функция НовыйОтвет() Экспорт
     Возврат Новый Структура;
 КонецФункции"#;
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -581,7 +506,7 @@ mod tests {
             diagnostics[0].message
         );
         // Line 10, function name НовыйОтвет
-        assert_diagnostic_range(&file_content, &diagnostics[0], 10, 8, 18);
+        assert_diagnostic_range(code, &diagnostics[0], 10, 8, 18);
     }
 
     #[test]
@@ -598,7 +523,7 @@ mod tests {
 Функция НовыйОтвет() Экспорт
     Возврат Новый Структура;
 КонецФункции"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),

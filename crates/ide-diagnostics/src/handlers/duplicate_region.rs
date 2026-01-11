@@ -161,42 +161,13 @@ fn report_duplicates(regions: &[RegionInfo]) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        test_utils::assert_diagnostic_range_multiline, DiagnosticsConfig, DiagnosticsContext,
-    };
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/DuplicateRegionDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 3, "Should match Java: 3 diagnostics (lines 12, 16, 21)");
 
@@ -235,7 +206,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "No duplicates - should be 0 diagnostics");
     }
 
@@ -254,7 +225,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             0,
@@ -273,7 +244,7 @@ mod tests {
 #EndRegion
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -296,7 +267,7 @@ mod tests {
 #EndRegion
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -315,7 +286,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             0,
@@ -334,7 +305,7 @@ mod tests {
 #КонецОбласти
         "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Non-standard regions with exact match are duplicates");
     }
 }

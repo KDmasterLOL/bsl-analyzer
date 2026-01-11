@@ -212,55 +212,21 @@ fn report_duplicates(
 mod tests {
     use super::*;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/DuplicateStringLiteralDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 2, "Should match Java: 2 diagnostics (default config)");
 
         // Метод1: "Строка2" at line 2 (0-indexed: line 1), col 8-17
         // Note: Col 17 is the position AFTER the closing quote (half-open range)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 8, 17);
+        assert_diagnostic_range(code, &diagnostics[0], 1, 8, 17);
 
         // Метод2: "Строка22" at line 11 (0-indexed: line 10), col 9-19
         // Note: Col 19 is the position AFTER the closing quote (half-open range)
-        assert_diagnostic_range(&file_content, &diagnostics[1], 10, 9, 19);
+        assert_diagnostic_range(code, &diagnostics[1], 10, 9, 19);
 
         assert!(
             diagnostics[0].message.contains("Строка2"),
@@ -277,6 +243,11 @@ mod tests {
         let code = r#"Процедура Метод1()
     Ц = "Строка2";
 КонецПроцедуры"#;
+
+        use ide_db::base_db::{RootQueryDb, SourceDatabase};
+        use ide_db::RootDatabaseImpl;
+        use test_fixture::Fixture;
+
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().unwrap();
@@ -290,7 +261,6 @@ mod tests {
             }
         }
 
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let parse = db.parse(file_id);
         let root = parse.syntax_node();
 
@@ -319,7 +289,6 @@ mod tests {
         println!("STRING token range: {:?}", string_range);
 
         // Convert to line/col
-        use crate::test_utils::range_to_line_col;
         let (start_line, start_col, _end_line, end_col) =
             range_to_line_col(&file_content, literal.text_range());
         println!("LITERAL position: line {}, col {}-{}", start_line, start_col, end_col);
@@ -338,7 +307,7 @@ mod tests {
     В = "ОШИБКА";
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // caseSensitive=false (default): groups 3 together (3 > 2) → 1 diagnostic
         assert_eq!(diagnostics.len(), 1, "Should group case-insensitive strings");
     }
@@ -352,7 +321,7 @@ mod tests {
     В = "OK";
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // minTextLength=5 (including quotes), "OK" with quotes is 4 chars → filtered
         assert_eq!(diagnostics.len(), 0, "Should filter short strings");
     }
@@ -365,7 +334,7 @@ mod tests {
     Б = "Текст1";
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // allowedNumberCopies=2 (default): 2 occurrences is allowed, need > 2
         assert_eq!(diagnostics.len(), 0, "Should not report at threshold");
     }
@@ -379,7 +348,7 @@ mod tests {
     В = "Текст1";
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // allowedNumberCopies=2: 3 occurrences > 2 → 1 diagnostic
         assert_eq!(diagnostics.len(), 1, "Should report when exceeding threshold");
     }
@@ -397,7 +366,7 @@ mod tests {
     Г = "Текст1";
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // analyzeFile=false (default): each method is separate scope
         // Each method has 2 occurrences, threshold is >2 → 0 diagnostics
         assert_eq!(diagnostics.len(), 0, "Should not report across method scopes");

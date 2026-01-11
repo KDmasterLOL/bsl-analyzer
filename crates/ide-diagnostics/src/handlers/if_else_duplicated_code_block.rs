@@ -132,9 +132,7 @@ mod tests {
 
     #[test]
     fn test_comprehensive_fixture() {
-        let code = include_str!(
-            "if_else_duplicated_code_block/fixtures/IfElseDuplicatedCodeBlockDiagnostic.bsl"
-        );
+        let code = include_str!("../../test_data/IfElseDuplicatedCodeBlockDiagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics

@@ -67,35 +67,8 @@ fn has_api_regions(root: &syntax::SyntaxNode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
-
-        let mut db = RootDatabaseImpl::new();
-        db.set_file_text(file_id, code);
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::check_ast_diagnostic;
 
     #[test]
     fn test_with_export_and_api() {
@@ -105,7 +78,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -117,7 +90,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -129,7 +102,7 @@ mod tests {
 КонецПроцедуры
 #КонецОбласти
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -139,7 +112,7 @@ mod tests {
 #Область ПрограммныйИнтерфейс
 #КонецОбласти
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 }

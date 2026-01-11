@@ -104,32 +104,24 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::test_utils::check_sdbl_diagnostic;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        // Extract content from the code (remove fixture header if present)
-        let content = code.strip_prefix("//- /test.bsl\n").unwrap_or(code).to_string();
-        (diagnostics, content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
 
     #[test]
     fn test_from_java_fixture() {
         let code = include_str!("../../test_data/LogicalOrInTheWhereSectionOfQueryDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 
         // Java uses 1-based line numbers, test file shows:
         // Line 8 (Java) = Line 7 (Rust 0-indexed)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 7, 15, 18);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 19, 8, 11);
-        assert_diagnostic_range(&file_content, &diagnostics[2], 31, 38, 41);
-        assert_diagnostic_range(&file_content, &diagnostics[3], 43, 8, 11);
-        assert_diagnostic_range(&file_content, &diagnostics[4], 44, 36, 39);
-        assert_diagnostic_range(&file_content, &diagnostics[5], 58, 21, 24);
+        assert_diagnostic_range(code, &diagnostics[0], 7, 15, 18);
+        assert_diagnostic_range(code, &diagnostics[1], 19, 8, 11);
+        assert_diagnostic_range(code, &diagnostics[2], 31, 38, 41);
+        assert_diagnostic_range(code, &diagnostics[3], 43, 8, 11);
+        assert_diagnostic_range(code, &diagnostics[4], 44, 36, 39);
+        assert_diagnostic_range(code, &diagnostics[5], 58, 21, 24);
     }
 
     #[test]
@@ -138,7 +130,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT Name FROM Products WHERE Type = 1 OR Category = 2";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -148,7 +140,7 @@ mod tests {
 Процедура Тест()
     Запрос = "ВЫБРАТЬ * ИЗ Товары ГДЕ Цена = 100 ИЛИ Количество = 0";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -158,7 +150,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE A = 1 AND (B = 2 OR C = 3)";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect OR inside parentheses");
     }
 
@@ -168,7 +160,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE A = 1 OR B = 2 OR C = 3";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 2, "Should detect both OR operators");
     }
 
@@ -178,7 +170,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T1 WHERE ID IN (SELECT ID FROM T2 WHERE A = 1 OR B = 2)";
 КонецПроцедуры"#;
-        let (diagnostics, _content) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect OR in nested subquery WHERE");
     }
 
@@ -188,7 +180,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT CASE WHEN Flag OR True THEN 1 ELSE 0 END AS Result FROM T WHERE ID = 1";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should NOT detect OR in CASE expression (not in WHERE)");
     }
 
@@ -198,7 +190,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T1 LEFT JOIN T2 ON T1.A = T2.A OR T1.B = T2.B WHERE T1.ID = 1";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             0,
@@ -212,7 +204,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM Products";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should not fail on missing WHERE");
     }
 
@@ -226,7 +218,7 @@ mod tests {
     |   Таблица.Поле1 = 1
     |   И (Таблица.Поле2 = 2 ИЛИ Таблица.Поле3 = 3)";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect OR inside parentheses after AND");
     }
 
@@ -236,7 +228,7 @@ mod tests {
 Процедура Тест()
     Запрос = "SELECT * FROM T WHERE Field1 = &Param1 AND (Field2 = &Param2 OR Field3 = &Param3)";
 КонецПроцедуры"#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect OR with parameters");
     }
 }

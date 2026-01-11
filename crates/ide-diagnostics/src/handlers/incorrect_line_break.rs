@@ -275,36 +275,8 @@ impl<'a> IncorrectLineBreakChecker<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
 
     #[test]
     fn test_correct_line_breaks() {
@@ -316,7 +288,7 @@ mod tests {
     Возврат Результат;
 КонецФункции
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should not detect correct line breaks");
     }
 
@@ -328,7 +300,7 @@ mod tests {
         Value2;
 КонецФункции
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert!(!diagnostics.is_empty(), "Should detect '+' at line end");
     }
 
@@ -342,14 +314,14 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert!(!diagnostics.is_empty(), "Should detect 'ИЛИ' at line end");
     }
 
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("fixtures/IncorrectLineBreak.bsl");
-        let diagnostics = check_diagnostic(code);
+        let code = include_str!("../../test_data/IncorrectLineBreakDiagnostic.bsl");
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java expects 14 diagnostics with specific positions
         assert_eq!(diagnostics.len(), 14, "Should match Java implementation: 14 diagnostics");

@@ -60,8 +60,7 @@ mod tests {
 
     #[test]
     fn test_function_out_parameter() {
-        let code =
-            include_str!("function_out_parameter/fixtures/FunctionOutParameterDiagnostic.bsl");
+        let code = include_str!("../../test_data/FunctionOutParameterDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();

@@ -164,41 +164,11 @@ fn get_first_keyword_range(node: &SyntaxNode) -> TextRange {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_no_nesting() {
@@ -208,7 +178,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -223,7 +193,7 @@ mod tests {
     КонецЕсли;
 КонецЕсли;"#;
 
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "4 levels is the maximum allowed");
     }
 
@@ -240,19 +210,19 @@ mod tests {
     КонецЕсли;
 КонецЕсли;"#;
 
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "5 levels exceeds limit of 4");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NestedStatementsDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 2, "Should match Java implementation (2 diagnostics)");
 
-        assert_diagnostic_range(&file_content, &diagnostics[0], 35, 8, 12);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 50, 6, 10);
+        assert_diagnostic_range(code, &diagnostics[0], 35, 8, 12);
+        assert_diagnostic_range(code, &diagnostics[1], 50, 6, 10);
     }
 
     #[test]
@@ -263,9 +233,9 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::NestedStatements, serde_json::json!({ "maxAllowedLevel": 6 }));
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert_eq!(diagnostics.len(), 1, "With maxAllowedLevel=6, only 7-level nesting triggers");
-        assert_diagnostic_range(&file_content, &diagnostics[0], 50, 6, 10);
+        assert_diagnostic_range(code, &diagnostics[0], 50, 6, 10);
     }
 }

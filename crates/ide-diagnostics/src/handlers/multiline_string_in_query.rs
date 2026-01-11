@@ -112,20 +112,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::check_sdbl_diagnostic;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let diagnostics = check_sdbl_diagnostic(code, check);
-        // Extract content from the code (remove fixture header if present)
-        let content = code.strip_prefix("//- /test.bsl\n").unwrap_or(code).to_string();
-        (diagnostics, content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
+    use crate::{DiagnosticCode, Severity};
 
     #[test]
     fn test_multiline_string_in_query() {
         let code = include_str!("../../test_data/MultilineStringInQueryDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 3);
 
@@ -135,10 +129,8 @@ mod tests {
             assert_eq!(diag.message, "Check if multiline literal is correct");
         }
 
-        use crate::test_utils::assert_diagnostic_range_multiline;
-
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 5, 8, 6, 5);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 6, 30, 10, 10);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 15, 60, 16, 68);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 5, 8, 6, 5);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 6, 30, 10, 10);
+        assert_diagnostic_range_multiline(code, &diagnostics[2], 15, 60, 16, 68);
     }
 }

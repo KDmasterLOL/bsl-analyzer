@@ -748,47 +748,9 @@ fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::{FileSet, VfsPath};
-
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for module_bodies to work
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, fixture.files[&file_id].content.to_string())
-    }
+    use super::check;
+    use crate::test_utils::check_ast_diagnostic;
+    use crate::Diagnostic;
 
     #[test]
     fn test_identical_comparison() {
@@ -801,23 +763,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let parse = db.as_ref().parse(file_id);
-        let root = parse.syntax_node();
-
-        eprintln!("\n=== Parse tree ===");
-        for node in root.descendants().take(50) {
-            eprintln!("Node: {:?}", node.kind());
-        }
-        eprintln!("==================\n");
-
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic, found {}", diagnostics.len());
         assert!(diagnostics[0].message.contains("x"));
     }
@@ -833,7 +779,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -845,7 +791,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("-"));
     }
@@ -859,7 +805,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -871,7 +817,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -887,10 +833,9 @@ mod tests {
 
     #[test]
     fn test_comprehensive_fixture() {
-        let code =
-            include_str!("identical_expressions/test_fixtures/IdenticalExpressionsDiagnostic.bsl");
+        let code = include_str!("../../test_data/IdenticalExpressionsDiagnostic.bsl");
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java test expects 20 diagnostics
         // Check how many we find
@@ -901,7 +846,7 @@ mod tests {
         let mut found_lines: Vec<u32> = diagnostics
             .iter()
             .map(|d| {
-                let (line, _, _, _) = crate::test_utils::range_to_line_col(&file_content, d.range);
+                let (line, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
                 line
             })
             .collect();
@@ -917,8 +862,7 @@ mod tests {
             diagnostics
                 .iter()
                 .find(|d| {
-                    let (line, _, _, _) =
-                        crate::test_utils::range_to_line_col(&file_content, d.range);
+                    let (line, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
                     line == target_line
                 })
                 .unwrap_or_else(|| panic!("No diagnostic found on line {}", target_line))
@@ -926,54 +870,44 @@ mod tests {
 
         // Verify diagnostic positions match Java implementation using test_utils helpers
         let diag_line_4 = find_diag_on_line(4);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_4.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_4, 4, 9, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_4.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_4, 4, 9, end_col);
 
         let diag_line_6 = find_diag_on_line(6);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_6.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_6, 6, 16, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_6.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_6, 6, 16, end_col);
 
         let diag_line_11 = find_diag_on_line(11);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_11.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_11, 11, 13, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_11.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_11, 11, 13, end_col);
 
         let diag_line_13 = find_diag_on_line(13);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_13.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_13, 13, 9, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_13.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_13, 13, 9, end_col);
 
         let diag_line_15 = find_diag_on_line(15);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_15.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_15, 15, 16, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_15.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_15, 15, 16, end_col);
 
         let diag_line_19 = find_diag_on_line(19);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_19.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_19, 19, 9, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_19.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_19, 19, 9, end_col);
 
         let diag_line_21 = find_diag_on_line(21);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_21.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_21, 21, 16, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_21.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_21, 21, 16, end_col);
 
         let diag_line_25 = find_diag_on_line(25);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_25.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_25, 25, 9, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_25.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_25, 25, 9, end_col);
 
         let diag_line_27 = find_diag_on_line(27);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_27.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_27, 27, 16, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_27.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_27, 27, 16, end_col);
 
         let diag_line_31 = find_diag_on_line(31);
-        let (_, _, _, end_col) =
-            crate::test_utils::range_to_line_col(&file_content, diag_line_31.range);
-        crate::test_utils::assert_diagnostic_range(&file_content, diag_line_31, 31, 16, end_col);
+        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_31.range);
+        crate::test_utils::assert_diagnostic_range(code, diag_line_31, 31, 16, end_col);
 
         // Missing cases (will implement later):
         // - Lines 42, 48: Transitive comparisons (1 = А vs А = 1)
@@ -991,7 +925,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -1010,7 +944,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -1025,7 +959,7 @@ mod tests {
 С = (А = 1) И (Б = 1) ИЛИ (А = 1) И (Б = 1);
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should find duplicate AND sub-expression in OR chain");
     }
 
@@ -1035,7 +969,7 @@ mod tests {
 Б = А = 12 ИЛИ А = 13 ИЛИ А = 12;
 "#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -1052,12 +986,10 @@ mod tests {
 #КонецОбласти
 "#;
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Debug: print AST structure
-        let fixture = test_fixture::Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let _file_id = fixture.first_file().unwrap();
-        let parse = parser::parse(&file_content);
+        let parse = parser::parse(code);
         let root = parse.syntax_node();
 
         eprintln!("\nAST Structure:");
@@ -1074,7 +1006,7 @@ mod tests {
 
         eprintln!("\nPreprocessor test: found {} diagnostics", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
-            let (line, col, _, _) = crate::test_utils::range_to_line_col(&file_content, diag.range);
+            let (line, col, _, _) = crate::test_utils::range_to_line_col(code, diag.range);
             eprintln!("  #{}: line {}, col {}, msg: {}", i + 1, line, col, diag.message);
         }
 
@@ -1093,10 +1025,10 @@ mod tests {
  ИЛИ Истина;
 "#;
 
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Debug: print AST structure
-        let parse = parser::parse(&file_content);
+        let parse = parser::parse(code);
         let root = parse.syntax_node();
 
         eprintln!("\nAST Structure for #Если:");
@@ -1115,7 +1047,7 @@ mod tests {
 
         eprintln!("\nPreprocessor #Если test: found {} diagnostics", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
-            let (line, col, _, _) = crate::test_utils::range_to_line_col(&file_content, diag.range);
+            let (line, col, _, _) = crate::test_utils::range_to_line_col(code, diag.range);
             eprintln!("  #{}: line {}, col {}, msg: {}", i + 1, line, col, diag.message);
         }
 

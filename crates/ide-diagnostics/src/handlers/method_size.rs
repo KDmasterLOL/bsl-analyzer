@@ -166,53 +166,25 @@ fn get_method_name(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
+    use super::{calculate_method_size, check};
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
     use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
+    use ide_db::RootDatabaseImpl;
+    use syntax::SyntaxKind;
     use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MethodSizeDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 2, "Should match Java implementation (2 diagnostics)");
 
         // First diagnostic: Процедура201Строка at line 6 (0-indexed), cols 10-28
-        assert_diagnostic_range(&file_content, &diagnostics[0], 6, 10, 28);
+        assert_diagnostic_range(code, &diagnostics[0], 6, 10, 28);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MethodSize);
         assert_eq!(diagnostics[0].severity, Severity::Major);
         assert!(
@@ -227,39 +199,19 @@ mod tests {
         );
 
         // Second diagnostic: Функция201Строка at line 419 (0-indexed), cols 8-24
-        assert_diagnostic_range(&file_content, &diagnostics[1], 419, 8, 24);
+        assert_diagnostic_range(code, &diagnostics[1], 419, 8, 24);
         assert!(diagnostics[1].message.contains("Функция201Строка"));
     }
 
     #[test]
     fn test_configure_threshold_20() {
         let code = include_str!("../../test_data/MethodSizeDiagnostic.bsl");
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let mut config = DiagnosticsConfig::default();
         let mut params = serde_json::Map::new();
         params.insert("maxMethodSize".to_string(), serde_json::Value::Number(20.into()));
         config.parameters.insert(DiagnosticCode::MethodSize, serde_json::Value::Object(params));
 
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 4, "Should match Java: 4 diagnostics with threshold 20");
     }
 
@@ -269,7 +221,7 @@ mod tests {
 
 КонецПроцедуры"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Empty method should not trigger");
     }
 
@@ -277,7 +229,7 @@ mod tests {
     fn test_one_liner() {
         let code = r#"Функция Тест() КонецФункции"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "One-liner should not trigger");
     }
 
@@ -290,6 +242,9 @@ mod tests {
     В = 2;
 КонецПроцедуры"#;
 
+        use ide_db::base_db::RootQueryDb;
+        use ide_db::RootDatabase;
+
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().unwrap();
@@ -299,11 +254,9 @@ mod tests {
             db.set_file_text(*fid, &file.content);
         }
 
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let parse = db.parse(file_id);
         let root = parse.syntax_node();
-        let _file_text = db.file_text_input(file_id).text(db.as_ref());
-        let file_id_input = ide_db::base_db::FileIdInput::new(db.as_ref(), file_id);
+        let file_id_input = ide_db::base_db::FileIdInput::new(&db, file_id);
         let line_index = db.line_index(file_id_input);
 
         let procedure = root

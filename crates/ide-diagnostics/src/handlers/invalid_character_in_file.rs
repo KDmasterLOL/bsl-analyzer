@@ -116,41 +116,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/InvalidCharacterInFileDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java test expects 14 diagnostics
         assert_eq!(diagnostics.len(), 14, "Expected 14 diagnostics");
@@ -203,7 +175,7 @@ mod tests {
         let code = r#"
 А = "тест–тест";
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for en dash");
         assert_eq!(diagnostics[0].message, "Correct character to \"-\"", "Should use dash message");
     }
@@ -212,7 +184,7 @@ mod tests {
     fn test_nbsp_in_comment() {
         // Non-breaking space in comment (U+00A0 explicitly)
         let code = "// Тест\u{00A0}неразрывный\u{00A0}пробел";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for non-breaking space");
         assert_eq!(
             diagnostics[0].message, "Replace non-breaking space character with space character",
@@ -230,7 +202,7 @@ mod tests {
     // Комментарий - нормальный
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Regular hyphen and space should not trigger diagnostic");
     }
 
@@ -238,7 +210,7 @@ mod tests {
     fn test_all_illegal_dashes() {
         // Test all 6 types of illegal dashes (using explicit Unicode escapes)
         let code = "А = \"\u{AD}\";\nБ = \"\u{2012}\";\nВ = \"\u{2013}\";\nГ = \"\u{2014}\";\nД = \"\u{2015}\";\nЕ = \"\u{2212}\";";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics for all dash types");
 
         for diagnostic in &diagnostics {
@@ -253,7 +225,7 @@ mod tests {
     fn test_mixed_invalid_chars() {
         // Mix of dashes and spaces (using explicit Unicode escapes)
         let code = "А = \"\u{2013}\";\nБ = \"\u{00A0}\";";
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
 
         assert_eq!(diagnostics[0].message, "Correct character to \"-\"", "First should be dash");

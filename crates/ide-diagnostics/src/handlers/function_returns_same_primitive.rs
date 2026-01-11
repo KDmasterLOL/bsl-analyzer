@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn test_fixture() {
-        let code = include_str!("../../tests/fixtures/FunctionReturnsSamePrimitiveDiagnostic.bsl");
+        let code = include_str!("../../test_data/FunctionReturnsSamePrimitiveDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
             .iter()

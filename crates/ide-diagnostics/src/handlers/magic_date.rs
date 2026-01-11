@@ -506,41 +506,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::{
+        check, is_in_date_function_simple_assignment, is_in_property_assignment,
+        is_in_simple_assignment,
+    };
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
+    use syntax::SyntaxKind;
 
     #[test]
     fn test_line_31_detection() {
@@ -568,8 +542,7 @@ mod tests {
             }
         }
 
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         println!("Found {} diagnostics (expected 1)", diagnostics.len());
         assert_eq!(diagnostics.len(), 1, "Should detect the date inside nested function calls");
@@ -578,14 +551,13 @@ mod tests {
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MagicDateDiagnostic.bsl");
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // DEBUG: Print all diagnostic positions
         eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
             let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(&file_content, diag.range);
+                crate::test_utils::range_to_line_col(code, diag.range);
             eprintln!(
                 "#{}: Line {}, Col {}-{}: {}",
                 i, start_line, start_col, end_col, diag.message
@@ -599,23 +571,23 @@ mod tests {
 
         // Verify exact positions (from Java test, 0-indexed)
         // NOTE: Skipping Java's line 23 diagnostic (edge case with malformed date)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 11, 12, 22);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 12, 12, 28);
-        assert_diagnostic_range(&file_content, &diagnostics[2], 13, 7, 17);
-        assert_diagnostic_range(&file_content, &diagnostics[3], 14, 14, 24);
+        assert_diagnostic_range(code, &diagnostics[0], 11, 12, 22);
+        assert_diagnostic_range(code, &diagnostics[1], 12, 12, 28);
+        assert_diagnostic_range(code, &diagnostics[2], 13, 7, 17);
+        assert_diagnostic_range(code, &diagnostics[3], 14, 14, 24);
         // Skipped: Line 23, Col 7-26 - '0001-01why not?02' (lexer limitation)
-        assert_diagnostic_range(&file_content, &diagnostics[4], 25, 87, 97);
-        assert_diagnostic_range(&file_content, &diagnostics[5], 26, 80, 90);
-        assert_diagnostic_range(&file_content, &diagnostics[6], 26, 92, 102);
-        assert_diagnostic_range(&file_content, &diagnostics[7], 27, 22, 32);
-        assert_diagnostic_range(&file_content, &diagnostics[8], 28, 19, 35);
-        assert_diagnostic_range(&file_content, &diagnostics[9], 29, 10, 26);
-        assert_diagnostic_range(&file_content, &diagnostics[10], 29, 29, 39);
-        assert_diagnostic_range(&file_content, &diagnostics[11], 31, 64, 80);
-        assert_diagnostic_range(&file_content, &diagnostics[12], 58, 17, 27);
-        assert_diagnostic_range(&file_content, &diagnostics[13], 58, 29, 45);
-        assert_diagnostic_range(&file_content, &diagnostics[14], 58, 47, 63);
-        assert_diagnostic_range(&file_content, &diagnostics[15], 60, 19, 29);
+        assert_diagnostic_range(code, &diagnostics[4], 25, 87, 97);
+        assert_diagnostic_range(code, &diagnostics[5], 26, 80, 90);
+        assert_diagnostic_range(code, &diagnostics[6], 26, 92, 102);
+        assert_diagnostic_range(code, &diagnostics[7], 27, 22, 32);
+        assert_diagnostic_range(code, &diagnostics[8], 28, 19, 35);
+        assert_diagnostic_range(code, &diagnostics[9], 29, 10, 26);
+        assert_diagnostic_range(code, &diagnostics[10], 29, 29, 39);
+        assert_diagnostic_range(code, &diagnostics[11], 31, 64, 80);
+        assert_diagnostic_range(code, &diagnostics[12], 58, 17, 27);
+        assert_diagnostic_range(code, &diagnostics[13], 58, 29, 45);
+        assert_diagnostic_range(code, &diagnostics[14], 58, 47, 63);
+        assert_diagnostic_range(code, &diagnostics[15], 60, 19, 29);
     }
 
     #[test]
@@ -629,7 +601,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 9 diagnostics, but we expect 8 because we skip line 23 edge case
         // Java: 17 total - 8 authorized = 9
@@ -644,40 +616,35 @@ mod tests {
     #[test]
     fn test_single_quoted_date_in_expression() {
         let code = r"День = '00010102' + Шаг;";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Single-quoted date in expression should be detected");
     }
 
     #[test]
     fn test_date_function_simple_assignment_excluded() {
         let code = r#"День = Дата("00020101");"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Simple Дата() assignment should be excluded");
     }
 
     #[test]
     fn test_date_function_expression_detected() {
         let code = r#"День = Дата("00020101") + Шаг;"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Дата() in expression should be detected");
     }
 
     #[test]
     fn test_authorized_date_excluded() {
         let code = r#"День = '00010101';"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Authorized date should be excluded");
     }
 
     #[test]
     fn test_return_statement_excluded() {
         let code = r"Возврат '39991231235959';";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Date in return statement should be excluded");
     }
 }

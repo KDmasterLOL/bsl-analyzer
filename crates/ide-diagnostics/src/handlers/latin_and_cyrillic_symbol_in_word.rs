@@ -399,45 +399,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let config = Rc::new(config);
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/LatinAndCyrillicSymbolInWordDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java expects 15 diagnostics
         assert_eq!(diagnostics.len(), 15, "Expected 15 diagnostics");
@@ -447,27 +415,27 @@ mod tests {
         // methods, variables, annotations, other
 
         // Methods
-        assert_diagnostic_range(&file_content, &diagnostics[8], 30, 17, 26); // ПараметрY
-        assert_diagnostic_range(&file_content, &diagnostics[9], 30, 33, 39); // ParamЫ
-        assert_diagnostic_range(&file_content, &diagnostics[11], 34, 10, 19); // Tутошибка
+        assert_diagnostic_range(code, &diagnostics[8], 30, 17, 26); // ПараметрY
+        assert_diagnostic_range(code, &diagnostics[9], 30, 33, 39); // ParamЫ
+        assert_diagnostic_range(code, &diagnostics[11], 34, 10, 19); // Tутошибка
 
         // Variables
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 6, 10); // Namе
-        assert_diagnostic_range(&file_content, &diagnostics[1], 5, 20, 23); // сcс
-        assert_diagnostic_range(&file_content, &diagnostics[2], 12, 10, 12); // Аg
-        assert_diagnostic_range(&file_content, &diagnostics[3], 13, 10, 15); // _Аg09
-        assert_diagnostic_range(&file_content, &diagnostics[4], 16, 4, 23); // _3C_omRRRО_5__бъект
-        assert_diagnostic_range(&file_content, &diagnostics[12], 35, 10, 21); // ПеременнаяA (21 not 20!)
-        assert_diagnostic_range(&file_content, &diagnostics[13], 36, 10, 22); // ПеременнаяAМ
-        assert_diagnostic_range(&file_content, &diagnostics[14], 37, 10, 18); // XПириенс
+        assert_diagnostic_range(code, &diagnostics[0], 0, 6, 10); // Namе
+        assert_diagnostic_range(code, &diagnostics[1], 5, 20, 23); // сcс
+        assert_diagnostic_range(code, &diagnostics[2], 12, 10, 12); // Аg
+        assert_diagnostic_range(code, &diagnostics[3], 13, 10, 15); // _Аg09
+        assert_diagnostic_range(code, &diagnostics[4], 16, 4, 23); // _3C_omRRRО_5__бъект
+        assert_diagnostic_range(code, &diagnostics[12], 35, 10, 21); // ПеременнаяA (21 not 20!)
+        assert_diagnostic_range(code, &diagnostics[13], 36, 10, 22); // ПеременнаяAМ
+        assert_diagnostic_range(code, &diagnostics[14], 37, 10, 18); // XПириенс
 
         // Annotations
-        assert_diagnostic_range(&file_content, &diagnostics[5], 19, 1, 10); // Аnotation
-        assert_diagnostic_range(&file_content, &diagnostics[6], 23, 11, 19); // Парaметр
+        assert_diagnostic_range(code, &diagnostics[5], 19, 1, 10); // Аnotation
+        assert_diagnostic_range(code, &diagnostics[6], 23, 11, 19); // Парaметр
 
         // Other (region, goto)
-        assert_diagnostic_range(&file_content, &diagnostics[7], 27, 9, 15); // Regiоn
-        assert_diagnostic_range(&file_content, &diagnostics[10], 31, 13, 19); // Lаbell
+        assert_diagnostic_range(code, &diagnostics[7], 27, 9, 15); // Regiоn
+        assert_diagnostic_range(code, &diagnostics[10], 31, 13, 19); // Lаbell
     }
 
     #[test]
@@ -478,7 +446,7 @@ ComОбъект = 1;
 HTTPСоединение = 2;
 ЧтениеXML = 3;
 "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Default exclusion list should work");
     }
 
@@ -489,7 +457,7 @@ HTTPСоединение = 2;
 Перем А;
 Перем a;
 "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Single-character identifiers should be skipped");
     }
 
@@ -500,7 +468,7 @@ HTTPСоединение = 2;
 Процедура ПроцедураРусская()
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Pure Cyrillic should not be flagged");
     }
 
@@ -511,7 +479,7 @@ HTTPСоединение = 2;
 Процедура ProcedureEnglish()
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Pure Latin should not be flagged");
     }
 
@@ -525,7 +493,7 @@ HTTPСоединение = 2;
 Функция InNameРусский()
 КонецФункции
 "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Trailing pattern should be allowed by default");
     }
 }

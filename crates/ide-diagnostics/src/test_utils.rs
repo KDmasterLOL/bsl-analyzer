@@ -324,6 +324,87 @@ where
     check_fn(&ctx)
 }
 
+/// Run AST-based diagnostics on test code with default configuration.
+///
+/// Creates a database with the given code and runs the provided check function.
+/// Used for testing AST diagnostic handlers that don't use HIR.
+///
+/// # Arguments
+/// * `code` - The BSL source code to analyze
+/// * `check_fn` - Closure that runs diagnostics (typically `|ctx| handlers::some_handler::check(ctx)`)
+///
+/// # Returns
+/// Vector of diagnostics found in the code
+///
+/// # Example
+/// ```ignore
+/// let diagnostics = check_ast_diagnostic(r#"
+/// Процедура Тест()
+///     // some code
+/// КонецПроцедуры
+/// "#, super::check);
+/// ```
+pub fn check_ast_diagnostic<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    let config = crate::DiagnosticsConfig::default();
+    check_ast_diagnostic_with_config(code, config, check_fn)
+}
+
+/// Run AST-based diagnostics on test code with custom configuration.
+///
+/// # Arguments
+/// * `code` - The BSL source code to analyze
+/// * `config` - The diagnostics configuration to use
+/// * `check_fn` - Closure that runs diagnostics
+///
+/// # Returns
+/// Vector of diagnostics found in the code
+pub fn check_ast_diagnostic_with_config<F>(
+    code: &str,
+    config: crate::DiagnosticsConfig,
+    check_fn: F,
+) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
+{
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use std::rc::Rc;
+    use test_fixture::Fixture;
+    use vfs::VfsPath;
+
+    let fixture_text = format!("//- /test.bsl\n{}", code);
+    let fixture = Fixture::parse(&fixture_text);
+    let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+    let mut db = RootDatabaseImpl::new();
+
+    let mut file_set = vfs::FileSet::default();
+    file_set.insert(file_id, VfsPath::new("/test.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    for (fid, file) in &fixture.files {
+        db.set_file_text(*fid, &file.content);
+    }
+
+    let config = Rc::new(config);
+    let ctx = crate::DiagnosticsContext {
+        db: &db,
+        config: &config,
+        file_id,
+        workspace_root: None,
+        configuration_path: None,
+        configuration_path_input: None,
+        file_set: None,
+    };
+
+    check_fn(&ctx)
+}
+
 /// Convert a BodyDiagnostic to Diagnostic for testing.
 fn convert_hir_diagnostic(
     body_diag: &hir::BodyDiagnostic,

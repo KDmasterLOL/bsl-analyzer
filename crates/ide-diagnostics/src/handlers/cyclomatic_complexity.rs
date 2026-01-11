@@ -212,52 +212,12 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
     use ide_db::{RootDatabase, RootDatabaseImpl};
     use std::rc::Rc;
     use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for module_bodies to work
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
 
     #[test]
     fn test_simple_function() {
@@ -265,7 +225,7 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Complexity 1 should not trigger (threshold 20)");
     }
 
@@ -279,20 +239,20 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Complexity 3 should not trigger (threshold 20)");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CyclomaticComplexityDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Java expects 1 diagnostic for function СерверныйМодульМенеджера
         assert_eq!(diagnostics.len(), 1, "Should match Java (1 diagnostic)");
 
         // Java expects diagnostic at line 0, columns 8-32 (function name)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 8, 32);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 32);
 
         // Verify diagnostic details
         assert_eq!(diagnostics[0].code, DiagnosticCode::CyclomaticComplexity);

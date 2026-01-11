@@ -387,59 +387,27 @@ fn generate_diagnostics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{test_utils::assert_diagnostic_range, DiagnosticsConfig};
-    use ide_db::{base_db::SourceDatabase, RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_simple_long_line() {
         let code = r#"А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Line 0: 121 characters (exceeds 120), diagnostic ends at column 121
         assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(&file_content, &diagnostics[0], 0, 0, 121);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 0, 121);
     }
 
     #[test]
     fn test_utf8_characters() {
         // Each Cyrillic character is 2 bytes but counts as 1 character
         let code = "А = \"фф\";  // Short line";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Should not trigger (under 120 chars)
         assert_eq!(diagnostics.len(), 0);
@@ -448,8 +416,7 @@ mod tests {
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/LineLengthDiagnostic.bsl");
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // CRITICAL: Must match Java implementation (13 diagnostics)
         assert_eq!(
@@ -460,19 +427,19 @@ mod tests {
 
         // Verify exact positions (Java uses 0-based line numbers in hasRange)
         // Java lines: 4, 5, 8, 11, 12, 36, 40, 44, 47, 49, 52, 56, 60
-        assert_diagnostic_range(&file_content, &diagnostics[0], 4, 0, 121);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 5, 0, 122);
-        assert_diagnostic_range(&file_content, &diagnostics[2], 8, 0, 127);
-        assert_diagnostic_range(&file_content, &diagnostics[3], 11, 0, 136);
-        assert_diagnostic_range(&file_content, &diagnostics[4], 12, 0, 135);
-        assert_diagnostic_range(&file_content, &diagnostics[5], 36, 0, 127);
-        assert_diagnostic_range(&file_content, &diagnostics[6], 40, 0, 140);
-        assert_diagnostic_range(&file_content, &diagnostics[7], 44, 0, 143);
-        assert_diagnostic_range(&file_content, &diagnostics[8], 47, 0, 139);
-        assert_diagnostic_range(&file_content, &diagnostics[9], 49, 0, 138);
-        assert_diagnostic_range(&file_content, &diagnostics[10], 52, 0, 177);
-        assert_diagnostic_range(&file_content, &diagnostics[11], 56, 0, 162);
-        assert_diagnostic_range(&file_content, &diagnostics[12], 60, 0, 145);
+        assert_diagnostic_range(code, &diagnostics[0], 4, 0, 121);
+        assert_diagnostic_range(code, &diagnostics[1], 5, 0, 122);
+        assert_diagnostic_range(code, &diagnostics[2], 8, 0, 127);
+        assert_diagnostic_range(code, &diagnostics[3], 11, 0, 136);
+        assert_diagnostic_range(code, &diagnostics[4], 12, 0, 135);
+        assert_diagnostic_range(code, &diagnostics[5], 36, 0, 127);
+        assert_diagnostic_range(code, &diagnostics[6], 40, 0, 140);
+        assert_diagnostic_range(code, &diagnostics[7], 44, 0, 143);
+        assert_diagnostic_range(code, &diagnostics[8], 47, 0, 139);
+        assert_diagnostic_range(code, &diagnostics[9], 49, 0, 138);
+        assert_diagnostic_range(code, &diagnostics[10], 52, 0, 177);
+        assert_diagnostic_range(code, &diagnostics[11], 56, 0, 162);
+        assert_diagnostic_range(code, &diagnostics[12], 60, 0, 145);
     }
 
     #[test]
@@ -483,12 +450,12 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::LineLength, serde_json::json!({"maxLineLength": 119}));
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With maxLineLength=119, should have 14 diagnostics (adds line 3)
         assert_eq!(diagnostics.len(), 14);
         // First diagnostic should be on line 3 (0-based) with 120 characters
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 0, 120);
+        assert_diagnostic_range(code, &diagnostics[0], 3, 0, 120);
     }
 
     #[test]
@@ -500,7 +467,7 @@ mod tests {
             serde_json::json!({"checkMethodDescription": false}),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With checkMethodDescription=false, should have 11 diagnostics
         // (excludes method description comments on lines 55 and 59)
@@ -516,7 +483,7 @@ mod tests {
             serde_json::json!({"excludeTrailingComments": true}),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // With excludeTrailingComments=true, should have 12 diagnostics
         assert_eq!(diagnostics.len(), 12);

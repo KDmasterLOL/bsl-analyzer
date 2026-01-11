@@ -409,53 +409,22 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MagicNumberDiagnostic.bsl");
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // DEBUG: Print all diagnostic positions
         eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
             let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(&file_content, diag.range);
+                crate::test_utils::range_to_line_col(code, diag.range);
             eprintln!(
                 "#{}: Line {}, Col {}-{}: {}",
                 i, start_line, start_col, end_col, diag.message
@@ -469,16 +438,16 @@ mod tests {
         assert_eq!(diagnostics.len(), 10, "Must match Java (10 diagnostics)");
 
         // Verify exact positions (0-indexed) - all 10 diagnostics
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 18, 20); // 60
-        assert_diagnostic_range(&file_content, &diagnostics[1], 3, 23, 25); // 60
-        assert_diagnostic_range(&file_content, &diagnostics[2], 7, 31, 33); // 11
-        assert_diagnostic_range(&file_content, &diagnostics[3], 11, 20, 21); // 4
-        assert_diagnostic_range(&file_content, &diagnostics[4], 20, 21, 23); // 11
-        assert_diagnostic_range(&file_content, &diagnostics[5], 23, 24, 26); // 14
-        assert_diagnostic_range(&file_content, &diagnostics[6], 27, 34, 35); // 7
-        assert_diagnostic_range(&file_content, &diagnostics[7], 33, 37, 38); // 2
-        assert_diagnostic_range(&file_content, &diagnostics[8], 34, 37, 38); // 3
-        assert_diagnostic_range(&file_content, &diagnostics[9], 44, 12, 14); // 12
+        assert_diagnostic_range(code, &diagnostics[0], 3, 18, 20); // 60
+        assert_diagnostic_range(code, &diagnostics[1], 3, 23, 25); // 60
+        assert_diagnostic_range(code, &diagnostics[2], 7, 31, 33); // 11
+        assert_diagnostic_range(code, &diagnostics[3], 11, 20, 21); // 4
+        assert_diagnostic_range(code, &diagnostics[4], 20, 21, 23); // 11
+        assert_diagnostic_range(code, &diagnostics[5], 23, 24, 26); // 14
+        assert_diagnostic_range(code, &diagnostics[6], 27, 34, 35); // 7
+        assert_diagnostic_range(code, &diagnostics[7], 33, 37, 38); // 2
+        assert_diagnostic_range(code, &diagnostics[8], 34, 37, 38); // 3
+        assert_diagnostic_range(code, &diagnostics[9], 44, 12, 14); // 12
     }
 
     #[test]
@@ -491,8 +460,7 @@ mod tests {
     Г = 2;  // Not authorized
 КонецПроцедуры
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Should only detect 2 (not -1, 0, 1 which are authorized by default)
         assert_eq!(
@@ -509,8 +477,7 @@ mod tests {
     Индекс = Массив[20];
 КонецПроцедуры
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Should NOT detect with default config (allowMagicIndexes = true)
         assert_eq!(diagnostics.len(), 0, "Array index should be excluded");
@@ -532,7 +499,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect both with allowMagicIndexes = false
         assert_eq!(
@@ -553,12 +520,12 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         eprintln!("\n=== Found {} diagnostics with allowMagicIndexes=false ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
             let (start_line, start_col, _, end_col) =
-                crate::test_utils::range_to_line_col(&file_content, diag.range);
+                crate::test_utils::range_to_line_col(code, diag.range);
             eprintln!(
                 "#{}: Line {}, Col {}-{}: {}",
                 i, start_line, start_col, end_col, diag.message
@@ -574,8 +541,8 @@ mod tests {
         );
 
         // Verify the 2 extra diagnostics are the array indexes
-        assert_diagnostic_range(&file_content, &diagnostics[10], 49, 32, 34); // Line 50: Индекс1 = Коллекция.Индексы[20];
-        assert_diagnostic_range(&file_content, &diagnostics[11], 50, 18, 20); // Line 51: Метод(Индексы[21])
+        assert_diagnostic_range(code, &diagnostics[10], 49, 32, 34); // Line 50: Индекс1 = Коллекция.Индексы[20];
+        assert_diagnostic_range(code, &diagnostics[11], 50, 18, 20); // Line 51: Метод(Индексы[21])
     }
 
     #[test]
@@ -585,8 +552,7 @@ mod tests {
     Возврат 12;
 КонецФункции
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1, "Return statement should NOT be excluded");
     }
@@ -600,8 +566,7 @@ mod tests {
     НоваяСтруктура.Вставить("ДругаяПеременная", 42);
 КонецПроцедуры
         "#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Structure.Insert() values should be excluded");
     }
@@ -614,8 +579,7 @@ mod tests {
     Структура2 = Новый ФиксированнаяСтруктура("Значение", 200);
 КонецПроцедуры
         "#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Structure constructor values should be excluded");
     }
@@ -628,8 +592,7 @@ mod tests {
     СтруктураСПолями.МояПеременная = 20;
 КонецПроцедуры
         "#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Property assignment values should be excluded");
     }
@@ -640,8 +603,7 @@ mod tests {
 Процедура А(А = 566)
 КонецПроцедуры
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 0, "Default parameter values should be excluded");
     }
@@ -663,7 +625,7 @@ mod tests {
             }),
         );
 
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // All numbers are authorized
         assert_eq!(diagnostics.len(), 0, "All numbers should be authorized with custom config");
@@ -680,8 +642,7 @@ mod tests {
     ТаймаутСоединения = 30;
 КонецПроцедуры
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Все числа в простых присваиваниях - исключаются
         assert_eq!(
@@ -706,8 +667,7 @@ mod tests {
     Сессия.Вставить("ПериодПроверки", 15);
 КонецПроцедуры
         "#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Все числа в .Вставить() - исключаются
         assert_eq!(
@@ -727,8 +687,7 @@ mod tests {
     Настройки.Повторы = 5;
 КонецПроцедуры
         "#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Присваивания свойствам - исключаются
         assert_eq!(
@@ -750,8 +709,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
         ";
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Должны быть обнаружены: 60 (дважды), 25, 100, 12 = 5 диагностик
         assert!(

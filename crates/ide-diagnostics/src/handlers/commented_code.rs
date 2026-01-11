@@ -545,43 +545,8 @@ fn has_consecutive_identifiers(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
 
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
@@ -592,7 +557,7 @@ mod tests {
     Возврат А;
 КонецФункции"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Regular comments should not be flagged");
     }
 
@@ -604,28 +569,28 @@ mod tests {
     Возврат А;
 КонецФункции"#;
 
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect commented assignment");
     }
 
     #[test]
     fn test_comprehensive_compatibility() {
         let code = include_str!("../../test_data/CommentedCodeDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 12, "Should match Java implementation (12 diagnostics)");
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 0, 0, 6, 81);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 16, 4, 34, 16);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 36, 4, 42, 156);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[3], 44, 4, 49, 16);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[4], 59, 4, 65, 78);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[5], 76, 0, 80, 18);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[6], 82, 0, 82, 23);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[7], 84, 0, 85, 38);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[8], 117, 0, 118, 24);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[9], 203, 0, 203, 32);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[10], 244, 0, 264, 152);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[11], 268, 4, 270, 22);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 6, 81);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 16, 4, 34, 16);
+        assert_diagnostic_range_multiline(code, &diagnostics[2], 36, 4, 42, 156);
+        assert_diagnostic_range_multiline(code, &diagnostics[3], 44, 4, 49, 16);
+        assert_diagnostic_range_multiline(code, &diagnostics[4], 59, 4, 65, 78);
+        assert_diagnostic_range_multiline(code, &diagnostics[5], 76, 0, 80, 18);
+        assert_diagnostic_range_multiline(code, &diagnostics[6], 82, 0, 82, 23);
+        assert_diagnostic_range_multiline(code, &diagnostics[7], 84, 0, 85, 38);
+        assert_diagnostic_range_multiline(code, &diagnostics[8], 117, 0, 118, 24);
+        assert_diagnostic_range_multiline(code, &diagnostics[9], 203, 0, 203, 32);
+        assert_diagnostic_range_multiline(code, &diagnostics[10], 244, 0, 264, 152);
+        assert_diagnostic_range_multiline(code, &diagnostics[11], 268, 4, 270, 22);
     }
 }

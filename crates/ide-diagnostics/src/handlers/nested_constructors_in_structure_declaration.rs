@@ -133,62 +133,15 @@ fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::{FileSet, VfsPath};
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for HIR (module_bodies) to work
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
 
     #[test]
     fn test_no_diagnostic_for_empty_structure() {
         let code = r#"
 Результат = Новый Структура;
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -197,7 +150,7 @@ mod tests {
         let code = r#"
 А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -209,7 +162,7 @@ mod tests {
                              ТекстЗапроса,
                              Новый Структура);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -220,7 +173,7 @@ mod tests {
                              Новый Структура("Код, Наименование"),
                              10);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -231,7 +184,7 @@ Result = New Structure("GoodsData, Count",
                         New Structure("Code, Name"),
                         10);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -240,7 +193,7 @@ Result = New Structure("GoodsData, Count",
         let code = r#"
 Result = New Structure("field1, field2, field3", New Array(), New Array(), New Array());
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -248,7 +201,7 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
     fn test_comprehensive() {
         let code =
             include_str!("../../test_data/NestedConstructorsInStructureDeclarationDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -258,13 +211,13 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
 
         // Verify exact positions matching bsl-language-server (Java) implementation
         // Java uses 0-indexed lines
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 10, 16, 12, 36);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[1], 14, 16, 23, 62);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[2], 25, 16, 27, 96);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[3], 26, 32, 27, 95);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[4], 38, 13, 40, 31);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[5], 42, 13, 51, 50);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[6], 53, 13, 55, 79);
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[7], 54, 28, 55, 78);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);
+        assert_diagnostic_range_multiline(code, &diagnostics[1], 14, 16, 23, 62);
+        assert_diagnostic_range_multiline(code, &diagnostics[2], 25, 16, 27, 96);
+        assert_diagnostic_range_multiline(code, &diagnostics[3], 26, 32, 27, 95);
+        assert_diagnostic_range_multiline(code, &diagnostics[4], 38, 13, 40, 31);
+        assert_diagnostic_range_multiline(code, &diagnostics[5], 42, 13, 51, 50);
+        assert_diagnostic_range_multiline(code, &diagnostics[6], 53, 13, 55, 79);
+        assert_diagnostic_range_multiline(code, &diagnostics[7], 54, 28, 55, 78);
     }
 }

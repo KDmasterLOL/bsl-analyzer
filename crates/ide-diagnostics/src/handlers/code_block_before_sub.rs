@@ -200,51 +200,17 @@ fn is_executable_statement(node: &SyntaxNode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range_multiline;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let config = crate::DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CodeBlockBeforeSubDiagnostic.bsl");
-        let (diagnostics, file_content) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1, "Should match Java implementation (1 diagnostic)");
 
-        assert_diagnostic_range_multiline(&file_content, &diagnostics[0], 3, 0, 5, 13);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 3, 0, 5, 13);
     }
 
     #[test]
@@ -257,7 +223,7 @@ mod tests {
 
 Инициализация();
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Code after procedures should be valid");
     }
 
@@ -270,7 +236,7 @@ mod tests {
 Процедура Тест()
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Code before procedure should be flagged");
     }
 
@@ -282,7 +248,7 @@ mod tests {
 Процедура Тест()
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Only variables before procedure is valid");
     }
 
@@ -293,7 +259,7 @@ mod tests {
 МояПеременная = 10;
 Сообщить(МояПеременная);
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "No procedures means no error (nothing to be 'before')");
     }
 
@@ -309,7 +275,7 @@ mod tests {
     Счетчик = 1;
 КонецПроцедуры
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Multiple code blocks reported as ONE diagnostic");
     }
 
@@ -322,7 +288,7 @@ MyVariable = 10;
 Procedure Initialize()
 EndProcedure
 "#;
-        let (diagnostics, _) = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "English keywords should work");
     }
 }

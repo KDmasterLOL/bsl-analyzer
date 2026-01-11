@@ -121,41 +121,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
 
     #[test]
     fn test_space_at_start_comment() {
         let code = include_str!("../../test_data/SpaceAtStartCommentDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // TODO: Port CodeRecognizer from Java to skip commented code (lines 31-33)
         // Java expects 7 diagnostics, we get 10 because we don't skip commented code yet.
@@ -203,7 +175,7 @@ mod tests {
 // Строка ниже используется как разделитель
 /////////////////////////////////////////////////////////////////////////////////
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -215,7 +187,7 @@ mod tests {
 //(c) Это строка с копирайтом
 //© Это рамка копирайта
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -226,7 +198,7 @@ mod tests {
 Перем1 = 7; //И это плохой
                 //Так тоже плохо
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 3, "Expected 3 bad comments");
     }
 
@@ -248,7 +220,7 @@ mod tests {
     Результат = Новый Структура;
 КонецФункции
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // Should have 0 diagnostics - all empty comment lines (just //) are valid
         assert_eq!(
             diagnostics.len(),
@@ -267,7 +239,7 @@ mod tests {
 //
 // Хороший комментарий
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // All empty lines with // are good, last line with space is also good
         assert_eq!(
             diagnostics.len(),
@@ -283,7 +255,7 @@ mod tests {
 //Плохо
 //Тоже плохо
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             2,
@@ -301,7 +273,7 @@ mod tests {
     Текст = "Текст с // внутри строки"; // И еще
 КонецПроцедуры
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         eprintln!("Found {} diagnostics:", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
             eprintln!("  {}: {:?}", i, diag.message);
@@ -317,7 +289,7 @@ mod tests {
         let code = r#"
 URL = "http://example.com";
 "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "URL inside string should not trigger diagnostic");
     }
 }

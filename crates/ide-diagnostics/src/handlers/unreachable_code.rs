@@ -307,7 +307,7 @@ mod tests {
     /// 17. (182, 0, 9) - after Возврат (module-level)
     #[test]
     fn test_java_fixture() {
-        let code = include_str!("../../tests/fixtures/UnreachableCodeDiagnostic.bsl");
+        let code = include_str!("../../test_data/UnreachableCodeDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();

@@ -160,19 +160,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// Helper to run diagnostic on BSL code
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        use crate::test_utils::check_sdbl_diagnostic;
-
-        check_sdbl_diagnostic(code, check)
-    }
+    use super::check;
+    use crate::test_utils::check_sdbl_diagnostic;
 
     #[test]
     fn test_fields_from_joins_without_is_null() {
         let code = include_str!("../../test_data/FieldsFromJoinsWithoutIsNullDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         // Per-field diagnostic mode: one diagnostic per unprotected field reference.
         // Java implementation emitted 9 diagnostics (one per JOIN), but we now emit
@@ -207,7 +201,7 @@ mod tests {
         |    ИсполнениеРезультатыПроверки.ЗадачаПроверяющего = &ЗадачаПроверяющего");
 КонецПроцедуры"#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for unprotected field");
 

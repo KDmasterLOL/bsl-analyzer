@@ -262,41 +262,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic_with_config};
     use crate::DiagnosticsConfig;
-    use ide_db::{base_db::SourceDatabase, RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                // file.content это РЕАЛЬНОЕ содержимое файла БЕЗ fixture header
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
 
     #[test]
     fn test_canonical_keywords() {
@@ -308,7 +275,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // All keywords are canonical, should NOT detect
         assert_eq!(diagnostics.len(), 0);
@@ -321,7 +288,7 @@ mod tests {
 конецфункции"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect 3 non-canonical keywords
         assert!(diagnostics.len() >= 3);
@@ -335,7 +302,7 @@ mod tests {
 КОНЕЦФУНКЦИИ"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect 3 non-canonical keywords
         assert!(diagnostics.len() >= 3);
@@ -350,7 +317,7 @@ mod tests {
 КонецЕсЛи;"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect: ЕслИ, ТогдА, ИнаЧе, КонецЕсЛи
         assert!(diagnostics.len() >= 4);
@@ -376,7 +343,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Should detect only non-canonical lowercase forms
         // Note: lexer may not recognize mixed-case as keywords
@@ -397,7 +364,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Both "Каждого" and "каждого" are canonical, should NOT detect
         // Only other non-canonical would be detected
@@ -412,7 +379,7 @@ mod tests {
         let code = include_str!("../../test_data/CanonicalSpellingKeywordsDiagnostic.bsl");
 
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // CRITICAL: Must match Java implementation (127 diagnostics)
         assert_eq!(
@@ -423,37 +390,36 @@ mod tests {
 
         // Verify exact positions (spot-check key diagnostics)
         // Using Java test line/column numbers directly (0-based)
-        use crate::test_utils::assert_diagnostic_range;
 
         // ПерЕМ
-        assert_diagnostic_range(&file_content, &diagnostics[0], 8, 4, 9);
+        assert_diagnostic_range(code, &diagnostics[0], 8, 4, 9);
         // НЕОПРЕделено
-        assert_diagnostic_range(&file_content, &diagnostics[1], 15, 8, 20);
+        assert_diagnostic_range(code, &diagnostics[1], 15, 8, 20);
         // НоВый
-        assert_diagnostic_range(&file_content, &diagnostics[2], 16, 8, 13);
+        assert_diagnostic_range(code, &diagnostics[2], 16, 8, 13);
         // ЕслИ
-        assert_diagnostic_range(&file_content, &diagnostics[3], 35, 4, 8);
+        assert_diagnostic_range(code, &diagnostics[3], 35, 4, 8);
         // ТогдА
-        assert_diagnostic_range(&file_content, &diagnostics[4], 35, 20, 25);
+        assert_diagnostic_range(code, &diagnostics[4], 35, 20, 25);
         // ИначеЕСли
-        assert_diagnostic_range(&file_content, &diagnostics[5], 37, 4, 13);
+        assert_diagnostic_range(code, &diagnostics[5], 37, 4, 13);
         // ИнаЧе
-        assert_diagnostic_range(&file_content, &diagnostics[6], 41, 4, 9);
+        assert_diagnostic_range(code, &diagnostics[6], 41, 4, 9);
         // КонецЕсЛи
-        assert_diagnostic_range(&file_content, &diagnostics[7], 43, 4, 13);
+        assert_diagnostic_range(code, &diagnostics[7], 43, 4, 13);
         // ДЛЯ
-        assert_diagnostic_range(&file_content, &diagnostics[8], 73, 4, 7);
+        assert_diagnostic_range(code, &diagnostics[8], 73, 4, 7);
         // КАЖДОГО
-        assert_diagnostic_range(&file_content, &diagnostics[9], 73, 8, 15);
+        assert_diagnostic_range(code, &diagnostics[9], 73, 8, 15);
         // ИЗ
-        assert_diagnostic_range(&file_content, &diagnostics[10], 73, 29, 31);
+        assert_diagnostic_range(code, &diagnostics[10], 73, 29, 31);
         // ЦикЛ
-        assert_diagnostic_range(&file_content, &diagnostics[11], 73, 34, 38);
+        assert_diagnostic_range(code, &diagnostics[11], 73, 34, 38);
         // ПРервать
-        assert_diagnostic_range(&file_content, &diagnostics[12], 74, 7, 15);
+        assert_diagnostic_range(code, &diagnostics[12], 74, 7, 15);
         // ПРодолжить
-        assert_diagnostic_range(&file_content, &diagnostics[13], 75, 7, 17);
+        assert_diagnostic_range(code, &diagnostics[13], 75, 7, 17);
         // КонецЦиклА
-        assert_diagnostic_range(&file_content, &diagnostics[14], 76, 4, 14);
+        assert_diagnostic_range(code, &diagnostics[14], 76, 4, 14);
     }
 }

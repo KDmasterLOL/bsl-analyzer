@@ -526,60 +526,16 @@ fn has_multiline_param_hir(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        use ide_db::base_db::{SourceRoot, SourceRootId};
-        use vfs::{FileSet, VfsPath};
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for HIR (module_bodies) to work
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Arc::new(db) as Arc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
-        (diagnostics, file_content)
-    }
+    use super::check;
+    use crate::test_utils::{
+        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+    };
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_no_diagnostic_single_line() {
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -589,8 +545,7 @@ mod tests {
         // Even though the whole call spans multiple lines, each parameter is on its own single line
         let code = r#"Сообщить(СуммаСтрокой("77"),
     СуммаСтрокой(СуммаНДС(Перечисление.ВтораяСумма)));"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -601,8 +556,7 @@ mod tests {
     ВложенныйМетод(
         Параметр
     ));"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -615,8 +569,7 @@ mod tests {
     ,
     ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())
 );"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -631,7 +584,7 @@ mod tests {
             DiagnosticCode::NestedFunctionInParameters,
             serde_json::json!({"allowOneliner": false}),
         );
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         // Single-line call - no diagnostics even with allowOneliner=false
         assert_eq!(diagnostics.len(), 0);
     }
@@ -640,8 +593,7 @@ mod tests {
     fn test_no_diagnostic_empty_params() {
         let code = r#"А = Новый Массив;
 Сообщить();"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -651,8 +603,7 @@ mod tests {
         // each parameter is on a single line (even though call spans multiple lines)
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура(), Новый Структура("Параметр3", Новый Массив()));"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -663,8 +614,7 @@ mod tests {
             Новый Структура(
                 "ВложенныйПараметр"
             ));"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -672,16 +622,14 @@ mod tests {
     fn test_no_diagnostic_new_expr_without_init() {
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура, Новый Массив);"#;
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NestedFunctionInParametersDiagnostic.bsl");
-        let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // With default config (allowOneliner=true), should find 3 diagnostics
         // Matching Java test: lines 1, 3, 51 (0-indexed)
@@ -689,11 +637,11 @@ mod tests {
 
         // Verify exact positions matching Java implementation
         // Line 1 (0-indexed), columns 22-30: Вставить
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 22, 30);
+        assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30);
         // Line 3 (0-indexed), columns 11-19: Картинка
-        assert_diagnostic_range(&file_content, &diagnostics[1], 3, 11, 19);
+        assert_diagnostic_range(code, &diagnostics[1], 3, 11, 19);
         // Line 51 (0-indexed), columns 72-94: ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(&file_content, &diagnostics[2], 51, 72, 94);
+        assert_diagnostic_range(code, &diagnostics[2], 51, 72, 94);
     }
 
     #[test]
@@ -704,7 +652,7 @@ mod tests {
             DiagnosticCode::NestedFunctionInParameters,
             serde_json::json!({"allowOneliner": false}),
         );
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 12 diagnostics with allowOneliner=false
         // Now fully matching Java behavior (100%)
@@ -715,18 +663,18 @@ mod tests {
         );
 
         // Verify positions match Java implementation (100% match)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 1, 22, 30); // Вставить
-        assert_diagnostic_range(&file_content, &diagnostics[1], 3, 11, 19); // Картинка
-        assert_diagnostic_range(&file_content, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
-        assert_diagnostic_range(&file_content, &diagnostics[3], 8, 4, 12); // Сообщить
-        assert_diagnostic_range(&file_content, &diagnostics[4], 13, 35, 42); // Метод21
-        assert_diagnostic_range(&file_content, &diagnostics[5], 17, 22, 31); // Структура
-        assert_diagnostic_range(&file_content, &diagnostics[6], 36, 14, 19); // Новый (without type name)
-        assert_diagnostic_range(&file_content, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(&file_content, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(&file_content, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
-        assert_diagnostic_range(&file_content, &diagnostics[10], 69, 16, 21); // Метод
-        assert_diagnostic_range(&file_content, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
+        assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30); // Вставить
+        assert_diagnostic_range(code, &diagnostics[1], 3, 11, 19); // Картинка
+        assert_diagnostic_range(code, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
+        assert_diagnostic_range(code, &diagnostics[3], 8, 4, 12); // Сообщить
+        assert_diagnostic_range(code, &diagnostics[4], 13, 35, 42); // Метод21
+        assert_diagnostic_range(code, &diagnostics[5], 17, 22, 31); // Структура
+        assert_diagnostic_range(code, &diagnostics[6], 36, 14, 19); // Новый (without type name)
+        assert_diagnostic_range(code, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(code, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(code, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
+        assert_diagnostic_range(code, &diagnostics[10], 69, 16, 21); // Метод
+        assert_diagnostic_range(code, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
     }
 
     #[test]
@@ -740,7 +688,7 @@ mod tests {
                 "allowOneliner": false
             }),
         );
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Java expects 13 diagnostics with custom allowed methods + allowOneliner=false
         // Now fully matching Java behavior (100%)

@@ -116,13 +116,53 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         sdbl_utils::extract_string_content,
         test_utils::{assert_diagnostic_range, range_to_line_col},
-        DiagnosticsConfig,
+        Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity,
     };
     use parser::parse_sdbl;
+
+    /// Helper for debug tests that need to return file content along with diagnostics.
+    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use std::rc::Rc;
+        use test_fixture::Fixture;
+        use vfs::VfsPath;
+
+        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture = Fixture::parse(&fixture_text);
+        let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        let mut file_content = String::new();
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+            if *fid == file_id {
+                file_content = file.content.to_string();
+            }
+        }
+
+        let config = Rc::new(config);
+        let ctx = crate::DiagnosticsContext {
+            db: &db,
+            config: &config,
+            file_id,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        };
+
+        (super::check(&ctx), file_content)
+    }
     use syntax::ast::SdblQueryPackage;
     use syntax::SyntaxKind;
 
@@ -251,16 +291,6 @@ mod tests {
         let mut diagnostics = Vec::new();
         check_sdbl_query(query_text, &mut diagnostics);
         diagnostics
-    }
-
-    /// Helper to run diagnostic on BSL code
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        use crate::test_utils::check_sdbl_diagnostic_with_config;
-
-        let diagnostics = check_sdbl_diagnostic_with_config(code, config, check);
-        // Extract content from the code
-        let content = code.strip_prefix("//- /test.bsl\n").unwrap_or(code).to_string();
-        (diagnostics, content)
     }
 
     #[test]

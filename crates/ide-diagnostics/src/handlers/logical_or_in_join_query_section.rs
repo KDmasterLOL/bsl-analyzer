@@ -114,17 +114,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        check_sdbl_diagnostic(code, check)
-    }
+    use crate::{DiagnosticCode, Severity};
 
     #[test]
     fn test_logical_or_in_join_query_section() {
         let code = include_str!("../../test_data/LogicalOrInJoinQuerySectionDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
 
         // Expect exactly 8 diagnostics matching Java implementation
         assert_eq!(diagnostics.len(), 8, "Expected 8 diagnostics matching Java implementation");
@@ -159,7 +156,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Same field OR should not trigger diagnostic");
     }
 
@@ -171,7 +168,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "OR in SELECT should not trigger diagnostic");
     }
 
@@ -184,7 +181,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Multiple fields with OR should trigger diagnostic");
         assert_eq!(diagnostics[0].code, DiagnosticCode::LogicalOrInJoinQuerySection);
     }
@@ -199,7 +196,7 @@ Procedure Test()
 EndProcedure
 "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "English OR should trigger diagnostic");
     }
 
@@ -213,7 +210,7 @@ EndProcedure
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Russian ИЛИ should trigger diagnostic");
     }
 }

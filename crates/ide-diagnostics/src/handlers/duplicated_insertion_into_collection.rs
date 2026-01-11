@@ -896,44 +896,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{DiagnosticsConfig, DiagnosticsContext};
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-    use vfs::VfsPath;
-
-    fn check_diagnostic(code: &str) -> Vec<Diagnostic> {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for module_bodies to work
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
-    }
+    use super::check;
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
 
     #[test]
     fn test_simple_duplicate() {
@@ -944,10 +908,9 @@ mod tests {
     Массив.Добавить(Значение);
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect one duplicate");
 
-        use crate::test_utils::assert_diagnostic_range;
         assert_diagnostic_range(code, &diagnostics[0], 4, 4, 29);
     }
 
@@ -961,7 +924,7 @@ mod tests {
     Массив.Добавить(Х);
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should NOT detect duplicate after generation change");
     }
 
@@ -978,7 +941,7 @@ mod tests {
     Список.Добавить(Символы.ПС);
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Special literals should be allowed to duplicate");
     }
 
@@ -990,10 +953,9 @@ mod tests {
     Коллекция().Добавить(Значение);
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with global function");
 
-        use crate::test_utils::assert_diagnostic_range;
         assert_diagnostic_range(code, &diagnostics[0], 3, 4, 34);
     }
 
@@ -1012,7 +974,7 @@ mod tests {
     #КонецЕсли
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         // Current HIR limitation: 0 diagnostics (code inside preprocessor not analyzed)
         // Java expectation: 1 diagnostic (duplicate key across branches)
         assert_eq!(
@@ -1035,7 +997,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1052,10 +1014,9 @@ mod tests {
     Данные.Метод().Коллекция.Добавить("Значение");
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with method in collection path");
 
-        use crate::test_utils::assert_diagnostic_range;
         assert_diagnostic_range(code, &diagnostics[0], 4, 4, 49);
     }
 
@@ -1067,19 +1028,16 @@ mod tests {
     Данные.Метод().ОбщаяКоллекция.Добавить(Данные.Метод().ПовторнаяКоллекция);
 КонецПроцедуры
         "#;
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect duplicate with complex argument");
 
-        use crate::test_utils::assert_diagnostic_range;
         assert_diagnostic_range(code, &diagnostics[0], 3, 4, 77);
     }
 
     #[test]
     fn test_comprehensive() {
-        use crate::test_utils::assert_diagnostic_range;
-
         let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
-        let diagnostics = check_diagnostic(code);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Expected: 18 diagnostics (17 from Java that HIR can detect + 1 extra we find)
         // Note: Line 59 (inside #Если/#Иначе) is NOT detected because HIR does not analyze

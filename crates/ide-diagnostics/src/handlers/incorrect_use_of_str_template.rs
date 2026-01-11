@@ -456,7 +456,7 @@ mod tests {
         use std::sync::Arc;
         use test_fixture::Fixture;
 
-        let code = include_str!("fixtures/IncorrectUseOfStrTemplate.bsl");
+        let code = include_str!("../../test_data/IncorrectUseOfStrTemplateDiagnostic.bsl");
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().expect("fixture should have a file");

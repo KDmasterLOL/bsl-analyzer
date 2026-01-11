@@ -490,71 +490,40 @@ fn get_call_expression_range(call_token: &SyntaxToken) -> TextRange {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::check;
     use crate::test_utils::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::{RootQueryDb, SourceDatabase};
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-
-    fn check_diagnostic(code: &str, config: DiagnosticsConfig) -> (Vec<Diagnostic>, String) {
-        let fixture = Fixture::parse(&format!("//- /test.bsl\n{}", code));
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
-        }
-
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        (check(&ctx), file_content)
-    }
+    use crate::{DiagnosticCode, DiagnosticsConfig};
 
     #[test]
     fn test_default_config() {
         let code = include_str!("../../test_data/MissingTemporaryFileDeletionDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Expect 7 diagnostics with default configuration
         assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics with default config");
 
         // Verify exact positions match Java implementation
         // Line 6: ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла("xml")
-        assert_diagnostic_range(&file_content, &diagnostics[0], 6, 29, 62);
+        assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
 
         // Line 19: ИмяПромежуточногоФайла4 = ПолучитьИмяВременногоФайла("xml")
-        assert_diagnostic_range(&file_content, &diagnostics[1], 19, 30, 63);
+        assert_diagnostic_range(code, &diagnostics[1], 19, 30, 63);
 
         // Line 25: ИмяПромежуточногоФайла5 = ПолучитьИмяВременногоФайла("xml")
-        assert_diagnostic_range(&file_content, &diagnostics[2], 25, 30, 63);
+        assert_diagnostic_range(code, &diagnostics[2], 25, 30, 63);
 
         // Line 45: ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла("xml")
-        assert_diagnostic_range(&file_content, &diagnostics[3], 45, 29, 62);
+        assert_diagnostic_range(code, &diagnostics[3], 45, 29, 62);
 
         // Line 49: ИмяПромежуточногоФайла2 = ПолучитьИмяВременногоФайла("txt")
-        assert_diagnostic_range(&file_content, &diagnostics[4], 49, 30, 63);
+        assert_diagnostic_range(code, &diagnostics[4], 49, 30, 63);
 
         // Line 64: ИмяПромежуточногоФайла3 = ПолучитьИмяВременногоФайла()
-        assert_diagnostic_range(&file_content, &diagnostics[5], 64, 30, 58);
+        assert_diagnostic_range(code, &diagnostics[5], 64, 30, 58);
 
         // Line 71: ИмяФайлаНаДиске = ПолучитьИмяВременногоФайла()
-        assert_diagnostic_range(&file_content, &diagnostics[6], 71, 26, 54);
+        assert_diagnostic_range(code, &diagnostics[6], 71, 26, 54);
     }
 
     #[test]
@@ -569,17 +538,17 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Expect 5 diagnostics with extended configuration
         assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics with extended config");
 
         // Lines 19 and 45 should no longer trigger (custom methods recognized)
-        assert_diagnostic_range(&file_content, &diagnostics[0], 6, 29, 62);
-        assert_diagnostic_range(&file_content, &diagnostics[1], 25, 30, 63);
-        assert_diagnostic_range(&file_content, &diagnostics[2], 49, 30, 63);
-        assert_diagnostic_range(&file_content, &diagnostics[3], 64, 30, 58);
-        assert_diagnostic_range(&file_content, &diagnostics[4], 71, 26, 54);
+        assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
+        assert_diagnostic_range(code, &diagnostics[1], 25, 30, 63);
+        assert_diagnostic_range(code, &diagnostics[2], 49, 30, 63);
+        assert_diagnostic_range(code, &diagnostics[3], 64, 30, 58);
+        assert_diagnostic_range(code, &diagnostics[4], 71, 26, 54);
     }
 
     #[test]
@@ -594,12 +563,12 @@ mod tests {
             }),
         );
 
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Debug: print all diagnostics
         println!("Got {} diagnostics:", diagnostics.len());
         for (i, d) in diagnostics.iter().enumerate() {
-            let (line, start_col, _end_line, end_col) = range_to_line_col(&file_content, d.range);
+            let (line, start_col, _end_line, end_col) = range_to_line_col(code, d.range);
             println!("  {}: line {} col {}..{}", i + 1, line + 1, start_col, end_col);
         }
 
@@ -615,7 +584,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let config = DiagnosticsConfig::default();
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert_eq!(diagnostics.len(), 1);
         let d = &diagnostics[0];
@@ -623,7 +592,7 @@ mod tests {
         println!("Range start: {:?}, end: {:?}", d.range.start(), d.range.end());
 
         // Find the line
-        let lines: Vec<&str> = file_content.lines().collect();
+        let lines: Vec<&str> = code.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             if line.contains("ПолучитьИмяВременногоФайла") {
                 println!("Line {}: {}", i + 1, line);
@@ -634,6 +603,11 @@ mod tests {
 
     #[test]
     fn test_debug() {
+        use ide_db::base_db::{RootQueryDb, SourceDatabase};
+        use ide_db::{RootDatabase, RootDatabaseImpl};
+        use std::rc::Rc;
+        use test_fixture::Fixture;
+
         // Debug test to see what tokens we're getting
         let code = r#"
             Процедура Тест()
@@ -663,7 +637,7 @@ mod tests {
         // Now run the actual diagnostic
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
+        let ctx = crate::DiagnosticsContext {
             db: db.as_ref(),
             config: &config,
             file_id,
@@ -673,7 +647,7 @@ mod tests {
             file_set: None,
         };
 
-        let diagnostics = check(&ctx);
+        let diagnostics = super::check(&ctx);
         println!("\n=== DIAGNOSTICS ===");
         println!("Found {} diagnostics", diagnostics.len());
         for diag in &diagnostics {
@@ -694,7 +668,7 @@ mod tests {
                 ПолучитьИмяВременногоФайла("xml");  // standalone call
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
             diagnostics.len(),
@@ -713,7 +687,7 @@ mod tests {
                 Файл = Новый Файл(ПолучитьИмяВременногоФайла("xml"));
             КонецПроцедуры
         "#;
-        let (diagnostics2, _) = check_diagnostic(code2, DiagnosticsConfig::default());
+        let diagnostics2 = check_ast_diagnostic(code2, check);
 
         // This creates ONE diagnostic for the GetTempFileName call (inline usage)
         // Note: "Файл" is assigned but GetTempFileName itself has no assignment
@@ -746,7 +720,7 @@ mod tests {
                 ПереместитьФайл(Файл4, "новое_имя.xml");
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
 
         // Expected errors:
         // - Файл2 (no deletion)
@@ -783,7 +757,7 @@ mod tests {
                 УдалитьФайлы(ИмяФайла);
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should not report when file is deleted");
 
         // Invalid: file not deleted
@@ -792,7 +766,7 @@ mod tests {
                 ИмяФайла = ПолучитьИмяВременногоФайла("xml");
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should report when file is not deleted");
 
         // Valid: file moved
@@ -802,7 +776,7 @@ mod tests {
                 ПереместитьФайл(ИмяФайла, "новое_имя.xml");
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should not report when file is moved");
     }
 
@@ -817,7 +791,7 @@ mod tests {
                 УдалитьФайлы(Файл3);
             КонецПроцедуры
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         // Only Файл1 and Файл2 should trigger (Файл3 is deleted)
         assert_eq!(diagnostics.len(), 2, "Should handle case-insensitive GetTempFileName");
     }
@@ -830,7 +804,7 @@ mod tests {
                 TempFile = GetTempFileName("xml");
             EndProcedure
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Should detect English GetTempFileName");
 
         // Test English deletion method
@@ -840,7 +814,7 @@ mod tests {
                 DeleteFiles(TempFile);
             EndProcedure
         "#;
-        let (diagnostics, _) = check_diagnostic(code, DiagnosticsConfig::default());
+        let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Should recognize English DeleteFiles");
     }
 
@@ -854,7 +828,7 @@ mod tests {
             КонецПроцедуры
         "#;
         let config = DiagnosticsConfig::default();
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         // Should report error - РаботаСФайламиКлиент.УдалитьФайл not in default config
         assert_eq!(diagnostics.len(), 1, "Custom method not in default config");
 
@@ -866,7 +840,7 @@ mod tests {
                 "searchDeleteFileMethod": "УдалитьФайлы|DeleteFiles|РаботаСФайламиКлиент.УдалитьФайл"
             }),
         );
-        let (diagnostics, _) = check_diagnostic(code, config);
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
         assert_eq!(diagnostics.len(), 0, "Custom method recognized in config");
     }
 }
