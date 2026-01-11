@@ -95,12 +95,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         for hir_diag in &hir.diagnostics {
             if let sdbl_hir::SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
                 join_type,
-                range,
-                unprotected_fields: _, // Future: use for RelatedInformation
+                range: _,
+                unprotected_fields,
             } = hir_diag
             {
-                let bsl_range = mapper.map_range(*range, query_text);
-
                 let join_type_str = match join_type {
                     sdbl_hir::JoinType::Left => "LEFT JOIN",
                     sdbl_hir::JoinType::Right => "RIGHT JOIN",
@@ -113,14 +111,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     join_type_str
                 );
 
-                diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::FieldsFromJoinsWithoutIsNull,
-                    message,
-                    severity: Severity::Critical,
-                    range: bsl_range,
-                    tags: vec![],
-                    fixes: vec![],
-                });
+                // Create one diagnostic per unprotected field, highlighting the field itself
+                for field_ref in unprotected_fields {
+                    let bsl_range = mapper.map_range(field_ref.range, query_text);
+
+                    diagnostics.push(Diagnostic {
+                        code: DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+                        message: message.clone(),
+                        severity: Severity::Critical,
+                        range: bsl_range,
+                        tags: vec![],
+                        fixes: vec![],
+                    });
+                }
             }
         }
 
@@ -171,21 +174,57 @@ mod tests {
         let code = include_str!("../../test_data/FieldsFromJoinsWithoutIsNullDiagnostic.bsl");
         let diagnostics = check_diagnostic(code);
 
-        // HIR-based implementation with WHERE IS NOT NULL protection semantics.
-        // Java reference implementation expects 9 diagnostics.
-        // WHERE IS NOT NULL for any field from a table protects the entire table.
+        // Per-field diagnostic mode: one diagnostic per unprotected field reference.
+        // Java implementation emitted 9 diagnostics (one per JOIN), but we now emit
+        // one per field for better UX - highlighting the exact field that needs protection.
+        // Test8 (FULL JOIN) has 3 unprotected fields: lines 99, 100, 101.
 
-        if diagnostics.len() != 9 {
+        if diagnostics.len() != 11 {
             // Debug: print all diagnostic locations
-            eprintln!("\n=== Found {} diagnostics (expected 9) ===", diagnostics.len());
+            eprintln!("\n=== Found {} diagnostics (expected 11) ===", diagnostics.len());
             for (i, diag) in diagnostics.iter().enumerate() {
                 let start_line = code[..diag.range.start().into()].lines().count();
                 eprintln!("Diagnostic {}: line {} - {}", i, start_line, diag.message);
             }
         }
 
-        // HIR-based implementation with recursive UNION subquery checking.
-        // Each UNION subquery has independent scope and WHERE protection.
-        assert_eq!(diagnostics.len(), 9, "Expected 9 diagnostics matching Java implementation");
+        // Per-field implementation: one diagnostic per unprotected field reference.
+        assert_eq!(diagnostics.len(), 11, "Expected 11 diagnostics (one per unprotected field)");
+    }
+
+    #[test]
+    fn test_diagnostic_highlights_field_not_join() {
+        // Verify diagnostic highlights the unprotected field, not the JOIN clause
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос("ВЫБРАТЬ
+        |    ЗадачиИсполнителей.Исполнитель,
+        |    ИсполнениеРезультатыПроверки.Комментарий КАК Комментарий
+        |ИЗ
+        |    БизнесПроцесс.Исполнение.РезультатыПроверки КАК ИсполнениеРезультатыПроверки
+        |        ЛЕВОЕ СОЕДИНЕНИЕ Задача.ЗадачаИсполнителя КАК ЗадачиИсполнителей
+        |        ПО ИсполнениеРезультатыПроверки.ЗадачаИсполнителя = ЗадачиИсполнителей.Ссылка
+        |ГДЕ
+        |    ИсполнениеРезультатыПроверки.ЗадачаПроверяющего = &ЗадачаПроверяющего");
+КонецПроцедуры"#;
+
+        let diagnostics = check_diagnostic(code);
+
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for unprotected field");
+
+        // Extract the highlighted text from the diagnostic range
+        let diag = &diagnostics[0];
+        let highlighted = &code[diag.range.start().into()..diag.range.end().into()];
+
+        // Should highlight "ЗадачиИсполнителей.Исполнитель", not "ЛЕВОЕ СОЕДИНЕНИЕ..."
+        assert!(
+            highlighted.contains("ЗадачиИсполнителей"),
+            "Diagnostic should highlight the field 'ЗадачиИсполнителей.Исполнитель', got: '{}'",
+            highlighted
+        );
+        assert!(
+            !highlighted.contains("СОЕДИНЕНИЕ") && !highlighted.contains("JOIN"),
+            "Diagnostic should NOT highlight the JOIN clause, got: '{}'",
+            highlighted
+        );
     }
 }
