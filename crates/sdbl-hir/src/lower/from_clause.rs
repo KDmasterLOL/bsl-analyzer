@@ -237,7 +237,7 @@ impl<'a> LoweringContext<'a> {
             };
 
             if !exists {
-                tracing::warn!(
+                tracing::debug!(
                     mdo_type = ?mdo_type,
                     object_name = object_name,
                     "Table not found in metadata"

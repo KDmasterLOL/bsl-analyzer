@@ -243,9 +243,9 @@ impl Scope {
                     });
                 }
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     full_name = %table_name,
-                    "column_completions: Table has no metadata!"
+                    "column_completions: Table has no resolved fields (may be from extension)"
                 );
             }
         }
