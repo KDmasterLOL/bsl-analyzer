@@ -21,12 +21,21 @@ pub(super) fn bsl_completions(
 ) -> Option<Vec<CompletionItem>> {
     let _span = tracing::info_span!("bsl_completions").entered();
 
+    tracing::info!("bsl_completions called");
+
     // Parse the file
     let parse = db.parse(position.file_id);
     let root = parse.syntax_node();
 
     // Find token at position
-    let token = root.token_at_offset(position.offset).right_biased()?;
+    let token = root.token_at_offset(position.offset).right_biased();
+
+    if token.is_none() {
+        tracing::info!("No token at position - returning None");
+        return None;
+    }
+
+    let token = token.unwrap();
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "BSL completion token");
 
@@ -34,10 +43,12 @@ pub(super) fn bsl_completions(
     // Platform completion will handle this
     if let Some(prev) = token.prev_sibling_or_token() {
         if prev.kind() == SyntaxKind::DOT {
-            tracing::trace!("After DOT - skipping BSL completion");
+            tracing::info!("After DOT - skipping BSL completion");
             return None;
         }
     }
+
+    tracing::debug!("Not after DOT, checking if typing...");
 
     // Check if we're typing something that could be a global function or keyword
     // This includes:
@@ -67,6 +78,8 @@ pub(super) fn bsl_completions(
         false
     };
 
+    tracing::debug!(is_typing = is_typing, "Checked is_typing");
+
     if is_typing {
         // Extract the prefix (text before cursor)
         let token_start = token.text_range().start();
@@ -76,17 +89,37 @@ pub(super) fn bsl_completions(
         // Get prefix (text from token start to cursor)
         let prefix = &token_text[..cursor_in_token.min(token_text.len())];
 
-        tracing::debug!(
+        tracing::info!(
             prefix = ?prefix,
             token_kind = ?token.kind(),
             full_text = ?token_text,
             "Completing with prefix"
         );
 
-        return Some(complete_global_functions(prefix));
+        let mut completions = Vec::new();
+
+        // If typing inside a keyword, offer the keyword itself as completion
+        if token.kind().is_keyword() {
+            let (detail, documentation) = get_keyword_info(token_text);
+            let keyword_item = CompletionItem {
+                label: token_text.to_string(),
+                detail: Some(detail),
+                kind: CompletionItemKind::Keyword,
+                insert_text: token_text.to_string(),
+                documentation: Some(documentation),
+            };
+            completions.push(keyword_item);
+        }
+
+        // Also add global functions that match the prefix
+        completions.extend(complete_global_functions(prefix));
+
+        tracing::info!(count = completions.len(), "Returning BSL completions");
+        return Some(completions);
     }
 
     // No BSL completion context
+    tracing::info!("No BSL completion context - returning None");
     None
 }
 
@@ -258,6 +291,23 @@ fn format_function_documentation(function: &GlobalFunction) -> String {
     }
 
     doc
+}
+
+/// Returns detail and documentation for a BSL keyword.
+///
+/// TODO: Extract real documentation from shlang_ru.hbk (syntax help).
+/// Currently returns minimal info. Full docs should be parsed from platform help files.
+fn get_keyword_info(keyword: &str) -> (String, String) {
+    // For now, just return basic info
+    // TODO: Parse shlang_ru.hbk to get full documentation like:
+    // - Multiple syntax variants
+    // - Parameter descriptions
+    // - Examples
+    // - Version info
+    (
+        "Оператор BSL".to_string(),
+        format!("**{}**\n\nОператор языка BSL.\n\n*Полная документация будет добавлена после парсинга shlang_ru.hbk*", keyword),
+    )
 }
 
 #[cfg(test)]
