@@ -93,6 +93,29 @@ impl GlobalState {
         }
     }
 
+    /// Initialize an empty SourceRoot(0) before event loop starts.
+    ///
+    /// Prevents race conditions where files are opened via LSP before
+    /// VFS loader finishes. SourceRoot will be populated later by
+    /// process_changes() and updated by init_source_root().
+    ///
+    /// This matches the pattern used in tests and ensures that
+    /// process_changes() can always safely call set_file_source_root().
+    pub fn init_empty_source_root(&mut self) {
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+
+        let db = self.analysis_host.raw_database_mut();
+        let source_root_id = SourceRootId(0);
+
+        // Create empty FileSet (will be populated by process_changes)
+        let file_set = vfs::file_set::FileSet::new();
+        let source_root = SourceRoot::new_local(file_set);
+
+        db.set_source_root(source_root_id, source_root);
+
+        tracing::debug!("initialized empty SourceRoot(0) before event loop");
+    }
+
     /// Sets the workspace root and loads project configuration.
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         tracing::info!(?root, "setting workspace root");
@@ -130,7 +153,7 @@ impl GlobalState {
     /// This method:
     /// 1. Takes all pending changes from VFS
     /// 2. Applies them to the Salsa database
-    /// 3. Ensures files are mapped to SourceRoot
+    /// 3. Ensures files are mapped to SourceRoot and added to FileSet
     /// 4. Returns true if any changes were processed
     ///
     /// Should be called after receiving loader messages or LSP file changes.
@@ -147,62 +170,93 @@ impl GlobalState {
         let db = self.analysis_host.raw_database_mut();
         let source_root_id = base_db::SourceRootId(0);
 
+        // Get current SourceRoot and FileSet
+        let source_root_input = db.source_root_input(source_root_id);
+        let source_root = source_root_input.root(db);
+        let mut file_set = source_root.file_set().clone();
+        let mut file_set_modified = false;
+
         for file in changed_files {
             let text = match file.change {
                 vfs::Change::Create(content, _) | vfs::Change::Modify(content, _) => Some(content),
                 vfs::Change::Delete => None,
             };
 
-            // Ensure file is mapped to SourceRoot (important for files opened via LSP)
+            // Map file to SourceRoot in database
             db.set_file_source_root(file.file_id, source_root_id);
+
+            // Ensure file is in SourceRoot's FileSet
+            if file_set.path_for_file(&file.file_id).is_none() {
+                let vfs = self.vfs.read();
+                let path = vfs.file_path(file.file_id);
+                file_set.insert(file.file_id, path.clone());
+                drop(vfs);
+                file_set_modified = true;
+
+                tracing::debug!(
+                    file_id = file.file_id.0,
+                    "added file to FileSet during process_changes"
+                );
+            }
 
             if let Some(text) = text {
                 db.set_file_text(file.file_id, &text);
             }
         }
 
+        // Update SourceRoot if FileSet changed
+        if file_set_modified {
+            let updated_source_root = base_db::SourceRoot::new_local(file_set);
+            db.set_source_root(source_root_id, updated_source_root);
+        }
+
         true
     }
 
-    /// Initialize SourceRoot after VFS loading completes.
+    /// Initialize or update SourceRoot after VFS loading completes.
     ///
-    /// This creates a single SourceRoot containing all files loaded by the VFS loader.
-    /// Should be called once after vfs_done becomes true.
+    /// Merges VFS-loaded files with existing SourceRoot to preserve
+    /// files opened via LSP before loader finished.
     pub fn init_source_root(&mut self) {
-        use base_db::SourceDatabase;
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 
-        // Collect all files that exist in VFS by checking which files have been registered
-        // We need to iterate through all FileIds and check if they exist
+        let source_root_id = SourceRootId(0);
         let vfs = self.vfs.read();
-        let mut file_set = vfs::file_set::FileSet::new();
 
-        // Find the maximum FileId by checking what's been allocated
-        // We'll iterate through FileIds and check if they exist
+        // Get existing SourceRoot (may contain LSP-opened files)
+        let db = self.analysis_host.raw_database_mut();
+        let existing_source_root = db.source_root_input(source_root_id);
+        let mut file_set = existing_source_root.root(db).file_set().clone();
+
+        let mut vfs_files_added = 0;
+
+        // Collect all VFS-loaded files
         for file_id_raw in 0..10000u32 {
-            // Reasonable upper limit
-            let file_id = FileId(file_id_raw);
+            let file_id = vfs::FileId(file_id_raw);
             if vfs.exists(file_id) {
                 let path = vfs.file_path(file_id);
+
+                // Track new files (not already in FileSet)
+                if file_set.path_for_file(&file_id).is_none() {
+                    vfs_files_added += 1;
+                }
                 file_set.insert(file_id, path.clone());
             }
         }
 
-        let file_count = file_set.len();
+        let total_files = file_set.len();
         drop(vfs);
 
-        if file_count == 0 {
-            tracing::warn!("No files found in VFS during init_source_root");
+        if total_files == 0 {
+            tracing::warn!("no files in VFS during init_source_root");
             return;
         }
 
-        // Create single source root for all files
-        let db = self.analysis_host.raw_database_mut();
-        let source_root_id = base_db::SourceRootId(0);
-        let source_root = base_db::SourceRoot::new_local(file_set);
-
+        // Update SourceRoot with merged FileSet
+        let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(source_root_id, source_root);
 
-        // Set source root mapping for all files
+        // Update file→source_root mappings
         let source_root_input = db.source_root_input(source_root_id);
         let indexed_files: Vec<_> = source_root_input.root(db).iter().collect();
 
@@ -210,7 +264,7 @@ impl GlobalState {
             db.set_file_source_root(file_id, source_root_id);
         }
 
-        tracing::info!(file_count, "initialized source root");
+        tracing::info!(total_files, vfs_files_added, "updated SourceRoot with VFS files (merged)");
     }
 
     /// Creates an immutable snapshot for thread-safe access.
@@ -348,5 +402,74 @@ impl AnalysisHost {
     /// Use this to apply changes (file updates, config changes, etc.).
     pub fn raw_database_mut(&mut self) -> &mut RootDatabaseImpl {
         &mut self.db
+    }
+}
+
+#[cfg(test)]
+mod vfs_race_tests {
+    use super::*;
+    use base_db::SourceDatabase;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_empty_source_root_init() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+
+        // Verify SourceRoot(0) exists and is empty
+        use base_db::{SourceDatabase, SourceRootId};
+        let db = state.analysis_host.raw_database_mut();
+        let sr = db.source_root_input(SourceRootId(0));
+        assert!(!sr.root(db).is_library);
+        assert_eq!(sr.root(db).file_set().len(), 0);
+    }
+
+    #[test]
+    fn test_lsp_before_loader() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+
+        // Phase 1: Early init
+        state.init_empty_source_root();
+
+        // Phase 2: LSP opens file (simulate didOpen)
+        let uri = lsp_types::Url::parse("file:///user.bsl").unwrap();
+        let file_id = state.vfs_file_for_url(&uri).unwrap();
+
+        {
+            let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(vfs_path, Some(Arc::from("Процедура Test() КонецПроцедуры")));
+        }
+
+        state.process_changes();
+
+        // Verify file accessible
+        let text1 = {
+            let db = state.analysis_host.raw_database_mut();
+            db.file_text_input(file_id).text(db)
+        };
+        assert!(text1.contains("Test"));
+
+        // Phase 3: Loader finishes (simulate VFS loading other files)
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                vfs::VfsPath::new("/loader.bsl"),
+                Some(Arc::from("// Loader file")),
+            );
+        }
+
+        state.process_changes();
+        state.init_source_root();
+
+        // Phase 4: Original file still accessible after merge
+        let text2 = {
+            let db = state.analysis_host.raw_database_mut();
+            db.file_text_input(file_id).text(db)
+        };
+        assert!(text2.contains("Test"));
+        assert_eq!(text1, text2, "file lost after merge!");
     }
 }

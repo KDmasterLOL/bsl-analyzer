@@ -61,6 +61,10 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     // Create global state
     let mut state = GlobalState::new(connection.sender);
 
+    // Initialize empty SourceRoot(0) to prevent race condition where files
+    // are opened via LSP before VFS loader finishes
+    state.init_empty_source_root();
+
     // Set workspace root from initialize params
     #[allow(deprecated)]
     if let Some(root_uri) = initialize_params.root_uri {
