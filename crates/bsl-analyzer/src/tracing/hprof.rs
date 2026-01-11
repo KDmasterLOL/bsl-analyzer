@@ -130,9 +130,6 @@ impl Node {
         self.go(0, filter)
     }
 
-    // Profiling output intentionally goes to stderr to avoid mixing with normal output.
-    // This allows users to redirect profiling data separately from program output.
-    #[allow(clippy::print_stderr)]
     fn go(&self, level: usize, filter: &WriteFilter) {
         if self.duration > filter.longer_than && level < filter.depth {
             let duration_ms = self.duration.as_secs_f64() * 1000.0;
@@ -149,7 +146,8 @@ impl Node {
                 let _ = write!(out, " ({} calls)", self.count);
             }
 
-            eprintln!("{out}");
+            // Use tracing so output goes to BSL_LOG_FILE when set (important for LSP mode)
+            tracing::warn!(target: "bsl_profile", "{out}");
 
             for child in &self.children {
                 child.go(level + 1, filter)
