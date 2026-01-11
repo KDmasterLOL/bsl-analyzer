@@ -8,8 +8,8 @@ use ide::Location as IdeLocation;
 use line_index::LineIndex;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Location, ReferenceParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
+    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
 };
 
 use crate::global_state::GlobalStateSnapshot;
@@ -110,6 +110,52 @@ pub fn handle_find_references(
         Ok(None)
     } else {
         Ok(Some(lsp_locations))
+    }
+}
+
+/// Handles textDocument/hover request.
+///
+/// Returns hover information for the symbol at the cursor position.
+pub fn handle_hover(snap: GlobalStateSnapshot, params: HoverParams) -> Result<Option<Hover>> {
+    let _p = tracing::info_span!(
+        "handle_hover",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Convert position to offset
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
+
+    // Call IDE API
+    let hover_result = snap.analysis.hover(file_id, offset.into());
+
+    // Convert result
+    match hover_result {
+        Some(result) => {
+            let range = result.range.and_then(|r| crate::lsp::range(&line_index, &text, r));
+
+            let contents = HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: result.markup,
+            });
+
+            Ok(Some(Hover { contents, range }))
+        }
+        None => Ok(None),
     }
 }
 
