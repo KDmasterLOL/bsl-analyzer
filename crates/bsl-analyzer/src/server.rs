@@ -177,9 +177,16 @@ fn handle_vfs_msg(
             }
         }
 
-        // Convert Vec<u8> to Arc<str>
-        let contents_str =
-            contents.and_then(|bytes| String::from_utf8(bytes).ok().map(|s| Arc::from(s.as_str())));
+        // Convert Vec<u8> to Arc<str>, stripping UTF-8 BOM if present.
+        // BOM (0xEF 0xBB 0xBF) is common in BSL files from 1C:Enterprise,
+        // but LSP clients like VS Code strip it when sending file content.
+        // Without this, VFS would see a "modify" change on every didOpen.
+        let contents_str = contents.and_then(|bytes| {
+            String::from_utf8(bytes).ok().map(|s| {
+                let s = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
+                Arc::from(s)
+            })
+        });
 
         vfs.set_file_contents(vfs_path, contents_str);
     }

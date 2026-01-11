@@ -424,3 +424,6 @@ Must maintain 100% compatibility with bsl-language-server:
 - Same severity levels
 - Same configuration format (`.bsl-analyzer.json`, also supports `.bsl-language-server.json` for compatibility)
 - Same parameters for diagnostics
+
+## Общие правила
+- Можно менять код если пользователь дал согласие с твоими выводами или планами. Иначе менять код запрещено!
