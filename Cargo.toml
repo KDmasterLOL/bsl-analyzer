@@ -32,7 +32,6 @@ hir = { path = "crates/hir" }
 hir-def = { path = "crates/hir-def" }
 hir-ty = { path = "crates/hir-ty" }
 sdbl-hir = { path = "crates/sdbl-hir" }
-module-graph = { path = "crates/module-graph" }
 vfs = { path = "crates/vfs" }
 project-model = { path = "crates/project-model" }
 intern = { path = "crates/intern" }
