@@ -11,6 +11,7 @@ hir-def.workspace = true
 la-arena.workspace = true
 rustc-hash.workspace = true
 smol_str.workspace = true
+smallvec.workspace = true
 tracing.workspace = true
 petgraph = "0.6"
 fixedbitset.workspace = true  # Compact BitSet for liveness analysis

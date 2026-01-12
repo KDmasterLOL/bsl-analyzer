@@ -135,11 +135,8 @@ pub fn from_hir(
     let param_name_lower = param_name.to_lowercase();
 
     // Find all definitions for this parameter variable
-    let param_definitions: Vec<_> = reaching_defs_set
-        .defs()
-        .iter()
-        .filter(|def| def.var_name.as_str() == param_name_lower)
-        .collect();
+    let param_definitions: Vec<_> =
+        reaching_defs_set.iter().filter(|def| def.var_name.as_str() == param_name_lower).collect();
 
     if param_definitions.is_empty() {
         // No definitions reach here - parameter not in scope? Shouldn't happen

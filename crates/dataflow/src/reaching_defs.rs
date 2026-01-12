@@ -18,14 +18,17 @@
 //! - Dead code elimination
 //! - Variable usage tracking
 
+use fixedbitset::FixedBitSet;
 use hir_def::{
     body::Body,
     hir::{BindingId, Expr, Stmt},
     Name,
 };
 use la_arena::RawIdx;
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use smol_str::SmolStr;
+use std::sync::Arc;
 
 use crate::{Lattice, Transfer};
 
@@ -100,50 +103,356 @@ impl Definition {
     }
 }
 
-/// Reaching definitions lattice: set of definitions.
+// ============================================================================
+// DefinitionIndex - maps definitions to compact bit indices
+// ============================================================================
+
+/// Maps definitions to compact bit indices for BitSet representation.
+///
+/// Similar to `VariableIndex` in liveness.rs but tracks definition SITES,
+/// not just variable names. Each unique definition (variable + site) gets
+/// a unique bit index.
+///
+/// This enables O(1) operations instead of hash table lookups:
+/// - `insert(def)`: set bit at def's index
+/// - `kill(var)`: clear all bits for definitions of this variable
+/// - `iter()`: iterate over set bits and decode back to Definition
+///
+/// # Memory Savings
+///
+/// With BitSet representation:
+/// - Old: `FxHashSet<Definition>` → ~48 bytes per definition
+/// - New: `FixedBitSet` → 1 bit per definition + shared index
+///
+/// For a method with 50 definitions:
+/// - Old: ~2.5 KB per state
+/// - New: ~8 bytes per state (64 bits) + shared index (~2 KB once)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionIndex {
+    /// All definitions in the method (position = bit index).
+    /// Used to decode bit index back to Definition.
+    definitions: Vec<Definition>,
+
+    /// var_name (lowercase) -> indices of all definitions for this variable.
+    /// Used for kill operation: clear all defs for a variable in O(k) where k = defs for var.
+    var_to_defs: FxHashMap<SmolStr, SmallVec<[u32; 4]>>,
+
+    /// Reverse lookup: Definition -> bit index.
+    /// Used for insert operation: O(1) lookup.
+    def_to_idx: FxHashMap<Definition, u32>,
+}
+
+impl DefinitionIndex {
+    /// Build definition index by collecting all definitions from Body.
+    ///
+    /// Scans all statements in the body to find:
+    /// - Variable declarations (Перем x)
+    /// - Assignments (x = value)
+    /// - For loop variables (Для x = 1 По 10)
+    /// - ForEach loop variables (Для Каждого x Из collection)
+    ///
+    /// Note: Parameters are added separately via `add_parameter_defs()` method
+    /// since they need to be known before the index is built.
+    pub fn from_body(body: &Body) -> Arc<Self> {
+        let mut definitions = Vec::new();
+        let mut var_to_defs: FxHashMap<SmolStr, SmallVec<[u32; 4]>> = FxHashMap::default();
+        let mut def_to_idx: FxHashMap<Definition, u32> = FxHashMap::default();
+
+        // Helper to add a definition
+        let mut add_def = |def: Definition| {
+            if def_to_idx.contains_key(&def) {
+                return; // Already added
+            }
+            let idx = definitions.len() as u32;
+            var_to_defs.entry(def.var_name.clone()).or_default().push(idx);
+            def_to_idx.insert(def.clone(), idx);
+            definitions.push(def);
+        };
+
+        // Collect definitions from statements
+        fn collect_stmt_defs<F: FnMut(Definition)>(
+            stmts: &[hir_def::StmtId],
+            body: &Body,
+            add_def: &mut F,
+        ) {
+            for &stmt_id in stmts {
+                match &body.stmts[stmt_id] {
+                    Stmt::Assign { target, .. } => {
+                        if let Some(var_name) = extract_var_name_from_expr(*target, body) {
+                            let def = Definition::assignment(var_name, stmt_id.into_raw());
+                            add_def(def);
+                        }
+                    }
+                    Stmt::VarDecl { bindings } => {
+                        for &binding_id in bindings.iter() {
+                            let binding = &body.bindings[binding_id];
+                            let def = Definition::var_decl(&binding.name, binding_id);
+                            add_def(def);
+                        }
+                    }
+                    Stmt::For { var, body: loop_body, .. } => {
+                        let binding = &body.bindings[*var];
+                        let def = Definition::for_loop(&binding.name, *var);
+                        add_def(def);
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    Stmt::ForEach { var, body: loop_body, .. } => {
+                        let binding = &body.bindings[*var];
+                        let def = Definition::for_each_loop(&binding.name, *var);
+                        add_def(def);
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    // Recursively check nested statements
+                    Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
+                        collect_stmt_defs(then_branch, body, add_def);
+                        for (_cond, stmts) in elsif_branches.iter() {
+                            collect_stmt_defs(stmts, body, add_def);
+                        }
+                        if let Some(else_stmts) = else_branch {
+                            collect_stmt_defs(else_stmts, body, add_def);
+                        }
+                    }
+                    Stmt::While { body: loop_body, .. } => {
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    Stmt::Try { body: try_body, except, .. } => {
+                        collect_stmt_defs(try_body, body, add_def);
+                        collect_stmt_defs(except, body, add_def);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        collect_stmt_defs(&body.body_stmts, body, &mut add_def);
+
+        Arc::new(Self { definitions, var_to_defs, def_to_idx })
+    }
+
+    /// Build definition index including parameter definitions.
+    ///
+    /// This variant collects parameters from the provided list of (name, binding_id) pairs.
+    /// Use this when you have access to the method signature with parameter information.
+    pub fn from_body_with_params(
+        body: &Body,
+        params: impl IntoIterator<Item = (Name, BindingId)>,
+    ) -> Arc<Self> {
+        let mut definitions = Vec::new();
+        let mut var_to_defs: FxHashMap<SmolStr, SmallVec<[u32; 4]>> = FxHashMap::default();
+        let mut def_to_idx: FxHashMap<Definition, u32> = FxHashMap::default();
+
+        // Helper to add a definition
+        let mut add_def = |def: Definition| {
+            if def_to_idx.contains_key(&def) {
+                return; // Already added
+            }
+            let idx = definitions.len() as u32;
+            var_to_defs.entry(def.var_name.clone()).or_default().push(idx);
+            def_to_idx.insert(def.clone(), idx);
+            definitions.push(def);
+        };
+
+        // First add parameters
+        for (name, binding_id) in params {
+            let def = Definition::parameter(&name, binding_id);
+            add_def(def);
+        }
+
+        // Collect definitions from statements
+        fn collect_stmt_defs<F: FnMut(Definition)>(
+            stmts: &[hir_def::StmtId],
+            body: &Body,
+            add_def: &mut F,
+        ) {
+            for &stmt_id in stmts {
+                match &body.stmts[stmt_id] {
+                    Stmt::Assign { target, .. } => {
+                        if let Some(var_name) = extract_var_name_from_expr(*target, body) {
+                            let def = Definition::assignment(var_name, stmt_id.into_raw());
+                            add_def(def);
+                        }
+                    }
+                    Stmt::VarDecl { bindings } => {
+                        for &binding_id in bindings.iter() {
+                            let binding = &body.bindings[binding_id];
+                            let def = Definition::var_decl(&binding.name, binding_id);
+                            add_def(def);
+                        }
+                    }
+                    Stmt::For { var, body: loop_body, .. } => {
+                        let binding = &body.bindings[*var];
+                        let def = Definition::for_loop(&binding.name, *var);
+                        add_def(def);
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    Stmt::ForEach { var, body: loop_body, .. } => {
+                        let binding = &body.bindings[*var];
+                        let def = Definition::for_each_loop(&binding.name, *var);
+                        add_def(def);
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    // Recursively check nested statements
+                    Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
+                        collect_stmt_defs(then_branch, body, add_def);
+                        for (_cond, stmts) in elsif_branches.iter() {
+                            collect_stmt_defs(stmts, body, add_def);
+                        }
+                        if let Some(else_stmts) = else_branch {
+                            collect_stmt_defs(else_stmts, body, add_def);
+                        }
+                    }
+                    Stmt::While { body: loop_body, .. } => {
+                        collect_stmt_defs(loop_body, body, add_def);
+                    }
+                    Stmt::Try { body: try_body, except, .. } => {
+                        collect_stmt_defs(try_body, body, add_def);
+                        collect_stmt_defs(except, body, add_def);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        collect_stmt_defs(&body.body_stmts, body, &mut add_def);
+
+        Arc::new(Self { definitions, var_to_defs, def_to_idx })
+    }
+
+    /// Get bit index for a definition.
+    ///
+    /// Returns None if the definition is not in the index (shouldn't happen
+    /// if index was built from the same body).
+    #[inline]
+    pub fn get_index(&self, def: &Definition) -> Option<u32> {
+        self.def_to_idx.get(def).copied()
+    }
+
+    /// Get all definition indices for a variable (for kill operation).
+    ///
+    /// Returns empty slice if variable has no definitions.
+    #[inline]
+    pub fn defs_for_var(&self, var_name: &str) -> &[u32] {
+        let normalized = var_name.to_lowercase();
+        self.var_to_defs.get(normalized.as_str()).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Decode bit index back to Definition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if idx is out of bounds.
+    #[inline]
+    pub fn get_definition(&self, idx: u32) -> &Definition {
+        &self.definitions[idx as usize]
+    }
+
+    /// Number of definitions (= bitset capacity needed).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.definitions.len()
+    }
+
+    /// Check if this index is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.definitions.is_empty()
+    }
+}
+
+/// Extract variable name from assignment target expression.
+///
+/// Handles:
+/// - Simple variables: `x = 5` → "x"
+/// - Field access: `obj.field = 5` → "obj.field"
+/// - Index access: `arr[i] = 5` → "arr"
+fn extract_var_name_from_expr(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
+    match &body.exprs[expr_id] {
+        Expr::Path(name) => Some(SmolStr::new(name.as_str().to_lowercase())),
+        Expr::Field { base, field } => {
+            let base_name = extract_var_name_from_expr(*base, body)?;
+            Some(SmolStr::new(format!("{}.{}", base_name, field.as_str().to_lowercase())))
+        }
+        Expr::Index { base, .. } => extract_var_name_from_expr(*base, body),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// ReachingDefs - BitSet-based lattice
+// ============================================================================
+
+/// Reaching definitions lattice using BitSet for compact storage.
 ///
 /// A definition reaches a program point if there is a path from the definition
 /// to that point without an intervening kill (redefinition of the same variable).
 ///
+/// ## Memory Efficiency
+///
+/// Uses `FixedBitSet` instead of `FxHashSet<Definition>`:
+/// - Old: ~48 bytes per definition in the set
+/// - New: 1 bit per definition + shared index (Arc, O(1) clone)
+///
+/// For a method with 50 definitions:
+/// - Old: ~2.5 KB per state × 1000 clones = ~2.5 MB per method
+/// - New: ~8 bytes per state × 1000 clones = ~8 KB per method (300x less!)
+///
 /// ## Lattice Properties
 ///
-/// - **Bottom (⊥)**: Empty set (no definitions)
-/// - **Top (⊤)**: All possible definitions (not represented explicitly)
-/// - **Order**: Set inclusion (A ⊑ B iff A ⊆ B)
-/// - **Join (⊔)**: Set union (definitions reach if they reach from ANY path)
+/// - **Bottom (⊥)**: Empty bitset (no definitions)
+/// - **Top (⊤)**: All bits set (all definitions reach)
+/// - **Order**: Subset of bits (A ⊑ B iff A.bits ⊆ B.bits)
+/// - **Join (⊔)**: Bitwise OR (definitions reach if they reach from ANY path)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReachingDefs {
-    /// Set of definitions that reach this program point.
-    defs: FxHashSet<Definition>,
+    /// Bitset where bit i indicates if definition i reaches this point.
+    bits: FixedBitSet,
+
+    /// Shared definition index (Arc for cheap clones).
+    def_index: Arc<DefinitionIndex>,
 }
 
 impl ReachingDefs {
-    /// Create an empty set of definitions.
-    pub fn new() -> Self {
-        Self { defs: FxHashSet::default() }
+    /// Create an empty set of definitions with given index.
+    pub fn new(def_index: Arc<DefinitionIndex>) -> Self {
+        Self { bits: FixedBitSet::with_capacity(def_index.len()), def_index }
     }
 
     /// Create a set with a single definition.
-    pub fn singleton(def: Definition) -> Self {
-        let mut defs = FxHashSet::default();
-        defs.insert(def);
-        Self { defs }
+    pub fn singleton(def_index: Arc<DefinitionIndex>, def: &Definition) -> Self {
+        let mut result = Self::new(def_index);
+        result.insert(def);
+        result
     }
 
     /// Create a set from multiple definitions.
-    pub fn from_definitions(defs: impl IntoIterator<Item = Definition>) -> Self {
-        Self { defs: defs.into_iter().collect() }
+    pub fn from_definitions(
+        def_index: Arc<DefinitionIndex>,
+        defs: impl IntoIterator<Item = Definition>,
+    ) -> Self {
+        let mut result = Self::new(def_index);
+        for def in defs {
+            result.insert(&def);
+        }
+        result
     }
 
-    /// Get all definitions.
-    pub fn defs(&self) -> &FxHashSet<Definition> {
-        &self.defs
+    /// Get the definition index.
+    pub fn def_index(&self) -> &Arc<DefinitionIndex> {
+        &self.def_index
+    }
+
+    /// Get all definitions as an iterator.
+    pub fn iter(&self) -> impl Iterator<Item = &Definition> + '_ {
+        self.bits.ones().map(|idx| self.def_index.get_definition(idx as u32))
     }
 
     /// Get all definitions for a specific variable (case-insensitive).
-    pub fn defs_for_var(&self, var_name: &str) -> impl Iterator<Item = &Definition> {
-        let normalized = var_name.to_lowercase();
-        self.defs.iter().filter(move |def| def.var_name == normalized.as_str())
+    pub fn defs_for_var(&self, var_name: &str) -> impl Iterator<Item = &Definition> + '_ {
+        let indices = self.def_index.defs_for_var(var_name);
+        indices
+            .iter()
+            .filter(|&&idx| self.bits.contains(idx as usize))
+            .map(|&idx| self.def_index.get_definition(idx))
     }
 
     /// Check if any definition exists for a variable.
@@ -151,56 +460,93 @@ impl ReachingDefs {
         self.defs_for_var(var_name).next().is_some()
     }
 
-    /// Add a definition to the set.
-    pub fn insert(&mut self, def: Definition) {
-        self.defs.insert(def);
+    /// Add a definition to the set (gen operation).
+    pub fn insert(&mut self, def: &Definition) {
+        if let Some(idx) = self.def_index.get_index(def) {
+            self.bits.insert(idx as usize);
+        }
     }
 
     /// Remove all definitions for a variable (kill operation).
+    ///
+    /// This is O(k) where k is the number of definitions for this variable.
     pub fn kill(&mut self, var_name: &str) {
-        let normalized = var_name.to_lowercase();
-        self.defs.retain(|def| def.var_name != normalized.as_str());
+        for &idx in self.def_index.defs_for_var(var_name) {
+            self.bits.set(idx as usize, false);
+        }
     }
 
-    /// Gen-kill: kill old definitions, then add new definition.
-    pub fn gen_kill(&mut self, var_name: &str, new_def: Definition) {
+    /// Gen-kill: kill old definitions for variable, then add new definition.
+    pub fn gen_kill(&mut self, var_name: &str, new_def: &Definition) {
         self.kill(var_name);
         self.insert(new_def);
     }
 
     /// Number of definitions in the set.
     pub fn len(&self) -> usize {
-        self.defs.len()
+        self.bits.count_ones(..)
     }
 
     /// Check if the set is empty.
     pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
+        self.bits.is_clear()
     }
-}
 
-impl Default for ReachingDefs {
-    fn default() -> Self {
-        Self::new()
+    /// Get raw access to the bitset for advanced operations.
+    #[inline]
+    pub fn bits(&self) -> &FixedBitSet {
+        &self.bits
+    }
+
+    /// Get mutable access to the bitset for advanced operations.
+    #[inline]
+    pub fn bits_mut(&mut self) -> &mut FixedBitSet {
+        &mut self.bits
     }
 }
 
 impl Lattice for ReachingDefs {
-    /// Bottom element: empty set (no definitions).
+    /// Bottom element: empty bitset (no definitions).
+    ///
+    /// **Note**: Cannot create bottom without DefinitionIndex!
+    /// The solver must use `set_bottom_factory()` to provide the index.
     fn bottom() -> Self {
-        Self::new()
+        panic!("ReachingDefs::bottom() requires DefinitionIndex - use new() with def_index instead")
     }
 
-    /// Join: set union (definition reaches if it reaches from ANY predecessor).
+    /// Join: bitwise OR (definition reaches if it reaches from ANY predecessor).
+    ///
+    /// This is O(n/64) where n is the number of possible definitions.
     fn join(&self, other: &Self) -> Self {
-        let mut defs = self.defs.clone();
-        defs.extend(other.defs.iter().cloned());
-        Self { defs }
+        debug_assert!(
+            Arc::ptr_eq(&self.def_index, &other.def_index),
+            "Cannot join ReachingDefs from different methods"
+        );
+
+        let mut bits = self.bits.clone();
+        bits.union_with(&other.bits);
+
+        Self {
+            bits,
+            def_index: self.def_index.clone(), // Arc clone is O(1)
+        }
+    }
+
+    /// In-place join: bitwise OR without allocation.
+    ///
+    /// Optimized version that modifies self directly.
+    fn join_in_place(&mut self, other: &Self) {
+        debug_assert!(
+            Arc::ptr_eq(&self.def_index, &other.def_index),
+            "Cannot join ReachingDefs from different methods"
+        );
+
+        self.bits.union_with(&other.bits);
     }
 
     /// Check if self is more informative than other (self ⊆ other).
     fn is_more_informative_than(&self, other: &Self) -> bool {
-        self.defs.is_subset(&other.defs)
+        self.bits.is_subset(&other.bits)
     }
 }
 
@@ -397,7 +743,7 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
             Stmt::Assign { target, .. } => {
                 if let Some(var_name) = Self::extract_var_name(*target, body) {
                     let def = Definition::assignment(var_name.clone(), stmt_id.into_raw());
-                    new_state.gen_kill(&var_name, def);
+                    new_state.gen_kill(&var_name, &def);
                 }
             }
 
@@ -406,7 +752,7 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
                 for &binding_id in bindings.iter() {
                     let binding = body.binding(binding_id);
                     let def = Definition::var_decl(&binding.name, binding_id);
-                    new_state.insert(def);
+                    new_state.insert(&def);
                 }
             }
 
@@ -414,14 +760,14 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
             Stmt::For { var, .. } => {
                 let binding = body.binding(*var);
                 let def = Definition::for_loop(&binding.name, *var);
-                new_state.gen_kill(binding.name.as_str(), def);
+                new_state.gen_kill(binding.name.as_str(), &def);
             }
 
             // ForEach loop: gen definition for loop variable
             Stmt::ForEach { var, .. } => {
                 let binding = body.binding(*var);
                 let def = Definition::for_each_loop(&binding.name, *var);
-                new_state.gen_kill(binding.name.as_str(), def);
+                new_state.gen_kill(binding.name.as_str(), &def);
             }
 
             // Other statements don't create definitions
@@ -489,6 +835,25 @@ impl ModuleReachingDefs {
 mod tests {
     use super::*;
 
+    /// Helper to create a test DefinitionIndex with given definitions
+    fn create_def_index(defs: &[Definition]) -> Arc<DefinitionIndex> {
+        let mut definitions = Vec::new();
+        let mut var_to_defs: FxHashMap<SmolStr, SmallVec<[u32; 4]>> = FxHashMap::default();
+        let mut def_to_idx: FxHashMap<Definition, u32> = FxHashMap::default();
+
+        for def in defs {
+            if def_to_idx.contains_key(def) {
+                continue;
+            }
+            let idx = definitions.len() as u32;
+            var_to_defs.entry(def.var_name.clone()).or_default().push(idx);
+            def_to_idx.insert(def.clone(), idx);
+            definitions.push(def.clone());
+        }
+
+        Arc::new(DefinitionIndex { definitions, var_to_defs, def_to_idx })
+    }
+
     #[test]
     fn test_definition_creation() {
         let name = Name::new("Переменная");
@@ -503,9 +868,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reaching_defs_lattice_bottom() {
-        let bottom = ReachingDefs::bottom();
-        assert!(bottom.is_empty());
+    fn test_reaching_defs_empty() {
+        let def_index = create_def_index(&[]);
+        let empty = ReachingDefs::new(def_index);
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -516,13 +882,15 @@ mod tests {
         let def1 = Definition::parameter(&name, binding_id);
         let def2 = Definition::var_decl(&name, binding_id);
 
-        let set1 = ReachingDefs::singleton(def1.clone());
-        let set2 = ReachingDefs::singleton(def2.clone());
+        let def_index = create_def_index(&[def1.clone(), def2.clone()]);
+
+        let set1 = ReachingDefs::singleton(def_index.clone(), &def1);
+        let set2 = ReachingDefs::singleton(def_index.clone(), &def2);
 
         let joined = set1.join(&set2);
         assert_eq!(joined.len(), 2);
-        assert!(joined.defs().contains(&def1));
-        assert!(joined.defs().contains(&def2));
+        assert!(joined.iter().any(|d| d == &def1));
+        assert!(joined.iter().any(|d| d == &def2));
     }
 
     #[test]
@@ -531,7 +899,8 @@ mod tests {
         let binding_id = BindingId::from_raw(la_arena::RawIdx::from_u32(0));
         let def = Definition::parameter(&name, binding_id);
 
-        let set = ReachingDefs::singleton(def);
+        let def_index = create_def_index(std::slice::from_ref(&def));
+        let set = ReachingDefs::singleton(def_index, &def);
         let joined = set.join(&set);
         assert_eq!(joined, set);
     }
@@ -544,8 +913,10 @@ mod tests {
         let def1 = Definition::parameter(&name, binding_id);
         let def2 = Definition::var_decl(&name, binding_id);
 
-        let set1 = ReachingDefs::singleton(def1);
-        let set2 = ReachingDefs::singleton(def2);
+        let def_index = create_def_index(&[def1.clone(), def2.clone()]);
+
+        let set1 = ReachingDefs::singleton(def_index.clone(), &def1);
+        let set2 = ReachingDefs::singleton(def_index.clone(), &def2);
 
         assert_eq!(set1.join(&set2), set2.join(&set1));
     }
@@ -556,8 +927,9 @@ mod tests {
         let binding_id = BindingId::from_raw(la_arena::RawIdx::from_u32(0));
         let def = Definition::parameter(&name, binding_id);
 
-        let set = ReachingDefs::singleton(def);
-        let bottom = ReachingDefs::bottom();
+        let def_index = create_def_index(std::slice::from_ref(&def));
+        let set = ReachingDefs::singleton(def_index.clone(), &def);
+        let bottom = ReachingDefs::new(def_index);
 
         assert_eq!(set.join(&bottom), set);
         assert_eq!(bottom.join(&set), set);
@@ -572,14 +944,15 @@ mod tests {
         let def1 = Definition::parameter(&name, binding_id1);
         let def2 = Definition::var_decl(&name, binding_id2);
 
-        let mut state = ReachingDefs::singleton(def1.clone());
+        let def_index = create_def_index(&[def1.clone(), def2.clone()]);
+        let mut state = ReachingDefs::singleton(def_index, &def1);
         assert_eq!(state.len(), 1);
 
         // Gen-kill: replace def1 with def2
-        state.gen_kill("x", def2.clone());
+        state.gen_kill("x", &def2);
         assert_eq!(state.len(), 1);
-        assert!(!state.defs().contains(&def1));
-        assert!(state.defs().contains(&def2));
+        assert!(!state.iter().any(|d| d == &def1));
+        assert!(state.iter().any(|d| d == &def2));
     }
 
     #[test]
@@ -594,12 +967,13 @@ mod tests {
         // Both should normalize to same name
         assert_eq!(def1.var_name, def2.var_name);
 
-        let mut state = ReachingDefs::singleton(def1);
-        state.gen_kill("ПЕРЕМЕННАЯ", def2.clone());
+        let def_index = create_def_index(&[def1.clone(), def2.clone()]);
+        let mut state = ReachingDefs::singleton(def_index, &def1);
+        state.gen_kill("ПЕРЕМЕННАЯ", &def2);
 
         // Should have killed def1 and added def2
         assert_eq!(state.len(), 1);
-        assert!(state.defs().contains(&def2));
+        assert!(state.iter().any(|d| d == &def2));
     }
 
     #[test]
@@ -611,7 +985,8 @@ mod tests {
         let def_x = Definition::parameter(&name_x, binding_id);
         let def_y = Definition::parameter(&name_y, binding_id);
 
-        let state = ReachingDefs::from_definitions([def_x.clone(), def_y.clone()]);
+        let def_index = create_def_index(&[def_x.clone(), def_y.clone()]);
+        let state = ReachingDefs::from_definitions(def_index, [def_x.clone(), def_y.clone()]);
 
         let x_defs: Vec<_> = state.defs_for_var("x").collect();
         assert_eq!(x_defs.len(), 1);

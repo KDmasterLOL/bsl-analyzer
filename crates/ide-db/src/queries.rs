@@ -420,18 +420,31 @@ pub fn module_reaching_definitions_query<'db>(
             None => continue,
         };
 
-        // Initialize with parameters
-        let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new();
+        // Build definition index from body with parameters
+        let params: Vec<_> = body
+            .params
+            .iter()
+            .map(|&param_id| {
+                let binding = body.binding(param_id);
+                (binding.name.clone(), param_id)
+            })
+            .collect();
+        let def_index =
+            dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
+
+        // Initialize entry state with parameters
+        let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
         for &param_id in body.params.iter() {
             let binding = body.binding(param_id);
             let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
-            initial_defs.insert(def);
+            initial_defs.insert(&def);
         }
 
         // Run dataflow analysis
         let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
         let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
         solver.set_max_iterations(10000); // ✅ Fixed! Was 100
+        solver.set_bottom_factory(|| dataflow::reaching_defs::ReachingDefs::new(def_index.clone()));
         solver.set_initial_state(initial_defs);
 
         if let Some(dataflow_result) = solver.solve() {
