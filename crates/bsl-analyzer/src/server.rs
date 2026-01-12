@@ -17,6 +17,7 @@ use lsp_types::{
 use crate::{
     global_state::GlobalState,
     handlers::{NotificationDispatcher, RequestDispatcher},
+    lsp::Progress,
 };
 
 /// Runs the main LSP server loop.
@@ -123,20 +124,44 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
                                 state.vfs_done = true;
                                 tracing::info!("VFS loading complete");
 
+                                // End loading progress
+                                state.report_progress(
+                                    "Loading",
+                                    Progress::End,
+                                    Some("Done".into()),
+                                    Some(1.0),
+                                );
+
                                 // Initialize SourceRoot after loading completes
                                 state.init_source_root();
+
+                                // Prime caches for fast first queries
+                                state.prime_caches();
                             }
                             LoadingProgress::Started => {
                                 tracing::info!("VFS loading started: {} entries", n_total);
+                                state.report_progress(
+                                    "Loading",
+                                    Progress::Begin,
+                                    Some(format!("Scanning {} files...", n_total)),
+                                    Some(0.0),
+                                );
                             }
                             LoadingProgress::Progress(done) => {
                                 tracing::debug!(
                                     "VFS loading progress: {}/{} (config v{})",
                                     done, n_total, config_version
                                 );
-                                if let Some(dir) = dir {
+                                if let Some(ref dir) = dir {
                                     tracing::debug!("  processing: {:?}", dir);
                                 }
+                                let fraction = Progress::fraction(done, n_total);
+                                state.report_progress(
+                                    "Loading",
+                                    Progress::Report,
+                                    Some(format!("{}/{}", done, n_total)),
+                                    Some(fraction),
+                                );
                             }
                         }
                     }

@@ -4,6 +4,7 @@
 //! following the rust-analyzer architecture pattern.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -17,7 +18,27 @@ use project_model::Project;
 use vfs::loader::Handle;
 use vfs::{loader, FileId, Vfs, VfsPath};
 
+use crate::lsp::Progress;
 use crate::mem_docs::MemDocs;
+use crate::task_pool;
+
+/// Task results from background threads.
+#[derive(Debug)]
+pub enum Task {
+    /// Cache priming progress.
+    PrimeCaches(PrimeCachesProgress),
+}
+
+/// Progress state for cache priming operation.
+#[derive(Debug)]
+pub enum PrimeCachesProgress {
+    /// Starting cache priming.
+    Begin,
+    /// Intermediate progress report.
+    Report { done: usize, total: usize, file_path: Option<String> },
+    /// Cache priming completed.
+    End { cancelled: bool },
+}
 
 /// The main state of the LSP server (mutable, main thread only).
 ///
@@ -68,6 +89,12 @@ pub struct GlobalState {
 
     /// Whether VFS has finished initial loading.
     pub vfs_done: bool,
+
+    /// Task pool for background tasks with result channel.
+    pub task_pool: task_pool::Handle<Task>,
+
+    /// Counter for generating unique LSP request IDs.
+    next_request_id: AtomicI32,
 }
 
 impl GlobalState {
@@ -90,6 +117,107 @@ impl GlobalState {
             loader_receiver,
             vfs_progress_config_version: 0,
             vfs_done: false,
+            task_pool: task_pool::TaskPool::new_with_handle(),
+            next_request_id: AtomicI32::new(1),
+        }
+    }
+
+    /// Generates a unique request ID for LSP requests.
+    fn next_request_id(&self) -> lsp_server::RequestId {
+        lsp_server::RequestId::from(self.next_request_id.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Reports progress to the LSP client using WorkDoneProgress protocol.
+    ///
+    /// This sends progress notifications that VS Code displays as a progress bar.
+    pub fn report_progress(
+        &self,
+        title: &str,
+        state: Progress,
+        message: Option<String>,
+        fraction: Option<f64>,
+    ) {
+        let percentage = fraction.map(|f| (f * 100.0) as u32);
+        let token = lsp_types::ProgressToken::String(format!("bslAnalyzer/{title}"));
+
+        let work_done_progress = match state {
+            Progress::Begin => {
+                // Create progress token first
+                let params = lsp_types::WorkDoneProgressCreateParams { token: token.clone() };
+                let request = lsp_server::Request::new(
+                    self.next_request_id(),
+                    "window/workDoneProgress/create".to_string(),
+                    params,
+                );
+                self.sender.send(request.into()).ok();
+
+                lsp_types::WorkDoneProgress::Begin(lsp_types::WorkDoneProgressBegin {
+                    title: title.into(),
+                    cancellable: Some(false),
+                    message,
+                    percentage,
+                })
+            }
+            Progress::Report => {
+                lsp_types::WorkDoneProgress::Report(lsp_types::WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message,
+                    percentage,
+                })
+            }
+            Progress::End => {
+                lsp_types::WorkDoneProgress::End(lsp_types::WorkDoneProgressEnd { message })
+            }
+        };
+
+        let notification = lsp_server::Notification::new(
+            "$/progress".to_string(),
+            lsp_types::ProgressParams {
+                token,
+                value: lsp_types::ProgressParamsValue::WorkDone(work_done_progress),
+            },
+        );
+        self.sender.send(notification.into()).ok();
+    }
+
+    /// Runs cache priming synchronously.
+    ///
+    /// This warms up the `workspace_symbols` cache after VFS loading completes,
+    /// so that the first GoToDefinition is fast. Progress is displayed via
+    /// LSP WorkDoneProgress notifications.
+    ///
+    /// Note: Runs on main thread since Salsa database isn't thread-safe.
+    /// This is acceptable since it happens right after VFS loading when
+    /// no LSP requests are pending.
+    pub fn prime_caches(&self) {
+        use base_db::SourceRootId;
+        use ide_db::hir_def::DefDatabase;
+
+        tracing::info!("starting cache priming");
+
+        // Show progress bar
+        self.report_progress(
+            "Indexing",
+            Progress::Begin,
+            Some("Building symbol index...".into()),
+            Some(0.0),
+        );
+
+        // Call workspace_symbols to prime the cache
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let analysis = self.analysis_host.analysis();
+            let _ = analysis.database().workspace_symbols(SourceRootId(0));
+        }));
+
+        let cancelled = result.is_err();
+        let message = if cancelled { "Cancelled" } else { "Done" };
+
+        self.report_progress("Indexing", Progress::End, Some(message.into()), Some(1.0));
+
+        if cancelled {
+            tracing::warn!("cache priming was cancelled");
+        } else {
+            tracing::info!("cache priming completed");
         }
     }
 

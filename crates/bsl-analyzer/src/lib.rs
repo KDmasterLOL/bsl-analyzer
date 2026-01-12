@@ -12,6 +12,7 @@ pub mod lsp;
 pub mod mem_docs;
 pub mod reporters;
 pub mod server;
+pub mod task_pool;
 
 // Re-export main server function
 pub use server::main_loop;
