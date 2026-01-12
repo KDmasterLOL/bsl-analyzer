@@ -255,6 +255,7 @@ pub fn handle_semantic_tokens_full(
     snap: GlobalStateSnapshot,
     params: SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
+    let start = std::time::Instant::now();
     let _p = tracing::info_span!(
         "handle_semantic_tokens_full",
         uri = %params.text_document.uri
@@ -275,10 +276,26 @@ pub fn handle_semantic_tokens_full(
     let line_index = LineIndex::new(&text);
 
     // Get highlights from IDE
+    let highlight_start = std::time::Instant::now();
     let highlights = snap.analysis.highlight(file_id);
+    let highlight_elapsed = highlight_start.elapsed();
+    tracing::warn!(
+        file_id = file_id.0,
+        highlight_count = highlights.len(),
+        elapsed_ms = highlight_elapsed.as_millis() as u64,
+        "semantic_tokens: analysis.highlight() completed"
+    );
 
     // Convert to LSP semantic tokens (pass text for UTF-16 length calculation)
     let tokens = crate::lsp::semantic_tokens(&line_index, &text, &highlights);
+    let total_elapsed = start.elapsed();
+    tracing::warn!(
+        file_id = file_id.0,
+        token_count = tokens.len(),
+        total_ms = total_elapsed.as_millis() as u64,
+        %uri,
+        "semantic_tokens: completed"
+    );
 
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: tokens })))
 }

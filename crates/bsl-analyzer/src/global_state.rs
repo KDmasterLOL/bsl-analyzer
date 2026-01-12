@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use base_db::{DiagnosticsConfigId, DiagnosticsConfigInput};
 use crossbeam_channel::{Receiver, Sender};
 use ide::Analysis;
 use ide_db::RootDatabaseImpl;
@@ -84,6 +85,12 @@ pub struct GlobalState {
 
     /// Counter for generating unique LSP request IDs.
     next_request_id: AtomicI32,
+
+    /// Current diagnostics configuration (hashable, for Salsa caching).
+    ///
+    /// This is the normalized config used for Salsa queries. When config file
+    /// changes, this is updated and all diagnostic caches are invalidated.
+    diagnostics_config: DiagnosticsConfigInput,
 }
 
 impl GlobalState {
@@ -108,7 +115,56 @@ impl GlobalState {
             vfs_done: false,
             task_pool: task_pool::TaskPool::new_with_handle(),
             next_request_id: AtomicI32::new(1),
+            diagnostics_config: DiagnosticsConfigInput::new(),
         }
+    }
+
+    /// Gets the Salsa-interned diagnostics config ID.
+    ///
+    /// This ID is used in the `file_diagnostics_query` for Salsa caching.
+    /// The same config produces the same ID (Salsa interning).
+    pub fn diagnostics_config_id(&self) -> DiagnosticsConfigId<'_> {
+        DiagnosticsConfigId::new(self.analysis_host.raw_database(), self.diagnostics_config.clone())
+    }
+
+    /// Gets a reference to the current diagnostics config.
+    pub fn diagnostics_config(&self) -> &DiagnosticsConfigInput {
+        &self.diagnostics_config
+    }
+
+    /// Updates diagnostics config from project settings.
+    ///
+    /// Called when project is loaded or config file changes.
+    /// This invalidates all cached diagnostics (new config ID = new hash).
+    pub fn update_diagnostics_config(&mut self) {
+        self.diagnostics_config =
+            self.project.as_ref().map(Self::config_from_project).unwrap_or_default();
+
+        tracing::info!(
+            disabled_count = self.diagnostics_config.disabled.len(),
+            params_count = self.diagnostics_config.parameters.len(),
+            "updated diagnostics config"
+        );
+    }
+
+    /// Converts project diagnostics config to hashable DiagnosticsConfigInput.
+    fn config_from_project(project: &Project) -> DiagnosticsConfigInput {
+        let raw = &project.config.diagnostics;
+
+        // Convert skip list (strings to strings, just clone and sort)
+        let disabled = raw.skip.clone();
+
+        // Convert parameters HashMap to sorted Vec
+        let parameters: Vec<(String, String)> = raw
+            .parameters
+            .iter()
+            .map(|(code, value)| (code.clone(), serde_json::to_string(value).unwrap_or_default()))
+            .collect();
+
+        DiagnosticsConfigInput::from_raw(
+            disabled, parameters, false, // ordinary_app_support - default to false
+            10000, // Default dataflow max iterations
+        )
     }
 
     /// Generates a unique request ID for LSP requests.
@@ -211,6 +267,9 @@ impl GlobalState {
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
 
+        // Update diagnostics config from project settings
+        self.update_diagnostics_config();
+
         // Configure VFS loader to scan source path in background thread
         self.vfs_progress_config_version += 1;
         self.loader.set_config(loader::Config {
@@ -255,6 +314,7 @@ impl GlobalState {
         let source_root = source_root_input.root(db);
         let mut file_set = source_root.file_set().clone();
         let mut file_set_modified = false;
+        let mut config_file_changed = false;
 
         for file in changed_files {
             let text = match file.change {
@@ -264,6 +324,19 @@ impl GlobalState {
 
             // Map file to SourceRoot in database
             db.set_file_source_root(file.file_id, source_root_id);
+
+            // Check if this is a config file change
+            {
+                let vfs = self.vfs.read();
+                let path = vfs.file_path(file.file_id);
+                let path_str = path.as_path().to_string_lossy();
+                if path_str.ends_with(".bsl-analyzer.json")
+                    || path_str.ends_with(".bsl-language-server.json")
+                {
+                    tracing::info!(path = %path_str, "config file changed");
+                    config_file_changed = true;
+                }
+            }
 
             // Ensure file is in SourceRoot's FileSet
             if file_set.path_for_file(&file.file_id).is_none() {
@@ -280,6 +353,17 @@ impl GlobalState {
             }
 
             if let Some(text) = text {
+                // This invalidates Salsa cache for this file!
+                let path_str = {
+                    let vfs = self.vfs.read();
+                    format!("{:?}", vfs.file_path(file.file_id))
+                };
+                tracing::debug!(
+                    file_id = file.file_id.0,
+                    path = %path_str,
+                    text_len = text.len(),
+                    "process_changes: set_file_text (invalidates Salsa cache)"
+                );
                 db.set_file_text(file.file_id, &text);
             }
         }
@@ -288,6 +372,17 @@ impl GlobalState {
         if file_set_modified {
             let updated_source_root = base_db::SourceRoot::new_local(file_set);
             db.set_source_root(source_root_id, updated_source_root);
+        }
+
+        // Reload project config if config file changed
+        // This invalidates all diagnostic caches (new config ID = new hash)
+        if config_file_changed {
+            if let Some(root) = self.workspace_root.clone() {
+                tracing::info!("reloading project config after config file change");
+                let project = Project::new(&root);
+                self.project = Some(project);
+                self.update_diagnostics_config();
+            }
         }
 
         true
@@ -475,6 +570,13 @@ impl AnalysisHost {
         // In Salsa 0.25+, the database itself provides snapshot semantics
         // We create a new Analysis referencing the current database state
         Analysis::from_database(self.db.clone())
+    }
+
+    /// Gets immutable access to the database.
+    ///
+    /// Used for Salsa interned types (DiagnosticsConfigId) and queries.
+    pub fn raw_database(&self) -> &RootDatabaseImpl {
+        &self.db
     }
 
     /// Gets mutable access to the database.

@@ -20,7 +20,8 @@ mod queries;
 
 pub use change::FileChange;
 pub use input::{
-    FileIdInput, FileSourceRootInput, FileTextInput, SourceRoot, SourceRootId, SourceRootInput,
+    DiagnosticsConfigId, DiagnosticsConfigInput, FileIdInput, FileSourceRootInput, FileTextInput,
+    SourceRoot, SourceRootId, SourceRootInput,
 };
 pub use queries::{
     method_regions_query, module_level_regions_query, parse_query, resolve_vfs_path_query,

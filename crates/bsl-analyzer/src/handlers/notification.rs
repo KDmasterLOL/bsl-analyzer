@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use ide::DiagnosticsConfig;
+use base_db::FileIdInput;
+use ide_diagnostics::file_diagnostics_query;
 use line_index::LineIndex;
 use lsp_server::Notification;
 use lsp_types::{
@@ -16,8 +17,15 @@ use lsp_types::{
 
 use crate::global_state::{GlobalState, Task};
 
-/// Publishes diagnostics for a file.
+/// Publishes diagnostics for a file using Salsa-cached query.
+///
+/// This uses `file_diagnostics_query` which is cached by Salsa.
+/// On first call: ~700ms (full computation)
+/// On subsequent calls: <1ms (cache hit)
+/// After file change: ~700ms (recomputes)
+/// After config change: all files recompute (config ID changed)
 fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
+    let start = std::time::Instant::now();
     let file_id = crate::lsp::file_id(state, uri)?;
 
     // Get file text for line index
@@ -28,19 +36,31 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
 
     let line_index = LineIndex::new(&text);
 
-    // Run diagnostics
-    let config = DiagnosticsConfig::default();
-    let analysis = state.analysis_host.analysis();
+    // Run diagnostics using Salsa-cached query
+    let db = state.analysis_host.raw_database();
+    let file_id_input = FileIdInput::new(db, file_id);
+    let config_id = state.diagnostics_config_id();
 
-    let ide_diagnostics = analysis.diagnostics(file_id, &config);
-    tracing::info!(
-        "Diagnostics computed successfully: {} diagnostics found",
-        ide_diagnostics.len()
+    let diag_start = std::time::Instant::now();
+    let ide_diagnostics = file_diagnostics_query(db, file_id_input, config_id);
+    let diag_elapsed = diag_start.elapsed();
+    tracing::warn!(
+        file_id = file_id.0,
+        count = ide_diagnostics.len(),
+        elapsed_ms = diag_elapsed.as_millis() as u64,
+        "publish_diagnostics: file_diagnostics_query() completed"
     );
 
     // Convert to LSP diagnostics
     let lsp_diagnostics = crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics);
-    tracing::info!("Publishing {} diagnostics for {}", lsp_diagnostics.len(), uri);
+    let total_elapsed = start.elapsed();
+    tracing::warn!(
+        file_id = file_id.0,
+        count = lsp_diagnostics.len(),
+        total_ms = total_elapsed.as_millis() as u64,
+        %uri,
+        "publish_diagnostics: completed"
+    );
 
     // Publish
     let params =
@@ -98,9 +118,12 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 
 /// Preloads dependencies of a file in background.
 ///
-/// This warms up the symbol_tree cache for modules that the opened file depends on,
-/// enabling fast GoToDefinition on first use.
+/// This warms up caches for modules that the opened file depends on:
+/// - symbol_tree (for fast GoToDefinition)
+/// - module_bodies (for hover info)
+/// - diagnostics (for fast diagnostics on dependency navigation)
 fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
+    use base_db::DiagnosticsConfigId;
     use ide_db::hir_def::{DefDatabase, ModuleId};
 
     // Get file dependencies (resolved ExternalRefs → FileIds)
@@ -109,24 +132,46 @@ fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
     let deps = analysis.database().file_dependencies(module_id);
 
     if deps.is_empty() {
-        tracing::debug!(file_id = file_id.0, "no dependencies to preload");
+        tracing::debug!(file_id = file_id.0, "preload: no dependencies found");
         return;
     }
 
     let dep_count = deps.len();
-    tracing::info!(file_id = file_id.0, dep_count, "preloading dependencies");
+    let dep_ids: Vec<u32> = deps.iter().map(|f| f.0).collect();
+    tracing::debug!(file_id = file_id.0, dep_count, ?dep_ids, "preload: starting background task");
 
     // Clone what we need for the background task
     let deps = deps.as_ref().clone();
     let db = analysis.database().clone();
+    let config = state.diagnostics_config().clone();
 
-    // Spawn background task to warm up symbol_tree caches
+    // Spawn background task to warm up caches for dependencies
+    // This includes symbol_tree (for GoToDefinition), module_bodies (for hover),
+    // and diagnostics (for fast diagnostics when navigating to dependencies)
     state.task_pool.pool.spawn(move || {
+        tracing::debug!(dep_count = deps.len(), "preload: background task started");
+
+        // Create config ID once for all files (Salsa interns it)
+        let config_id = DiagnosticsConfigId::new(&db, config);
+
         for dep_file_id in &deps {
             let dep_module_id = ModuleId::new(*dep_file_id);
-            // Call symbol_tree to prime the cache
+
+            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming symbol_tree");
+            // Warm up symbol_tree (for GoToDefinition resolution)
             let _ = db.symbol_tree(dep_module_id);
+
+            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming module_bodies");
+            // Warm up module_bodies (for diagnostics, hover info)
+            // This also primes item_tree and other intermediate caches
+            let _ = db.module_bodies(dep_module_id);
+
+            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming diagnostics");
+            // Warm up diagnostics (so opening a dependency file is instant)
+            let file_id_input = FileIdInput::new(&db, *dep_file_id);
+            let _ = file_diagnostics_query(&db, file_id_input, config_id);
         }
+        tracing::debug!(dep_count = deps.len(), "preload: background task completed");
         Task::DependenciesPreloaded { file_id, count: deps.len() }
     });
 }

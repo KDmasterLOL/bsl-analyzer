@@ -17,7 +17,7 @@ use ide_db::{RootDatabase, TextRange};
 use vfs::FileId;
 
 /// A diagnostic produced by the analyzer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub message: String,
@@ -317,14 +317,14 @@ pub enum DiagnosticTag {
 }
 
 /// A quick fix for a diagnostic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fix {
     pub label: String,
     pub edits: Vec<TextEdit>,
 }
 
 /// A text edit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub range: TextRange,
     pub new_text: String,
@@ -1252,4 +1252,227 @@ fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     diagnostics
+}
+
+// ============================================================================
+// Salsa-cached diagnostics query
+// ============================================================================
+
+use std::sync::Arc;
+
+use base_db::{DiagnosticsConfigId, DiagnosticsConfigInput, FileIdInput};
+
+impl DiagnosticsConfig {
+    /// Convert from Salsa-hashable DiagnosticsConfigInput.
+    ///
+    /// This converts the string-based config (used in Salsa for hashability)
+    /// to the typed config (used by diagnostic handlers).
+    pub fn from_input(input: &DiagnosticsConfigInput) -> Self {
+        // Convert string codes to DiagnosticCode
+        let disabled: Vec<DiagnosticCode> =
+            input.disabled.iter().filter_map(|s| s.parse().ok()).collect();
+
+        // Convert string parameters to HashMap
+        let parameters: std::collections::HashMap<DiagnosticCode, serde_json::Value> = input
+            .parameters
+            .iter()
+            .filter_map(|(code_str, json_str)| {
+                let code: DiagnosticCode = code_str.parse().ok()?;
+                let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+                Some((code, value))
+            })
+            .collect();
+
+        Self {
+            disabled,
+            parameters,
+            ordinary_app_support: input.ordinary_app_support,
+            dataflow_max_iterations: input.dataflow_max_iterations,
+        }
+    }
+}
+
+impl std::str::FromStr for DiagnosticCode {
+    type Err = ();
+
+    /// Parse diagnostic code from string.
+    ///
+    /// Used when converting DiagnosticsConfigInput to DiagnosticsConfig.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "CanonicalSpellingKeywords" => Ok(Self::CanonicalSpellingKeywords),
+            "ConsecutiveEmptyLines" => Ok(Self::ConsecutiveEmptyLines),
+            "LineLength" => Ok(Self::LineLength),
+            "MissingSpace" => Ok(Self::MissingSpace),
+            "OneStatementPerLine" => Ok(Self::OneStatementPerLine),
+            "SemicolonPresence" => Ok(Self::SemicolonPresence),
+            "SpaceAtStartComment" => Ok(Self::SpaceAtStartComment),
+            "IncorrectLineBreak" => Ok(Self::IncorrectLineBreak),
+            "IncorrectUseOfStrTemplate" => Ok(Self::IncorrectUseOfStrTemplate),
+            "ExtraCommas" => Ok(Self::ExtraCommas),
+            "CommentedCode" => Ok(Self::CommentedCode),
+            "EmptyCodeBlock" => Ok(Self::EmptyCodeBlock),
+            "EmptyRegion" => Ok(Self::EmptyRegion),
+            "EmptyStatement" => Ok(Self::EmptyStatement),
+            "UnreachableCode" => Ok(Self::UnreachableCode),
+            "CodeBlockBeforeSub" => Ok(Self::CodeBlockBeforeSub),
+            "CodeOutOfRegion" => Ok(Self::CodeOutOfRegion),
+            "MagicNumber" => Ok(Self::MagicNumber),
+            "MagicDate" => Ok(Self::MagicDate),
+            "YoLetterUsage" => Ok(Self::YoLetterUsage),
+            "LatinAndCyrillicSymbolInWord" => Ok(Self::LatinAndCyrillicSymbolInWord),
+            "InvalidCharacterInFile" => Ok(Self::InvalidCharacterInFile),
+            "DoubleNegatives" => Ok(Self::DoubleNegatives),
+            "NestedTernaryOperator" => Ok(Self::NestedTernaryOperator),
+            "NonExportMethodsInApiRegion" => Ok(Self::NonExportMethodsInApiRegion),
+            "TernaryOperatorUsage" => Ok(Self::TernaryOperatorUsage),
+            "UnaryPlusInConcatenation" => Ok(Self::UnaryPlusInConcatenation),
+            "UselessTernaryOperator" => Ok(Self::UselessTernaryOperator),
+            "BadWords" => Ok(Self::BadWords),
+            "DuplicateStringLiteral" => Ok(Self::DuplicateStringLiteral),
+            "DuplicateRegion" => Ok(Self::DuplicateRegion),
+            "NonStandardRegion" => Ok(Self::NonStandardRegion),
+            "DuplicatedInsertionIntoCollection" => Ok(Self::DuplicatedInsertionIntoCollection),
+            "ExcessiveAutoTestCheck" => Ok(Self::ExcessiveAutoTestCheck),
+            "IdenticalExpressions" => Ok(Self::IdenticalExpressions),
+            "IfElseDuplicatedCodeBlock" => Ok(Self::IfElseDuplicatedCodeBlock),
+            "IfElseDuplicatedCondition" => Ok(Self::IfElseDuplicatedCondition),
+            "IfElseIfEndsWithElse" => Ok(Self::IfElseIfEndsWithElse),
+            "MultilingualStringHasAllDeclaredLanguages" => {
+                Ok(Self::MultilingualStringHasAllDeclaredLanguages)
+            }
+            "MultilingualStringUsingWithTemplate" => Ok(Self::MultilingualStringUsingWithTemplate),
+            "NestedConstructorsInStructureDeclaration" => {
+                Ok(Self::NestedConstructorsInStructureDeclaration)
+            }
+            "NestedFunctionInParameters" => Ok(Self::NestedFunctionInParameters),
+            "AllFunctionPathMustHaveReturn" => Ok(Self::AllFunctionPathMustHaveReturn),
+            "FunctionShouldHaveReturn" => Ok(Self::FunctionShouldHaveReturn),
+            "ProcedureReturnsValue" => Ok(Self::ProcedureReturnsValue),
+            "FunctionReturnsSamePrimitive" => Ok(Self::FunctionReturnsSamePrimitive),
+            "FunctionNameStartsWithGet" => Ok(Self::FunctionNameStartsWithGet),
+            "TooManyReturns" => Ok(Self::TooManyReturns),
+            "NumberOfParams" => Ok(Self::NumberOfParams),
+            "NumberOfOptionalParams" => Ok(Self::NumberOfOptionalParams),
+            "OrderOfParams" => Ok(Self::OrderOfParams),
+            "MissedRequiredParameter" => Ok(Self::MissedRequiredParameter),
+            "FunctionOutParameter" => Ok(Self::FunctionOutParameter),
+            "UnusedParameters" => Ok(Self::UnusedParameters),
+            "MissingParameterDescription" => Ok(Self::MissingParameterDescription),
+            "MissingReturnedValueDescription" => Ok(Self::MissingReturnedValueDescription),
+            "RewriteMethodParameter" => Ok(Self::RewriteMethodParameter),
+            "UnusedLocalVariable" => Ok(Self::UnusedLocalVariable),
+            "UnusedLocalMethod" => Ok(Self::UnusedLocalMethod),
+            "ExportVariables" => Ok(Self::ExportVariables),
+            "MissingVariablesDescription" => Ok(Self::MissingVariablesDescription),
+            "SelfAssign" => Ok(Self::SelfAssign),
+            "ThisObjectAssign" => Ok(Self::ThisObjectAssign),
+            "CyclomaticComplexity" => Ok(Self::CyclomaticComplexity),
+            "CognitiveComplexity" => Ok(Self::CognitiveComplexity),
+            "NestedStatements" => Ok(Self::NestedStatements),
+            "MethodSize" => Ok(Self::MethodSize),
+            "IfConditionComplexity" => Ok(Self::IfConditionComplexity),
+            "MissingCodeTryCatchEx" => Ok(Self::MissingCodeTryCatchEx),
+            "MissingTempStorageDeletion" => Ok(Self::MissingTempStorageDeletion),
+            "MissingTemporaryFileDeletion" => Ok(Self::MissingTemporaryFileDeletion),
+            "UsingGoto" => Ok(Self::UsingGoto),
+            "BeginTransactionBeforeTryCatch" => Ok(Self::BeginTransactionBeforeTryCatch),
+            "CodeAfterAsyncCall" => Ok(Self::CodeAfterAsyncCall),
+            "CommitTransactionOutsideTryCatch" => Ok(Self::CommitTransactionOutsideTryCatch),
+            "CompilationDirectiveLost" => Ok(Self::CompilationDirectiveLost),
+            "CreateQueryInCycle" => Ok(Self::CreateQueryInCycle),
+            "DataExchangeLoading" => Ok(Self::DataExchangeLoading),
+            "DeletingCollectionItem" => Ok(Self::DeletingCollectionItem),
+            "DeprecatedCurrentDate" => Ok(Self::DeprecatedCurrentDate),
+            "DeprecatedFind" => Ok(Self::DeprecatedFind),
+            "DeprecatedMessage" => Ok(Self::DeprecatedMessage),
+            "DeprecatedTypeManagedForm" => Ok(Self::DeprecatedTypeManagedForm),
+            "DeprecatedMethods8310" => Ok(Self::DeprecatedMethods8310),
+            "DeprecatedMethods8317" => Ok(Self::DeprecatedMethods8317),
+            "DeprecatedAttributes8312" => Ok(Self::DeprecatedAttributes8312),
+            "DisableSafeMode" => Ok(Self::DisableSafeMode),
+            "ExecuteExternalCode" => Ok(Self::ExecuteExternalCode),
+            "ExternalAppStarting" => Ok(Self::ExternalAppStarting),
+            "FileSystemAccess" => Ok(Self::FileSystemAccess),
+            "FormDataToValue" => Ok(Self::FormDataToValue),
+            "GetFormMethod" => Ok(Self::GetFormMethod),
+            "GlobalContextMethodCollision8312" => Ok(Self::GlobalContextMethodCollision8312),
+            "InternetAccess" => Ok(Self::InternetAccess),
+            "IsInRoleMethod" => Ok(Self::IsInRoleMethod),
+            "PairingBrokenTransaction" => Ok(Self::PairingBrokenTransaction),
+            "WrongUseOfRollbackTransactionMethod" => Ok(Self::WrongUseOfRollbackTransactionMethod),
+            "CachedPublic" => Ok(Self::CachedPublic),
+            "CommandModuleExportMethods" => Ok(Self::CommandModuleExportMethods),
+            "CommonModuleAssign" => Ok(Self::CommonModuleAssign),
+            "CommonModuleInvalidType" => Ok(Self::CommonModuleInvalidType),
+            "CommonModuleMissingAPI" => Ok(Self::CommonModuleMissingAPI),
+            "CommonModuleNameCached" => Ok(Self::CommonModuleNameCached),
+            "CommonModuleNameClient" => Ok(Self::CommonModuleNameClient),
+            "CommonModuleNameClientServer" => Ok(Self::CommonModuleNameClientServer),
+            "CommonModuleNameFullAccess" => Ok(Self::CommonModuleNameFullAccess),
+            "CommonModuleNameGlobal" => Ok(Self::CommonModuleNameGlobal),
+            "CommonModuleNameGlobalClient" => Ok(Self::CommonModuleNameGlobalClient),
+            "CommonModuleNameServerCall" => Ok(Self::CommonModuleNameServerCall),
+            "CommonModuleNameWords" => Ok(Self::CommonModuleNameWords),
+            "DenyIncompleteValues" => Ok(Self::DenyIncompleteValues),
+            "MetadataObjectNameLength" => Ok(Self::MetadataObjectNameLength),
+            "MissingCommonModuleMethod" => Ok(Self::MissingCommonModuleMethod),
+            "MissingEventSubscriptionHandler" => Ok(Self::MissingEventSubscriptionHandler),
+            "AssignAliasFieldsInQuery" => Ok(Self::AssignAliasFieldsInQuery),
+            "FieldsFromJoinsWithoutIsNull" => Ok(Self::FieldsFromJoinsWithoutIsNull),
+            "FullOuterJoinQuery" => Ok(Self::FullOuterJoinQuery),
+            "JoinWithSubQuery" => Ok(Self::JoinWithSubQuery),
+            "LogicalOrInJoinQuerySection" => Ok(Self::LogicalOrInJoinQuerySection),
+            "LogicalOrInTheWhereSectionOfQuery" => Ok(Self::LogicalOrInTheWhereSectionOfQuery),
+            "MultilineStringInQuery" => Ok(Self::MultilineStringInQuery),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Salsa-cached diagnostics query.
+///
+/// Computes diagnostics for a file with the given configuration.
+/// Results are cached by Salsa and automatically invalidated when:
+/// - File content changes (via FileIdInput dependency)
+/// - Config changes (via DiagnosticsConfigId)
+///
+/// ## Performance
+/// - **LRU cache:** 256 files
+/// - **First call:** ~700ms (full computation)
+/// - **Cached call:** < 1ms (cache hit)
+/// - **After file change:** ~700ms (recomputes for that file only)
+/// - **After config change:** ~700ms × N files (all invalidated)
+///
+/// ## Usage
+///
+/// ```ignore
+/// let file_id_input = FileIdInput::new(db, file_id);
+/// let config = DiagnosticsConfigInput::new();
+/// let config_id = DiagnosticsConfigId::new(db, config);
+/// let diagnostics = file_diagnostics_query(db, file_id_input, config_id);
+/// ```
+#[salsa::tracked(lru = 256)]
+pub fn file_diagnostics_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+    config_id: DiagnosticsConfigId<'db>,
+) -> Arc<Vec<Diagnostic>> {
+    let file_id = file_id_input.file_id(db);
+    let config_input = config_id.config(db);
+    let config = DiagnosticsConfig::from_input(&config_input);
+
+    let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
+
+    let ctx = DiagnosticsContext {
+        db,
+        config: &config,
+        file_id,
+        workspace_root: None,
+        configuration_path: None,
+        configuration_path_input: None,
+        file_set: None,
+    };
+
+    Arc::new(diagnostics(&ctx))
 }

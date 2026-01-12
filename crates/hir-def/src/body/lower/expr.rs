@@ -436,13 +436,37 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     } else if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
         // Check for external app methods in qualified calls (obj.method())
-        // Extract method name from FIELD_EXPR (last IDENT token after DOT)
-        if let Some(method_token) = actual_callee
-            .children_with_tokens()
+        // Extract all IDENT tokens from FIELD_EXPR (use descendants to unwrap EXPR wrappers)
+        let idents: Vec<_> = actual_callee
+            .descendants_with_tokens()
             .filter_map(|el| el.into_token())
             .filter(|tok| tok.kind() == SyntaxKind::IDENT)
-            .last()
-        {
+            .collect();
+
+        tracing::debug!(
+            idents_count = idents.len(),
+            callee_text = %actual_callee.text(),
+            "lower_call_expr: FIELD_EXPR found"
+        );
+
+        // Collect ExternalRef for module dependency graph (two-level calls: Module.Method())
+        if idents.len() == 2 {
+            let module_name = idents[0].text();
+            let method_name_str = idents[1].text();
+            let key = module_name.to_lowercase();
+
+            // Only collect if module_name is NOT a local variable or parameter
+            if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
+                ctx.external_refs.push(crate::body::ExternalRef::QualifiedCall {
+                    receiver: crate::Name::new(module_name),
+                    method: crate::Name::new(method_name_str),
+                    range: actual_callee.text_range(),
+                });
+            }
+        }
+
+        // Extract method name from FIELD_EXPR (last IDENT token after DOT)
+        if let Some(method_token) = idents.last() {
             let method_name = method_token.text();
             if is_external_app_method(method_name) {
                 // Range is just the method name token, not the whole call
@@ -853,9 +877,11 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
     if arg_list_node.is_some() {
         let method = field_name.to_string();
+        tracing::warn!(method = %method, "lower_field_expr: has arg_list, analyzing call");
 
         // Analyze call structure to determine call type (for diagnostics)
         let call_info = analyze_qualified_call(node, ctx);
+        tracing::warn!(has_call_info = call_info.is_some(), "lower_field_expr: call_info result");
 
         // Collect ExternalRef for module dependency graph
         if let Some(ref info) = &call_info {
@@ -1013,6 +1039,12 @@ enum QualifiedCallInfo {
 /// - `None` for local variable calls or field access
 fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<QualifiedCallInfo> {
     let first_child = node.children().next()?;
+    tracing::warn!(
+        node_kind = ?node.kind(),
+        first_child_kind = ?first_child.kind(),
+        first_child_text = %first_child.text(),
+        "analyze_qualified_call: entry"
+    );
 
     // Check for three-level call: first child is FIELD_EXPR
     // Structure: FIELD_EXPR > FIELD_EXPR > [IDENT, DOT, IDENT]
@@ -1072,9 +1104,11 @@ fn analyze_qualified_call(node: &SyntaxNode, ctx: &LoweringCtx) -> Option<Qualif
     // Check if module name is a local variable
     let key = module.to_lowercase();
     if ctx.local_vars.contains_key(&key) || ctx.param_names.contains(&key) {
+        tracing::warn!(module = %module, "analyze_qualified_call: is local variable, returning None");
         return None;
     }
 
+    tracing::warn!(module = %module, "analyze_qualified_call: returning TwoLevel");
     Some(QualifiedCallInfo::TwoLevel { module })
 }
 

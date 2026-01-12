@@ -120,6 +120,144 @@ pub struct FileIdInput {
     pub file_id: vfs::FileId,
 }
 
+/// Hashable diagnostics configuration for Salsa caching.
+///
+/// Uses String codes instead of DiagnosticCode enum to avoid circular dependencies
+/// between base-db and ide-diagnostics. Conversion to DiagnosticCode happens at
+/// the query call site.
+///
+/// ## Design rationale
+///
+/// HashMap can't be used in Salsa because:
+/// 1. Iteration order is non-deterministic (violates Salsa's same-input→same-output guarantee)
+/// 2. serde_json::Value doesn't implement Hash
+///
+/// Instead, we use sorted Vec which is:
+/// - Deterministic (same data → same hash)
+/// - Hashable (all fields implement Hash)
+/// - Efficient for ~10 items (typical diagnostic config size)
+///
+/// ## Usage
+///
+/// ```ignore
+/// let config = DiagnosticsConfigInput {
+///     disabled: vec!["LineLength".to_string(), "MissingReturn".to_string()],
+///     parameters: vec![
+///         ("LineLength".to_string(), r#"{"maxLength":140}"#.to_string()),
+///     ],
+///     ordinary_app_support: false,
+///     dataflow_max_iterations: 10000,
+/// };
+/// let config_id = DiagnosticsConfigId::new(db, config);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct DiagnosticsConfigInput {
+    /// Disabled diagnostic codes (sorted alphabetically).
+    ///
+    /// Example: `["LineLength", "MissingReturn"]`
+    pub disabled: Vec<String>,
+
+    /// Per-diagnostic parameters as (code, json_string) pairs, sorted by code.
+    ///
+    /// JSON string is used instead of serde_json::Value because Value doesn't implement Hash.
+    /// The JSON is parsed at the call site when needed.
+    ///
+    /// Example: `[("LineLength", r#"{"maxLength":140}"#)]`
+    pub parameters: Vec<(String, String)>,
+
+    /// Support for ordinary application mode.
+    ///
+    /// When true, enables checks specific to ordinary (non-managed) applications.
+    pub ordinary_app_support: bool,
+
+    /// Max iterations for dataflow analysis.
+    ///
+    /// Used by flow-sensitive diagnostics to limit computation.
+    /// Default: 10000.
+    pub dataflow_max_iterations: usize,
+}
+
+impl DiagnosticsConfigInput {
+    /// Create a new DiagnosticsConfigInput with default values.
+    pub fn new() -> Self {
+        Self {
+            disabled: Vec::new(),
+            parameters: Vec::new(),
+            ordinary_app_support: false,
+            dataflow_max_iterations: 10000,
+        }
+    }
+
+    /// Build from raw config data, normalizing for deterministic hashing.
+    ///
+    /// - Sorts disabled list alphabetically
+    /// - Sorts parameters by code
+    /// - Removes duplicates
+    pub fn from_raw(
+        disabled: impl IntoIterator<Item = String>,
+        parameters: impl IntoIterator<Item = (String, String)>,
+        ordinary_app_support: bool,
+        dataflow_max_iterations: usize,
+    ) -> Self {
+        let mut disabled: Vec<String> = disabled.into_iter().collect();
+        disabled.sort();
+        disabled.dedup();
+
+        let mut parameters: Vec<(String, String)> = parameters.into_iter().collect();
+        parameters.sort_by(|a, b| a.0.cmp(&b.0));
+        parameters.dedup_by(|a, b| a.0 == b.0);
+
+        Self { disabled, parameters, ordinary_app_support, dataflow_max_iterations }
+    }
+
+    /// Check if a diagnostic code is disabled.
+    ///
+    /// Uses binary search for O(log n) lookup.
+    pub fn is_disabled(&self, code: &str) -> bool {
+        self.disabled.binary_search_by(|c| c.as_str().cmp(code)).is_ok()
+    }
+
+    /// Get parameter JSON for a diagnostic code.
+    ///
+    /// Uses binary search for O(log n) lookup.
+    /// Returns None if no parameters are set for this code.
+    pub fn get_parameters(&self, code: &str) -> Option<&str> {
+        self.parameters
+            .binary_search_by(|(c, _)| c.as_str().cmp(code))
+            .ok()
+            .map(|idx| self.parameters[idx].1.as_str())
+    }
+}
+
+/// Salsa interned diagnostics config for caching.
+///
+/// This wrapper makes DiagnosticsConfigInput compatible with Salsa tracked functions.
+/// Salsa interns the config, so identical configs share the same ID.
+///
+/// ## Usage
+///
+/// ```ignore
+/// // Create config ID
+/// let config = DiagnosticsConfigInput::new();
+/// let config_id = DiagnosticsConfigId::new(db, config);
+///
+/// // Use in tracked function
+/// #[salsa::tracked(lru = 256)]
+/// pub fn file_diagnostics(
+///     db: &dyn RootDatabase,
+///     file_id_input: FileIdInput,
+///     config_id: DiagnosticsConfigId,
+/// ) -> Arc<Vec<Diagnostic>> {
+///     let config = config_id.config(db);
+///     // ... use config
+/// }
+/// ```
+#[salsa::interned(debug)]
+pub struct DiagnosticsConfigId {
+    /// The diagnostics configuration.
+    pub config: DiagnosticsConfigInput,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -241,19 +241,42 @@ pub fn file_external_refs_query<'db>(
     let _span = tracing::info_span!("file_external_refs", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
     let module_id = ModuleId::new(file_id);
+
+    tracing::debug!(file_id = file_id.0, "file_external_refs: calling module_bodies");
     let bodies = db.module_bodies(module_id);
+
+    let method_count = bodies.iter_lower_results().count();
+    tracing::debug!(file_id = file_id.0, method_count, "file_external_refs: got module_bodies");
 
     // Collect external refs from all method bodies
     let mut refs = Vec::new();
-    for (_, lower_result) in bodies.iter_lower_results() {
+    for (method_id, lower_result) in bodies.iter_lower_results() {
+        let ref_count = lower_result.external_refs.len();
+        if ref_count > 0 {
+            tracing::debug!(
+                file_id = file_id.0,
+                method_id = ?method_id,
+                ref_count,
+                "file_external_refs: found refs in method"
+            );
+        }
         refs.extend(lower_result.external_refs.iter().cloned());
     }
 
     // Also collect from module-level code
     if let Some(module_code) = bodies.module_code_result() {
+        let ref_count = module_code.external_refs.len();
+        if ref_count > 0 {
+            tracing::debug!(
+                file_id = file_id.0,
+                ref_count,
+                "file_external_refs: found refs in module code"
+            );
+        }
         refs.extend(module_code.external_refs.iter().cloned());
     }
 
+    tracing::debug!(file_id = file_id.0, total_refs = refs.len(), "file_external_refs: done");
     Arc::new(refs)
 }
 
@@ -321,11 +344,29 @@ pub fn file_dependencies_query<'db>(
 
     // Get module index and external refs
     let index = module_index_query(db, source_root_input);
+    tracing::debug!(
+        file_id = file_id.0,
+        common_modules = index.common_module_count(),
+        managers = index.manager_count(),
+        "file_dependencies: got module_index"
+    );
+
     let file_id_input = base_db::FileIdInput::new(db, file_id);
     let refs = file_external_refs_query(db, file_id_input);
+    tracing::debug!(
+        file_id = file_id.0,
+        refs_count = refs.len(),
+        "file_dependencies: got external_refs"
+    );
 
     // Resolve each ref to a FileId
     let mut deps: Vec<FileId> = refs.iter().filter_map(|r| index.resolve(r)).collect();
+    tracing::debug!(
+        file_id = file_id.0,
+        resolved = deps.len(),
+        unresolved = refs.len() - deps.len(),
+        "file_dependencies: resolved refs"
+    );
 
     // Remove duplicates
     deps.sort_by_key(|f| f.index());

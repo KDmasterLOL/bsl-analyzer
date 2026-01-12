@@ -6,9 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base-db.workspace = true
 cfg.workspace = true
 dataflow.workspace = true
 ide-db.workspace = true
+salsa.workspace = true
 hir.workspace = true
 hir-def.workspace = true
 parser.workspace = true
