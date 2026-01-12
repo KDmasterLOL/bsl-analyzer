@@ -224,20 +224,22 @@ impl Resolver {
 
     /// Resolve cross-module call: CommonModule.Method
     ///
-    /// Uses workspace symbol index to find the module and method.
+    /// Uses module_index for fast module lookup (no parsing), then loads
+    /// symbol_tree only for the target module.
     ///
     /// # Algorithm
     ///
     /// 1. Get current module's source root via Salsa queries
-    /// 2. Collect all files in the source root
-    /// 3. Build workspace symbol index via workspace_symbols query
-    /// 4. Lookup module by name (case-insensitive via Name type)
-    /// 5. Search for method in the module's method list
+    /// 2. Get module_index (built from file paths, no parsing)
+    /// 3. Resolve module_name → FileId via module_index
+    /// 4. Load symbol_tree for that single file
+    /// 5. Search for method in the symbol_tree
     ///
     /// # Performance
     ///
-    /// - **First call:** O(n×m) where n = files, m = methods per file (~100ms for 6,540 files)
-    /// - **Subsequent calls:** Cached by Salsa (workspace_symbols query is memoized)
+    /// - **Module lookup:** O(1) via module_index (hash lookup)
+    /// - **Method lookup:** O(1) via symbol_tree (parses only 1 file)
+    /// - **Total:** ~10-50ms for first call, <1ms cached
     fn resolve_cross_module(
         &self,
         db: &dyn DefDatabase,
@@ -264,68 +266,64 @@ impl Resolver {
         let file_source_root_input = db.file_source_root_input(file_id);
         let source_root_id = file_source_root_input.source_root_id(db);
 
-        // Get workspace symbols (Salsa-cached via SourceRootInput)
-        let workspace_symbols = db.workspace_symbols(source_root_id);
+        // Get module_index (built from file paths, no parsing required)
+        let module_index = db.module_index(source_root_id);
 
-        tracing::info!(
-            "resolve_cross_module: workspace has {} common modules",
-            workspace_symbols.common_modules.len()
+        // Resolve module name to FileId via module_index
+        let target_file_id = match module_index.resolve_common_module(module_name) {
+            Some(id) => id,
+            None => {
+                tracing::debug!(
+                    "resolve_cross_module: module '{}' NOT found in module_index",
+                    module_name
+                );
+                return PathResolution::Unresolved(QualifiedName::from_segments([
+                    module_name.clone(),
+                    method_name.clone(),
+                ]));
+            }
+        };
+
+        tracing::debug!(
+            "resolve_cross_module: module '{}' resolved to FileId({})",
+            module_name,
+            target_file_id.index()
         );
 
-        // Lookup CommonModule by name (case-insensitive search)
-        // Note: HashMap.get() uses case-sensitive Hash/Eq, so we iterate instead
-        let common_module_info = workspace_symbols
-            .common_modules
-            .iter()
-            .find(|(name, _)| name.eq_ignore_case(module_name))
-            .map(|(_, info)| info);
+        // Get symbol_tree for the target module (parses only this one file)
+        let target_module_id = crate::ModuleId::new(target_file_id);
+        let symbol_tree = db.symbol_tree(target_module_id);
 
-        if let Some(common_module_info) = common_module_info {
-            tracing::info!(
-                "resolve_cross_module: found module '{}' with {} methods",
-                module_name,
-                common_module_info.methods.len()
-            );
-            // Search for method in the module (case-insensitive)
-            for method_symbol in &common_module_info.methods {
-                if method_symbol.name.eq_ignore_case(method_name) {
-                    // Check if method is exported
-                    if !method_symbol.is_export {
-                        tracing::info!(
-                            "resolve_cross_module: method '{}' found in '{}' but NOT exported",
-                            method_name,
-                            module_name
-                        );
-                        return PathResolution::Unresolved(QualifiedName::from_segments([
-                            module_name.clone(),
-                            method_name.clone(),
-                        ]));
-                    }
-
-                    tracing::info!(
-                        "resolve_cross_module: SUCCESS - found exported method '{}' in module '{}'",
-                        method_name,
-                        module_name
-                    );
-                    return PathResolution::Method(method_symbol.id);
-                }
+        // Search for method in symbol_tree (case-insensitive)
+        if let Some(method_symbol) = symbol_tree.find_method(method_name) {
+            // Check if method is exported
+            if !method_symbol.is_export {
+                tracing::debug!(
+                    "resolve_cross_module: method '{}' found in '{}' but NOT exported",
+                    method_name,
+                    module_name
+                );
+                return PathResolution::Unresolved(QualifiedName::from_segments([
+                    module_name.clone(),
+                    method_name.clone(),
+                ]));
             }
 
-            tracing::info!(
-                "resolve_cross_module: module '{}' found but method '{}' NOT found. Methods in module: {:?}",
-                module_name,
+            tracing::debug!(
+                "resolve_cross_module: SUCCESS - found exported method '{}' in module '{}'",
                 method_name,
-                common_module_info.methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+                module_name
             );
-        } else {
-            tracing::info!(
-                "resolve_cross_module: module '{}' NOT found. Available modules: {:?}",
-                module_name,
-                workspace_symbols.common_modules.keys().collect::<Vec<_>>()
-            );
+            return PathResolution::Method(method_symbol.id);
         }
 
-        // Method not found or module not found
+        tracing::debug!(
+            "resolve_cross_module: module '{}' found but method '{}' NOT found",
+            module_name,
+            method_name
+        );
+
+        // Method not found
         PathResolution::Unresolved(QualifiedName::from_segments([
             module_name.clone(),
             method_name.clone(),
