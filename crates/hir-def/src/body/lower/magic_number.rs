@@ -60,10 +60,13 @@ fn check_stmt(
             // Return statements are NOT excluded
             check_expr(*expr_id, ExprContext::Return, body, source_map, diagnostics);
         }
-        Stmt::If { condition, then_branch, else_branch, .. } => {
-            check_expr(*condition, ExprContext::Condition, body, source_map, diagnostics);
-            check_stmts(then_branch, body, source_map, diagnostics);
-            if let Some(else_stmts) = else_branch {
+        Stmt::If(if_stmt) => {
+            check_expr(if_stmt.condition, ExprContext::Condition, body, source_map, diagnostics);
+            check_stmts(&if_stmt.then_branch, body, source_map, diagnostics);
+            for (_, elsif_body) in if_stmt.elsif_branches.iter() {
+                check_stmts(elsif_body, body, source_map, diagnostics);
+            }
+            if let Some(ref else_stmts) = if_stmt.else_branch {
                 check_stmts(else_stmts, body, source_map, diagnostics);
             }
         }

@@ -118,12 +118,12 @@ impl VariableIndex {
                         }
                     }
                     // Recursively check nested statements in control flow
-                    hir_def::hir::Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-                        collect_implicit_vars(then_branch, body, name_to_idx, idx_to_name);
-                        for (_cond, stmts) in elsif_branches.iter() {
+                    hir_def::hir::Stmt::If(if_stmt) => {
+                        collect_implicit_vars(&if_stmt.then_branch, body, name_to_idx, idx_to_name);
+                        for (_cond, stmts) in if_stmt.elsif_branches.iter() {
                             collect_implicit_vars(stmts, body, name_to_idx, idx_to_name);
                         }
-                        if let Some(else_stmts) = else_branch {
+                        if let Some(ref else_stmts) = if_stmt.else_branch {
                             collect_implicit_vars(else_stmts, body, name_to_idx, idx_to_name);
                         }
                     }
@@ -453,9 +453,9 @@ impl Transfer<Liveness> for LivenessTransfer {
                 }
             }
 
-            Stmt::If { condition, .. } => {
+            Stmt::If(if_stmt) => {
                 // If statement: USE(condition)
-                collect_expr_vars(*condition, body, &mut in_state);
+                collect_expr_vars(if_stmt.condition, body, &mut in_state);
 
                 // Branches are handled by CFG - each branch is a separate basic block
                 // We just need to handle condition here
@@ -578,8 +578,8 @@ impl Transfer<Liveness> for LivenessTransfer {
                 }
             }
 
-            Stmt::If { condition, .. } => {
-                collect_expr_vars(*condition, body, state);
+            Stmt::If(if_stmt) => {
+                collect_expr_vars(if_stmt.condition, body, state);
             }
 
             Stmt::While { condition, .. } => {

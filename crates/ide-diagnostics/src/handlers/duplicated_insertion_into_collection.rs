@@ -659,12 +659,12 @@ fn check_stmt(
             }
         }
 
-        Stmt::If { condition: _, then_branch, elsif_branches, else_branch } => {
+        Stmt::If(if_stmt) => {
             // Check then branch
             check_stmt_list(
                 body,
                 source_map,
-                then_branch,
+                &if_stmt.then_branch,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -673,7 +673,7 @@ fn check_stmt(
             tracker.report_duplicates(diagnostics, scope_depth + 1);
 
             // Check elsif branches
-            for (_, branch_stmts) in elsif_branches.iter() {
+            for (_, branch_stmts) in if_stmt.elsif_branches.iter() {
                 check_stmt_list(
                     body,
                     source_map,
@@ -687,7 +687,7 @@ fn check_stmt(
             }
 
             // Check else branch
-            if let Some(else_stmts) = else_branch {
+            if let Some(ref else_stmts) = if_stmt.else_branch {
                 check_stmt_list(
                     body,
                     source_map,

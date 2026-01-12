@@ -52,7 +52,7 @@ pub use body::{
     lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, ExternalRef, LowerResult,
     ManagerType,
 };
-pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
+pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, IfStmt, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
@@ -528,8 +528,9 @@ impl ModuleMetadata {
 ///
 /// Metadata is populated by the `module_bodies()` query in ide-db.
 ///
-/// Note: `ModuleBodies` implements `Clone` to enable metadata attachment pattern
-/// in Salsa queries. Use `Arc<ModuleBodies>` for sharing to avoid cloning overhead.
+/// Note: This struct is returned from Salsa cached query. Do NOT clone it -
+/// always use Arc<ModuleBodies> for sharing to benefit from Salsa's LRU cache.
+/// Metadata is stored separately and accessed via module_metadata() query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleBodies {
     /// Bodies indexed by MethodId.local_id
@@ -540,9 +541,6 @@ pub struct ModuleBodies {
     module_vars: Vec<ModuleVarDecl>,
     /// Module-level code body (statements outside procedures)
     module_code: Option<body::LowerResult>,
-    /// Module metadata (type, execution context, loaded from Configuration).
-    /// Populated by module_bodies() query in ide-db, not by lower_module_bodies.
-    metadata: Option<Arc<ModuleMetadata>>,
 }
 
 impl ModuleBodies {
@@ -553,19 +551,7 @@ impl ModuleBodies {
             all_diagnostics: Vec::new(),
             module_vars: Vec::new(),
             module_code: None,
-            metadata: None,
         }
-    }
-
-    /// Set metadata for this module (used by module_bodies query).
-    pub fn with_metadata(mut self, metadata: Arc<ModuleMetadata>) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Get metadata for this module if available.
-    pub fn metadata(&self) -> Option<&ModuleMetadata> {
-        self.metadata.as_ref().map(|m| m.as_ref())
     }
 
     /// Get body for a method by its local_id.

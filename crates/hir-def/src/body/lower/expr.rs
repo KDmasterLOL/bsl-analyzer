@@ -83,15 +83,11 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
 
     let expr_id = ctx.alloc_expr(expr, range);
 
-    // Associate SDBL with ExprId
-    if let Some(idx) = ctx.pending_sdbl.iter().position(|(query_text, _)| {
-        if let Expr::Literal(Literal::String(ref expr_string)) = ctx.body.exprs[expr_id] {
-            query_text == expr_string
-        } else {
-            false
-        }
-    }) {
-        let (_query_text, query_info) = ctx.pending_sdbl.remove(idx);
+    // Associate SDBL with ExprId by matching TextRange
+    if let Some(idx) =
+        ctx.pending_sdbl.iter().position(|(literal_range, _)| *literal_range == range)
+    {
+        let (_literal_range, query_info) = ctx.pending_sdbl.remove(idx);
         ctx.body.sdbl_exprs.push((expr_id, query_info));
     }
 
@@ -136,7 +132,7 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
             // Check if this is SDBL query
             if looks_like_sdbl(&value) {
-                let sdbl_ast = parser::parse_sdbl(&value);
+                let sdbl_ast = parser::parse_sdbl_with_shared_cache(&value);
 
                 if !sdbl_ast.has_errors() {
                     let query_info = syntax::SdblQueryInfo::new(
@@ -145,7 +141,7 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                         Some(sdbl_ast),
                     );
 
-                    ctx.pending_sdbl.push((value.clone(), query_info));
+                    ctx.pending_sdbl.push((node.text_range(), query_info));
                 }
             }
 

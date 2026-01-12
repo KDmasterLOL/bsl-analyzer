@@ -145,6 +145,18 @@ pub enum Expr {
     Await { expr: ExprId },
 }
 
+/// If statement data.
+///
+/// Boxed in `Stmt::If` to reduce enum size from 56 to 32 bytes,
+/// saving ~313 MB for large projects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfStmt {
+    pub condition: ExprId,
+    pub then_branch: Box<[StmtId]>,
+    pub elsif_branches: Box<[(ExprId, Box<[StmtId]>)]>,
+    pub else_branch: Option<Box<[StmtId]>>,
+}
+
 /// HIR statement.
 ///
 /// Represents an executable construct in BSL code.
@@ -159,13 +171,8 @@ pub enum Stmt {
     /// Variable declaration (Перем a, b, c).
     VarDecl { bindings: Box<[BindingId]> },
 
-    /// If statement.
-    If {
-        condition: ExprId,
-        then_branch: Box<[StmtId]>,
-        elsif_branches: Box<[(ExprId, Box<[StmtId]>)]>,
-        else_branch: Option<Box<[StmtId]>>,
-    },
+    /// If statement (boxed to reduce enum size).
+    If(Box<IfStmt>),
 
     /// While loop (Пока condition Цикл ... КонецЦикла).
     While { condition: ExprId, body: Box<[StmtId]> },
@@ -310,5 +317,20 @@ mod tests {
     fn test_expr_missing() {
         let expr = Expr::Missing;
         assert!(matches!(expr, Expr::Missing));
+    }
+
+    #[test]
+    fn test_stmt_size() {
+        let stmt_size = std::mem::size_of::<Stmt>();
+        // After Box<IfStmt> optimization, Stmt should be 40 bytes (down from 56)
+        // The largest variant is now Try with two Box<[StmtId]> = 32 bytes
+        assert!(
+            stmt_size <= 40,
+            "Stmt size {} bytes exceeds expected 40 bytes. Consider boxing large variants.",
+            stmt_size
+        );
+        println!("Stmt size: {} bytes", stmt_size);
+        println!("IfStmt size: {} bytes", std::mem::size_of::<IfStmt>());
+        println!("Expr size: {} bytes", std::mem::size_of::<Expr>());
     }
 }

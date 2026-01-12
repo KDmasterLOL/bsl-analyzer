@@ -138,12 +138,12 @@ impl<'a> IsInRoleChecker<'a> {
     /// Pass 2: Check if-statements for unprotected IsInRole() usage.
     fn check_statements(&mut self) {
         for (_stmt_id, stmt) in self.body.stmts_iter() {
-            if let Stmt::If { condition, then_branch: _, elsif_branches, else_branch: _ } = stmt {
+            if let Stmt::If(if_stmt) = stmt {
                 // Check main if condition
-                self.check_expression(*condition);
+                self.check_expression(if_stmt.condition);
 
                 // Check elsif conditions
-                for (elsif_condition, _elsif_stmts) in elsif_branches.iter() {
+                for (elsif_condition, _elsif_stmts) in if_stmt.elsif_branches.iter() {
                     self.check_expression(*elsif_condition);
                 }
             }

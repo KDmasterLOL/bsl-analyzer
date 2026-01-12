@@ -162,14 +162,14 @@ fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
     let stmt = body.stmt(stmt_id);
 
     match stmt {
-        Stmt::If { condition, then_branch, .. } => {
+        Stmt::If(if_stmt) => {
             // Check condition contains DataExchange.Load
-            if !condition_has_data_exchange_load(body, *condition) {
+            if !condition_has_data_exchange_load(body, if_stmt.condition) {
                 return false;
             }
 
             // Check then_branch has Return
-            has_return_in_branch(body, then_branch)
+            has_return_in_branch(body, &if_stmt.then_branch)
         }
         _ => false,
     }
@@ -245,12 +245,14 @@ fn has_return_anywhere(body: &Body, stmt_id: StmtId) -> bool {
     let stmt = body.stmt(stmt_id);
     match stmt {
         Stmt::Return { .. } => true,
-        Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-            then_branch.iter().any(|&s| has_return_anywhere(body, s))
-                || elsif_branches
+        Stmt::If(if_stmt) => {
+            if_stmt.then_branch.iter().any(|&s| has_return_anywhere(body, s))
+                || if_stmt
+                    .elsif_branches
                     .iter()
                     .any(|(_, branch)| branch.iter().any(|&s| has_return_anywhere(body, s)))
-                || else_branch
+                || if_stmt
+                    .else_branch
                     .as_ref()
                     .map(|b| b.iter().any(|&s| has_return_anywhere(body, s)))
                     .unwrap_or(false)

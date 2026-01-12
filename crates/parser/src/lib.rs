@@ -42,6 +42,31 @@ pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     builder.finish()
 }
 
+/// Parse BSL source code using a shared thread-local cache for token deduplication.
+///
+/// This version significantly reduces memory usage when parsing many files
+/// by sharing common tokens (keywords, punctuation, etc.) across parses.
+///
+/// # Example
+///
+/// ```
+/// let parse = parser::parse_with_shared_cache("Процедура Тест() КонецПроцедуры");
+/// assert!(!parse.has_errors());
+/// ```
+pub fn parse_with_shared_cache(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
+    let tokens = tokenize(input);
+    let mut p = Parser::new(&tokens);
+    grammar::source_file(&mut p);
+    let events = p.finish();
+
+    // Build syntax tree from events using shared cache
+    syntax::with_shared_node_cache(|cache| {
+        let sink = sink::Sink::with_cache(&tokens, cache);
+        let builder = sink.finish(events);
+        builder.finish()
+    })
+}
+
 /// Parse SDBL query string into a Rowan syntax tree.
 ///
 /// SDBL (Structured Data Base Language) is the SQL-like query language
@@ -81,6 +106,24 @@ pub fn parse_sdbl(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     let sink = sink::Sink::new(&tokens);
     let builder = sink.finish(events);
     builder.finish()
+}
+
+/// Parse SDBL query using a shared thread-local cache for token deduplication.
+pub fn parse_sdbl_with_shared_cache(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
+    use lexer::sdbl::tokenize_sdbl;
+
+    let sdbl_tokens = tokenize_sdbl(input);
+    let tokens = sdbl_token_converter::convert_sdbl_tokens(&sdbl_tokens);
+
+    let mut p = parser::Parser::new(&tokens);
+    grammar::sdbl::query_package(&mut p);
+    let events = p.finish();
+
+    syntax::with_shared_node_cache(|cache| {
+        let sink = sink::Sink::with_cache(&tokens, cache);
+        let builder = sink.finish(events);
+        builder.finish()
+    })
 }
 
 #[cfg(test)]

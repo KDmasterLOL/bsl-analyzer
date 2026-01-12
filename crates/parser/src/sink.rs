@@ -13,21 +13,36 @@ use crate::{
 ///
 /// This processes the event stream and constructs a lossless syntax tree
 /// with all trivia (whitespace, comments) preserved.
-pub struct Sink<'t> {
-    builder: SyntaxTreeBuilder,
+///
+/// The lifetime parameter `'cache` allows using a shared `NodeCache` for
+/// token deduplication across multiple parses.
+pub struct Sink<'t, 'cache> {
+    builder: SyntaxTreeBuilder<'cache>,
     tokens: &'t [lexer::Token],
     token_pos: usize,
     errors: Vec<String>,
 }
 
-impl<'t> Sink<'t> {
-    /// Create a new sink with the given tokens.
+impl<'t> Sink<'t, 'static> {
+    /// Create a new sink with the given tokens and its own internal cache.
     pub fn new(tokens: &'t [lexer::Token]) -> Self {
         Self { builder: SyntaxTreeBuilder::new(), tokens, token_pos: 0, errors: Vec::new() }
     }
+}
+
+impl<'t, 'cache> Sink<'t, 'cache> {
+    /// Create a new sink with the given tokens and a shared cache.
+    pub fn with_cache(tokens: &'t [lexer::Token], cache: &'cache mut syntax::NodeCache) -> Self {
+        Self {
+            builder: SyntaxTreeBuilder::with_cache(cache),
+            tokens,
+            token_pos: 0,
+            errors: Vec::new(),
+        }
+    }
 
     /// Process all events and finish building the tree.
-    pub fn finish(mut self, events: Vec<Event>) -> SyntaxTreeBuilder {
+    pub fn finish(mut self, events: Vec<Event>) -> SyntaxTreeBuilder<'cache> {
         // Process events with forward_parent resolution
         let mut forward_parents = Vec::new();
         let mut skip = vec![false; events.len()];

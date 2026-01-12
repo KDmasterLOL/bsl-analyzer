@@ -219,7 +219,7 @@ impl CfgBuilder {
         match stmt {
             Stmt::Return { .. } => self.walk_return_statement_hir(stmt_id, body),
             Stmt::Raise { .. } => self.walk_raise_statement_hir(stmt_id, body),
-            Stmt::If { .. } => self.walk_if_statement_hir(stmt_id, body),
+            Stmt::If(_) => self.walk_if_statement_hir(stmt_id, body),
             Stmt::While { .. } => self.walk_while_statement_hir(stmt_id, body),
             Stmt::For { .. } => self.walk_for_statement_hir(stmt_id, body),
             Stmt::ForEach { .. } => self.walk_foreach_statement_hir(stmt_id, body),
@@ -611,11 +611,11 @@ impl CfgBuilder {
     fn walk_if_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
         use crate::vertex::ConditionalVertex;
 
-        if let Stmt::If { condition, then_branch, elsif_branches, else_branch } = body.stmt(stmt_id)
-        {
+        if let Stmt::If(if_stmt) = body.stmt(stmt_id) {
             // Create conditional vertex (condition is ExprId - no searching!)
-            let cond_vertex =
-                self.cfg.add_vertex(CfgVertex::Conditional(ConditionalVertex::new(*condition)));
+            let cond_vertex = self
+                .cfg
+                .add_vertex(CfgVertex::Conditional(ConditionalVertex::new(if_stmt.condition)));
 
             // Connect current block to conditional
             if let Some(current) = self.current_block {
@@ -630,7 +630,7 @@ impl CfgBuilder {
             let _ = self.cfg.add_edge(cond_vertex, then_block, CfgEdgeType::TrueBranch);
             self.current_block = Some(then_block);
 
-            for &then_stmt_id in then_branch.iter() {
+            for &then_stmt_id in if_stmt.then_branch.iter() {
                 self.walk_statement_hir(then_stmt_id, body);
             }
 
@@ -645,7 +645,7 @@ impl CfgBuilder {
             // Process ELSIF clauses (already structured as Vec<(ExprId, Box<[StmtId]>)>!)
             let mut current_cond = cond_vertex;
 
-            for (elsif_condition, elsif_body) in elsif_branches.iter() {
+            for (elsif_condition, elsif_body) in if_stmt.elsif_branches.iter() {
                 // Create elsif conditional (condition is ExprId - no searching!)
                 let elsif_cond = self
                     .cfg
@@ -676,7 +676,7 @@ impl CfgBuilder {
             }
 
             // Process ELSE clause if present (else_branch is Option<Box<[StmtId]>>)
-            if let Some(else_stmts) = else_branch {
+            if let Some(ref else_stmts) = if_stmt.else_branch {
                 // Create else block
                 let else_block =
                     self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
@@ -1304,12 +1304,12 @@ mod tests {
         let return_1 = body.stmts.alloc(Stmt::Return { value: Some(lit_1) });
         let return_2 = body.stmts.alloc(Stmt::Return { value: Some(lit_2) });
 
-        let if_stmt = body.stmts.alloc(Stmt::If {
+        let if_stmt = body.stmts.alloc(Stmt::If(Box::new(hir_def::IfStmt {
             condition: true_lit,
             then_branch: vec![return_1].into(),
             elsif_branches: vec![].into(),
             else_branch: Some(vec![return_2].into()),
-        });
+        })));
 
         body.body_stmts = vec![if_stmt].into();
 

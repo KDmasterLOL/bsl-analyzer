@@ -6,9 +6,18 @@
 //! The real implementation is in the (language-agnostic) `rowan` crate, this
 //! module just wraps its API.
 
-use rowan::{GreenNode, GreenNodeBuilder, Language};
+use std::cell::RefCell;
+
+use rowan::{GreenNode, GreenNodeBuilder, Language, NodeCache};
 
 use crate::{Parse, SyntaxError, SyntaxKind};
+
+// Thread-local NodeCache for sharing tokens across parses within a thread.
+// This significantly reduces memory usage by deduplicating common tokens
+// like keywords ("Процедура", "Функция"), punctuation ("(", ")", ";"), etc.
+thread_local! {
+    static SHARED_NODE_CACHE: RefCell<NodeCache> = RefCell::new(NodeCache::default());
+}
 
 /// BSL language definition for Rowan.
 ///
@@ -106,20 +115,47 @@ impl From<&SyntaxNode> for SyntaxNodePtr {
     }
 }
 
+/// Access the shared thread-local NodeCache for token deduplication.
+///
+/// This allows sharing tokens across multiple file parses within the same thread,
+/// significantly reducing memory usage by deduplicating common tokens like keywords,
+/// punctuation, and whitespace.
+pub fn with_shared_node_cache<T>(f: impl FnOnce(&mut NodeCache) -> T) -> T {
+    SHARED_NODE_CACHE.with_borrow_mut(f)
+}
+
 /// Builder for constructing syntax trees.
 ///
 /// The parser generates events, which are then processed into a tree
 /// using this builder.
-#[derive(Default)]
-pub struct SyntaxTreeBuilder {
+///
+/// The lifetime parameter `'cache` allows the builder to borrow a shared
+/// `NodeCache` for token deduplication across multiple parses.
+pub struct SyntaxTreeBuilder<'cache> {
     errors: Vec<SyntaxError>,
-    inner: GreenNodeBuilder<'static>,
+    inner: GreenNodeBuilder<'cache>,
 }
 
-impl SyntaxTreeBuilder {
-    /// Create a new syntax tree builder.
+impl Default for SyntaxTreeBuilder<'static> {
+    fn default() -> Self {
+        Self { errors: Vec::new(), inner: GreenNodeBuilder::new() }
+    }
+}
+
+impl SyntaxTreeBuilder<'static> {
+    /// Create a new syntax tree builder with its own internal cache.
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl<'cache> SyntaxTreeBuilder<'cache> {
+    /// Create a new syntax tree builder using a shared cache.
+    ///
+    /// Using a shared cache across multiple parses allows token deduplication,
+    /// significantly reducing memory usage when parsing many files.
+    pub fn with_cache(cache: &'cache mut NodeCache) -> Self {
+        Self { errors: Vec::new(), inner: GreenNodeBuilder::with_cache(cache) }
     }
 
     /// Add a token to the current node.

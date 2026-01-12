@@ -765,12 +765,12 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         }
     }
 
-    Some(Stmt::If {
+    Some(Stmt::If(Box::new(crate::hir::IfStmt {
         condition,
         then_branch: then_branch.into_boxed_slice(),
         elsif_branches: elsif_branches.into_boxed_slice(),
         else_branch,
-    })
+    })))
 }
 
 /// Lower while statement.

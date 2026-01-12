@@ -79,7 +79,8 @@ pub(crate) struct LoweringCtx {
     pub(crate) by_value_params: FxHashMap<String, BindingId>,
 
     /// Pending SDBL queries (before ExprId allocation).
-    pub(crate) pending_sdbl: Vec<(String, syntax::SdblQueryInfo)>,
+    /// Stores (literal_range, query_info) to match by TextRange instead of String comparison.
+    pub(crate) pending_sdbl: Vec<(syntax::TextRange, syntax::SdblQueryInfo)>,
 
     /// Loop nesting depth (0 = not in loop, 1+ = inside loop).
     /// Used for CreateQueryInCycle diagnostic.
@@ -682,16 +683,16 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
                     collect_declared(body, s, declared);
                 }
             }
-            Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-                for &s in then_branch.iter() {
+            Stmt::If(if_stmt) => {
+                for &s in if_stmt.then_branch.iter() {
                     collect_declared(body, s, declared);
                 }
-                for (_, branch) in elsif_branches.iter() {
+                for (_, branch) in if_stmt.elsif_branches.iter() {
                     for &s in branch.iter() {
                         collect_declared(body, s, declared);
                     }
                 }
-                if let Some(else_stmts) = else_branch {
+                if let Some(ref else_stmts) = if_stmt.else_branch {
                     for &s in else_stmts.iter() {
                         collect_declared(body, s, declared);
                     }

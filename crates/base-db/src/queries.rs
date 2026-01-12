@@ -23,12 +23,17 @@ pub struct RegionInfo {
 ///
 /// This query automatically depends on the FileTextInput and is cached with LRU (512 entries).
 /// When file text changes, Salsa automatically invalidates this query.
+///
+/// Uses a thread-local shared cache for token deduplication across files.
+/// Common tokens like keywords ("Процедура", "Функция"), punctuation ("(", ")", ";"),
+/// and whitespace are shared between all parses on the same thread, significantly
+/// reducing memory usage when parsing many files.
 #[salsa::tracked(lru = 512)]
 pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<SyntaxNode> {
     let _span = tracing::info_span!("parse").entered();
 
     let text = input.text(db);
-    parser::parse(&text)
+    parser::parse_with_shared_cache(&text)
 }
 
 /// Map from method source ranges to parent API region names.

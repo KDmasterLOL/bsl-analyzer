@@ -254,17 +254,17 @@ fn stmt_uses_binding(
             expr_uses_binding(body, *target, binding_id)
                 || expr_uses_binding(body, *value, binding_id)
         }
-        Stmt::If { condition, then_branch, elsif_branches, else_branch } => {
-            if expr_uses_binding(body, *condition, binding_id) {
+        Stmt::If(if_stmt) => {
+            if expr_uses_binding(body, if_stmt.condition, binding_id) {
                 return true;
             }
             // Check branches
-            for &stmt_id in then_branch.iter() {
+            for &stmt_id in if_stmt.then_branch.iter() {
                 if stmt_uses_binding(body, stmt_id, binding_id) {
                     return true;
                 }
             }
-            for (cond, branch) in elsif_branches.iter() {
+            for (cond, branch) in if_stmt.elsif_branches.iter() {
                 if expr_uses_binding(body, *cond, binding_id) {
                     return true;
                 }
@@ -274,7 +274,7 @@ fn stmt_uses_binding(
                     }
                 }
             }
-            if let Some(branch) = else_branch {
+            if let Some(ref branch) = if_stmt.else_branch {
                 for &stmt_id in branch.iter() {
                     if stmt_uses_binding(body, stmt_id, binding_id) {
                         return true;

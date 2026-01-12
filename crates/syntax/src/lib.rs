@@ -28,10 +28,11 @@ pub use crate::{
     sdbl_query::SdblQueryInfo,
     syntax_kind::SyntaxKind,
     syntax_node::{
-        BslLanguage, SyntaxElement, SyntaxNode, SyntaxNodePtr, SyntaxToken, SyntaxTreeBuilder,
+        with_shared_node_cache, BslLanguage, SyntaxElement, SyntaxNode, SyntaxNodePtr, SyntaxToken,
+        SyntaxTreeBuilder,
     },
 };
-pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
+pub use rowan::{Direction, NodeCache, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 
 /// Result of parsing BSL source code.
 ///

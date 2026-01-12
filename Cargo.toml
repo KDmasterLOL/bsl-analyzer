@@ -52,7 +52,7 @@ lsp-types = "0.95"
 lsp-server = "0.7"
 
 # Parsing infrastructure (rowan for syntax trees)
-rowan = "=0.15.17"
+rowan = "0.16.1"
 logos = "0.14"
 text-size = "1.1.1"
 

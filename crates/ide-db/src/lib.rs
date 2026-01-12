@@ -528,14 +528,11 @@ impl DefDatabase for RootDatabaseImpl {
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
         // Call Salsa tracked query to get lowered bodies
+        // NOTE: Return Arc directly without cloning! Metadata is accessed separately
+        // via module_metadata() query. This is critical for performance - cloning
+        // ModuleBodies was causing massive memory overhead.
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        let mut bodies = (*hir_def::module_bodies_query(self, file_id_input)).clone();
-
-        // Attach metadata (requires VFS access, so done here instead of in hir-def)
-        let metadata = self.module_metadata(module_id);
-        bodies = bodies.with_metadata(metadata);
-
-        Arc::new(bodies)
+        hir_def::module_bodies_query(self, file_id_input)
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir_def::ModuleMetadata> {
@@ -1343,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn test_module_bodies_includes_metadata() {
+    fn test_module_bodies_and_metadata_separate() {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId(0);
 
@@ -1357,13 +1354,13 @@ mod tests {
         // Set file text
         db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
 
-        // Test module_bodies includes metadata
+        // Test module_bodies and module_metadata are separate queries
         let module_id = ModuleId::new(file_id);
-        let module_bodies = db.module_bodies(module_id);
+        let _module_bodies = db.module_bodies(module_id);
+        let _module_metadata = db.module_metadata(module_id);
 
-        // Metadata should be present in module_bodies
-        // Even if empty, it should be Some
-        assert!(module_bodies.metadata().is_some(), "Module bodies should include metadata");
+        // Both should work independently (metadata is now accessed separately)
+        // This is the correct pattern for performance - no cloning of ModuleBodies
     }
 
     #[test]

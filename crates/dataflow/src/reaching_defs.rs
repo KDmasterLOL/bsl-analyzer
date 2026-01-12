@@ -203,12 +203,12 @@ impl DefinitionIndex {
                         collect_stmt_defs(loop_body, body, add_def);
                     }
                     // Recursively check nested statements
-                    Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-                        collect_stmt_defs(then_branch, body, add_def);
-                        for (_cond, stmts) in elsif_branches.iter() {
+                    Stmt::If(if_stmt) => {
+                        collect_stmt_defs(&if_stmt.then_branch, body, add_def);
+                        for (_cond, stmts) in if_stmt.elsif_branches.iter() {
                             collect_stmt_defs(stmts, body, add_def);
                         }
-                        if let Some(else_stmts) = else_branch {
+                        if let Some(ref else_stmts) = if_stmt.else_branch {
                             collect_stmt_defs(else_stmts, body, add_def);
                         }
                     }
@@ -292,12 +292,12 @@ impl DefinitionIndex {
                         collect_stmt_defs(loop_body, body, add_def);
                     }
                     // Recursively check nested statements
-                    Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-                        collect_stmt_defs(then_branch, body, add_def);
-                        for (_cond, stmts) in elsif_branches.iter() {
+                    Stmt::If(if_stmt) => {
+                        collect_stmt_defs(&if_stmt.then_branch, body, add_def);
+                        for (_cond, stmts) in if_stmt.elsif_branches.iter() {
                             collect_stmt_defs(stmts, body, add_def);
                         }
-                        if let Some(else_stmts) = else_branch {
+                        if let Some(ref else_stmts) = if_stmt.else_branch {
                             collect_stmt_defs(else_stmts, body, add_def);
                         }
                     }

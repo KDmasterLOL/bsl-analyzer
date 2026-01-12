@@ -221,8 +221,8 @@ fn check_stmt_recursive(
     } else {
         // Recursively check nested statements for other statement types
         match stmt {
-            Stmt::If { then_branch, elsif_branches, else_branch, .. } => {
-                for &nested in then_branch.iter() {
+            Stmt::If(if_stmt) => {
+                for &nested in if_stmt.then_branch.iter() {
                     check_stmt_recursive(
                         nested,
                         body,
@@ -232,7 +232,7 @@ fn check_stmt_recursive(
                         diagnostics,
                     );
                 }
-                for (_, branch) in elsif_branches.iter() {
+                for (_, branch) in if_stmt.elsif_branches.iter() {
                     for &nested in branch.iter() {
                         check_stmt_recursive(
                             nested,
@@ -244,7 +244,7 @@ fn check_stmt_recursive(
                         );
                     }
                 }
-                if let Some(branch) = else_branch {
+                if let Some(ref branch) = if_stmt.else_branch {
                     for &nested in branch.iter() {
                         check_stmt_recursive(
                             nested,

@@ -53,21 +53,21 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32, nes
 
     match stmt {
         // Structural increment: +1 + nesting, then increase nesting for children
-        Stmt::If { condition, then_branch, elsif_branches, else_branch } => {
+        Stmt::If(if_stmt) => {
             // If itself: +1 + nesting
             *complexity += 1 + nesting;
 
             // Count complexity in condition (for AND/OR)
-            count_expr_complexity(body, *condition, complexity);
+            count_expr_complexity(body, if_stmt.condition, complexity);
 
             // Then branch: IF increases nesting by 1, THEN_CLAUSE doesn't add more
-            for &child_stmt in then_branch.iter() {
+            for &child_stmt in if_stmt.then_branch.iter() {
                 count_stmt_complexity(body, child_stmt, complexity, nesting + 1);
             }
 
             // Elsif branches: +1 each (hybrid), then nested body
             // ELSIF adds +1 to nesting on top of IF's +1, so children get nesting+2
-            for (elsif_condition, elsif_body) in elsif_branches.iter() {
+            for (elsif_condition, elsif_body) in if_stmt.elsif_branches.iter() {
                 *complexity += 1; // Hybrid increment for elsif
 
                 // Count complexity in elsif condition
@@ -80,7 +80,7 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32, nes
 
             // Else branch: +1 (hybrid), then nested body
             // ELSE adds +1 to nesting on top of IF's +1, so children get nesting+2
-            if let Some(else_body) = else_branch {
+            if let Some(ref else_body) = if_stmt.else_branch {
                 *complexity += 1; // Hybrid increment for else
 
                 for &child_stmt in else_body.iter() {

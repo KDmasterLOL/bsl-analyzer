@@ -50,16 +50,16 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32) {
     let stmt = body.stmt(stmt_id);
 
     match stmt {
-        Stmt::If { condition, then_branch, elsif_branches, else_branch } => {
+        Stmt::If(if_stmt) => {
             *complexity += 1; // IF
-            count_expr_complexity(body, *condition, complexity);
+            count_expr_complexity(body, if_stmt.condition, complexity);
 
-            for &s in then_branch.iter() {
+            for &s in if_stmt.then_branch.iter() {
                 count_stmt_complexity(body, s, complexity);
             }
 
             // Each ELSIF +1
-            for (elsif_cond, elsif_body) in elsif_branches.iter() {
+            for (elsif_cond, elsif_body) in if_stmt.elsif_branches.iter() {
                 *complexity += 1;
                 count_expr_complexity(body, *elsif_cond, complexity);
                 for &s in elsif_body.iter() {
@@ -68,7 +68,7 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32) {
             }
 
             // ELSE +1 (важно! В отличие от cognitive complexity, cyclomatic считает else)
-            if let Some(else_body) = else_branch {
+            if let Some(ref else_body) = if_stmt.else_branch {
                 *complexity += 1;
                 for &s in else_body.iter() {
                     count_stmt_complexity(body, s, complexity);

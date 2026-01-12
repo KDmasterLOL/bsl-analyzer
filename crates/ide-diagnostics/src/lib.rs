@@ -1194,53 +1194,48 @@ fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    // Get metadata attached to module_bodies
-    if let Some(metadata) = module_bodies.metadata() {
-        // Check CommonModuleInvalidType
-        diagnostics
-            .extend(handlers::common_module_invalid_type::from_metadata(metadata, ctx.config));
+    // Get metadata via separate query (NOT from module_bodies to avoid cloning)
+    let metadata = ctx.db.module_metadata(module_id);
+    let metadata_ref = metadata.as_ref();
 
-        // Check CommonModuleNameClient
-        diagnostics
-            .extend(handlers::common_module_name_client::from_metadata(metadata, ctx.config));
+    // Check CommonModuleInvalidType
+    diagnostics
+        .extend(handlers::common_module_invalid_type::from_metadata(metadata_ref, ctx.config));
 
-        // Check CommonModuleNameGlobal
-        diagnostics
-            .extend(handlers::common_module_name_global::from_metadata(metadata, ctx.config));
+    // Check CommonModuleNameClient
+    diagnostics
+        .extend(handlers::common_module_name_client::from_metadata(metadata_ref, ctx.config));
 
-        // Check CommonModuleNameCached
-        diagnostics
-            .extend(handlers::common_module_name_cached::from_metadata(metadata, ctx.config));
+    // Check CommonModuleNameGlobal
+    diagnostics
+        .extend(handlers::common_module_name_global::from_metadata(metadata_ref, ctx.config));
 
-        // Check CommonModuleNameClientServer
-        diagnostics.extend(handlers::common_module_name_client_server::from_metadata(
-            metadata, ctx.config,
-        ));
+    // Check CommonModuleNameCached
+    diagnostics
+        .extend(handlers::common_module_name_cached::from_metadata(metadata_ref, ctx.config));
 
-        // Check CommonModuleNameFullAccess
-        diagnostics
-            .extend(handlers::common_module_name_full_access::from_metadata(metadata, ctx.config));
+    // Check CommonModuleNameClientServer
+    diagnostics.extend(handlers::common_module_name_client_server::from_metadata(
+        metadata_ref,
+        ctx.config,
+    ));
 
-        // Check CommonModuleNameGlobalClient
-        diagnostics.extend(handlers::common_module_name_global_client::from_metadata(
-            metadata, ctx.config,
-        ));
+    // Check CommonModuleNameFullAccess
+    diagnostics
+        .extend(handlers::common_module_name_full_access::from_metadata(metadata_ref, ctx.config));
 
-        // Check CommonModuleNameServerCall
-        diagnostics
-            .extend(handlers::common_module_name_server_call::from_metadata(metadata, ctx.config));
+    // Check CommonModuleNameGlobalClient
+    diagnostics.extend(handlers::common_module_name_global_client::from_metadata(
+        metadata_ref,
+        ctx.config,
+    ));
 
-        // Check CommonModuleNameWords
-        diagnostics.extend(handlers::common_module_name_words::from_metadata(metadata, ctx.config));
+    // Check CommonModuleNameServerCall
+    diagnostics
+        .extend(handlers::common_module_name_server_call::from_metadata(metadata_ref, ctx.config));
 
-        // Phase 2.2: Add more metadata-based diagnostics here as they are migrated
-        // Examples:
-        // - common_module_missing_api (AST-based, not metadata)
-        // - missing_common_module_method
-        // - execute_external_code_in_common_module (AST-based, not metadata)
-        // - common_module_assign (AST-based, not metadata)
-        // - missing_event_subscription_handler
-    }
+    // Check CommonModuleNameWords
+    diagnostics.extend(handlers::common_module_name_words::from_metadata(metadata_ref, ctx.config));
 
     // Check ExportVariables - module-level variables with is_export flag
     for var in module_bodies.module_vars() {

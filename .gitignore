@@ -36,3 +36,4 @@ coverage/
 # Test data
 /data/
 bsl-platform-shcntx/
+bsl-json.json
