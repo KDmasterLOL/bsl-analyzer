@@ -14,7 +14,7 @@ use lsp_types::{
     DidSaveTextDocumentParams, PublishDiagnosticsParams, Url,
 };
 
-use crate::global_state::GlobalState;
+use crate::global_state::{GlobalState, Task};
 
 /// Publishes diagnostics for a file.
 fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
@@ -59,6 +59,7 @@ fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
 /// 1. Store the full text in MemDocs
 /// 2. Update VFS with file content
 /// 3. Sync changes to Salsa database via process_changes()
+/// 4. Preload dependencies in background for fast GoToDefinition
 pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_open", uri = %params.text_document.uri).entered();
 
@@ -72,7 +73,7 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     state.mem_docs.insert(uri.clone(), text.clone(), version);
 
     // Get or create FileId
-    let _file_id = state.vfs_file_for_url(&uri)?;
+    let file_id = state.vfs_file_for_url(&uri)?;
 
     // Update VFS with file content
     {
@@ -86,10 +87,48 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 
     tracing::debug!("Document opened successfully: {}", uri);
 
+    // Preload dependencies in background for fast GoToDefinition
+    preload_dependencies(state, file_id);
+
     // Publish diagnostics
     publish_diagnostics(state, &uri)?;
 
     Ok(())
+}
+
+/// Preloads dependencies of a file in background.
+///
+/// This warms up the symbol_tree cache for modules that the opened file depends on,
+/// enabling fast GoToDefinition on first use.
+fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
+    use ide_db::hir_def::{DefDatabase, ModuleId};
+
+    // Get file dependencies (resolved ExternalRefs → FileIds)
+    let analysis = state.analysis_host.analysis();
+    let module_id = ModuleId::new(file_id);
+    let deps = analysis.database().file_dependencies(module_id);
+
+    if deps.is_empty() {
+        tracing::debug!(file_id = file_id.0, "no dependencies to preload");
+        return;
+    }
+
+    let dep_count = deps.len();
+    tracing::info!(file_id = file_id.0, dep_count, "preloading dependencies");
+
+    // Clone what we need for the background task
+    let deps = deps.as_ref().clone();
+    let db = analysis.database().clone();
+
+    // Spawn background task to warm up symbol_tree caches
+    state.task_pool.pool.spawn(move || {
+        for dep_file_id in &deps {
+            let dep_module_id = ModuleId::new(*dep_file_id);
+            // Call symbol_tree to prime the cache
+            let _ = db.symbol_tree(dep_module_id);
+        }
+        Task::DependenciesPreloaded { file_id, count: deps.len() }
+    });
 }
 
 /// Handles textDocument/didChange notification.

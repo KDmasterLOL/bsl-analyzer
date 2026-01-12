@@ -32,6 +32,7 @@ pub mod cyclomatic_complexity;
 pub mod docs;
 pub mod hir;
 pub mod item_tree;
+pub mod module_index;
 pub mod name;
 pub mod path;
 pub mod queries;
@@ -47,12 +48,16 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use vfs::FileId;
 
-pub use body::{lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, LowerResult};
+pub use body::{
+    lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, ExternalRef, LowerResult,
+    ManagerType,
+};
 pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, Literal, Stmt, StmtId, UnaryOp};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
 pub use item_tree::ItemTree;
+pub use module_index::ModuleIndex;
 pub use name::Name;
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
@@ -63,9 +68,9 @@ pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
-    conditional_tree_query, infer_types_query, item_tree_query, module_bodies_query,
-    module_data_query, module_metadata_query, region_tree_query, symbol_tree_query,
-    workspace_symbols_query,
+    conditional_tree_query, file_dependencies_query, file_external_refs_query, infer_types_query,
+    item_tree_query, module_bodies_query, module_data_query, module_index_query,
+    module_metadata_query, region_tree_query, symbol_tree_query, workspace_symbols_query,
 };
 
 /// HIR definition layer - lowering from AST to HIR.
@@ -297,6 +302,47 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Note
     /// This is a workspace-level query. Invalidation happens when the source root changes.
     fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<WorkspaceSymbols>;
+
+    /// Get external module references from a file.
+    ///
+    /// Extracts ExternalRef from module bodies (collected during HIR lowering).
+    /// These references are used to build the module dependency graph.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 files
+    /// - **Depends on:** [`module_bodies`](Self::module_bodies)
+    /// - **Typical time:** < 1ms
+    ///
+    /// # Implementation
+    /// Should delegate to [`file_external_refs_query`].
+    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<ExternalRef>>;
+
+    /// Build module index from source root.
+    ///
+    /// Creates a lightweight index mapping module names to FileIds based on
+    /// file paths (Designer format). No parsing is required.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 16 source roots
+    /// - **Typical time:** ~10ms for 6,540 files
+    ///
+    /// # Implementation
+    /// Should delegate to [`module_index_query`].
+    fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
+
+    /// Get file dependencies for a module.
+    ///
+    /// Resolves external references to actual FileIds using the module index.
+    /// Returns the list of files that this module depends on.
+    ///
+    /// # Performance
+    /// - **LRU cache:** 512 files
+    /// - **Depends on:** [`file_external_refs`](Self::file_external_refs), [`module_index`](Self::module_index)
+    /// - **Typical time:** < 1ms
+    ///
+    /// # Implementation
+    /// Should delegate to [`file_dependencies_query`].
+    fn file_dependencies(&self, module_id: ModuleId) -> Arc<Vec<FileId>>;
 }
 
 /// Module identifier.
@@ -568,6 +614,12 @@ impl ModuleBodies {
         self.bodies.iter().map(|(local_id, lower_result)| {
             (*local_id, &lower_result.body, &lower_result.source_map)
         })
+    }
+
+    /// Iterate over all LowerResults.
+    /// Useful for extracting external references from all method bodies.
+    pub fn iter_lower_results(&self) -> impl Iterator<Item = (u32, &body::LowerResult)> {
+        self.bodies.iter().map(|(local_id, lower_result)| (*local_id, lower_result))
     }
 
     /// Get module-level code body (statements outside procedures/functions).

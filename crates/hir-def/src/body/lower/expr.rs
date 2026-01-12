@@ -4,7 +4,7 @@
 
 use syntax::{SyntaxKind, SyntaxNode};
 
-use crate::body::{Body, BodyDiagnostic};
+use crate::body::{Body, BodyDiagnostic, ExternalRef, ManagerType};
 use crate::hir::{BinaryOp, Expr, ExprId, Literal, UnaryOp};
 use crate::{Name, QualifiedName};
 
@@ -857,6 +857,29 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         // Analyze call structure to determine call type (for diagnostics)
         let call_info = analyze_qualified_call(node, ctx);
 
+        // Collect ExternalRef for module dependency graph
+        if let Some(ref info) = &call_info {
+            match info {
+                QualifiedCallInfo::TwoLevel { module } => {
+                    ctx.external_refs.push(ExternalRef::QualifiedCall {
+                        receiver: Name::new(module),
+                        method: field_name.clone(),
+                        range: node.text_range(),
+                    });
+                }
+                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
+                    if let Some(manager_type) = parse_manager_type(mdo_type) {
+                        ctx.external_refs.push(ExternalRef::ManagerAccess {
+                            manager_type,
+                            object_name: Name::new(mdo_name),
+                            method: Some(field_name.clone()),
+                            range: node.text_range(),
+                        });
+                    }
+                }
+            }
+        }
+
         if let Some(ref info) = call_info {
             match info {
                 QualifiedCallInfo::TwoLevel { module } => {
@@ -1428,4 +1451,30 @@ fn find_string_in_node(node: &SyntaxNode) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse manager type from MDO type string.
+///
+/// Converts Russian/English MDO type names to ManagerType enum:
+/// - Документы / Documents -> Documents
+/// - Справочники / Catalogs -> Catalogs
+/// - Обработки / DataProcessors -> DataProcessors
+/// - Отчёты / Reports -> Reports
+/// - РегистрыСведений / InformationRegisters -> InformationRegisters
+/// - РегистрыНакопления / AccumulationRegisters -> AccumulationRegisters
+fn parse_manager_type(mdo_type: &str) -> Option<ManagerType> {
+    let lower = mdo_type.to_lowercase();
+    match lower.as_str() {
+        "документы" | "documents" => Some(ManagerType::Documents),
+        "справочники" | "catalogs" => Some(ManagerType::Catalogs),
+        "обработки" | "dataprocessors" => Some(ManagerType::DataProcessors),
+        "отчёты" | "отчеты" | "reports" => Some(ManagerType::Reports),
+        "регистрысведений" | "informationregisters" => {
+            Some(ManagerType::InformationRegisters)
+        }
+        "регистрынакопления" | "accumulationregisters" => {
+            Some(ManagerType::AccumulationRegisters)
+        }
+        _ => None,
+    }
 }

@@ -41,6 +41,7 @@ use syntax::SyntaxNode;
 use text_size::TextRange;
 
 use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
+use crate::Name;
 
 /// HIR representation of a method body.
 ///
@@ -217,6 +218,9 @@ pub struct LowerResult {
     /// Variables referenced but not locally declared (potential module-level variables).
     /// Lowercase names for case-insensitive comparison.
     pub referenced_externals: rustc_hash::FxHashSet<String>,
+    /// External module references collected during lowering.
+    /// Used to build module dependency graph for lazy loading.
+    pub external_refs: Vec<ExternalRef>,
 }
 
 /// Diagnostic collected during body lowering.
@@ -478,6 +482,43 @@ pub enum DeprecatedKind8312 {
     EnumName,
     /// Deprecated enum value
     EnumValue,
+}
+
+/// External reference collected during body lowering.
+///
+/// Used for building module dependency graph without parsing all files.
+/// Collected during HIR lowering when encountering qualified calls.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExternalRef {
+    /// Qualified call: Module.Method()
+    /// Example: ОбщегоНазначения.СообщитьПользователю()
+    QualifiedCall { receiver: Name, method: Name, range: TextRange },
+
+    /// Manager access: Документы.ИмяОбъекта.Метод()
+    /// Example: Документы.ПриходнаяНакладная.СоздатьЭлемент()
+    ManagerAccess {
+        manager_type: ManagerType,
+        object_name: Name,
+        method: Option<Name>,
+        range: TextRange,
+    },
+}
+
+/// Type of metadata manager (global context collection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ManagerType {
+    /// Документы / Documents
+    Documents,
+    /// Справочники / Catalogs
+    Catalogs,
+    /// Обработки / DataProcessors
+    DataProcessors,
+    /// Отчёты / Reports
+    Reports,
+    /// РегистрыСведений / InformationRegisters
+    InformationRegisters,
+    /// РегистрыНакопления / AccumulationRegisters
+    AccumulationRegisters,
 }
 
 impl BodyDiagnostic {

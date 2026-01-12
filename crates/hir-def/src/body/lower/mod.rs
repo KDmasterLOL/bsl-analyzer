@@ -102,6 +102,10 @@ pub(crate) struct LoweringCtx {
     /// Used for FormDataToValue diagnostic - call is allowed in БезКонтекста methods.
     /// Checks for @НаСервереБезКонтекста or @НаКлиентеНаСервереБезКонтекста.
     pub(crate) has_no_context_annotation: bool,
+
+    /// External module references collected during lowering.
+    /// Used to build module dependency graph for lazy loading.
+    pub(crate) external_refs: Vec<crate::body::ExternalRef>,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -140,6 +144,7 @@ impl LoweringCtx {
             foreach_collections: Vec::new(),
             is_client_only: false, // Will be set in lower_method_with_externals
             has_no_context_annotation: false, // Will be set in lower_method_with_externals
+            external_refs: Vec::new(),
         }
     }
 
@@ -548,6 +553,7 @@ pub fn lower_method_with_externals(
         source_map: ctx.source_map,
         diagnostics: ctx.diagnostics,
         referenced_externals,
+        external_refs: ctx.external_refs,
     }
 }
 
@@ -632,6 +638,7 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
         source_map: ctx.source_map,
         diagnostics: ctx.diagnostics,
         referenced_externals,
+        external_refs: ctx.external_refs,
     }
 }
 

@@ -25,19 +25,8 @@ use crate::task_pool;
 /// Task results from background threads.
 #[derive(Debug)]
 pub enum Task {
-    /// Cache priming progress.
-    PrimeCaches(PrimeCachesProgress),
-}
-
-/// Progress state for cache priming operation.
-#[derive(Debug)]
-pub enum PrimeCachesProgress {
-    /// Starting cache priming.
-    Begin,
-    /// Intermediate progress report.
-    Report { done: usize, total: usize, file_path: Option<String> },
-    /// Cache priming completed.
-    End { cancelled: bool },
+    /// Dependency preloading completed for a file.
+    DependenciesPreloaded { file_id: FileId, count: usize },
 }
 
 /// The main state of the LSP server (mutable, main thread only).
@@ -178,47 +167,6 @@ impl GlobalState {
             },
         );
         self.sender.send(notification.into()).ok();
-    }
-
-    /// Runs cache priming synchronously.
-    ///
-    /// This warms up the `workspace_symbols` cache after VFS loading completes,
-    /// so that the first GoToDefinition is fast. Progress is displayed via
-    /// LSP WorkDoneProgress notifications.
-    ///
-    /// Note: Runs on main thread since Salsa database isn't thread-safe.
-    /// This is acceptable since it happens right after VFS loading when
-    /// no LSP requests are pending.
-    pub fn prime_caches(&self) {
-        use base_db::SourceRootId;
-        use ide_db::hir_def::DefDatabase;
-
-        tracing::info!("starting cache priming");
-
-        // Show progress bar
-        self.report_progress(
-            "Indexing",
-            Progress::Begin,
-            Some("Building symbol index...".into()),
-            Some(0.0),
-        );
-
-        // Call workspace_symbols to prime the cache
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let analysis = self.analysis_host.analysis();
-            let _ = analysis.database().workspace_symbols(SourceRootId(0));
-        }));
-
-        let cancelled = result.is_err();
-        let message = if cancelled { "Cancelled" } else { "Done" };
-
-        self.report_progress("Indexing", Progress::End, Some(message.into()), Some(1.0));
-
-        if cancelled {
-            tracing::warn!("cache priming was cancelled");
-        } else {
-            tracing::info!("cache priming completed");
-        }
     }
 
     /// Initialize an empty SourceRoot(0) before event loop starts.

@@ -135,8 +135,8 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
                                 // Initialize SourceRoot after loading completes
                                 state.init_source_root();
 
-                                // Prime caches for fast first queries
-                                state.prime_caches();
+                                // Note: Cache priming removed - dependencies are now
+                                // preloaded lazily when files are opened via didOpen
                             }
                             LoadingProgress::Started => {
                                 tracing::info!("VFS loading started: {} entries", n_total);
