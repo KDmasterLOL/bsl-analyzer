@@ -994,7 +994,8 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 });
             }
 
-            let callee = ctx.alloc_expr(Expr::QualifiedPath(qualified_path), node.text_range());
+            let callee =
+                ctx.alloc_expr(Expr::QualifiedPath(Box::new(qualified_path)), node.text_range());
             Expr::Call { callee, args: args.into_boxed_slice() }
         } else {
             // Regular method call on an expression

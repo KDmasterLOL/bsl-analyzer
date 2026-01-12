@@ -109,7 +109,9 @@ pub enum Expr {
     /// - CommonModule calls: `ОбщийМодуль.Метод()`
     /// - Manager module calls: `Документы.ПКО.Создать()`
     /// - Chained field access that requires resolution
-    QualifiedPath(crate::path::QualifiedName),
+    ///
+    /// Note: Boxed to reduce Expr enum size from 64 to 48 bytes.
+    QualifiedPath(Box<crate::path::QualifiedName>),
 
     /// Binary operation (a + b, a И b, etc.).
     BinaryOp { lhs: ExprId, rhs: ExprId, op: BinaryOp },
