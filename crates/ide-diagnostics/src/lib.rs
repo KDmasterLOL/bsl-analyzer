@@ -566,6 +566,34 @@ impl<'a> DiagnosticsContext<'a> {
         self.db.item_tree(self.file_id)
     }
 
+    /// Get file text as String (abstracted from db/provider).
+    ///
+    /// This method provides unified access to file text:
+    /// - In streaming mode: returns provider's Arc<String>
+    /// - In LSP mode: gets FileTextInput from db and calls .text(db)
+    ///
+    /// IMPORTANT: Use this instead of ctx.db.file_text_input() to enable streaming mode.
+    pub fn file_text(&self) -> std::sync::Arc<String> {
+        if let Some(provider) = self.provider {
+            let text = provider.file_text(self.file_id);
+            return std::sync::Arc::new(text);
+        }
+        let input = self.db.file_text_input(self.file_id);
+        // Wrap the db's String in Arc for consistent API
+        let text: String = input.text(self.db).to_string();
+        std::sync::Arc::new(text)
+    }
+
+    /// Get file text input (Salsa input) for current file.
+    ///
+    /// NOTE: This method only works in LSP mode with Salsa database.
+    /// For streaming mode compatibility, use ctx.file_text() instead.
+    ///
+    /// Kept for backward compatibility with handlers that haven't been migrated yet.
+    pub fn file_text_input(&self) -> base_db::FileTextInput {
+        self.db.file_text_input(self.file_id)
+    }
+
     /// Get line index for current file.
     pub fn line_index(&self) -> std::sync::Arc<line_index::LineIndex> {
         if let Some(provider) = self.provider {
