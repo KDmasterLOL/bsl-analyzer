@@ -67,6 +67,22 @@ impl Default for ItemTree {
 }
 
 impl ItemTree {
+    /// Build ItemTree from a parse result (without Salsa).
+    ///
+    /// This is the pure version for streaming mode.
+    pub fn from_parse(parse: &syntax::Parse<syntax::SyntaxNode>) -> Self {
+        use syntax::ast::{self, AstNode};
+
+        let file = match ast::SourceFile::cast(parse.syntax_node()) {
+            Some(f) => f,
+            None => return ItemTree::default(),
+        };
+
+        let mut tree = ItemTree::default();
+        lower::lower_module_items_into(&file, &mut tree);
+        tree
+    }
+
     /// Get all top-level items.
     pub fn top_level_items(&self) -> &[ModItem] {
         &self.top_level

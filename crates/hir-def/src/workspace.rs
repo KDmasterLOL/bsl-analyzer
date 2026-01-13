@@ -40,7 +40,7 @@ pub struct CommonModuleInfo {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkspaceSymbols {
     /// Map from CommonModule name to module information.
     ///
