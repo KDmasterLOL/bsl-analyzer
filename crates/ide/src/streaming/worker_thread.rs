@@ -35,10 +35,12 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use tracing::{error, info, warn};
 
-use crate::provider::AnalysisProvider;
+// Import from ide-db (infrastructure layer)
+use ide_db::provider::AnalysisProvider;
+use ide_db::streaming::SharedState;
 
+// Import from current crate (ide features layer)
 use super::file_processor::{FileProcessor, FileResult};
-use super::shared_state::SharedState;
 
 /// Main worker loop.
 ///
@@ -156,8 +158,8 @@ pub fn worker_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streaming::{FileReader, GlobalContext, StreamingProvider};
     use crossbeam_channel::unbounded;
+    use ide_db::streaming::{FileReader, GlobalContext, StreamingProvider};
     use rustc_hash::FxHashMap;
     use std::thread;
     use vfs::{file_set::FileSet, FileId, VfsPath};
@@ -179,8 +181,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
+            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files.clone()),
         });

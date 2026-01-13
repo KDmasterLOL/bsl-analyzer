@@ -498,7 +498,7 @@ fn analyze_streaming(
     quiet: bool,
     workers: Option<usize>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use ide_db::streaming::AnalysisOrchestrator;
+    use ide::streaming::AnalysisOrchestrator;
     use std::time::Instant;
     use vfs::FileId;
     use walkdir::WalkDir;

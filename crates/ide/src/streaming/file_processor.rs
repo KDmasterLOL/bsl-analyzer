@@ -7,18 +7,17 @@
 
 use std::sync::Arc;
 
-use hir_def::{ItemTree, ModuleId, SymbolTree};
+use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree};
 use vfs::FileId;
 
-use crate::provider::AnalysisProvider;
-
-use super::shared_state::{ProcessError, SharedState};
+// Import from ide-db (infrastructure layer)
+use ide_db::provider::AnalysisProvider;
+use ide_db::streaming::{ProcessError, SharedState};
 
 /// Diagnostic information collected during analysis.
 ///
-/// This is a simplified representation to avoid circular dependencies
-/// (ide-diagnostics already depends on ide-db, so we can't import from it here).
-/// The CLI will convert these to proper ide_diagnostics::Diagnostic types.
+/// This is a simplified representation to avoid complex type conversions.
+/// The CLI will convert these to proper output formats (JSON, SARIF, etc.).
 #[derive(Debug, Clone)]
 pub struct DiagnosticInfo {
     pub code: String,
@@ -93,17 +92,11 @@ impl<'a> FileProcessor<'a> {
         // Phase 2: Collect diagnostics
         // TODO: Implement diagnostics collection
         //
-        // ARCHITECTURE NOTE: Cannot directly call ide_diagnostics here due to circular dependency:
-        //   - ide-diagnostics depends on ide-db (for RootDatabase, AnalysisProvider, etc.)
-        //   - ide-db/streaming/file_processor cannot depend on ide-diagnostics
+        // NOW POSSIBLE! We're in ide crate, so we can import ide_diagnostics!
         //
-        // SOLUTION: Dependency Injection pattern
-        //   Option 1: Pass diagnostics collector as closure/trait object to FileProcessor::new()
-        //     - FileProcessor<'a, D> where D: Fn(FileId, &dyn AnalysisProvider) -> Vec<DiagnosticInfo>
-        //   Option 2: Move diagnostics collection to WorkerThread (which CAN import ide-diagnostics)
-        //     - WorkerThread calls file_processor.process_file() then ide_diagnostics::diagnostics()
-        //   Option 3: Move FileProcessor to ide crate (higher level)
-        //     - Cleaner architecture but requires more refactoring
+        // Next step: Add DiagnosticsConfig to constructor and call:
+        //   let ctx = DiagnosticsContext::with_provider(...);
+        //   let diagnostics = ide_diagnostics::diagnostics(&ctx);
         //
         // For now, diagnostics remain empty (Phase 1 only)
         let diagnostics = vec![];
@@ -173,7 +166,7 @@ impl<'a> FileProcessor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streaming::{FileReader, GlobalContext, StreamingProvider};
+    use ide_db::streaming::{FileReader, GlobalContext, StreamingProvider};
     use rustc_hash::FxHashMap;
     use vfs::{file_set::FileSet, VfsPath};
 
@@ -189,8 +182,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
+            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });
@@ -209,7 +202,7 @@ mod tests {
         let (provider, shared_state, file_id) = create_test_setup();
 
         // Claim file
-        assert_eq!(shared_state.try_claim(file_id), super::super::shared_state::ClaimResult::ByUs);
+        assert_eq!(shared_state.try_claim(file_id), ide_db::streaming::ClaimResult::ByUs);
 
         // Create processor
         let processor = FileProcessor::new(&*provider, &shared_state);
@@ -223,7 +216,7 @@ mod tests {
         let symbol_tree = shared_state.get_symbol_tree(file_id).unwrap();
 
         // Verify SymbolTree has the method
-        let method = symbol_tree.find_method(&hir_def::Name::new("Тест"));
+        let method = symbol_tree.find_method(&ide_db::hir_def::Name::new("Тест"));
         assert!(method.is_some());
     }
 
@@ -232,7 +225,7 @@ mod tests {
         let (provider, shared_state, file_id) = create_test_setup();
 
         // Claim file
-        assert_eq!(shared_state.try_claim(file_id), super::super::shared_state::ClaimResult::ByUs);
+        assert_eq!(shared_state.try_claim(file_id), ide_db::streaming::ClaimResult::ByUs);
 
         // Create processor
         let processor = FileProcessor::new(&*provider, &shared_state);
@@ -246,10 +239,7 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 0); // No diagnostics yet
 
         // Check file completed
-        assert_eq!(
-            shared_state.file_status(file_id),
-            super::super::shared_state::FileStatus::Completed
-        );
+        assert_eq!(shared_state.file_status(file_id), ide_db::streaming::FileStatus::Completed);
 
         // Check SymbolTree available
         let symbol_tree = shared_state.get_symbol_tree(file_id).unwrap();
@@ -269,8 +259,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
+            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });
@@ -304,8 +294,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
+            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });

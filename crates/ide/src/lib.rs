@@ -7,6 +7,7 @@ pub mod config_finder;
 mod goto_definition;
 mod hover;
 mod references;
+pub mod streaming;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};

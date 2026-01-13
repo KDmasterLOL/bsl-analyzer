@@ -55,13 +55,13 @@ use rustc_hash::FxHashMap;
 use tracing::{error, info, warn};
 use vfs::{file_set::FileSet, FileId};
 
-use hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
+use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
 
+// Import from ide-db (infrastructure layer)
+use ide_db::streaming::{FileReader, GlobalContext, SharedState, StreamingProvider};
+
+// Import from current crate (ide features layer)
 use super::file_processor::FileResult;
-use super::file_reader::FileReader;
-use super::global_context::GlobalContext;
-use super::provider::StreamingProvider;
-use super::shared_state::SharedState;
 use super::worker_thread::worker_main;
 
 /// Results of batch analysis.
@@ -268,7 +268,7 @@ impl AnalysisOrchestrator {
 
         // 5. Build ModuleIndex
         // TODO: Extract module names from file paths and build proper index
-        let module_index = Arc::new(hir_def::ModuleIndex::new());
+        let module_index = Arc::new(ide_db::hir_def::ModuleIndex::new());
         info!("ModuleIndex built (empty for now)");
 
         Ok(Arc::new(GlobalContext {
