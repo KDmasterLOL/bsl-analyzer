@@ -60,6 +60,9 @@ use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
 // Import from ide-db (infrastructure layer)
 use ide_db::streaming::{FileReader, GlobalContext, SharedState, StreamingProvider};
 
+// Import from ide-diagnostics
+use ide_diagnostics::DiagnosticsConfig;
+
 // Import from current crate (ide features layer)
 use super::file_processor::FileResult;
 use super::worker_thread::worker_main;
@@ -174,9 +177,12 @@ impl AnalysisOrchestrator {
         let shared_state = SharedState::new(global_context.as_ref().clone(), sorted_files.clone());
         let provider = Arc::new(StreamingProvider::new(global_context));
 
+        // Load diagnostics configuration (default for now - CLI will load from file)
+        let config = Arc::new(DiagnosticsConfig::default());
+
         let (results_tx, results_rx) = unbounded();
 
-        let workers = self.spawn_workers(provider, shared_state, results_tx)?;
+        let workers = self.spawn_workers(provider, shared_state, config, results_tx)?;
 
         // Phase 3: Collect results
         let results = self.collect_results(results_rx, workers, sorted_files.len());
@@ -330,6 +336,7 @@ impl AnalysisOrchestrator {
         &self,
         provider: Arc<StreamingProvider>,
         shared_state: Arc<SharedState>,
+        config: Arc<DiagnosticsConfig>,
         results_tx: crossbeam_channel::Sender<FileResult>,
     ) -> Result<Vec<thread::JoinHandle<()>>, OrchestratorError> {
         let _span = tracing::info_span!("spawn_workers").entered();
@@ -341,12 +348,13 @@ impl AnalysisOrchestrator {
         for worker_id in 0..self.num_workers {
             let provider = Arc::clone(&provider);
             let shared_state = Arc::clone(&shared_state);
+            let config = Arc::clone(&config);
             let results_tx = results_tx.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("worker-{}", worker_id))
                 .spawn(move || {
-                    worker_main(worker_id, shared_state, provider, results_tx);
+                    worker_main(worker_id, shared_state, provider, config, results_tx);
                 })
                 .map_err(|e| {
                     OrchestratorError::WorkerPool(format!(

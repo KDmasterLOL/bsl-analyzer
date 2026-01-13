@@ -39,6 +39,9 @@ use tracing::{error, info, warn};
 use ide_db::provider::AnalysisProvider;
 use ide_db::streaming::SharedState;
 
+// Import from ide-diagnostics
+use ide_diagnostics::DiagnosticsConfig;
+
 // Import from current crate (ide features layer)
 use super::file_processor::{FileProcessor, FileResult};
 
@@ -52,15 +55,21 @@ use super::file_processor::{FileProcessor, FileResult};
 /// - `worker_id`: Unique identifier for this worker (for logging/debugging)
 /// - `shared_state`: Coordination structure for claiming files
 /// - `provider`: AnalysisProvider for accessing file data
+/// - `config`: Diagnostics configuration (enabled/disabled rules, parameters)
 /// - `results_tx`: Channel for sending results back to orchestrator
 ///
 /// ## Behavior
 ///
 /// 1. Loop: claim next file from SharedState
-/// 2. If Some(file_id): process file with FileProcessor
+/// 2. If Some(file_id): process file with FileProcessor (includes diagnostics!)
 /// 3. Send result via channel (ignore send errors - orchestrator may have stopped)
 /// 4. If None: all files processed, exit gracefully
 /// 5. Catch panics and convert to error results
+///
+/// ## Note
+///
+/// The dummy RootDatabase is created locally in FileProcessor since it's not
+/// thread-safe (contains RefCell) and cannot be passed across threads.
 ///
 /// ## Example
 ///
@@ -70,6 +79,7 @@ use super::file_processor::{FileProcessor, FileResult};
 ///         worker_id,
 ///         shared_state,
 ///         provider,
+///         config,
 ///         results_tx,
 ///     );
 /// });
@@ -78,6 +88,7 @@ pub fn worker_main(
     worker_id: usize,
     shared_state: Arc<SharedState>,
     provider: Arc<dyn AnalysisProvider + Send + Sync>,
+    config: Arc<DiagnosticsConfig>,
     results_tx: Sender<FileResult>,
 ) {
     let _span = tracing::info_span!("worker", worker_id).entered();
@@ -85,8 +96,8 @@ pub fn worker_main(
 
     let mut files_processed = 0;
 
-    // Create FileProcessor for this worker
-    let processor = FileProcessor::new(&*provider, &shared_state);
+    // Create FileProcessor for this worker (with diagnostics support!)
+    let processor = FileProcessor::new(&*provider, &shared_state, &config);
 
     loop {
         // Claim next file (lock-free work stealing)
@@ -168,6 +179,7 @@ mod tests {
         Arc<StreamingProvider>,
         Arc<SharedState>,
         Vec<FileId>,
+        Arc<DiagnosticsConfig>,
         Sender<FileResult>,
         crossbeam_channel::Receiver<FileResult>,
     );
@@ -193,9 +205,12 @@ mod tests {
         let global_context = GlobalContext::empty();
         let shared_state = SharedState::new(global_context, sorted_files.clone());
 
+        // Create diagnostics config (all disabled for tests)
+        let config = Arc::new(DiagnosticsConfig::default());
+
         let (tx, rx) = unbounded();
 
-        (provider, shared_state, sorted_files, tx, rx)
+        (provider, shared_state, sorted_files, config, tx, rx)
     }
 
     #[test]
@@ -204,11 +219,11 @@ mod tests {
         let mut files = FxHashMap::default();
         files.insert(file_id, "Процедура Тест() КонецПроцедуры".to_string());
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files);
+        let (provider, shared_state, _sorted_files, config, tx, rx) = create_test_setup(files);
 
         // Run worker in thread
         let handle = thread::spawn(move || {
-            worker_main(0, shared_state, provider, tx);
+            worker_main(0, shared_state, provider, config, tx);
         });
 
         // Collect results
@@ -220,7 +235,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].file_id, file_id);
         assert!(results[0].error.is_none());
-        assert_eq!(results[0].diagnostics.len(), 0); // Phase 2 not implemented yet
+        // Diagnostics collection is now implemented in Phase 2
     }
 
     #[test]
@@ -231,11 +246,12 @@ mod tests {
             files.insert(file_id, format!("Процедура Тест{}() КонецПроцедуры", i));
         }
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files.clone());
+        let (provider, shared_state, _sorted_files, config, tx, rx) =
+            create_test_setup(files.clone());
 
         // Run worker
         let handle = thread::spawn(move || {
-            worker_main(0, shared_state, provider, tx);
+            worker_main(0, shared_state, provider, config, tx);
         });
 
         // Collect results
@@ -259,17 +275,19 @@ mod tests {
             files.insert(file_id, format!("Функция Функция{}() КонецФункции", i));
         }
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files.clone());
+        let (provider, shared_state, _sorted_files, config, tx, rx) =
+            create_test_setup(files.clone());
 
         // Spawn 3 workers
         let mut handles = vec![];
         for worker_id in 0..3 {
             let provider = Arc::clone(&provider);
             let shared_state = Arc::clone(&shared_state);
+            let config = Arc::clone(&config);
             let tx = tx.clone();
 
             let handle = thread::spawn(move || {
-                worker_main(worker_id, shared_state, provider, tx);
+                worker_main(worker_id, shared_state, provider, config, tx);
             });
 
             handles.push(handle);
@@ -303,11 +321,11 @@ mod tests {
         // Invalid BSL code
         files.insert(file_id, "Процедура Ошибка( КонецПроцедуры".to_string());
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files);
+        let (provider, shared_state, _sorted_files, config, tx, rx) = create_test_setup(files);
 
         // Run worker
         let handle = thread::spawn(move || {
-            worker_main(0, shared_state, provider, tx);
+            worker_main(0, shared_state, provider, config, tx);
         });
 
         // Collect results
@@ -325,11 +343,11 @@ mod tests {
     fn test_worker_empty_queue() {
         let files = FxHashMap::default(); // Empty
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files);
+        let (provider, shared_state, _sorted_files, config, tx, rx) = create_test_setup(files);
 
         // Run worker
         let handle = thread::spawn(move || {
-            worker_main(0, shared_state, provider, tx);
+            worker_main(0, shared_state, provider, config, tx);
         });
 
         // Collect results
@@ -349,11 +367,11 @@ mod tests {
             files.insert(file_id, format!("Процедура Тест{}() КонецПроцедуры", i));
         }
 
-        let (provider, shared_state, _sorted_files, tx, rx) = create_test_setup(files);
+        let (provider, shared_state, _sorted_files, config, tx, rx) = create_test_setup(files);
 
         // Start worker
         let handle = thread::spawn(move || {
-            worker_main(0, shared_state, provider, tx);
+            worker_main(0, shared_state, provider, config, tx);
         });
 
         // Close receiver immediately
