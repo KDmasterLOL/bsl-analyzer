@@ -46,7 +46,7 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir::Method;
+use hir_def::item_tree::ModItem;
 use ide_db::TextRange;
 
 /// Run the MissingReturnedValueDescription diagnostic.
@@ -84,31 +84,33 @@ fn check_function_hir(
     ctx: &DiagnosticsContext,
     method_id: hir_def::MethodId,
 ) -> Option<Diagnostic> {
-    // Check if export via ctx.item_tree() (works in both LSP and streaming mode)
+    // Get item tree via ctx (works in both LSP and streaming mode)
     let tree = ctx.item_tree();
-    let is_export = tree.top_level_items().get(method_id.local_id as usize).is_some_and(|item| {
-        use hir_def::item_tree::ModItem;
-        match item {
-            ModItem::Function(func_idx) => tree.function(*func_idx).is_export,
-            _ => false,
-        }
-    });
+
+    // Get function info from item tree
+    let func_info =
+        tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
+            ModItem::Function(func_idx) => {
+                let func = tree.function(*func_idx);
+                Some((func.is_export, func.name_range))
+            }
+            _ => None,
+        });
+
+    let (is_export, name_range) = func_info?;
 
     // Only check export functions (public API)
     if !is_export {
         return None;
     }
 
-    // Create Method wrapper for diagnostic range (only used for name_range(), not for data access)
-    let method = Method::new(ctx.db, method_id);
-
     // Get documentation via ctx (works in both LSP and streaming mode)
     // If no documentation, require it for export functions
     let docs = match ctx.method_docs(method_id) {
         Some(d) => d,
         None => {
-            return Some(create_diagnostic_hir(
-                &method,
+            return Some(create_diagnostic(
+                name_range,
                 "Добавьте описание возвращаемого значения функции",
             ));
         }
@@ -121,8 +123,8 @@ fn check_function_hir(
 
     // Check if return value section exists
     if docs.returned_value.is_empty() {
-        return Some(create_diagnostic_hir(
-            &method,
+        return Some(create_diagnostic(
+            name_range,
             "Добавьте описание возвращаемого значения функции",
         ));
     }
@@ -157,7 +159,7 @@ fn check_function_hir(
                 "Необходимо добавить описание типов \"{}\" возвращаемого значения",
                 types_list
             );
-            return Some(create_diagnostic_hir(&method, &message));
+            return Some(create_diagnostic(name_range, &message));
         }
     }
 
@@ -169,15 +171,23 @@ fn check_procedure_hir(
     ctx: &DiagnosticsContext,
     method_id: hir_def::MethodId,
 ) -> Option<Diagnostic> {
-    let method = Method::new(ctx.db, method_id);
+    // Get item tree via ctx (works in both LSP and streaming mode)
+    let tree = ctx.item_tree();
+
+    // Get procedure name range from item tree
+    let name_range =
+        tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
+            ModItem::Procedure(proc_idx) => Some(tree.procedure(*proc_idx).name_range),
+            _ => None,
+        })?;
 
     // Get documentation via ctx (works in both LSP and streaming mode)
     let docs = ctx.method_docs(method_id)?;
 
     // Procedures must NOT have return value descriptions
     if !docs.returned_value.is_empty() {
-        return Some(create_diagnostic_hir(
-            &method,
+        return Some(create_diagnostic(
+            name_range,
             "Удалите описание возвращаемого значения для процедуры",
         ));
     }
@@ -185,19 +195,10 @@ fn check_procedure_hir(
     None
 }
 
-/// Create a diagnostic with the given message (HIR-based).
+/// Create a diagnostic with the given message.
 ///
 /// The diagnostic range is set to the method name (identifier only).
-fn create_diagnostic_hir<DB: hir_def::DefDatabase + ?Sized>(
-    method: &Method<'_, DB>,
-    message: &str,
-) -> Diagnostic {
-    // Get method's name range from HIR (identifier only, not full method body)
-    let range = method.name_range().unwrap_or_else(|| {
-        // Fallback: return a default range (shouldn't happen in practice)
-        TextRange::empty(0.into())
-    });
-
+fn create_diagnostic(range: TextRange, message: &str) -> Diagnostic {
     Diagnostic {
         code: DiagnosticCode::MissingReturnedValueDescription,
         message: message.to_string(),
