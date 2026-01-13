@@ -81,6 +81,15 @@ enum Commands {
         /// Git ref to compare against (e.g., HEAD~1, origin/main) for incremental mode
         #[arg(long, requires = "incremental", conflicts_with = "changed_files")]
         git_diff: Option<String>,
+
+        /// Use streaming mode (low memory, parallel file processing)
+        /// Recommended for large projects (>1000 files)
+        #[arg(long)]
+        streaming: bool,
+
+        /// Number of worker threads for streaming mode (default: CPU cores)
+        #[arg(long, requires = "streaming")]
+        workers: Option<usize>,
     },
 
     /// Check configuration file
@@ -136,6 +145,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
+            streaming,
+            workers,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -146,6 +157,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
+            streaming,
+            workers,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Lsp) | None => run_lsp_server(),
@@ -188,6 +201,33 @@ fn analyze(
     _incremental: bool,
     _changed_files: Option<Vec<PathBuf>>,
     _git_diff: Option<String>,
+    streaming: bool,
+    workers: Option<usize>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Route to streaming or Salsa mode
+    if streaming {
+        analyze_streaming(
+            source_dir,
+            workspace_dir,
+            output_dir,
+            config_path,
+            reporters,
+            quiet,
+            workers,
+        )
+    } else {
+        analyze_salsa(source_dir, workspace_dir, output_dir, config_path, reporters, quiet)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_salsa(
+    source_dir: PathBuf,
+    workspace_dir: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    reporters: Vec<String>,
+    quiet: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use base_db::SourceDatabase;
     use ide::{DiagnosticsConfig, RootDatabaseImpl};
@@ -444,6 +484,163 @@ fn analyze(
     }
 
     tracing::info!("Analysis complete");
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_streaming(
+    source_dir: PathBuf,
+    workspace_dir: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    reporters: Vec<String>,
+    quiet: bool,
+    workers: Option<usize>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use ide_db::streaming::AnalysisOrchestrator;
+    use std::time::Instant;
+    use vfs::FileId;
+    use walkdir::WalkDir;
+
+    use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
+
+    let _span = tracing::info_span!("cli_analyze_streaming").entered();
+
+    tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
+    tracing::info!("Workers: {:?}", workers);
+    tracing::info!("Reporters: {:?}", reporters);
+    tracing::info!("Quiet mode: {}", quiet);
+
+    let start = Instant::now();
+
+    // Determine workspace and output directories
+    let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
+    let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+
+    // Find all BSL files
+    tracing::info!("Finding BSL files in {:?}", source_dir);
+    let mut bsl_files = Vec::new();
+    for entry in WalkDir::new(&source_dir).follow_links(true) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "bsl" {
+                    bsl_files.push(entry.path().to_path_buf());
+                }
+            }
+        }
+    }
+
+    tracing::info!("Found {} BSL files", bsl_files.len());
+
+    if bsl_files.is_empty() {
+        tracing::warn!("No BSL files found in {:?}", source_dir);
+        println!("No BSL files found!");
+        return Ok(());
+    }
+
+    // Build FileSet and file IDs
+    let mut file_set = vfs::FileSet::new();
+    let mut file_ids = Vec::new();
+
+    for (idx, path) in bsl_files.iter().enumerate() {
+        let file_id = FileId(idx as u32);
+        let vfs_path = vfs::VfsPath::new(path.clone());
+        file_set.insert(file_id, vfs_path);
+        file_ids.push((file_id, path.clone()));
+    }
+
+    // Create orchestrator
+    let mut builder = AnalysisOrchestrator::builder().workspace_root(&source_dir);
+
+    if let Some(w) = workers {
+        builder = builder.num_workers(w);
+    }
+
+    if let Some(ref cfg) = config_path {
+        builder = builder.configuration_path(cfg);
+    }
+
+    let orchestrator = builder.build()?;
+
+    // Show progress message
+    if !quiet {
+        println!("Analyzing {} files with streaming mode...", file_ids.len());
+        if let Some(w) = workers {
+            println!("Using {} worker threads", w);
+        } else {
+            println!(
+                "Using {} worker threads (auto-detected)",
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+            );
+        }
+    }
+
+    // Run analysis
+    let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
+    let streaming_results = orchestrator.analyze(file_id_vec, file_set)?;
+
+    let elapsed = start.elapsed();
+
+    if !quiet {
+        println!("Analysis completed in {:.2?}", elapsed);
+        println!("Processed: {} files", streaming_results.total_files);
+        println!("Diagnostics: {}", streaming_results.total_diagnostics);
+        println!("Failed: {} files", streaming_results.failed_files);
+    }
+
+    // Convert streaming results to reporter format
+    // Note: Phase 2 (diagnostics) not implemented yet, so diagnostics will be empty
+    let mut all_diagnostics = Vec::new();
+
+    for file_result in &streaming_results.file_results {
+        if !file_result.diagnostics.is_empty() {
+            // Find original path
+            if let Some((_, path)) = file_ids.iter().find(|(id, _)| *id == file_result.file_id) {
+                all_diagnostics.push(FileAnalysis {
+                    path: path.clone(),
+                    relative_path: path.strip_prefix(&workspace_dir).unwrap_or(path).to_path_buf(),
+                    diagnostics: vec![], // TODO: Convert String diagnostics to proper Diagnostic types
+                });
+            }
+        }
+    }
+
+    let results = AnalysisResults {
+        files_analyzed: bsl_files.len(),
+        files_with_issues: streaming_results.failed_files,
+        total_diagnostics: streaming_results.total_diagnostics,
+        elapsed_secs: elapsed.as_secs_f64(),
+        diagnostics: all_diagnostics,
+        source_dir: source_dir.clone(),
+        workspace_dir: workspace_dir.clone(),
+    };
+
+    // Create output directory if needed
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Run reporters
+    let registry = ReporterRegistry::new();
+    let reporter_keys = if reporters.is_empty() { vec!["console".to_string()] } else { reporters };
+
+    for key in &reporter_keys {
+        match registry.get(key) {
+            Some(reporter) => {
+                if let Err(e) = reporter.report(&results, &output_dir) {
+                    tracing::error!("Reporter '{}' failed: {}", key, e);
+                    eprintln!("Error: Reporter '{}' failed: {}", key, e);
+                }
+            }
+            None => {
+                eprintln!("Error: Unknown reporter '{}'", key);
+                eprintln!("Valid reporters: {}", registry.keys().join(", "));
+                return Err(format!("Unknown reporter: {}", key).into());
+            }
+        }
+    }
+
+    tracing::info!("Streaming analysis complete");
 
     Ok(())
 }

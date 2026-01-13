@@ -33,7 +33,10 @@ pub mod streaming;
 // Re-export provider types
 pub use provider::AnalysisProvider;
 pub use salsa_provider::SalsaProvider;
-pub use streaming::{FileReader, GlobalContext, StreamingProvider};
+pub use streaming::{
+    ClaimResult, FileProcessor, FileReader, FileResult, FileStatus, GlobalContext, ProcessError,
+    SharedState, StreamingProvider,
+};
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{

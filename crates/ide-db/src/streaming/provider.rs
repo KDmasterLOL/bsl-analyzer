@@ -1,14 +1,5 @@
-//! Streaming analysis provider for batch/analyze mode.
-//!
-//! This module provides `StreamingProvider` - an implementation of `AnalysisProvider`
-//! optimized for batch analysis with minimal memory usage.
-//!
-//! # Architecture
-//!
-//! Unlike `SalsaProvider` which caches everything in the Salsa database,
-//! `StreamingProvider` computes per-file data on-the-fly and releases it after use.
+//! StreamingProvider implementation.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use base_db::SourceRootId;
@@ -18,121 +9,12 @@ use hir_def::{
 };
 use rustc_hash::FxHashMap;
 use syntax::{Parse, SyntaxNode};
-use vfs::{file_set::FileSet, FileId, VfsPath};
+use vfs::FileId;
 
 use crate::metadata::get_module_type_from_uri;
 use crate::provider::AnalysisProvider;
 
-/// Global context shared across all files during streaming analysis.
-///
-/// This structure holds data that needs to be available for cross-module
-/// validation and is kept in memory for the entire analysis session.
-#[derive(Debug)]
-pub struct GlobalContext {
-    /// 1C Configuration metadata.
-    pub configuration: Option<Arc<Configuration>>,
-
-    /// Symbol trees for all modules (prebuilt during initialization).
-    pub symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
-
-    /// Workspace symbols index for cross-module resolution.
-    pub workspace_symbols: Arc<WorkspaceSymbols>,
-
-    /// Module index (name → FileId).
-    pub module_index: Arc<ModuleIndex>,
-
-    /// File set for path resolution.
-    pub file_set: Arc<FileSet>,
-
-    /// File content provider.
-    pub file_reader: FileReader,
-}
-
-impl GlobalContext {
-    /// Create a new GlobalContext with the given components.
-    pub fn new(
-        configuration: Option<Arc<Configuration>>,
-        symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
-        workspace_symbols: Arc<WorkspaceSymbols>,
-        module_index: Arc<ModuleIndex>,
-        file_set: Arc<FileSet>,
-        file_reader: FileReader,
-    ) -> Self {
-        Self { configuration, symbol_trees, workspace_symbols, module_index, file_set, file_reader }
-    }
-
-    /// Create an empty GlobalContext (useful for testing).
-    pub fn empty() -> Self {
-        Self {
-            configuration: None,
-            symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
-            module_index: Arc::new(ModuleIndex::new()),
-            file_set: Arc::new(FileSet::default()),
-            file_reader: FileReader::empty(),
-        }
-    }
-}
-
-/// File content provider for streaming mode.
-///
-/// Can read files from disk or from a pre-loaded map.
-#[derive(Debug, Clone)]
-pub enum FileReader {
-    /// Read files from disk using workspace root.
-    Disk {
-        /// Workspace root directory.
-        workspace_root: Arc<Path>,
-        /// FileSet for FileId → path resolution.
-        file_set: Arc<FileSet>,
-    },
-
-    /// Use pre-loaded file contents (for testing).
-    InMemory {
-        /// Map from FileId to file content.
-        files: Arc<FxHashMap<FileId, String>>,
-    },
-}
-
-impl FileReader {
-    /// Create a disk-based file reader.
-    pub fn from_disk(workspace_root: impl AsRef<Path>, file_set: Arc<FileSet>) -> Self {
-        Self::Disk { workspace_root: Arc::from(workspace_root.as_ref()), file_set }
-    }
-
-    /// Create an in-memory file reader (for testing).
-    pub fn in_memory(files: FxHashMap<FileId, String>) -> Self {
-        Self::InMemory { files: Arc::new(files) }
-    }
-
-    /// Create an empty file reader.
-    pub fn empty() -> Self {
-        Self::InMemory { files: Arc::new(FxHashMap::default()) }
-    }
-
-    /// Read file content.
-    pub fn read(&self, file_id: FileId) -> Option<String> {
-        match self {
-            FileReader::Disk { workspace_root, file_set } => {
-                let vfs_path = file_set.path_for_file(&file_id)?;
-                let path = resolve_vfs_path(workspace_root, vfs_path)?;
-                std::fs::read_to_string(&path).ok()
-            }
-            FileReader::InMemory { files } => files.get(&file_id).cloned(),
-        }
-    }
-}
-
-/// Resolve VfsPath to absolute filesystem path.
-fn resolve_vfs_path(workspace_root: &Path, vfs_path: &VfsPath) -> Option<std::path::PathBuf> {
-    let path = vfs_path.as_path();
-    if path.is_absolute() {
-        Some(path.to_path_buf())
-    } else {
-        // Relative to workspace root
-        Some(workspace_root.join(path))
-    }
-}
+use super::global_context::GlobalContext;
 
 /// Streaming analysis provider.
 ///
@@ -369,6 +251,8 @@ fn extract_common_module_name(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::streaming::{FileReader, GlobalContext};
+    use vfs::{file_set::FileSet, VfsPath};
 
     #[test]
     fn test_extract_common_module_name_english() {

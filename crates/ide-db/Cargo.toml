@@ -24,10 +24,15 @@ tracing.workspace = true
 dataflow.workspace = true
 cfg.workspace = true
 line-index.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+crossbeam-utils.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "salsa_incremental"
