@@ -227,6 +227,99 @@ impl AnalysisProvider for StreamingProvider {
 
         Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
+
+    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree> {
+        let parse = self.parse(file_id);
+        Arc::new(hir_def::region_tree::lower_regions(&parse.syntax_node()))
+    }
+
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
+        use syntax::{
+            ast::{self, AstNode},
+            SyntaxKind, TextRange, TextSize,
+        };
+
+        let parse = self.parse(file_id);
+        let root = parse.syntax_node();
+
+        let mut regions = Vec::new();
+        for child in root.children() {
+            if child.kind() == SyntaxKind::PRE_REGION_DIR {
+                if let Some(region) = ast::PreRegionDir::cast(child.clone()) {
+                    if region.is_start() {
+                        if let Some(name) = region.name() {
+                            let text = child.text().to_string();
+                            let first_line = text.lines().next().unwrap_or(&text);
+                            let first_line_len = first_line.len();
+
+                            let start = child.text_range().start();
+                            let end = start + TextSize::from(first_line_len as u32);
+                            let range = TextRange::new(start, end);
+
+                            regions.push(base_db::RegionInfo { name, range });
+                        }
+                    }
+                }
+            }
+        }
+
+        Arc::new(regions)
+    }
+
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
+        // Get SDBL queries from BSL HIR
+        let sdbl_queries = self.all_sdbl_in_file(file_id);
+
+        // Try to get configuration for metadata-based type inference
+        let configuration = self.configuration();
+        let config_ref = configuration.as_deref();
+
+        // Lower each SDBL query to HIR
+        let mut result = Vec::with_capacity(sdbl_queries.len());
+        for (expr_id, query_info) in sdbl_queries.iter() {
+            // Only lower if we have a parsed AST
+            if let Some(ref sdbl_ast) = query_info.query_ast {
+                let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+                result.push((*expr_id, Arc::new(sdbl_package)));
+            }
+        }
+
+        Arc::new(result)
+    }
+
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut result = Vec::new();
+
+        // Collect from all method bodies (procedures and functions)
+        for (_local_id, body) in module_bodies.iter_bodies() {
+            for (expr_id, query_info) in body.sdbl_exprs() {
+                result.push((*expr_id, query_info.clone()));
+            }
+        }
+
+        // Collect from module-level code (statements outside methods)
+        if let Some(module_code) = module_bodies.module_code() {
+            for (expr_id, query_info) in module_code.sdbl_exprs() {
+                result.push((*expr_id, query_info.clone()));
+            }
+        }
+
+        // Sort by position in file for deterministic output
+        result.sort_by_key(|(_, query_info)| query_info.bsl_literal_range.start());
+
+        Arc::new(result)
+    }
+
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData> {
+        let item_tree = self.item_tree(module_id.file_id);
+        Arc::new(hir_def::ModuleData::from_item_tree(module_id, item_tree))
+    }
 }
 
 /// Extract CommonModule name from file path.

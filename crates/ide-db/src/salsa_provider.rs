@@ -110,4 +110,27 @@ impl AnalysisProvider for SalsaProvider<'_> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.module_reaching_definitions(input)
     }
+
+    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree> {
+        self.db.region_tree(file_id)
+    }
+
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
+        self.db.module_level_regions(file_id)
+    }
+
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
+        self.db.sdbl_hir_in_file(file_id)
+    }
+
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+        self.db.all_sdbl_in_file(file_id)
+    }
+
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData> {
+        self.db.module_data(module_id)
+    }
 }

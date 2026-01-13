@@ -778,6 +778,49 @@ impl<'a> DiagnosticsContext<'a> {
         let input = base_db::FileIdInput::new(self.db, self.file_id);
         self.db.module_reaching_definitions(input)
     }
+
+    /// Get region tree for current file.
+    pub fn region_tree(&self) -> std::sync::Arc<hir_def::RegionTree> {
+        if let Some(provider) = self.provider {
+            return provider.region_tree(self.file_id);
+        }
+        self.db.region_tree(self.file_id)
+    }
+
+    /// Get module-level regions for current file.
+    pub fn module_level_regions(&self) -> std::sync::Arc<Vec<base_db::RegionInfo>> {
+        if let Some(provider) = self.provider {
+            return provider.module_level_regions(self.file_id);
+        }
+        self.db.module_level_regions(self.file_id)
+    }
+
+    /// Get SDBL HIR for all queries in current file.
+    pub fn sdbl_hir_in_file(&self) -> ide_db::SdblHirEntries {
+        if let Some(provider) = self.provider {
+            return provider.sdbl_hir_in_file(self.file_id);
+        }
+        self.db.sdbl_hir_in_file(self.file_id)
+    }
+
+    /// Get all SDBL queries (parsed AST) in current file.
+    pub fn all_sdbl_in_file(
+        &self,
+    ) -> std::sync::Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+        if let Some(provider) = self.provider {
+            return provider.all_sdbl_in_file(self.file_id);
+        }
+        self.db.all_sdbl_in_file(self.file_id)
+    }
+
+    /// Get module data for current file.
+    pub fn module_data(&self) -> std::sync::Arc<hir_def::ModuleData> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        if let Some(provider) = self.provider {
+            return provider.module_data(module_id);
+        }
+        self.db.module_data(module_id)
+    }
 }
 
 /// Helper to run a diagnostic and log if it's slow (>80ms)
@@ -871,8 +914,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Text-based diagnostics (single AST pass)
     result.extend(collect_text_diagnostics(ctx));
 
-    // STREAMING MODE: Only run text-based diagnostics for now
-    // TODO: Migrate HIR/dataflow/metadata diagnostics to use provider
+    // STREAMING MODE: Skip diagnostics that use unmigrated db methods
+    // Handlers using ctx.db.file_source_root_input, ctx.db.resolve_vfs_path, etc.
+    // need additional AnalysisProvider methods before they can work in streaming mode
     if ctx.provider.is_some() {
         return result;
     }

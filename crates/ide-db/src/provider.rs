@@ -13,6 +13,8 @@ use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, Sym
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
+use crate::SdblHirEntries;
+
 /// Abstraction over analysis data sources.
 ///
 /// Two implementations:
@@ -75,6 +77,40 @@ pub trait AnalysisProvider {
 
     /// Get source root ID for a file.
     fn file_source_root_id(&self, file_id: FileId) -> SourceRootId;
+
+    // ========================================================================
+    // Regions (for code style diagnostics)
+    // ========================================================================
+
+    /// Get region tree for file (module structure with regions).
+    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree>;
+
+    /// Get module-level regions (top-level regions in file).
+    fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>>;
+
+    // ========================================================================
+    // SDBL Queries (for query diagnostics)
+    // ========================================================================
+
+    /// Get SDBL HIR for all queries in file (lowered + type-inferred).
+    ///
+    /// Returns Vec<(ExprId in BSL HIR, lowered SDBL HIR)>.
+    fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries;
+
+    /// Get all SDBL queries (parsed AST) in file.
+    ///
+    /// Returns Vec<(ExprId in BSL HIR, SDBL query info with source position)>.
+    fn all_sdbl_in_file(
+        &self,
+        file_id: FileId,
+    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>;
+
+    // ========================================================================
+    // Module Information
+    // ========================================================================
+
+    /// Get module data (name, type, etc.) for a module.
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData>;
 
     // ========================================================================
     // Dataflow Analysis (for complex diagnostics)

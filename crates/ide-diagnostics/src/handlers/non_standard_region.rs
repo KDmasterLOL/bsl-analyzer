@@ -56,7 +56,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let regions = ctx.db.module_level_regions(ctx.file_id);
+    let regions = ctx.module_level_regions();
 
     if regions.is_empty() {
         return Vec::new();

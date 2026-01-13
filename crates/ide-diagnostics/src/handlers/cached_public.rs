@@ -61,7 +61,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // OPTIMIZATION 1: Check regions first (Salsa cached via region_tree_query)
     // This is faster than loading metadata, so we do it first for early exit
-    let region_tree = ctx.db.region_tree(ctx.file_id);
+    let region_tree = ctx.region_tree();
 
     // Find all public regions (ПрограммныйИнтерфейс or Public)
     let public_regions: Vec<_> = region_tree
@@ -143,7 +143,7 @@ fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Di
     }
 
     // Use HIR RegionTree and ItemTree (same as main check())
-    let region_tree = ctx.db.region_tree(ctx.file_id);
+    let region_tree = ctx.region_tree();
 
     // Find all public regions
     let public_regions: Vec<_> = region_tree

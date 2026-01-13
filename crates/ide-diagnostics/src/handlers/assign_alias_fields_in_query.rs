@@ -56,12 +56,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Get SDBL HIR with collected diagnostics
-    let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
+    let sdbl_hirs = ctx.sdbl_hir_in_file();
 
     let bsl_source = ctx.file_text();
 
     // Get cached SDBL queries for position mapping
-    let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);
+    let sdbl_queries = ctx.all_sdbl_in_file();
 
     // Build shared line index
     use crate::sdbl_utils::build_line_index_shared;

@@ -53,7 +53,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
 
     // Get RegionTree from HIR (cached via Salsa)
-    let region_tree = ctx.db.region_tree(ctx.file_id);
+    let region_tree = ctx.region_tree();
 
     let mut diagnostics = Vec::new();
     check_node(&root, &region_tree, &mut diagnostics);

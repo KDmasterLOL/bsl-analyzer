@@ -75,7 +75,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Use Salsa-cached query (LRU=256) - shared with non_standard_region
-    let regions = ctx.db.module_level_regions(ctx.file_id);
+    let regions = ctx.module_level_regions();
 
     let diagnostics = report_duplicates(&regions);
 

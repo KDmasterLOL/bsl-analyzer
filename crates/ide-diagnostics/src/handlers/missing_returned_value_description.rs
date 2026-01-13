@@ -60,8 +60,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Get module data from HIR
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    let module_data = ctx.db.module_data(module_id);
+    let module_data = ctx.module_data();
 
     // Check all procedures
     for method_id in &module_data.procedures {
