@@ -4,11 +4,11 @@
 //! for parallel file processing with minimal blocking.
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
-use hir_def::{ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
+use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, SymbolTree, WorkspaceSymbols};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxBuildHasher;
 use syntax::{Parse, SyntaxNode};
@@ -16,16 +16,15 @@ use vfs::{file_set::FileSet, FileId};
 
 use super::{FileReader, GlobalContext};
 
-/// Cached parsed file data.
+/// Cached parsed file data with lazy HIR/CFG computation.
 ///
-/// Contains text, AST and ItemTree for a file.
-/// This cache eliminates redundant parsing during:
+/// Contains text, AST, ItemTree and lazily computed HIR/CFG for a file.
+/// This cache eliminates redundant parsing and HIR lowering during:
 /// - Phase 1: item_tree() no longer re-parses
-/// - Phase 2: diagnostics collection reuses parsed data
+/// - Phase 2: diagnostics collection reuses parsed data AND HIR/CFG
 ///
-/// Memory: ~10-50 KB per file (depends on file size)
+/// Memory: ~10-50 KB per file (base) + ~500 KB-1 MB if HIR computed
 /// Lifecycle: Created in Phase 1, removed after Phase 2
-#[derive(Debug)]
 pub struct ParsedFile {
     /// Original source text (needed for diagnostics output conversion).
     pub text: Arc<str>,
@@ -35,6 +34,82 @@ pub struct ParsedFile {
 
     /// ItemTree (method signatures, no bodies).
     pub item_tree: Arc<ItemTree>,
+
+    /// Module ID for this file.
+    module_id: ModuleId,
+
+    /// Lazily computed module bodies (HIR).
+    /// Computed on first access during Phase 2.
+    module_bodies: OnceLock<Arc<ModuleBodies>>,
+
+    /// Lazily computed CFGs for all methods.
+    /// Computed on first access during Phase 2 (requires module_bodies).
+    module_cfgs: OnceLock<Arc<cfg::ModuleCfgs>>,
+}
+
+impl std::fmt::Debug for ParsedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedFile")
+            .field("text_len", &self.text.len())
+            .field("module_id", &self.module_id)
+            .field("has_bodies", &self.module_bodies.get().is_some())
+            .field("has_cfgs", &self.module_cfgs.get().is_some())
+            .finish()
+    }
+}
+
+impl ParsedFile {
+    /// Create a new ParsedFile with lazy HIR/CFG.
+    pub fn new(
+        text: Arc<str>,
+        parse: Arc<Parse<SyntaxNode>>,
+        item_tree: Arc<ItemTree>,
+        module_id: ModuleId,
+    ) -> Self {
+        Self {
+            text,
+            parse,
+            item_tree,
+            module_id,
+            module_bodies: OnceLock::new(),
+            module_cfgs: OnceLock::new(),
+        }
+    }
+
+    /// Get or compute module bodies (HIR).
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Uses `OnceLock` for lazy initialization.
+    pub fn module_bodies(&self) -> Arc<ModuleBodies> {
+        self.module_bodies
+            .get_or_init(|| Arc::new(ModuleBodies::from_parse(&self.parse, self.module_id)))
+            .clone()
+    }
+
+    /// Get or compute module CFGs.
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Requires module_bodies (which will be computed if needed).
+    pub fn module_cfgs(&self) -> Arc<cfg::ModuleCfgs> {
+        self.module_cfgs
+            .get_or_init(|| {
+                let bodies = self.module_bodies();
+                let mut cfgs = rustc_hash::FxHashMap::default();
+
+                for (local_id, body) in bodies.iter_bodies() {
+                    let source_map = bodies.source_map(local_id);
+                    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+                        &body.body_stmts,
+                        body,
+                        source_map,
+                    );
+                    cfgs.insert(local_id, Arc::new(cfg));
+                }
+
+                Arc::new(cfg::ModuleCfgs::new(cfgs))
+            })
+            .clone()
+    }
 }
 
 /// File processing status - single source of truth.
@@ -735,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_cache_parsed_file() {
-        use crate::hir_def::ItemTree;
+        use crate::hir_def::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(10);
@@ -745,8 +820,9 @@ mod tests {
         let text: Arc<str> = Arc::from("Процедура Тест() КонецПроцедуры");
         let parse: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text));
         let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
+        let module_id = ModuleId::new(file_id);
 
-        let parsed = Arc::new(ParsedFile { text: text.clone(), parse, item_tree });
+        let parsed = Arc::new(ParsedFile::new(text.clone(), parse, item_tree, module_id));
 
         // Cache it
         state.cache_parsed_file(file_id, Arc::clone(&parsed));
@@ -804,7 +880,7 @@ mod tests {
 
     #[test]
     fn test_cache_lifecycle() {
-        use crate::hir_def::ItemTree;
+        use crate::hir_def::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(3);
@@ -820,8 +896,8 @@ mod tests {
         let text_0: Arc<str> = Arc::from("Процедура Тест0() КонецПроцедуры");
         let parse_0: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_0));
         let item_tree_0: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_0));
-        let parsed_0 =
-            Arc::new(ParsedFile { text: text_0, parse: parse_0, item_tree: item_tree_0 });
+        let module_id_0 = ModuleId::new(file_0);
+        let parsed_0 = Arc::new(ParsedFile::new(text_0, parse_0, item_tree_0, module_id_0));
         state.cache_parsed_file(file_0, parsed_0);
 
         // Verify cache state after first file
@@ -833,8 +909,8 @@ mod tests {
         let text_1: Arc<str> = Arc::from("Процедура Тест1() КонецПроцедуры");
         let parse_1: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_1));
         let item_tree_1: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_1));
-        let parsed_1 =
-            Arc::new(ParsedFile { text: text_1, parse: parse_1, item_tree: item_tree_1 });
+        let module_id_1 = ModuleId::new(file_1);
+        let parsed_1 = Arc::new(ParsedFile::new(text_1, parse_1, item_tree_1, module_id_1));
         state.cache_parsed_file(file_1, parsed_1);
 
         // Verify cache state after second file

@@ -451,6 +451,25 @@ pub struct TextEdit {
 }
 
 /// Configuration for diagnostics.
+///
+/// Supports Java BSL-LS compatible format:
+/// ```json
+/// {
+///   "diagnostics": {
+///     "ordinaryAppSupport": false,
+///     "dataflowMaxIterations": 10000,
+///     "parameters": {
+///       "EmptyCodeBlock": false,
+///       "LineLength": { "maxLength": 120 }
+///     }
+///   }
+/// }
+/// ```
+///
+/// In `parameters`:
+/// - `false` = diagnostic disabled
+/// - `true` = diagnostic enabled (default)
+/// - `{...}` = diagnostic parameters
 #[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
@@ -472,6 +491,83 @@ impl Default for DiagnosticsConfig {
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
         }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{MapAccess, Visitor};
+        use std::fmt;
+
+        struct DiagnosticsConfigVisitor;
+
+        impl<'de> Visitor<'de> for DiagnosticsConfigVisitor {
+            type Value = DiagnosticsConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a diagnostics configuration object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<DiagnosticsConfig, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut disabled = Vec::new();
+                let mut parameters = std::collections::HashMap::new();
+                let mut ordinary_app_support = false;
+                let mut dataflow_max_iterations = 10000usize;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "ordinaryAppSupport" => {
+                            ordinary_app_support = map.next_value()?;
+                        }
+                        "dataflowMaxIterations" => {
+                            dataflow_max_iterations = map.next_value()?;
+                        }
+                        "parameters" => {
+                            let params: std::collections::HashMap<String, serde_json::Value> =
+                                map.next_value()?;
+                            for (code_str, value) in params {
+                                if let Ok(code) = code_str.parse::<DiagnosticCode>() {
+                                    match &value {
+                                        serde_json::Value::Bool(false) => {
+                                            disabled.push(code);
+                                        }
+                                        serde_json::Value::Bool(true) => {
+                                            // enabled = default, skip
+                                        }
+                                        serde_json::Value::Object(_) => {
+                                            parameters.insert(code, value);
+                                        }
+                                        _ => {
+                                            // ignore other values
+                                        }
+                                    }
+                                }
+                                // Unknown diagnostic codes are silently ignored
+                            }
+                        }
+                        _ => {
+                            // Skip unknown fields
+                            let _: serde_json::Value = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(DiagnosticsConfig {
+                    disabled,
+                    parameters,
+                    ordinary_app_support,
+                    dataflow_max_iterations,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(DiagnosticsConfigVisitor)
     }
 }
 
@@ -1697,6 +1793,13 @@ impl DiagnosticsConfig {
             ordinary_app_support: input.ordinary_app_support,
             dataflow_max_iterations: input.dataflow_max_iterations,
         }
+    }
+}
+
+impl std::fmt::Display for DiagnosticCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use Debug representation which gives variant name (e.g., "EmptyCodeBlock")
+        write!(f, "{:?}", self)
     }
 }
 

@@ -131,11 +131,37 @@ fn search_configuration_xml_recursive(
 }
 
 /// Project configuration (from .bsl-analyzer.json or .bsl-language-server.json).
+///
+/// ## JSON Format (Java BSL-LS compatible)
+///
+/// ```json
+/// {
+///   "configurationRoot": "src/cf",
+///   "diagnostics": {
+///     "ordinaryAppSupport": false,
+///     "dataflowMaxIterations": 10000,
+///     "parameters": {
+///       "EmptyCodeBlock": false,
+///       "LineLength": { "maxLength": 120 }
+///     }
+///   }
+/// }
+/// ```
+///
+/// The `diagnostics` field is stored as raw JSON and parsed by `ide_diagnostics::DiagnosticsConfig`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
+    /// Raw diagnostics configuration.
+    ///
+    /// Stored as raw JSON to avoid coupling project_model to ide_diagnostics.
+    /// Convert to `ide_diagnostics::DiagnosticsConfig` via:
+    /// ```ignore
+    /// let config: DiagnosticsConfig = serde_json::from_value(proj_config.diagnostics.clone())
+    ///     .unwrap_or_default();
+    /// ```
     #[serde(default)]
-    pub diagnostics: DiagnosticsConfig,
+    pub diagnostics: serde_json::Value,
 
     #[serde(default)]
     pub code_lens: CodeLensConfig,
@@ -157,29 +183,24 @@ impl ProjectConfig {
             .or_else(|| Self::try_load(root, ".bsl-language-server.json"))
     }
 
-    fn try_load(root: &Path, filename: &str) -> Option<Self> {
-        let config_path = root.join(filename);
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path).ok()?;
+    /// Load configuration from a specific file path.
+    pub fn load_from_file(path: &Path) -> Option<Self> {
+        if path.exists() {
+            let content = std::fs::read_to_string(path).ok()?;
             serde_json::from_str(&content).ok()
         } else {
             None
         }
     }
 
+    fn try_load(root: &Path, filename: &str) -> Option<Self> {
+        let config_path = root.join(filename);
+        Self::load_from_file(&config_path)
+    }
+
     pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
         self.configuration_root.as_ref().map(|root| project_root.join(root))
     }
-}
-
-/// Diagnostics configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DiagnosticsConfig {
-    #[serde(default)]
-    pub skip: Vec<String>,
-
-    #[serde(default)]
-    pub parameters: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Code Lens configuration.

@@ -148,22 +148,31 @@ impl GlobalState {
     }
 
     /// Converts project diagnostics config to hashable DiagnosticsConfigInput.
+    ///
+    /// Deserializes the raw JSON into `ide_diagnostics::DiagnosticsConfig`,
+    /// then converts to the Salsa-compatible `DiagnosticsConfigInput`.
     fn config_from_project(project: &Project) -> DiagnosticsConfigInput {
-        let raw = &project.config.diagnostics;
+        // Deserialize JSON into ide_diagnostics::DiagnosticsConfig
+        let config: ide_diagnostics::DiagnosticsConfig =
+            serde_json::from_value(project.config.diagnostics.clone()).unwrap_or_default();
 
-        // Convert skip list (strings to strings, just clone and sort)
-        let disabled = raw.skip.clone();
+        // Convert DiagnosticCode enums back to strings for Salsa hashing
+        let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
 
-        // Convert parameters HashMap to sorted Vec
-        let parameters: Vec<(String, String)> = raw
+        // Convert parameters HashMap<DiagnosticCode, Value> to Vec<(String, String)>
+        let parameters: Vec<(String, String)> = config
             .parameters
             .iter()
-            .map(|(code, value)| (code.clone(), serde_json::to_string(value).unwrap_or_default()))
+            .map(|(code, value)| {
+                (code.to_string(), serde_json::to_string(value).unwrap_or_default())
+            })
             .collect();
 
         DiagnosticsConfigInput::from_raw(
-            disabled, parameters, false, // ordinary_app_support - default to false
-            10000, // Default dataflow max iterations
+            disabled,
+            parameters,
+            config.ordinary_app_support,
+            config.dataflow_max_iterations,
         )
     }
 

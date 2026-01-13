@@ -137,6 +137,14 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        // Check ParsedFile cache (lazy computation via OnceLock)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
+                return parsed.module_bodies();
+            }
+        }
+
+        // Fallback - compute on-the-fly
         let parse = self.parse(module_id.file_id);
         Arc::new(ModuleBodies::from_parse(&parse, module_id))
     }
@@ -190,6 +198,14 @@ impl AnalysisProvider for StreamingProvider {
     // ========================================================================
 
     fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs> {
+        // Check ParsedFile cache (lazy computation via OnceLock)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(file_id) {
+                return parsed.module_cfgs();
+            }
+        }
+
+        // Fallback - compute on-the-fly
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.module_bodies(module_id);
 

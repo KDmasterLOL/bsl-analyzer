@@ -61,7 +61,7 @@ use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
 use ide_db::streaming::{FileReader, GlobalContext, SharedState, StreamingProvider};
 
 // Import from ide-diagnostics
-use ide_diagnostics::{DiagnosticCode, DiagnosticsConfig};
+use ide_diagnostics::DiagnosticsConfig;
 
 // Import from current crate (ide features layer)
 use super::file_processor::FileResult;
@@ -322,99 +322,47 @@ impl AnalysisOrchestrator {
 
     /// Load diagnostics configuration from project config file.
     ///
-    /// Loads .bsl-analyzer.json (or .bsl-language-server.json for compatibility)
-    /// from workspace root and converts to DiagnosticsConfig.
+    /// Uses `project_model::ProjectConfig` to load configuration,
+    /// then deserializes the `diagnostics` field into `DiagnosticsConfig`.
     ///
-    /// ## Config Format
+    /// ## Config Format (Java BSL-LS compatible)
     ///
     /// ```json
     /// {
     ///   "diagnostics": {
+    ///     "ordinaryAppSupport": false,
+    ///     "dataflowMaxIterations": 10000,
     ///     "parameters": {
-    ///       "DiagnosticCode": false,  // disable
-    ///       "OtherDiag": { "param": 123 }  // parameters
+    ///       "EmptyCodeBlock": false,
+    ///       "LineLength": { "maxLength": 120 }
     ///     }
     ///   }
     /// }
     /// ```
     fn load_diagnostics_config(&self) -> DiagnosticsConfig {
-        // Try to load from configuration_path or workspace root
-        let config_path = self.configuration_path.clone().or_else(|| {
-            let primary = self.workspace_root.join(".bsl-analyzer.json");
-            if primary.exists() {
-                Some(primary)
-            } else {
-                let fallback = self.workspace_root.join(".bsl-language-server.json");
-                if fallback.exists() {
-                    Some(fallback)
-                } else {
-                    None
-                }
-            }
-        });
+        // Load project config via project_model (unified entry point)
+        let proj_config = if let Some(ref path) = self.configuration_path {
+            project_model::ProjectConfig::load_from_file(path)
+        } else {
+            project_model::ProjectConfig::load(&self.workspace_root)
+        };
 
-        let Some(path) = config_path else {
+        let Some(proj_config) = proj_config else {
             info!("No config file found, using default DiagnosticsConfig");
             return DiagnosticsConfig::default();
         };
 
-        info!(path = ?path, "Loading diagnostics config");
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(path = ?path, error = %e, "Failed to read config file");
-                return DiagnosticsConfig::default();
+        // Deserialize diagnostics field into DiagnosticsConfig
+        match serde_json::from_value(proj_config.diagnostics) {
+            Ok(config) => {
+                info!("Loaded diagnostics config from project file");
+                config
             }
-        };
-
-        // Parse as JSON
-        let json: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
             Err(e) => {
-                warn!(path = ?path, error = %e, "Failed to parse config JSON");
-                return DiagnosticsConfig::default();
-            }
-        };
-
-        // Extract diagnostics.parameters
-        let mut disabled = Vec::new();
-        let mut parameters = std::collections::HashMap::new();
-
-        if let Some(diag_config) = json.get("diagnostics") {
-            if let Some(params) = diag_config.get("parameters") {
-                if let Some(obj) = params.as_object() {
-                    for (key, value) in obj {
-                        match value {
-                            // false = disabled
-                            serde_json::Value::Bool(false) => {
-                                if let Ok(code) = key.parse::<DiagnosticCode>() {
-                                    disabled.push(code);
-                                    info!(diagnostic = %key, "Disabled");
-                                }
-                            }
-                            // true = enabled (default, ignore)
-                            serde_json::Value::Bool(true) => {}
-                            // object = parameters
-                            serde_json::Value::Object(_) => {
-                                if let Ok(code) = key.parse::<DiagnosticCode>() {
-                                    parameters.insert(code, value.clone());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                warn!(error = %e, "Failed to parse diagnostics config, using default");
+                DiagnosticsConfig::default()
             }
         }
-
-        info!(
-            disabled_count = disabled.len(),
-            params_count = parameters.len(),
-            "Loaded diagnostics config"
-        );
-
-        DiagnosticsConfig { disabled, parameters, ..Default::default() }
     }
 
     /// Spawn worker pool.

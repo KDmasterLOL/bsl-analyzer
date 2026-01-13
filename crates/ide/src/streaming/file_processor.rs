@@ -179,13 +179,13 @@ impl<'a> FileProcessor<'a> {
             "ItemTree built"
         );
 
-        // Cache ParsedFile for Phase 2
-        let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
-        self.shared_state.cache_parsed_file(file_id, parsed_file);
-
-        // Build SymbolTree from ItemTree
+        // Build ModuleId and SymbolTree
         let module_id = ModuleId::new(file_id);
         let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
+        let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
+        self.shared_state.cache_parsed_file(file_id, parsed_file);
 
         // Publish to SharedState
         self.shared_state.publish_symbol_tree(file_id, symbol_tree);
@@ -228,13 +228,13 @@ impl<'a> FileProcessor<'a> {
             "ItemTree built"
         );
 
-        // Cache ParsedFile for Phase 2
-        let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
-        self.shared_state.cache_parsed_file(file_id, parsed_file);
-
-        // Build SymbolTree from ItemTree
+        // Build ModuleId and SymbolTree
         let module_id = ModuleId::new(file_id);
         let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
+        let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
+        self.shared_state.cache_parsed_file(file_id, parsed_file);
 
         // Publish and immediately transition to DiagnosticsInProgress
         // This prevents second pass from grabbing this file

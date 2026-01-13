@@ -369,7 +369,16 @@ fn analyze_salsa(
     // Use map_with to clone database for each thread worker
     // map_with calls db.clone() once per thread (not per file!)
     // Salsa's clone creates snapshot with new ZalsaLocal (per-thread state)
-    let config = Arc::new(DiagnosticsConfig::default());
+
+    // Load diagnostics config from project config (unified with streaming mode)
+    let config: DiagnosticsConfig =
+        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
+    tracing::info!(
+        disabled = config.disabled.len(),
+        params = config.parameters.len(),
+        "Loaded DiagnosticsConfig"
+    );
+    let config = Arc::new(config);
     let processed = Arc::new(AtomicUsize::new(0));
     let progress_arc = Arc::new(progress);
     let workspace_dir_arc = Arc::new(workspace_dir.clone());

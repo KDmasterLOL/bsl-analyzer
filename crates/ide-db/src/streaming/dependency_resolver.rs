@@ -159,13 +159,13 @@ fn process_symbol_tree_only(
         "ItemTree built in recursive processing"
     );
 
-    // Cache ParsedFile for Phase 2 (diagnostics will need it later)
-    let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
-    shared_state.cache_parsed_file(file_id, parsed_file);
-
-    // Build SymbolTree from ItemTree
+    // Build ModuleId and SymbolTree
     let module_id = ModuleId::new(file_id);
     let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+    // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
+    let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
+    shared_state.cache_parsed_file(file_id, parsed_file);
 
     // Publish to SharedState (this atomically makes it visible to other threads)
     // Status stays SymbolTreeReady (not Completed) - Phase 2 still needed
