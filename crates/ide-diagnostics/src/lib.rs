@@ -392,12 +392,27 @@ impl DiagnosticsConfig {
 }
 
 /// Context for running diagnostics.
+///
+/// Supports two modes of operation:
+/// - **Salsa mode** (LSP): Uses `db` field with full caching
+/// - **Provider mode** (streaming): Uses `provider` field for abstracted data access
+///
+/// Helper methods automatically use `provider` when available, falling back to `db`.
 pub struct DiagnosticsContext<'a> {
+    /// RootDatabase for Salsa-backed queries (LSP mode).
     pub db: &'a dyn RootDatabase,
+    /// DiagnosticsConfig with enabled/disabled diagnostics and parameters.
     pub config: &'a DiagnosticsConfig,
+    /// FileId of the file being analyzed.
     pub file_id: FileId,
 
-    // Workspace integration (for Tier 3 diagnostics)
+    // === Provider abstraction (for streaming mode) ===
+    /// Optional AnalysisProvider for abstracted data access.
+    /// When set, helper methods use this instead of db directly.
+    /// This enables StreamingProvider for analyze mode with minimal memory.
+    pub provider: Option<&'a dyn ide_db::AnalysisProvider>,
+
+    // === Workspace integration (for Tier 3 diagnostics) ===
     /// Root directory of the workspace (for finding Configuration.xml)
     pub workspace_root: Option<&'a std::path::Path>,
     /// Direct path to Configuration.xml (if known)
@@ -412,6 +427,47 @@ pub struct DiagnosticsContext<'a> {
 }
 
 impl<'a> DiagnosticsContext<'a> {
+    /// Create a new DiagnosticsContext with db (Salsa mode).
+    ///
+    /// This is the standard constructor for LSP mode with full Salsa caching.
+    pub fn new(db: &'a dyn RootDatabase, config: &'a DiagnosticsConfig, file_id: FileId) -> Self {
+        Self {
+            db,
+            config,
+            file_id,
+            provider: None,
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        }
+    }
+
+    /// Create a new DiagnosticsContext with provider (streaming mode).
+    ///
+    /// This constructor is for analyze mode where an AnalysisProvider
+    /// abstracts the data source (enabling StreamingProvider).
+    ///
+    /// Note: `db` is still required for compatibility with existing code
+    /// that hasn't been migrated to use helper methods.
+    pub fn with_provider(
+        db: &'a dyn RootDatabase,
+        config: &'a DiagnosticsConfig,
+        file_id: FileId,
+        provider: &'a dyn ide_db::AnalysisProvider,
+    ) -> Self {
+        Self {
+            db,
+            config,
+            file_id,
+            provider: Some(provider),
+            workspace_root: None,
+            configuration_path: None,
+            configuration_path_input: None,
+            file_set: None,
+        }
+    }
+
     /// Load configuration metadata using cached ConfigurationPathInput.
     ///
     /// CRITICAL: This method uses ctx.configuration_path_input if available
@@ -460,6 +516,109 @@ impl<'a> DiagnosticsContext<'a> {
         let file_set = source_root.file_set();
         let vfs_path = file_set.path_for_file(&self.file_id)?;
         Some(vfs_path.as_path().to_string_lossy().to_string())
+    }
+
+    // ========================================================================
+    // Helper methods for accessing data
+    // These methods use provider when available, falling back to db
+    // ========================================================================
+
+    /// Get parsed AST for current file.
+    pub fn parse(&self) -> syntax::Parse<syntax::SyntaxNode> {
+        if let Some(provider) = self.provider {
+            return provider.parse(self.file_id);
+        }
+        self.db.parse(self.file_id)
+    }
+
+    /// Get lowered HIR bodies for current module.
+    pub fn module_bodies(&self) -> std::sync::Arc<hir_def::ModuleBodies> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        if let Some(provider) = self.provider {
+            return provider.module_bodies(module_id);
+        }
+        self.db.module_bodies(module_id)
+    }
+
+    /// Get module metadata for current file.
+    pub fn module_metadata(&self) -> std::sync::Arc<hir_def::ModuleMetadata> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        if let Some(provider) = self.provider {
+            return provider.module_metadata(module_id);
+        }
+        self.db.module_metadata(module_id)
+    }
+
+    /// Get symbol tree for current module.
+    pub fn symbol_tree(&self) -> std::sync::Arc<hir_def::SymbolTree> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        if let Some(provider) = self.provider {
+            return provider.symbol_tree(module_id);
+        }
+        self.db.symbol_tree(module_id)
+    }
+
+    /// Get item tree for current file.
+    pub fn item_tree(&self) -> std::sync::Arc<hir_def::ItemTree> {
+        if let Some(provider) = self.provider {
+            return provider.item_tree(self.file_id);
+        }
+        self.db.item_tree(self.file_id)
+    }
+
+    /// Get line index for current file.
+    pub fn line_index(&self) -> std::sync::Arc<line_index::LineIndex> {
+        if let Some(provider) = self.provider {
+            return provider.line_index(self.file_id);
+        }
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.line_index(input)
+    }
+
+    /// Get source root ID for current file.
+    pub fn source_root_id(&self) -> base_db::SourceRootId {
+        if let Some(provider) = self.provider {
+            return provider.file_source_root_id(self.file_id);
+        }
+        self.db.file_source_root_input(self.file_id).source_root_id(self.db)
+    }
+
+    /// Get workspace symbols for cross-module resolution.
+    pub fn workspace_symbols(&self) -> std::sync::Arc<hir_def::WorkspaceSymbols> {
+        let source_root_id = self.source_root_id();
+        if let Some(provider) = self.provider {
+            return provider.workspace_symbols(source_root_id);
+        }
+        self.db.workspace_symbols(source_root_id)
+    }
+
+    /// Get module CFGs (batch).
+    pub fn module_cfgs(&self) -> std::sync::Arc<cfg::ModuleCfgs> {
+        if let Some(provider) = self.provider {
+            return provider.module_cfgs(self.file_id);
+        }
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_cfgs(input)
+    }
+
+    /// Get module liveness analysis (batch).
+    pub fn module_liveness(&self) -> std::sync::Arc<dataflow::liveness::ModuleLiveness> {
+        if let Some(provider) = self.provider {
+            return provider.module_liveness_analysis(self.file_id);
+        }
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_liveness_analysis(input)
+    }
+
+    /// Get module reaching definitions (batch).
+    pub fn module_reaching_defs(
+        &self,
+    ) -> std::sync::Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+        if let Some(provider) = self.provider {
+            return provider.module_reaching_definitions(self.file_id);
+        }
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_reaching_definitions(input)
     }
 }
 
@@ -1002,18 +1161,14 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// Returns empty vec for test contexts where source_root is not set.
 fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use hir::ModuleId;
-
     // In tests, file_source_root may not be set. Rather than panicking,
     // we silently return no diagnostics. This is fine since HIR diagnostics are
     // tested separately in their respective handler tests.
-    let module_id = ModuleId::new(ctx.file_id);
-    let module_bodies = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.db.module_bodies(module_id)
-    })) {
-        Ok(bodies) => bodies,
-        Err(_) => return Vec::new(),
-    };
+    let module_bodies =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
+            Ok(bodies) => bodies,
+            Err(_) => return Vec::new(),
+        };
 
     let mut diagnostics = Vec::new();
 
@@ -1178,24 +1333,19 @@ fn dispatch_hir_diagnostic(
 ///
 /// Returns empty vec for test contexts where source_root is not set.
 fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use hir::ModuleId;
-
     // In tests, file_source_root may not be set. Rather than panicking,
     // we silently return no diagnostics. This is fine since metadata-based
     // diagnostics are production features tested separately.
-    let module_id = ModuleId::new(ctx.file_id);
-
-    let module_bodies = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ctx.db.module_bodies(module_id)
-    })) {
-        Ok(bodies) => bodies,
-        Err(_) => return Vec::new(),
-    };
+    let module_bodies =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
+            Ok(bodies) => bodies,
+            Err(_) => return Vec::new(),
+        };
 
     let mut diagnostics = Vec::new();
 
-    // Get metadata via separate query (NOT from module_bodies to avoid cloning)
-    let metadata = ctx.db.module_metadata(module_id);
+    // Get metadata via helper method (uses provider if available)
+    let metadata = ctx.module_metadata();
     let metadata_ref = metadata.as_ref();
 
     // Check CommonModuleInvalidType
@@ -1463,6 +1613,7 @@ pub fn file_diagnostics_query<'db>(
         db,
         config: &config,
         file_id,
+        provider: None,
         workspace_root: None,
         configuration_path: None,
         configuration_path_input: None,

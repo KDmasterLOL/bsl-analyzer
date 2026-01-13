@@ -1,0 +1,460 @@
+//! Streaming analysis provider for batch/analyze mode.
+//!
+//! This module provides `StreamingProvider` - an implementation of `AnalysisProvider`
+//! optimized for batch analysis with minimal memory usage.
+//!
+//! # Architecture
+//!
+//! Unlike `SalsaProvider` which caches everything in the Salsa database,
+//! `StreamingProvider` computes per-file data on-the-fly and releases it after use.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use base_db::SourceRootId;
+use bsl_metadata::Configuration;
+use hir_def::{
+    ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree, WorkspaceSymbols,
+};
+use rustc_hash::FxHashMap;
+use syntax::{Parse, SyntaxNode};
+use vfs::{file_set::FileSet, FileId, VfsPath};
+
+use crate::metadata::get_module_type_from_uri;
+use crate::provider::AnalysisProvider;
+
+/// Global context shared across all files during streaming analysis.
+///
+/// This structure holds data that needs to be available for cross-module
+/// validation and is kept in memory for the entire analysis session.
+#[derive(Debug)]
+pub struct GlobalContext {
+    /// 1C Configuration metadata.
+    pub configuration: Option<Arc<Configuration>>,
+
+    /// Symbol trees for all modules (prebuilt during initialization).
+    pub symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
+
+    /// Workspace symbols index for cross-module resolution.
+    pub workspace_symbols: Arc<WorkspaceSymbols>,
+
+    /// Module index (name → FileId).
+    pub module_index: Arc<ModuleIndex>,
+
+    /// File set for path resolution.
+    pub file_set: Arc<FileSet>,
+
+    /// File content provider.
+    pub file_reader: FileReader,
+}
+
+impl GlobalContext {
+    /// Create a new GlobalContext with the given components.
+    pub fn new(
+        configuration: Option<Arc<Configuration>>,
+        symbol_trees: FxHashMap<FileId, Arc<SymbolTree>>,
+        workspace_symbols: Arc<WorkspaceSymbols>,
+        module_index: Arc<ModuleIndex>,
+        file_set: Arc<FileSet>,
+        file_reader: FileReader,
+    ) -> Self {
+        Self { configuration, symbol_trees, workspace_symbols, module_index, file_set, file_reader }
+    }
+
+    /// Create an empty GlobalContext (useful for testing).
+    pub fn empty() -> Self {
+        Self {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(FileSet::default()),
+            file_reader: FileReader::empty(),
+        }
+    }
+}
+
+/// File content provider for streaming mode.
+///
+/// Can read files from disk or from a pre-loaded map.
+#[derive(Debug, Clone)]
+pub enum FileReader {
+    /// Read files from disk using workspace root.
+    Disk {
+        /// Workspace root directory.
+        workspace_root: Arc<Path>,
+        /// FileSet for FileId → path resolution.
+        file_set: Arc<FileSet>,
+    },
+
+    /// Use pre-loaded file contents (for testing).
+    InMemory {
+        /// Map from FileId to file content.
+        files: Arc<FxHashMap<FileId, String>>,
+    },
+}
+
+impl FileReader {
+    /// Create a disk-based file reader.
+    pub fn from_disk(workspace_root: impl AsRef<Path>, file_set: Arc<FileSet>) -> Self {
+        Self::Disk { workspace_root: Arc::from(workspace_root.as_ref()), file_set }
+    }
+
+    /// Create an in-memory file reader (for testing).
+    pub fn in_memory(files: FxHashMap<FileId, String>) -> Self {
+        Self::InMemory { files: Arc::new(files) }
+    }
+
+    /// Create an empty file reader.
+    pub fn empty() -> Self {
+        Self::InMemory { files: Arc::new(FxHashMap::default()) }
+    }
+
+    /// Read file content.
+    pub fn read(&self, file_id: FileId) -> Option<String> {
+        match self {
+            FileReader::Disk { workspace_root, file_set } => {
+                let vfs_path = file_set.path_for_file(&file_id)?;
+                let path = resolve_vfs_path(workspace_root, vfs_path)?;
+                std::fs::read_to_string(&path).ok()
+            }
+            FileReader::InMemory { files } => files.get(&file_id).cloned(),
+        }
+    }
+}
+
+/// Resolve VfsPath to absolute filesystem path.
+fn resolve_vfs_path(workspace_root: &Path, vfs_path: &VfsPath) -> Option<std::path::PathBuf> {
+    let path = vfs_path.as_path();
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        // Relative to workspace root
+        Some(workspace_root.join(path))
+    }
+}
+
+/// Streaming analysis provider.
+///
+/// Implements `AnalysisProvider` by:
+/// - Using `GlobalContext` for shared data (configuration, symbol trees)
+/// - Computing per-file data on-the-fly (parse, HIR)
+/// - NOT caching per-file data
+pub struct StreamingProvider {
+    /// Shared global context.
+    global: Arc<GlobalContext>,
+}
+
+impl StreamingProvider {
+    /// Create a new StreamingProvider with the given global context.
+    pub fn new(global: Arc<GlobalContext>) -> Self {
+        Self { global }
+    }
+
+    /// Get the global context.
+    pub fn global(&self) -> &GlobalContext {
+        &self.global
+    }
+}
+
+impl AnalysisProvider for StreamingProvider {
+    // ========================================================================
+    // Global Data (from GlobalContext)
+    // ========================================================================
+
+    fn configuration(&self) -> Option<Arc<Configuration>> {
+        self.global.configuration.clone()
+    }
+
+    fn workspace_symbols(&self, _source_root_id: SourceRootId) -> Arc<WorkspaceSymbols> {
+        self.global.workspace_symbols.clone()
+    }
+
+    fn module_index(&self, _source_root_id: SourceRootId) -> Arc<ModuleIndex> {
+        self.global.module_index.clone()
+    }
+
+    // ========================================================================
+    // Per-file Data (computed on-the-fly)
+    // ========================================================================
+
+    fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
+        let text = self.global.file_reader.read(file_id).unwrap_or_default();
+        parser::parse(&text)
+    }
+
+    fn file_text(&self, file_id: FileId) -> String {
+        self.global.file_reader.read(file_id).unwrap_or_default()
+    }
+
+    fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        let parse = self.parse(file_id);
+        Arc::new(ItemTree::from_parse(&parse))
+    }
+
+    fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
+        // Use pre-built symbol tree from global context if available
+        self.global.symbol_trees.get(&module_id.file_id).cloned().unwrap_or_else(|| {
+            // Build on-the-fly if not pre-built
+            let item_tree = self.item_tree(module_id.file_id);
+            Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
+        })
+    }
+
+    fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
+        let parse = self.parse(module_id.file_id);
+        Arc::new(ModuleBodies::from_parse(&parse, module_id))
+    }
+
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
+        let file_path = self.file_path(module_id.file_id);
+        let module_type = file_path
+            .as_ref()
+            .and_then(|p| get_module_type_from_uri(p))
+            .unwrap_or(bsl_metadata::ModuleType::Unknown);
+
+        // If it's a CommonModule, try to get execution context from configuration
+        if module_type == bsl_metadata::ModuleType::CommonModule {
+            if let (Some(config), Some(path)) = (&self.global.configuration, &file_path) {
+                if let Some(name) = extract_common_module_name(path) {
+                    if let Some(common_module) = config.find_common_module(&name) {
+                        let execution_context = hir_def::compute_execution_context(common_module);
+                        return Arc::new(ModuleMetadata {
+                            module_type,
+                            execution_context: Some(execution_context),
+                            common_module: Some(Arc::new(common_module.clone())),
+                            mdo: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        Arc::new(ModuleMetadata::unknown(module_type))
+    }
+
+    fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
+        let text = self.file_text(file_id);
+        Arc::new(line_index::LineIndex::new(&text))
+    }
+
+    fn file_path(&self, file_id: FileId) -> Option<String> {
+        self.global
+            .file_set
+            .path_for_file(&file_id)
+            .map(|p| p.as_path().to_string_lossy().to_string())
+    }
+
+    fn file_source_root_id(&self, _file_id: FileId) -> SourceRootId {
+        // In streaming mode, all files belong to a single synthetic source root
+        SourceRootId(0)
+    }
+
+    // ========================================================================
+    // Dataflow Analysis (computed on-the-fly)
+    // ========================================================================
+
+    fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs> {
+        let module_id = ModuleId::new(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut cfgs = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let source_map = module_bodies.source_map(local_id);
+            let cfg =
+                cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, source_map);
+            cfgs.insert(local_id, Arc::new(cfg));
+        }
+
+        Arc::new(cfg::ModuleCfgs::new(cfgs))
+    }
+
+    fn module_liveness_analysis(&self, file_id: FileId) -> Arc<dataflow::liveness::ModuleLiveness> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut results = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+
+            let var_index = dataflow::liveness::VariableIndex::from_body(body);
+
+            if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
+                body, cfg, var_index, 10000, // max_iterations
+            ) {
+                results.insert(local_id, Arc::new(liveness_result));
+            }
+        }
+
+        Arc::new(dataflow::liveness::ModuleLiveness::new(results))
+    }
+
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+        let module_id = ModuleId::new(file_id);
+        let module_cfgs = self.module_cfgs(file_id);
+        let module_bodies = self.module_bodies(module_id);
+
+        let mut results = FxHashMap::default();
+        for (local_id, body) in module_bodies.iter_bodies() {
+            let cfg = match module_cfgs.get(local_id) {
+                Some(cfg) => cfg.clone(),
+                None => continue,
+            };
+
+            // Build definition index from body with parameters
+            let params: Vec<_> = body
+                .params
+                .iter()
+                .map(|&param_id| {
+                    let binding = body.binding(param_id);
+                    (binding.name.clone(), param_id)
+                })
+                .collect();
+            let def_index =
+                dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
+
+            // Initialize entry state with parameters
+            let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
+            for &param_id in body.params.iter() {
+                let binding = body.binding(param_id);
+                let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
+                initial_defs.insert(&def);
+            }
+
+            // Run dataflow analysis
+            let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
+            let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+            solver.set_max_iterations(10000);
+            solver.set_bottom_factory(|| {
+                dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
+            });
+            solver.set_initial_state(initial_defs);
+
+            if let Some(dataflow_result) = solver.solve() {
+                let result = dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+                results.insert(local_id, Arc::new(result));
+            }
+        }
+
+        Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
+    }
+}
+
+/// Extract CommonModule name from file path.
+fn extract_common_module_name(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+
+    // Try English pattern
+    if let Some(idx) = normalized.find("CommonModules/") {
+        let after = &normalized[idx + "CommonModules/".len()..];
+        return after.split('/').next().map(String::from);
+    }
+
+    // Try Russian pattern
+    if let Some(idx) = normalized.find("ОбщиеМодули/") {
+        let after = &normalized[idx + "ОбщиеМодули/".len()..];
+        return after.split('/').next().map(String::from);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_common_module_name_english() {
+        let path = "/project/CommonModules/MyModule/Ext/Module.bsl";
+        assert_eq!(extract_common_module_name(path), Some("MyModule".to_string()));
+    }
+
+    #[test]
+    fn test_extract_common_module_name_russian() {
+        let path = "/project/ОбщиеМодули/МойМодуль/Ext/Module.bsl";
+        assert_eq!(extract_common_module_name(path), Some("МойМодуль".to_string()));
+    }
+
+    #[test]
+    fn test_extract_common_module_name_not_found() {
+        let path = "/project/Catalogs/MyCatalog/Ext/Module.bsl";
+        assert_eq!(extract_common_module_name(path), None);
+    }
+
+    #[test]
+    fn test_streaming_provider_parse() {
+        let mut files = FxHashMap::default();
+        let file_id = FileId(0);
+        files.insert(file_id, "Процедура Тест() КонецПроцедуры".to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+        });
+
+        let provider = StreamingProvider::new(global);
+        let parse = provider.parse(file_id);
+        assert!(!parse.has_errors());
+    }
+
+    #[test]
+    fn test_streaming_provider_item_tree() {
+        let mut files = FxHashMap::default();
+        let file_id = FileId(0);
+        files.insert(file_id, "Процедура Тест() КонецПроцедуры".to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+        });
+
+        let provider = StreamingProvider::new(global);
+        let item_tree = provider.item_tree(file_id);
+        assert_eq!(item_tree.top_level_items().len(), 1);
+    }
+
+    #[test]
+    fn test_streaming_provider_module_bodies() {
+        let mut files = FxHashMap::default();
+        let file_id = FileId(0);
+        files.insert(file_id, "Процедура Тест()\n  А = 1;\nКонецПроцедуры".to_string());
+
+        let mut file_set = FileSet::default();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+
+        let global = Arc::new(GlobalContext {
+            configuration: None,
+            symbol_trees: FxHashMap::default(),
+            workspace_symbols: Arc::new(WorkspaceSymbols::default()),
+            module_index: Arc::new(ModuleIndex::new()),
+            file_set: Arc::new(file_set),
+            file_reader: FileReader::in_memory(files),
+        });
+
+        let provider = StreamingProvider::new(global);
+        let module_id = ModuleId::new(file_id);
+        let bodies = provider.module_bodies(module_id);
+        assert_eq!(bodies.iter_bodies().count(), 1);
+    }
+}

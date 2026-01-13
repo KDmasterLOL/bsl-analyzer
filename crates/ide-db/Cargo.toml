@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+parser.workspace = true
 hir.workspace = true
 hir-def.workspace = true
 hir-ty.workspace = true

@@ -217,6 +217,15 @@ impl Ctx {
     }
 }
 
+/// Lower module items into an ItemTree (pure function, no Salsa).
+///
+/// This is used by streaming mode to build ItemTree without database access.
+pub fn lower_module_items_into(file: &ast::SourceFile, tree: &mut ItemTree) {
+    let mut ctx = Ctx { tree: std::mem::take(tree) };
+    ctx.lower_module_items(file);
+    *tree = ctx.tree;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

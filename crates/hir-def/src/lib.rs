@@ -554,6 +554,93 @@ impl ModuleBodies {
         }
     }
 
+    /// Build ModuleBodies from a parse result (without Salsa).
+    ///
+    /// This is the pure version for streaming mode.
+    pub fn from_parse(parse: &syntax::Parse<syntax::SyntaxNode>, module_id: ModuleId) -> Self {
+        use rustc_hash::FxHashSet;
+        use syntax::SyntaxKind;
+
+        let root = parse.syntax_node();
+        let mut result = ModuleBodies::new();
+        let mut all_referenced_externals: FxHashSet<String> = FxHashSet::default();
+        let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
+
+        // Single pass to collect module variables and method nodes
+        for node in root.descendants() {
+            match node.kind() {
+                SyntaxKind::VAR_DEF => {
+                    let is_inside_method = node.ancestors().any(|n| {
+                        matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
+                    });
+                    if !is_inside_method {
+                        collect_module_vars(&node, &mut result.module_vars);
+                    }
+                }
+                SyntaxKind::PROCEDURE_DEF => {
+                    method_nodes.push((node, false));
+                }
+                SyntaxKind::FUNCTION_DEF => {
+                    method_nodes.push((node, true));
+                }
+                _ => {}
+            }
+        }
+
+        // Deduplicate module variables
+        {
+            let mut seen_names: FxHashSet<String> = FxHashSet::default();
+            result.module_vars.retain(|var| {
+                let key = var.name.to_lowercase();
+                seen_names.insert(key)
+            });
+        }
+
+        // Create set of module variable names for method lowering
+        let module_var_names: FxHashSet<String> =
+            result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
+
+        // Lower all methods
+        for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
+            let method_idx = method_idx as u32;
+            let lower_result =
+                body::lower_method_with_externals(&node, is_function, module_var_names.clone());
+
+            let method_id_val = MethodId { module: module_id, local_id: method_idx };
+            for diag in &lower_result.diagnostics {
+                result.all_diagnostics.push((method_id_val, diag.clone()));
+            }
+
+            all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
+            result.bodies.insert(method_idx, lower_result);
+        }
+
+        // Lower module-level code
+        let module_code_result = body::lower_module_code(&root);
+        let module_method_id = MethodId { module: module_id, local_id: u32::MAX };
+        for diag in &module_code_result.diagnostics {
+            result.all_diagnostics.push((module_method_id, diag.clone()));
+        }
+        all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
+        result.module_code = Some(module_code_result);
+
+        // Check for unused module variables
+        for var in &result.module_vars {
+            if var.is_export {
+                continue;
+            }
+            let key = var.name.to_lowercase();
+            if !all_referenced_externals.contains(&key) {
+                result.all_diagnostics.push((
+                    module_method_id,
+                    BodyDiagnostic::UnusedVariable { name: var.name.clone(), range: var.range },
+                ));
+            }
+        }
+
+        result
+    }
+
     /// Get body for a method by its local_id.
     pub fn body(&self, local_id: u32) -> Option<&Body> {
         self.bodies.get(&local_id).map(|r| &r.body)
