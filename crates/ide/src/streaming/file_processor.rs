@@ -59,12 +59,9 @@ pub struct FileProcessor<'a> {
     shared_state: &'a SharedState,
 
     /// Diagnostics configuration (enabled/disabled rules, parameters).
-    /// TODO: Will be used once diagnostics integration is complete
-    #[allow(dead_code)]
     config: &'a DiagnosticsConfig,
 }
 
-#[allow(dead_code)] // TODO: Remove once diagnostics integration is complete
 impl<'a> FileProcessor<'a> {
     /// Create a new FileProcessor.
     pub fn new(
@@ -171,29 +168,41 @@ impl<'a> FileProcessor<'a> {
     /// This method creates a DiagnosticsContext with provider and calls
     /// ide_diagnostics::diagnostics() to collect all enabled diagnostics.
     ///
-    /// ## TODO: Full integration with diagnostics system
-    ///
-    /// Currently returns empty diagnostics vector because DiagnosticsContext
-    /// integration with StreamingProvider needs more work. The diagnostics
-    /// system still tries to access the Salsa database even when provider is set.
-    ///
-    /// To fully enable:
-    /// 1. Update DiagnosticsContext to never call db methods when provider is set
-    /// 2. Update all diagnostic handlers to use helper methods
-    /// 3. Test with real BSL files
-    fn collect_diagnostics(&self, _file_id: FileId) -> Vec<DiagnosticInfo> {
-        // TODO: Implement diagnostics collection via provider
-        // For now, return empty vector to avoid database access panics
-        vec![]
+    /// Creates a minimal RootDatabaseImpl for compatibility (many handlers
+    /// still use ctx.db for some operations), but uses provider for all
+    /// file text/parse/symbol tree access.
+    fn collect_diagnostics(&self, file_id: FileId) -> Vec<DiagnosticInfo> {
+        let _span = tracing::debug_span!("collect_diagnostics", ?file_id).entered();
+
+        // Create minimal RootDatabaseImpl for compatibility
+        // This is needed because DiagnosticsContext::with_provider() requires a db reference
+        let dummy_db = ide_db::RootDatabaseImpl::default();
+
+        // Create DiagnosticsContext with provider
+        let ctx = ide_diagnostics::DiagnosticsContext::with_provider(
+            &dummy_db,
+            self.config,
+            file_id,
+            self.provider,
+        );
+
+        // Collect all enabled diagnostics
+        let diagnostics = ide_diagnostics::diagnostics(&ctx);
+
+        tracing::trace!(
+            file_id = ?file_id,
+            num_diagnostics = diagnostics.len(),
+            "Diagnostics collected"
+        );
+
+        // Convert to DiagnosticInfo format
+        self.convert_diagnostics(diagnostics, file_id)
     }
 
     /// Convert ide_diagnostics::Diagnostic → DiagnosticInfo.
     ///
     /// This converts from the internal Diagnostic type (with TextRange)
     /// to the simplified DiagnosticInfo format (with line/column).
-    ///
-    /// TODO: Will be used once diagnostics integration is complete
-    #[allow(dead_code)]
     fn convert_diagnostics(
         &self,
         diagnostics: Vec<Diagnostic>,

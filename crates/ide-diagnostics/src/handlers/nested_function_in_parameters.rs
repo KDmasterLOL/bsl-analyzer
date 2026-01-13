@@ -106,7 +106,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let line_index = ctx.db.line_index(file_id_input);
 
     // Get parse tree for name token extraction
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
     // Check module-level code (code outside procedures/functions)

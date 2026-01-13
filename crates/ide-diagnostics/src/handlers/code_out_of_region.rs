@@ -49,7 +49,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
     // Get RegionTree from HIR (cached via Salsa)

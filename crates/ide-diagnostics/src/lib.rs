@@ -680,32 +680,38 @@ where
 ///
 /// Pattern from rust-analyzer: crates/ide-diagnostics/src/lib.rs:336-352
 fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
 
     // File-level text-based diagnostics (called once per file)
+    // NOTE: Only fully migrated handlers enabled for streaming mode compatibility
     diagnostics.extend(handlers::consecutive_empty_lines::check(ctx));
     diagnostics.extend(handlers::line_length::check(ctx));
-    diagnostics.extend(handlers::missing_space::check(ctx));
-    diagnostics.extend(handlers::incorrect_line_break::check(ctx));
-    diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
-    diagnostics.extend(handlers::space_at_start_comment::check(ctx));
     diagnostics.extend(handlers::commented_code::check(ctx));
 
+    // TODO: Migrate these handlers to use helper methods instead of ctx.db directly
+    // diagnostics.extend(handlers::missing_space::check(ctx));
+    // diagnostics.extend(handlers::incorrect_line_break::check(ctx));
+    // diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
+    // diagnostics.extend(handlers::space_at_start_comment::check(ctx));
+
     // Region-related diagnostics (file-level)
-    diagnostics.extend(handlers::duplicate_region::check(ctx));
-    diagnostics.extend(handlers::non_standard_region::check(ctx));
-    diagnostics.extend(handlers::code_block_before_sub::check(ctx));
-    diagnostics.extend(handlers::code_out_of_region::check(ctx));
+    // TODO: These use ctx.db.module_level_regions() - need helper method
+    // diagnostics.extend(handlers::duplicate_region::check(ctx));
+    // diagnostics.extend(handlers::non_standard_region::check(ctx));
+    // diagnostics.extend(handlers::code_block_before_sub::check(ctx));
+    // diagnostics.extend(handlers::code_out_of_region::check(ctx));
 
     // String/Date literal diagnostics (file-level)
-    diagnostics.extend(handlers::magic_date::check(ctx));
-    diagnostics.extend(handlers::duplicate_string_literal::check(ctx));
+    // TODO: Need to migrate these handlers
+    // diagnostics.extend(handlers::magic_date::check(ctx));
+    // diagnostics.extend(handlers::duplicate_string_literal::check(ctx));
 
     // Keyword spelling diagnostics (file-level, token-based)
-    diagnostics.extend(handlers::canonical_spelling_keywords::check(ctx));
+    // TODO: Need to migrate this handler
+    // diagnostics.extend(handlers::canonical_spelling_keywords::check(ctx));
 
     // Single traversal for all node-based text diagnostics
     // FIXME: This iterates the entire file which is expensive.
@@ -715,7 +721,8 @@ fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
         // extra_commas is now HIR-based (checked during argument list lowering)
         // handlers::extra_commas::check_node(&node, &mut diagnostics, ctx);
-        handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+        // TODO: Migrate nested_ternary_operator before enabling
+        // handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
         // empty_region is now HIR-based (checked during preprocessor lowering)
         // empty_statement is now HIR-based (checked during statement lowering)
         // TODO: Add more node-based text diagnostics here:
@@ -733,6 +740,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Text-based diagnostics (single AST pass)
     result.extend(collect_text_diagnostics(ctx));
+
+    // STREAMING MODE: Only run text-based diagnostics for now
+    // TODO: Migrate HIR/dataflow/metadata diagnostics to use provider
+    if ctx.provider.is_some() {
+        return result;
+    }
 
     // Tier 1: Syntax diagnostics (TODO: migrate to collect_text_diagnostics)
     // result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));

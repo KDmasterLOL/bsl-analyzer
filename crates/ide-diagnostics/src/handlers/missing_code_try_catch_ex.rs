@@ -131,7 +131,7 @@ fn check_stmt_recursive(
                 // For now, we'll use source_map to get the stmt range, then parse AST
                 if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
                     // Parse AST at this range to check for comments
-                    let parse = ctx.db.parse(ctx.file_id);
+                    let parse = ctx.parse();
                     let root = parse.syntax_node();
 
                     // Find the TRY_STMT node at this range
@@ -172,7 +172,7 @@ fn check_stmt_recursive(
                 // commentAsCode=false, report diagnostic directly
                 // Find the EXCEPT keyword position via AST fallback
                 if let Some(stmt_range) = source_map.stmt_range(stmt_id) {
-                    let parse = ctx.db.parse(ctx.file_id);
+                    let parse = ctx.parse();
                     let root = parse.syntax_node();
 
                     if let Some(try_node) = root

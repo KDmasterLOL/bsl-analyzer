@@ -87,7 +87,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // AST fallback for preprocessor split expressions (Phase 5 evaluation)
     // These might not be properly captured by HIR lowering
     // E.g., "Результат = Истина\n#Область\n ИЛИ Истина;\n#КонецОбласти"
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
     check_preprocessor_split_expressions(&root, &mut diagnostics);
 

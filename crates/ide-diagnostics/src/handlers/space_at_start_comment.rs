@@ -88,7 +88,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let use_strict = true; // Java default: USE_STRICT_VALIDATION = true
     let comments_annotation = parse_comments_annotation(DEFAULT_COMMENTS_ANNOTATION);
 
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 

@@ -221,7 +221,7 @@ fn collect_annotation_params(annotation_node: &syntax::SyntaxNode) -> Vec<Identi
 
 /// Collects all identifiers from the syntax tree
 fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
     let mut identifiers = Vec::new();
 

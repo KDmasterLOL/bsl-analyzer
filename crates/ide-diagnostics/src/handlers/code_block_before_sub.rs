@@ -54,7 +54,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
     let mut code_blocks_before_sub: Vec<SyntaxNode> = Vec::new();
