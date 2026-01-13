@@ -85,8 +85,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 format_register_full_name(&register)
             );
 
-            // Report at position (0, 0, 0, 9) - matches Java implementation
-            let range = TextRange::new(0.into(), 9.into());
+            // Get file text to determine safe range
+            let file_text = ctx.file_text();
+            let file_len = file_text.len();
+
+            // Use range [0, min(9, file_len)) to avoid exceeding file bounds
+            // Java implementation uses (0, 0, 0, 9) but we need to be safe for small files
+            let end_offset = std::cmp::min(9, file_len);
+            let range = TextRange::new(0.into(), (end_offset as u32).into());
 
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::DenyIncompleteValues,

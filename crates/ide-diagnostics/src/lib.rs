@@ -85,6 +85,25 @@ impl Diagnostic {
     pub fn to_output(&self, file_text: &str) -> DiagnosticOutput {
         use line_index::LineIndex;
 
+        // Validate TextRange before creating LineIndex
+        let file_len = file_text.len();
+        let range_start: u32 = self.range.start().into();
+        let range_end: u32 = self.range.end().into();
+
+        if range_start as usize > file_len || range_end as usize > file_len {
+            panic!(
+                "BUG in diagnostic handler '{}': Invalid TextRange [{}, {}) exceeds file length {}\n\
+                 Diagnostic message: '{}'\n\
+                 This is a bug in the diagnostic handler that created this Diagnostic.\n\
+                 The handler must ensure TextRange is within file bounds.",
+                self.code.as_str(),
+                range_start,
+                range_end,
+                file_len,
+                self.message
+            );
+        }
+
         let line_index = LineIndex::new(file_text);
 
         let start = line_index.line_col(self.range.start());

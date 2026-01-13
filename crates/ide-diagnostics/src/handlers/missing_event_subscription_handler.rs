@@ -127,7 +127,12 @@ fn check_event_subscription(
 ) {
     // CHECK 1: Empty handler
     if event_sub.handler_string().is_empty() {
-        diagnostics.push(create_diagnostic(DiagnosticType::EmptyHandler, event_sub.name(), ""));
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::EmptyHandler,
+            event_sub.name(),
+            "",
+        ));
         return;
     }
 
@@ -136,6 +141,7 @@ fn check_event_subscription(
         Some(h) if h.method_name.is_empty() => {
             // Malformed: "CommonModule.ModuleName" (no method)
             diagnostics.push(create_diagnostic(
+                ctx,
                 DiagnosticType::IncorrectFormat,
                 event_sub.name(),
                 event_sub.handler_string(),
@@ -151,6 +157,7 @@ fn check_event_subscription(
         Some(cm) => cm,
         None => {
             diagnostics.push(create_diagnostic(
+                ctx,
                 DiagnosticType::MissingModule,
                 event_sub.name(),
                 &handler.module_name,
@@ -162,6 +169,7 @@ fn check_event_subscription(
     // CHECK 4: CommonModule has Server flag
     if !common_module.is_server() {
         diagnostics.push(create_diagnostic(
+            ctx,
             DiagnosticType::ShouldBeServer,
             event_sub.name(),
             &handler.module_name,
@@ -199,6 +207,7 @@ fn check_method(
         None => {
             // CHECK 5: Method does not exist
             diagnostics.push(create_diagnostic(
+                ctx,
                 DiagnosticType::MissingMethod,
                 event_sub.name(),
                 &format!("{}.{}", handler.module_name, handler.method_name),
@@ -207,6 +216,7 @@ fn check_method(
         Some(m) if !m.is_export => {
             // CHECK 6: Method not exported
             diagnostics.push(create_diagnostic(
+                ctx,
                 DiagnosticType::NonExportMethod,
                 event_sub.name(),
                 &format!("{}.{}", handler.module_name, handler.method_name),
@@ -234,6 +244,7 @@ enum DiagnosticType {
 /// All diagnostics are reported at the SessionModule start (line 1, columns 1-8)
 /// to match bsl-language-server behavior.
 fn create_diagnostic(
+    ctx: &DiagnosticsContext,
     diagnostic_type: DiagnosticType,
     event_sub_name: &str,
     detail: &str,
@@ -274,11 +285,20 @@ fn create_diagnostic(
         }
     };
 
+    // Get file text to determine safe range
+    let file_text = ctx.file_text();
+    let file_len = file_text.len();
+
+    // Use range [0, min(14, file_len)) to avoid exceeding file bounds
+    // Java implementation uses (0, 0, 0, 14) but we need to be safe for small files
+    let end_offset = std::cmp::min(14, file_len);
+    let range = TextRange::new(0.into(), (end_offset as u32).into());
+
     Diagnostic {
         code: DiagnosticCode::MissingEventSubscriptionHandler,
         message,
         severity: Severity::Blocker,
-        range: TextRange::new(0.into(), 14.into()), // Line 1, columns 0-7 (8 chars in UTF-8: "Функция ")
+        range,
         tags: vec![],
         fixes: vec![],
     }
