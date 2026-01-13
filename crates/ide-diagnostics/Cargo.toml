@@ -20,6 +20,7 @@ rustc-hash.workspace = true
 vfs.workspace = true
 stdx.workspace = true
 itertools.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 bsl-metadata.workspace = true
 tracing.workspace = true

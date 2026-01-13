@@ -425,13 +425,30 @@ fn analyze_salsa(
 
             // Return only if diagnostics found
             if !diagnostics.is_empty() {
+                // Convert Diagnostic → DiagnosticOutput for reporters
+                // Read file text for LineIndex in to_output()
+                let file_text = match fs::read_to_string(path) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read file {:?} for diagnostic conversion: {}",
+                            path,
+                            e
+                        );
+                        return None;
+                    }
+                };
+
+                let diagnostic_outputs: Vec<_> =
+                    diagnostics.iter().map(|d| d.to_output(&file_text)).collect();
+
                 Some(FileAnalysis {
                     path: path.clone(),
                     relative_path: path
                         .strip_prefix(&*workspace_dir_arc)
                         .unwrap_or(path)
                         .to_path_buf(),
-                    diagnostics,
+                    diagnostics: diagnostic_outputs,
                 })
             } else {
                 None
@@ -591,7 +608,7 @@ fn analyze_streaming(
     }
 
     // Convert streaming results to reporter format
-    // Note: Phase 2 (diagnostics) not implemented yet, so diagnostics will be empty
+    // DiagnosticOutput is already in the correct format (DTO from domain layer)
     let mut all_diagnostics = Vec::new();
 
     for file_result in &streaming_results.file_results {
@@ -601,7 +618,7 @@ fn analyze_streaming(
                 all_diagnostics.push(FileAnalysis {
                     path: path.clone(),
                     relative_path: path.strip_prefix(&workspace_dir).unwrap_or(path).to_path_buf(),
-                    diagnostics: vec![], // TODO: Convert String diagnostics to proper Diagnostic types
+                    diagnostics: file_result.diagnostics.clone(),
                 });
             }
         }
@@ -609,7 +626,7 @@ fn analyze_streaming(
 
     let results = AnalysisResults {
         files_analyzed: bsl_files.len(),
-        files_with_issues: streaming_results.failed_files,
+        files_with_issues: all_diagnostics.len(),
         total_diagnostics: streaming_results.total_diagnostics,
         elapsed_secs: elapsed.as_secs_f64(),
         diagnostics: all_diagnostics,

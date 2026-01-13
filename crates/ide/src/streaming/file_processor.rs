@@ -15,22 +15,10 @@ use ide_db::provider::AnalysisProvider;
 use ide_db::streaming::{ProcessError, SharedState};
 
 // Import from ide-diagnostics (NOW POSSIBLE!)
-use ide_diagnostics::{Diagnostic, DiagnosticsConfig};
+use ide_diagnostics::DiagnosticsConfig;
 
-/// Diagnostic information collected during analysis.
-///
-/// This is a simplified representation to avoid complex type conversions.
-/// The CLI will convert these to proper output formats (JSON, SARIF, etc.).
-#[derive(Debug, Clone)]
-pub struct DiagnosticInfo {
-    pub code: String,
-    pub message: String,
-    pub severity: String, // "Error", "Warning", "Information", etc.
-    pub line: usize,
-    pub column: usize,
-    pub end_line: usize,
-    pub end_column: usize,
-}
+// Re-export DiagnosticOutput DTO for use by CLI and orchestrator
+pub use ide_diagnostics::DiagnosticOutput;
 
 /// Result of processing a single file.
 #[derive(Debug, Clone)]
@@ -38,8 +26,8 @@ pub struct FileResult {
     /// File that was processed.
     pub file_id: FileId,
 
-    /// Diagnostics found in this file.
-    pub diagnostics: Vec<DiagnosticInfo>,
+    /// Diagnostics found in this file (output DTO format).
+    pub diagnostics: Vec<DiagnosticOutput>,
 
     /// Optional error if processing failed.
     pub error: Option<Arc<str>>,
@@ -171,7 +159,7 @@ impl<'a> FileProcessor<'a> {
     /// Creates a minimal RootDatabaseImpl for compatibility (many handlers
     /// still use ctx.db for some operations), but uses provider for all
     /// file text/parse/symbol tree access.
-    fn collect_diagnostics(&self, file_id: FileId) -> Vec<DiagnosticInfo> {
+    fn collect_diagnostics(&self, file_id: FileId) -> Vec<DiagnosticOutput> {
         let _span = tracing::debug_span!("collect_diagnostics", ?file_id).entered();
 
         // Create minimal RootDatabaseImpl for compatibility
@@ -195,39 +183,26 @@ impl<'a> FileProcessor<'a> {
             "Diagnostics collected"
         );
 
-        // Convert to DiagnosticInfo format
+        // Convert to DiagnosticOutput format (domain layer conversion)
         self.convert_diagnostics(diagnostics, file_id)
     }
 
-    /// Convert ide_diagnostics::Diagnostic → DiagnosticInfo.
+    /// Convert ide_diagnostics::Diagnostic → DiagnosticOutput.
     ///
     /// This converts from the internal Diagnostic type (with TextRange)
-    /// to the simplified DiagnosticInfo format (with line/column).
+    /// to the output DTO format (with line/column positions).
+    ///
+    /// Uses Diagnostic::to_output() method which performs the conversion
+    /// in the domain layer (proper Clean Architecture).
     fn convert_diagnostics(
         &self,
-        diagnostics: Vec<Diagnostic>,
+        diagnostics: Vec<ide_diagnostics::Diagnostic>,
         file_id: FileId,
-    ) -> Vec<DiagnosticInfo> {
-        // Get line index for position conversion
-        let line_index = self.provider.line_index(file_id);
+    ) -> Vec<DiagnosticOutput> {
+        // Get file text for LineIndex creation in to_output()
+        let file_text = self.provider.file_text(file_id);
 
-        diagnostics
-            .into_iter()
-            .map(|d| {
-                let start = line_index.line_col(d.range.start());
-                let end = line_index.line_col(d.range.end());
-
-                DiagnosticInfo {
-                    code: format!("{:?}", d.code), // Use Debug format since Display not implemented
-                    message: d.message,
-                    severity: format!("{:?}", d.severity),
-                    line: start.line as usize,
-                    column: start.col as usize,
-                    end_line: end.line as usize,
-                    end_column: end.col as usize,
-                }
-            })
-            .collect()
+        diagnostics.into_iter().map(|d| d.to_output(&file_text)).collect()
     }
 }
 

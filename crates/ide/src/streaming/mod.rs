@@ -28,6 +28,6 @@ mod file_processor;
 mod orchestrator;
 mod worker_thread;
 
-pub use file_processor::{DiagnosticInfo, FileProcessor, FileResult};
+pub use file_processor::{DiagnosticOutput, FileProcessor, FileResult};
 pub use orchestrator::{AnalysisOrchestrator, AnalysisResults, OrchestratorError};
 pub use worker_thread::worker_main;

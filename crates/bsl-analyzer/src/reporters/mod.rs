@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ide_diagnostics::Diagnostic;
+use ide_diagnostics::DiagnosticOutput;
 
 pub mod console;
 pub mod json;
@@ -27,7 +27,7 @@ pub struct AnalysisResults {
 pub struct FileAnalysis {
     pub path: PathBuf,
     pub relative_path: PathBuf, // Relative to workspace
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<DiagnosticOutput>,
 }
 
 /// Reporter trait for generating analysis reports.

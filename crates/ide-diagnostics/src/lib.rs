@@ -16,7 +16,7 @@ pub mod test_utils;
 use ide_db::{RootDatabase, TextRange};
 use vfs::FileId;
 
-/// A diagnostic produced by the analyzer.
+/// A diagnostic produced by the analyzer (internal representation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
@@ -25,6 +25,82 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub tags: Vec<DiagnosticTag>,
     pub fixes: Vec<Fix>,
+}
+
+/// Diagnostic output DTO for external consumption (reports, CLI, etc.).
+///
+/// This is the public-facing format with line/column positions instead of byte offsets.
+/// Used by:
+/// - Streaming mode results
+/// - Reporter system (JSON, SARIF, console)
+/// - CLI output
+///
+/// ## Architecture
+/// This follows the DTO (Data Transfer Object) pattern:
+/// - Internal representation: `Diagnostic` with `TextRange` (byte offsets)
+/// - External representation: `DiagnosticOutput` with line/column positions
+///
+/// Conversion happens in the domain layer via `Diagnostic::to_output()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticOutput {
+    /// Diagnostic code (e.g., "LineLength", "BadWords").
+    pub code: String,
+
+    /// Human-readable message.
+    pub message: String,
+
+    /// Severity level (e.g., "Warning", "Error").
+    pub severity: String,
+
+    /// Start line (0-based).
+    pub start_line: usize,
+
+    /// Start column (0-based).
+    pub start_column: usize,
+
+    /// End line (0-based).
+    pub end_line: usize,
+
+    /// End column (0-based).
+    pub end_column: usize,
+
+    /// Diagnostic tags (e.g., "Unnecessary", "Deprecated").
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl Diagnostic {
+    /// Convert to output DTO with line/column positions.
+    ///
+    /// This method performs the conversion from internal representation (TextRange)
+    /// to external output format (line/column). Requires file text to build LineIndex.
+    ///
+    /// ## Example
+    /// ```ignore
+    /// let diagnostic = Diagnostic { ... };
+    /// let file_text = "...";
+    /// let output = diagnostic.to_output(file_text);
+    /// println!("Error at {}:{}", output.start_line, output.start_column);
+    /// ```
+    pub fn to_output(&self, file_text: &str) -> DiagnosticOutput {
+        use line_index::LineIndex;
+
+        let line_index = LineIndex::new(file_text);
+
+        let start = line_index.line_col(self.range.start());
+        let end = line_index.line_col(self.range.end());
+
+        DiagnosticOutput {
+            code: self.code.as_str().to_string(),
+            message: self.message.clone(),
+            severity: self.severity.as_str().to_string(),
+            start_line: start.line as usize,
+            start_column: start.col as usize,
+            end_line: end.line as usize,
+            end_column: end.col as usize,
+            tags: self.tags.iter().map(|tag| tag.as_str().to_string()).collect(),
+        }
+    }
 }
 
 /// Diagnostic code - matches bsl-language-server codes.
@@ -309,11 +385,36 @@ pub enum Severity {
     Hint,        // Lowest severity
 }
 
+impl Severity {
+    /// Returns string representation for output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocker => "Blocker",
+            Self::Critical => "Critical",
+            Self::Major => "Major",
+            Self::Error => "Error",
+            Self::Warning => "Warning",
+            Self::Information => "Information",
+            Self::Hint => "Hint",
+        }
+    }
+}
+
 /// Diagnostic tag for special handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticTag {
     Unnecessary,
     Deprecated,
+}
+
+impl DiagnosticTag {
+    /// Returns string representation for output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unnecessary => "Unnecessary",
+            Self::Deprecated => "Deprecated",
+        }
+    }
 }
 
 /// A quick fix for a diagnostic.
