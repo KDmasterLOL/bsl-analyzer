@@ -53,8 +53,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Get SDBL HIR with collected diagnostics
     let sdbl_hirs = ctx.db.sdbl_hir_in_file(ctx.file_id);
 
-    let input = ctx.db.file_text_input(ctx.file_id);
-    let bsl_source = input.text(ctx.db);
+    let bsl_source = ctx.file_text();
 
     // Get cached SDBL queries for position mapping
     let sdbl_queries = ctx.db.all_sdbl_in_file(ctx.file_id);

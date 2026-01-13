@@ -85,12 +85,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let config = Config::from_context(ctx);
 
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
     // Get file text for checking gaps between comments
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
+    let file_text = ctx.file_text();
 
     // Collect all comment tokens
     let comment_tokens = collect_comment_tokens(&root);

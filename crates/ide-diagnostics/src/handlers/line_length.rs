@@ -94,16 +94,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let config = Config::from_context(ctx);
 
-    let parse = ctx.db.parse(ctx.file_id);
+    let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
+    let file_text = ctx.file_text();
     let file_text = file_text.as_ref();
 
-    // Get line index (cached by Salsa, following rust-analyzer pattern)
-    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let line_index = ctx.db.line_index(file_id_input);
+    // Get line index (cached, using helper method for streaming mode compatibility)
+    let line_index = ctx.line_index();
     let num_lines = line_index.len_lines();
 
     // Pre-allocate line info for all lines

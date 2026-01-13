@@ -124,9 +124,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         Err(_) => return Vec::new(), // Invalid pattern, skip
     };
 
-    // Get file text directly from input (not from parsed tree, to preserve exact positions)
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
+    // Get file text directly (not from parsed tree, to preserve exact positions)
+    let file_text = ctx.file_text();
 
     let mut diagnostics = Vec::new();
     let mut byte_offset = 0;

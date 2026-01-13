@@ -28,16 +28,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .and_then(|v| usize::try_from(v).ok())
         .unwrap_or(DEFAULT_ALLOWED_EMPTY_LINES);
 
-    let file_text_input = ctx.db.file_text_input(ctx.file_id);
-    let file_text = file_text_input.text(ctx.db);
+    let file_text = ctx.file_text();
 
     if file_text.is_empty() {
         return Vec::new();
     }
 
-    // Get line index (cached by Salsa, following rust-analyzer pattern)
-    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let line_index = ctx.db.line_index(file_id_input);
+    // Get line index (cached, using helper method for streaming mode compatibility)
+    let line_index = ctx.line_index();
 
     scan_consecutive_empty_lines(&file_text, &line_index, allowed_empty_lines)
 }
