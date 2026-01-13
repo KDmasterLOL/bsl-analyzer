@@ -138,8 +138,7 @@ fn check_local_call(
     method_name: &str,
     args: &[bool],
 ) -> Option<Vec<String>> {
-    let module_id = ModuleId::new(ctx.file_id);
-    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let symbol_tree = ctx.symbol_tree();
     let name = Name::new(method_name);
 
     let method = symbol_tree.find_method(&name)?;
@@ -166,7 +165,7 @@ fn check_qualified_call(
 
     // Build SymbolTree
     let module_id = ModuleId::new(module_file_id);
-    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let symbol_tree = ctx.symbol_tree_for(module_id);
 
     // Lookup method
     let name = Name::new(method_name);
@@ -236,7 +235,7 @@ fn check_manager_module_call(
 
     // Build SymbolTree for Manager Module
     let module_id = ModuleId::new(manager_file_id);
-    let manager_symbol_tree = ctx.db.symbol_tree(module_id);
+    let manager_symbol_tree = ctx.symbol_tree_for(module_id);
 
     // Look up method in Manager Module
     let method_name_obj = Name::new(method_name);
@@ -292,8 +291,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let parse = ctx.parse();
     let root = parse.syntax_node();
-    let module_id = ModuleId::new(ctx.file_id);
-    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let symbol_tree = ctx.symbol_tree();
 
     let mut diagnostics = Vec::new();
 
@@ -424,7 +422,7 @@ fn check_common_module_call_cached(
 
     // Build SymbolTree for the CommonModule file (Salsa-cached)
     let module_id = ModuleId::new(module_file_id);
-    let module_symbol_tree = ctx.db.symbol_tree(module_id);
+    let module_symbol_tree = ctx.symbol_tree_for(module_id);
 
     // Look up the method in the CommonModule's SymbolTree
     let method_name_obj = Name::new(method_name);
@@ -477,7 +475,7 @@ fn check_object_method_call(
 
     // Build SymbolTree for Manager Module
     let module_id = ModuleId::new(manager_file_id);
-    let manager_symbol_tree = ctx.db.symbol_tree(module_id);
+    let manager_symbol_tree = ctx.symbol_tree_for(module_id);
 
     // Look up method in Manager Module
     let method_name_obj = Name::new(method_name);
@@ -515,8 +513,7 @@ fn check_this_object_call(
     let _span = tracing::debug_span!("check_this_object_call", method = method_name).entered();
 
     // Use current module's SymbolTree (already loaded)
-    let module_id = ModuleId::new(ctx.file_id);
-    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let symbol_tree = ctx.symbol_tree();
 
     // Look up method in current module
     let method_name_obj = Name::new(method_name);

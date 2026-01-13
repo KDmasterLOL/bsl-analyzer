@@ -672,6 +672,16 @@ impl<'a> DiagnosticsContext<'a> {
     /// Get symbol tree for current module.
     pub fn symbol_tree(&self) -> std::sync::Arc<hir_def::SymbolTree> {
         let module_id = hir_def::ModuleId::new(self.file_id);
+        self.symbol_tree_for(module_id)
+    }
+
+    /// Get symbol tree for specific module.
+    ///
+    /// Use this when you need SymbolTree for a module other than the current file.
+    pub fn symbol_tree_for(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> std::sync::Arc<hir_def::SymbolTree> {
         if let Some(provider) = self.provider {
             return provider.symbol_tree(module_id);
         }

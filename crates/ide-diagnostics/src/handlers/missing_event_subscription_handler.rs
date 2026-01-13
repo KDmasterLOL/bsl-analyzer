@@ -197,7 +197,7 @@ fn check_method(
 
     // Build SymbolTree for CommonModule
     let module_id = ModuleId::new(module_file_id);
-    let symbol_tree = ctx.db.symbol_tree(module_id);
+    let symbol_tree = ctx.symbol_tree_for(module_id);
 
     // Lookup method
     let method_name_obj = Name::new(&handler.method_name);

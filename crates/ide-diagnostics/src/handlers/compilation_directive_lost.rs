@@ -39,7 +39,6 @@
 //! Only applies to FormModule and CommandModule (not CommonModule).
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::ModuleId;
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -48,8 +47,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Get module metadata via HIR (cached by Salsa)
-    let module_id = ModuleId::new(ctx.file_id);
-    let metadata = ctx.db.module_metadata(module_id);
+    let metadata = ctx.module_metadata();
 
     // Only check FormModule and CommandModule
     if !matches!(
@@ -60,7 +58,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Get ItemTree (cached by Salsa)
-    let item_tree = ctx.db.item_tree(ctx.file_id);
+    let item_tree = ctx.item_tree();
     let mut diagnostics = Vec::new();
 
     // Check procedures without compilation directives

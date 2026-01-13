@@ -56,7 +56,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::hir_def::resolver::Resolver;
-use ide_db::hir_def::{ModuleId, Name, PathResolution, QualifiedName};
+use ide_db::hir_def::{Name, PathResolution, QualifiedName};
 use syntax::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -85,7 +85,7 @@ pub fn from_hir(
     let qualified_name = QualifiedName::from_segments([Name::new(module), Name::new(method)]);
 
     // Create resolver with workspace scope for cross-module resolution
-    let module_id = ModuleId::new(ctx.file_id);
+    let module_id = hir_def::ModuleId::new(ctx.file_id);
     let resolver = Resolver::with_workspace_scope(module_id);
 
     // Resolve the qualified path using workspace symbols
@@ -102,7 +102,7 @@ pub fn from_hir(
         PathResolution::Method(method_id) => {
             // Method found - check if it's exported via SymbolTree
             let method_module_id = method_id.module;
-            let symbol_tree = ctx.db.symbol_tree(method_module_id);
+            let symbol_tree = ctx.symbol_tree_for(method_module_id);
             let method_name_obj = Name::new(method);
 
             if let Some(method_sym) = symbol_tree.find_method(&method_name_obj) {

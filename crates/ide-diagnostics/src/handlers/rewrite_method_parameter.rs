@@ -81,7 +81,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::hir::StmtId;
-use ide_db::base_db::FileIdInput;
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -106,8 +105,7 @@ pub fn from_hir(
     }
 
     // Get module bodies and find the method containing this diagnostic
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Find which method contains this range
     let (local_id, body, source_map) =
@@ -124,8 +122,7 @@ pub fn from_hir(
     let param_name = param.name.as_str();
 
     // Get reaching definitions for this method
-    let file_id_input = FileIdInput::new(ctx.db, ctx.file_id);
-    let module_reaching_defs = ctx.db.module_reaching_definitions(file_id_input);
+    let module_reaching_defs = ctx.module_reaching_defs();
     let reaching_defs_result = module_reaching_defs.get(local_id)?;
 
     // Get reaching defs BEFORE this assignment statement

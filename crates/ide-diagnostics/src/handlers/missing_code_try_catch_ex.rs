@@ -49,10 +49,7 @@
 //! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::{
-    hir::{Stmt, StmtId},
-    ModuleId,
-};
+use hir_def::hir::{Stmt, StmtId};
 use syntax::SyntaxKind;
 
 /// Main entry point for MissingCodeTryCatchEx diagnostic.
@@ -71,8 +68,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .unwrap_or(false);
 
     let mut diagnostics = Vec::new();
-    let module_id = ModuleId { file_id: ctx.file_id };
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // 3. Check method bodies
     for (_local_id, body, source_map) in module_bodies.method_bodies() {

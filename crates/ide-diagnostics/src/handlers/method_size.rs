@@ -69,8 +69,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
 
     // Get line index (cached by Salsa, following rust-analyzer pattern)
-    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let line_index = ctx.db.line_index(file_id_input);
+    let line_index = ctx.line_index();
 
     let mut diagnostics = Vec::new();
 

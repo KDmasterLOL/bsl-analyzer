@@ -42,7 +42,6 @@
 //! - Module-level code coverage (not just methods)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir::ModuleId;
 use hir_def::{Body, BodySourceMap, Expr, ExprId, Name};
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
@@ -98,12 +97,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Get module bodies from HIR (cached by Salsa)
-    let module_id = ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Get line index (cached by Salsa, following rust-analyzer pattern)
-    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let line_index = ctx.db.line_index(file_id_input);
+    let line_index = ctx.line_index();
 
     // Get parse tree for name token extraction
     let parse = ctx.parse();

@@ -88,7 +88,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_id = ModuleId { file_id: ctx.file_id };
 
     // Get module bodies
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Check each method
     for (local_id, body, source_map) in module_bodies.method_bodies() {

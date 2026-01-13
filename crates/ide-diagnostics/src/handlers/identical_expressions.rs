@@ -58,7 +58,6 @@
 //! - See `check_preprocessor_split_expressions()` for detailed explanation
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir::ModuleId;
 use hir_def::{BinaryOp, Body, BodySourceMap, Expr, ExprId, Literal, UnaryOp};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
@@ -71,8 +70,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // HIR-based checking - covers methods and module-level code
-    let module_id = ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Check module-level code (outside procedures/functions)
     if let Some(module_code) = module_bodies.module_code_result() {

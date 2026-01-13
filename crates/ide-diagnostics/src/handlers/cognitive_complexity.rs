@@ -84,7 +84,7 @@
 //! - Reusability (same calculation for code lens)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use ide_db::hir_def::{self, item_tree::ModItem, ModuleId};
+use ide_db::hir_def::{self, item_tree::ModItem};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -114,13 +114,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let module_id = ModuleId::new(ctx.file_id);
 
     // Get ItemTree for method metadata (names, ranges)
-    let item_tree = ctx.db.item_tree(ctx.file_id);
+    let item_tree = ctx.item_tree();
 
     // Get ModuleBodies for HIR-based complexity calculation
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
 
@@ -201,6 +200,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     use crate::DiagnosticsConfig;
+    use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
     use ide_db::{RootDatabase, RootDatabaseImpl};

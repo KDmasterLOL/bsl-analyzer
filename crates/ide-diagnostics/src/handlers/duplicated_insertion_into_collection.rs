@@ -881,8 +881,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
 

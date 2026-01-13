@@ -39,7 +39,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticTag, DiagnosticsContext, Severity};
 use hir_def::ModuleId;
-use ide_db::{base_db, RootDatabase, TextRange};
+use ide_db::{RootDatabase, TextRange};
 
 /// Collect UnusedLocalVariable diagnostics using liveness analysis.
 ///
@@ -59,15 +59,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let mut diagnostics = Vec::new();
-    let module_id = ModuleId::new(ctx.file_id);
 
     // Load module_bodies ONCE for the entire file
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Load module-level liveness ONCE (Salsa cached, batch processed)
-    let file_id_input = base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let module_liveness = ctx.db.module_liveness_analysis(file_id_input);
-    let module_cfgs = ctx.db.module_cfgs(file_id_input);
+    let module_liveness = ctx.module_liveness();
+    let module_cfgs = ctx.module_cfgs();
 
     // Check each method for unused local variables
     // Use module-level liveness results (cheap HashMap lookups)
@@ -83,6 +81,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Check module-level code for unused variables
+    let module_id = hir_def::ModuleId::new(ctx.file_id);
     diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
 
     diagnostics

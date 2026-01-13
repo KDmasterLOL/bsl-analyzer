@@ -80,14 +80,12 @@ pub fn from_hir(
     }
 
     // Get module bodies and method body using the provided MethodId
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
     let local_id = method_id.local_id;
     let body = module_bodies.body(local_id)?;
 
     // Get CFG for this method from module-level query (batch processing)
-    let file_id_input = ide_db::base_db::FileIdInput::new(ctx.db, ctx.file_id);
-    let module_cfgs = ctx.db.module_cfgs(file_id_input);
+    let module_cfgs = ctx.module_cfgs();
     let cfg = module_cfgs.get(local_id)?;
 
     // Perform CFG-based validation

@@ -45,7 +45,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use bsl_metadata::ReturnValueReuse;
-use ide_db::hir_def::ModuleId;
 
 /// Main entry point for CachedPublic diagnostic.
 ///
@@ -75,8 +74,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // OPTIMIZATION 2: Only load metadata if we have public regions
-    let module_id = ModuleId::new(ctx.file_id);
-    let metadata = ctx.db.module_metadata(module_id);
+    let metadata = ctx.module_metadata();
 
     // Check if this is a cached CommonModule
     let common_module = match &metadata.common_module {
@@ -89,7 +87,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Get item tree for method lookup (Salsa cached)
-    let item_tree = ctx.db.item_tree(ctx.file_id);
+    let item_tree = ctx.item_tree();
 
     // Check each public region for methods
     public_regions
@@ -158,7 +156,7 @@ fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Di
     }
 
     // Get item tree for method lookup
-    let item_tree = ctx.db.item_tree(ctx.file_id);
+    let item_tree = ctx.item_tree();
 
     // Check each public region for methods
     public_regions

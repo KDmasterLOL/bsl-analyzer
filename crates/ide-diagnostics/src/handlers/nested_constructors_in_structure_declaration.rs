@@ -41,7 +41,6 @@
 //! - Cleaner recursive checking via ExprId references
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir::ModuleId;
 use hir_def::{Body, BodySourceMap, Expr, Name};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -52,8 +51,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Get module bodies from HIR (cached by Salsa)
-    let module_id = ModuleId::new(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let module_bodies = ctx.module_bodies();
 
     // Check module-level code (code outside procedures/functions)
     if let Some(module_code) = module_bodies.module_code_result() {

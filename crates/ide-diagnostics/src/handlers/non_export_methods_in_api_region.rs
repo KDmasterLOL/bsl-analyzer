@@ -88,7 +88,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Get HIR structures (both cached via Salsa)
     let region_tree = ctx.db.region_tree(ctx.file_id);
-    let item_tree = ctx.db.item_tree(ctx.file_id);
+    let item_tree = ctx.item_tree();
 
     let mut diagnostics = Vec::new();
 

@@ -40,7 +40,7 @@
 //! - data_exchange_loading.rs (bsl-language-server-rust) - Rust reference
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, ModuleId, Name, Stmt, StmtId};
+use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, Name, Stmt, StmtId};
 
 const MONITORED_PROCEDURES: &[&str] =
     &["передзаписью", "beforewrite", "призаписи", "onwrite", "передудалением", "beforedelete"];
@@ -58,9 +58,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx.config.get_bool(DiagnosticCode::DataExchangeLoading, "findFirst").unwrap_or(false);
 
     // Use HIR queries instead of AST parsing
-    let module_id = ModuleId::new(ctx.file_id);
-    let item_tree = ctx.db.item_tree(ctx.file_id);
-    let module_bodies = ctx.db.module_bodies(module_id);
+    let item_tree = ctx.item_tree();
+    let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
 
