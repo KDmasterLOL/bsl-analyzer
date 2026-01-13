@@ -25,7 +25,13 @@ pub use vfs;
 pub type SdblHirEntries = Arc<Vec<(hir_def::ExprId, Arc<sdbl_hir::SdblPackage>)>>;
 
 pub mod metadata;
+pub mod provider;
 pub mod queries;
+pub mod salsa_provider;
+
+// Re-export provider types
+pub use provider::AnalysisProvider;
+pub use salsa_provider::SalsaProvider;
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{

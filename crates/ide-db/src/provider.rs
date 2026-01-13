@@ -1,0 +1,195 @@
+//! Analysis data provider abstraction.
+//!
+//! This module defines the `AnalysisProvider` trait which abstracts over
+//! the source of analysis data, enabling two implementations:
+//! - [`SalsaProvider`](crate::SalsaProvider): Full caching via RootDatabase (LSP mode)
+//! - `StreamingProvider`: On-the-fly computation (analyze mode, future)
+
+use std::sync::Arc;
+
+use base_db::SourceRootId;
+use bsl_metadata::Configuration;
+use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree};
+use syntax::{Parse, SyntaxNode};
+use vfs::FileId;
+
+/// Abstraction over analysis data sources.
+///
+/// Two implementations:
+/// - `SalsaProvider`: Uses RootDatabase with full caching (LSP mode)
+/// - `StreamingProvider`: Computes on-the-fly, releases after use (analyze mode)
+///
+/// # Global vs Per-file Data
+///
+/// Methods are organized into categories:
+/// - **Global**: Shared across all files, kept in memory for the entire analysis
+/// - **Per-file**: Can be computed on-demand and released after use
+/// - **Dataflow**: Complex analyses built on top of CFG
+pub trait AnalysisProvider {
+    // ========================================================================
+    // Global Data (shared across all files)
+    // ========================================================================
+
+    /// Get 1C Configuration metadata.
+    ///
+    /// Contains CommonModules, MetadataObjects, Registers, etc.
+    /// Loaded once and reused for all files.
+    fn configuration(&self) -> Option<Arc<Configuration>>;
+
+    /// Get workspace symbols index for cross-module resolution.
+    ///
+    /// Maps CommonModule names to their exported methods.
+    /// Used for qualified name resolution: `CommonModule.Method()`.
+    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir_def::WorkspaceSymbols>;
+
+    /// Get module index (name -> FileId mapping).
+    fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
+
+    // ========================================================================
+    // Per-file Data
+    // ========================================================================
+
+    /// Parse file to AST.
+    fn parse(&self, file_id: FileId) -> Parse<SyntaxNode>;
+
+    /// Get file text.
+    fn file_text(&self, file_id: FileId) -> String;
+
+    /// Get ItemTree (method signatures).
+    fn item_tree(&self, file_id: FileId) -> Arc<ItemTree>;
+
+    /// Get SymbolTree for a module (case-insensitive lookup).
+    fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
+
+    /// Get lowered HIR bodies for all methods in module.
+    fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
+
+    /// Get module metadata (type, execution context).
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
+
+    /// Get line index for byte offset -> line/column conversion.
+    fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex>;
+
+    /// Get file path as string (for metadata lookups).
+    fn file_path(&self, file_id: FileId) -> Option<String>;
+
+    /// Get source root ID for a file.
+    fn file_source_root_id(&self, file_id: FileId) -> SourceRootId;
+
+    // ========================================================================
+    // Dataflow Analysis (for complex diagnostics)
+    // ========================================================================
+
+    /// Get CFGs for all methods in module (batch).
+    fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs>;
+
+    /// Get liveness analysis for all methods (batch).
+    fn module_liveness_analysis(&self, file_id: FileId) -> Arc<dataflow::liveness::ModuleLiveness>;
+
+    /// Get reaching definitions for all methods (batch).
+    fn module_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{salsa_provider::SalsaProvider, RootDatabaseImpl};
+    use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use vfs::{file_set::FileSet, VfsPath};
+
+    fn setup_db() -> RootDatabaseImpl {
+        let mut db = RootDatabaseImpl::new();
+        let file_id = FileId(0);
+
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, "Процедура Тест() КонецПроцедуры");
+
+        db
+    }
+
+    #[test]
+    fn test_salsa_provider_parse() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let parse = provider.parse(FileId(0));
+        assert!(!parse.has_errors());
+    }
+
+    #[test]
+    fn test_salsa_provider_file_text() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let text = provider.file_text(FileId(0));
+        assert_eq!(text, "Процедура Тест() КонецПроцедуры");
+    }
+
+    #[test]
+    fn test_salsa_provider_item_tree() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let item_tree = provider.item_tree(FileId(0));
+        assert_eq!(item_tree.top_level_items().len(), 1);
+    }
+
+    #[test]
+    fn test_salsa_provider_module_bodies() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let module_id = ModuleId::new(FileId(0));
+        let bodies = provider.module_bodies(module_id);
+
+        // Should have one method body
+        assert_eq!(bodies.iter_bodies().count(), 1);
+    }
+
+    #[test]
+    fn test_salsa_provider_symbol_tree() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let module_id = ModuleId::new(FileId(0));
+        let symbols = provider.symbol_tree(module_id);
+
+        // Should find the "Тест" procedure
+        assert!(symbols.find_method(&hir_def::Name::new("Тест")).is_some());
+    }
+
+    #[test]
+    fn test_salsa_provider_line_index() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let line_index = provider.line_index(FileId(0));
+        // File has one line
+        assert_eq!(line_index.line_col(0.into()).line, 0);
+    }
+
+    #[test]
+    fn test_salsa_provider_source_root_id() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        let source_root_id = provider.file_source_root_id(FileId(0));
+        assert_eq!(source_root_id, SourceRootId(0));
+    }
+
+    #[test]
+    fn test_salsa_provider_configuration_none() {
+        let db = setup_db();
+        let provider = SalsaProvider::new(&db, None);
+
+        // No configuration path provided
+        assert!(provider.configuration().is_none());
+    }
+}

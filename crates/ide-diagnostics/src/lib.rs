@@ -461,6 +461,76 @@ impl<'a> DiagnosticsContext<'a> {
         let vfs_path = file_set.path_for_file(&self.file_id)?;
         Some(vfs_path.as_path().to_string_lossy().to_string())
     }
+
+    // ========================================================================
+    // Helper methods for accessing data via db
+    // These will be migrated to use AnalysisProvider in future sessions
+    // ========================================================================
+
+    /// Get parsed AST for current file.
+    pub fn parse(&self) -> syntax::Parse<syntax::SyntaxNode> {
+        self.db.parse(self.file_id)
+    }
+
+    /// Get lowered HIR bodies for current module.
+    pub fn module_bodies(&self) -> std::sync::Arc<hir_def::ModuleBodies> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        self.db.module_bodies(module_id)
+    }
+
+    /// Get module metadata for current file.
+    pub fn module_metadata(&self) -> std::sync::Arc<hir_def::ModuleMetadata> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        self.db.module_metadata(module_id)
+    }
+
+    /// Get symbol tree for current module.
+    pub fn symbol_tree(&self) -> std::sync::Arc<hir_def::SymbolTree> {
+        let module_id = hir_def::ModuleId::new(self.file_id);
+        self.db.symbol_tree(module_id)
+    }
+
+    /// Get item tree for current file.
+    pub fn item_tree(&self) -> std::sync::Arc<hir_def::ItemTree> {
+        self.db.item_tree(self.file_id)
+    }
+
+    /// Get line index for current file.
+    pub fn line_index(&self) -> std::sync::Arc<line_index::LineIndex> {
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.line_index(input)
+    }
+
+    /// Get source root ID for current file.
+    pub fn source_root_id(&self) -> base_db::SourceRootId {
+        self.db.file_source_root_input(self.file_id).source_root_id(self.db)
+    }
+
+    /// Get workspace symbols for cross-module resolution.
+    pub fn workspace_symbols(&self) -> std::sync::Arc<hir_def::WorkspaceSymbols> {
+        let source_root_id = self.source_root_id();
+        self.db.workspace_symbols(source_root_id)
+    }
+
+    /// Get module CFGs (batch).
+    pub fn module_cfgs(&self) -> std::sync::Arc<cfg::ModuleCfgs> {
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_cfgs(input)
+    }
+
+    /// Get module liveness analysis (batch).
+    pub fn module_liveness(&self) -> std::sync::Arc<dataflow::liveness::ModuleLiveness> {
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_liveness_analysis(input)
+    }
+
+    /// Get module reaching definitions (batch).
+    pub fn module_reaching_defs(
+        &self,
+    ) -> std::sync::Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+        let input = base_db::FileIdInput::new(self.db, self.file_id);
+        self.db.module_reaching_definitions(input)
+    }
 }
 
 /// Helper to run a diagnostic and log if it's slow (>80ms)
