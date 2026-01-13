@@ -81,8 +81,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Check module-level code for unused variables
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
+    // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
+    if ctx.provider.is_none() {
+        let module_id = hir_def::ModuleId::new(ctx.file_id);
+        diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
+    }
 
     diagnostics
 }
@@ -287,12 +290,12 @@ fn check_method_with_module_liveness(
 fn check_module_level_code(
     db: &dyn RootDatabase,
     module_id: ModuleId,
-    _ctx: &DiagnosticsContext,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // Get module bodies
-    let module_bodies = db.module_bodies(module_id);
+    // Get module bodies via ctx (works in both LSP and streaming mode)
+    let module_bodies = ctx.module_bodies();
 
     // Get module-level code result (body + source_map)
     let lower_result = match module_bodies.module_code_result() {

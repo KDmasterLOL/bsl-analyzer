@@ -287,6 +287,35 @@ pub fn method_docs_query(db: &dyn DefDatabase, method: MethodId) -> Option<Arc<M
     Some(Arc::new(docs))
 }
 
+/// Compute method documentation without database.
+///
+/// This is a public wrapper around the private `method_docs_query` logic,
+/// allowing StreamingProvider to compute docs without Salsa.
+///
+/// # Arguments
+///
+/// * `parse` - Parsed AST for the file
+/// * `tree` - ItemTree for the file
+/// * `method_id` - ID of the method to get docs for
+/// * `file_text` - Source text of the file
+pub fn compute_method_docs(
+    parse: &syntax::Parse<SyntaxNode>,
+    tree: &crate::item_tree::ItemTree,
+    method_id: MethodId,
+    file_text: &str,
+) -> Option<Arc<MethodDocs>> {
+    // Find the method's AST node
+    let method_node = find_method_node(parse, tree, method_id)?;
+
+    // Extract leading comments
+    let comments = syntax::extract_leading_comments(&method_node, file_text)?;
+
+    // Parse documentation
+    let docs = parse_method_docs(&comments)?;
+
+    Some(Arc::new(docs))
+}
+
 /// Find the AST node for a given method in the parse tree.
 fn find_method_node(
     parse: &syntax::Parse<SyntaxNode>,

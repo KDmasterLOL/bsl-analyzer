@@ -320,6 +320,34 @@ impl AnalysisProvider for StreamingProvider {
         let item_tree = self.item_tree(module_id.file_id);
         Arc::new(hir_def::ModuleData::from_item_tree(module_id, item_tree))
     }
+
+    fn method_docs(&self, method_id: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+        let parse = self.parse(method_id.module.file_id);
+        let tree = self.item_tree(method_id.module.file_id);
+        let file_text = self.file_text(method_id.module.file_id);
+
+        hir_def::docs::compute_method_docs(&parse, &tree, method_id, &file_text)
+    }
+
+    fn reaching_definitions(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+        // Get module-level reaching definitions
+        let module_reaching_defs = self.module_reaching_definitions(method_id.module.file_id);
+
+        // Extract result for specific method
+        module_reaching_defs.get(method_id.local_id).cloned()
+    }
+
+    fn resolve_vfs_path(
+        &self,
+        _source_root_id: base_db::SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<FileId> {
+        // In streaming mode, use global file_set directly (no Salsa)
+        self.global.file_set.file_for_path(vfs_path).copied()
+    }
 }
 
 /// Extract CommonModule name from file path.

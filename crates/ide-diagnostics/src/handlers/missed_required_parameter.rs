@@ -562,10 +562,9 @@ fn find_common_module_file(
     let file_id = if let Some(file_set) = ctx.file_set {
         file_set.file_for_path(&vfs_path).copied()
     } else {
-        // Fallback: Resolve via Salsa (slower, for tests)
-        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-        let source_root_id = source_root_input.source_root_id(ctx.db);
-        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+        // Fallback: Use provider/db (slower, for tests)
+        let source_root_id = ctx.source_root_id();
+        ctx.resolve_vfs_path(source_root_id, &vfs_path)
     };
 
     if file_id.is_none() {
@@ -646,10 +645,9 @@ fn find_manager_module_file(
     let file_id = if let Some(file_set) = ctx.file_set {
         file_set.file_for_path(&vfs_path).copied()
     } else {
-        // Fallback: Resolve via Salsa (slower, for tests)
-        let source_root_input = ctx.db.file_source_root_input(ctx.file_id);
-        let source_root_id = source_root_input.source_root_id(ctx.db);
-        ctx.db.resolve_vfs_path(source_root_id, &vfs_path)
+        // Fallback: Use provider/db (slower, for tests)
+        let source_root_id = ctx.source_root_id();
+        ctx.resolve_vfs_path(source_root_id, &vfs_path)
     };
 
     if file_id.is_none() {

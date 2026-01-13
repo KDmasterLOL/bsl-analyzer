@@ -133,4 +133,23 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData> {
         self.db.module_data(module_id)
     }
+
+    fn method_docs(&self, method_id: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+        self.db.method_docs(method_id)
+    }
+
+    fn reaching_definitions(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+        self.db.reaching_definitions(method_id)
+    }
+
+    fn resolve_vfs_path(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<FileId> {
+        self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
 }

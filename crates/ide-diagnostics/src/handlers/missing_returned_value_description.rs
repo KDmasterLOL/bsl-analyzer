@@ -64,14 +64,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check all procedures
     for method_id in &module_data.procedures {
-        if let Some(diag) = check_procedure_hir(ctx.db, *method_id) {
+        if let Some(diag) = check_procedure_hir(ctx, *method_id) {
             diagnostics.push(diag);
         }
     }
 
     // Check all functions
     for method_id in &module_data.functions {
-        if let Some(diag) = check_function_hir(ctx.db, *method_id, ctx) {
+        if let Some(diag) = check_function_hir(ctx, *method_id) {
             diagnostics.push(diag);
         }
     }
@@ -81,29 +81,38 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Check a function for missing or invalid return description (HIR-based).
 fn check_function_hir(
-    db: &dyn hir_def::DefDatabase,
-    method_id: hir_def::MethodId,
     ctx: &DiagnosticsContext,
+    method_id: hir_def::MethodId,
 ) -> Option<Diagnostic> {
-    let method = Method::new(db, method_id);
+    // Check if export via ctx.item_tree() (works in both LSP and streaming mode)
+    let tree = ctx.item_tree();
+    let is_export = tree.top_level_items().get(method_id.local_id as usize).is_some_and(|item| {
+        use hir_def::item_tree::ModItem;
+        match item {
+            ModItem::Function(func_idx) => tree.function(*func_idx).is_export,
+            _ => false,
+        }
+    });
 
     // Only check export functions (public API)
-    if !method.is_export() {
+    if !is_export {
         return None;
     }
 
-    // Get documentation via HIR
-    let docs = method.docs();
+    // Create Method wrapper for diagnostic range (only used for name_range(), not for data access)
+    let method = Method::new(ctx.db, method_id);
 
-    // Check if documentation exists
-    if docs.is_none() {
-        return Some(create_diagnostic_hir(
-            &method,
-            "Добавьте описание возвращаемого значения функции",
-        ));
-    }
-
-    let docs = docs.unwrap();
+    // Get documentation via ctx (works in both LSP and streaming mode)
+    // If no documentation, require it for export functions
+    let docs = match ctx.method_docs(method_id) {
+        Some(d) => d,
+        None => {
+            return Some(create_diagnostic_hir(
+                &method,
+                "Добавьте описание возвращаемого значения функции",
+            ));
+        }
+    };
 
     // If it's a hyperlink reference, skip validation
     if docs.is_hyperlink() {
@@ -157,13 +166,13 @@ fn check_function_hir(
 
 /// Check a procedure for invalid return description (HIR-based).
 fn check_procedure_hir(
-    db: &dyn hir_def::DefDatabase,
+    ctx: &DiagnosticsContext,
     method_id: hir_def::MethodId,
 ) -> Option<Diagnostic> {
-    let method = Method::new(db, method_id);
+    let method = Method::new(ctx.db, method_id);
 
-    // Get documentation via HIR
-    let docs = method.docs()?;
+    // Get documentation via ctx (works in both LSP and streaming mode)
+    let docs = ctx.method_docs(method_id)?;
 
     // Procedures must NOT have return value descriptions
     if !docs.returned_value.is_empty() {

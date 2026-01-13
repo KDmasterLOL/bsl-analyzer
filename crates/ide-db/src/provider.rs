@@ -9,9 +9,12 @@ use std::sync::Arc;
 
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
-use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree};
+use hir_def::{
+    docs::MethodDocs, ItemTree, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata,
+    SymbolTree,
+};
 use syntax::{Parse, SyntaxNode};
-use vfs::FileId;
+use vfs::{FileId, VfsPath};
 
 use crate::SdblHirEntries;
 
@@ -112,6 +115,12 @@ pub trait AnalysisProvider {
     /// Get module data (name, type, etc.) for a module.
     fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData>;
 
+    /// Get parsed documentation for a method.
+    ///
+    /// Extracts and parses leading comments (lines starting with //)
+    /// before a procedure or function definition.
+    fn method_docs(&self, method_id: MethodId) -> Option<Arc<MethodDocs>>;
+
     // ========================================================================
     // Dataflow Analysis (for complex diagnostics)
     // ========================================================================
@@ -127,6 +136,28 @@ pub trait AnalysisProvider {
         &self,
         file_id: FileId,
     ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
+
+    // ========================================================================
+    // Per-Method Dataflow (for specific diagnostics)
+    // ========================================================================
+
+    /// Get reaching definitions for a specific method.
+    ///
+    /// Returns `None` if analysis doesn't converge (malformed CFG, infinite loop).
+    fn reaching_definitions(
+        &self,
+        method_id: MethodId,
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+
+    // ========================================================================
+    // VFS Resolution (for metadata lookups)
+    // ========================================================================
+
+    /// Resolve VfsPath to FileId within a SourceRoot.
+    ///
+    /// Used for finding metadata files (CommonModules, EventSubscriptions, etc.)
+    /// given their URI from Configuration.
+    fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 }
 
 #[cfg(test)]

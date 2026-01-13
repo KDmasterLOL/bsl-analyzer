@@ -622,6 +622,11 @@ impl<'a> DiagnosticsContext<'a> {
             return Some(vfs_path.as_path().to_string_lossy().to_string());
         }
 
+        // Medium path: use provider (for streaming mode)
+        if let Some(provider) = self.provider {
+            return provider.file_path(self.file_id);
+        }
+
         // Slow path: go through Salsa (for tests without FileSet)
         self.file_path_via_salsa()
     }
@@ -821,6 +826,54 @@ impl<'a> DiagnosticsContext<'a> {
         }
         self.db.module_data(module_id)
     }
+
+    /// Get parsed documentation for a method.
+    ///
+    /// Extracts and parses leading comments (lines starting with //)
+    /// before a procedure or function definition.
+    pub fn method_docs(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<std::sync::Arc<hir_def::docs::MethodDocs>> {
+        if let Some(provider) = self.provider {
+            return provider.method_docs(method_id);
+        }
+        self.db.method_docs(method_id)
+    }
+
+    /// Get reaching definitions for a specific method.
+    ///
+    /// Returns `None` if analysis doesn't converge.
+    pub fn reaching_definitions(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<std::sync::Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+        if let Some(provider) = self.provider {
+            return provider.reaching_definitions(method_id);
+        }
+        self.db.reaching_definitions(method_id)
+    }
+
+    /// Resolve VfsPath to FileId.
+    ///
+    /// Used for finding metadata files given their URI from Configuration.
+    /// IMPORTANT: This method uses ctx.file_set for fast path when available.
+    pub fn resolve_vfs_path(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        vfs_path: &vfs::VfsPath,
+    ) -> Option<vfs::FileId> {
+        // Fast path: use provided FileSet (bypasses Salsa)
+        if let Some(file_set) = self.file_set {
+            return file_set.file_for_path(vfs_path).copied();
+        }
+
+        // Slow path: delegate to provider/db
+        if let Some(provider) = self.provider {
+            return provider.resolve_vfs_path(source_root_id, vfs_path);
+        }
+        self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
 }
 
 /// Helper to run a diagnostic and log if it's slow (>80ms)
@@ -914,12 +967,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Text-based diagnostics (single AST pass)
     result.extend(collect_text_diagnostics(ctx));
 
-    // STREAMING MODE: Skip diagnostics that use unmigrated db methods
-    // Handlers using ctx.db.file_source_root_input, ctx.db.resolve_vfs_path, etc.
-    // need additional AnalysisProvider methods before they can work in streaming mode
-    if ctx.provider.is_some() {
-        return result;
-    }
+    // All handlers migrated - streaming mode supports all diagnostics!
 
     // Tier 1: Syntax diagnostics (TODO: migrate to collect_text_diagnostics)
     // result.extend(run_diagnostic("BadWords", ctx, handlers::bad_words::check));

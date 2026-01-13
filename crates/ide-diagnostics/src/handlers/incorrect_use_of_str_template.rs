@@ -95,7 +95,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let method_id = MethodId { module: module_id, local_id };
 
         // Get reaching definitions for this method
-        let reaching_defs = match ctx.db.reaching_definitions(method_id) {
+        let reaching_defs = match ctx.reaching_definitions(method_id) {
             Some(defs) => defs,
             None => continue, // Analysis didn't converge, skip
         };
