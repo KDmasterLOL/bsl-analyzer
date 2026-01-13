@@ -641,6 +641,7 @@ mod tests {
             db: db.as_ref(),
             config: &config,
             file_id,
+            provider: None,
             workspace_root: None,
             configuration_path: None,
             configuration_path_input: None,

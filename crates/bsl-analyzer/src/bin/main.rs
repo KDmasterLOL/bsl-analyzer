@@ -344,6 +344,7 @@ fn analyze(
                 db: db_snapshot,
                 config: &config,
                 file_id: *file_id,
+                provider: None,
                 workspace_root: Some(&source_dir_arc),
                 configuration_path: configuration_path_arc.as_deref(),
                 configuration_path_input: config_path_input,
