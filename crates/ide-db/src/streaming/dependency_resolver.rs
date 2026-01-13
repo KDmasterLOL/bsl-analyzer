@@ -23,11 +23,12 @@
 use std::sync::Arc;
 
 use hir_def::{ItemTree, ModuleId, SymbolTree};
+use syntax::Parse;
 use vfs::FileId;
 
 use crate::provider::AnalysisProvider;
 
-use super::shared_state::{ClaimResult, ProcessError, SharedState};
+use super::shared_state::{ClaimResult, ParsedFile, ProcessError, SharedState};
 
 /// Get or process a SymbolTree for the target file.
 ///
@@ -82,7 +83,7 @@ pub fn get_or_process_symbol_tree(
             // We claimed it - process Phase 1 only (SymbolTree)
             process_symbol_tree_only(target_file, provider, shared_state)?;
         }
-        ClaimResult::ByOther => {
+        ClaimResult::ByOther | ClaimResult::NotReady => {
             tracing::debug!(target_file = ?target_file, "Waiting for other worker to finish");
             // Another worker is processing - wait for SymbolTree
             shared_state.wait_for_symbol_tree(target_file)?;
@@ -134,23 +135,23 @@ fn process_symbol_tree_only(
 ) -> Result<(), ProcessError> {
     let _span = tracing::debug_span!("process_symbol_tree_only", ?file_id).entered();
 
-    // Read file text
-    let text = provider.file_text(file_id);
+    // Read file text ONCE
+    let text: Arc<str> = Arc::from(provider.file_text(file_id));
 
     if text.is_empty() {
         tracing::warn!(file_id = ?file_id, "Empty file in recursive processing");
     }
 
-    // Parse to AST
-    let parse = provider.parse(file_id);
+    // Parse to AST ONCE
+    let parse: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text));
     if parse.has_errors() {
         let errors: Vec<_> = parse.errors().iter().take(3).map(|e| e.to_string()).collect();
         tracing::warn!(file_id = ?file_id, errors = ?errors, "Parse errors in recursive processing");
         // Continue - we can still build ItemTree from partial AST
     }
 
-    // Lower to ItemTree (signatures only, no dependencies)
-    let item_tree: Arc<ItemTree> = provider.item_tree(file_id);
+    // Lower to ItemTree (signatures only, no dependencies) ONCE
+    let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
     tracing::trace!(
         file_id = ?file_id,
         num_procedures = item_tree.procedures().count(),
@@ -158,14 +159,19 @@ fn process_symbol_tree_only(
         "ItemTree built in recursive processing"
     );
 
+    // Cache ParsedFile for Phase 2 (diagnostics will need it later)
+    let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
+    shared_state.cache_parsed_file(file_id, parsed_file);
+
     // Build SymbolTree from ItemTree
     let module_id = ModuleId::new(file_id);
     let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
 
     // Publish to SharedState (this atomically makes it visible to other threads)
+    // Status stays SymbolTreeReady (not Completed) - Phase 2 still needed
     shared_state.publish_symbol_tree(file_id, symbol_tree);
 
-    tracing::debug!(file_id = ?file_id, "SymbolTree published in recursive processing");
+    tracing::debug!(file_id = ?file_id, "SymbolTree published in recursive processing (Phase 2 pending)");
 
     Ok(())
 }

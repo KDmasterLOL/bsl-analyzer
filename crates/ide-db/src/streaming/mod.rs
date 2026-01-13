@@ -29,4 +29,4 @@ pub use dependency_resolver::get_or_process_symbol_tree;
 pub use file_reader::FileReader;
 pub use global_context::GlobalContext;
 pub use provider::StreamingProvider;
-pub use shared_state::{ClaimResult, FileStatus, ProcessError, SharedState};
+pub use shared_state::{ClaimResult, FileStatus, ParsedFile, ProcessError, SharedState};

@@ -15,22 +15,32 @@ use crate::metadata::get_module_type_from_uri;
 use crate::provider::AnalysisProvider;
 
 use super::global_context::GlobalContext;
+use super::shared_state::SharedState;
 
 /// Streaming analysis provider.
 ///
 /// Implements `AnalysisProvider` by:
 /// - Using `GlobalContext` for shared data (configuration, symbol trees)
-/// - Computing per-file data on-the-fly (parse, HIR)
-/// - NOT caching per-file data
+/// - Using `SharedState` for per-file cache (parse, item_tree) during processing
+/// - Computing on-the-fly when cache miss
 pub struct StreamingProvider {
     /// Shared global context.
     global: Arc<GlobalContext>,
+
+    /// Optional shared state for caching.
+    /// When Some, provider checks cache first for parse/item_tree.
+    shared_state: Option<Arc<SharedState>>,
 }
 
 impl StreamingProvider {
     /// Create a new StreamingProvider with the given global context.
     pub fn new(global: Arc<GlobalContext>) -> Self {
-        Self { global }
+        Self { global, shared_state: None }
+    }
+
+    /// Create a new StreamingProvider with shared state for caching.
+    pub fn with_shared_state(global: Arc<GlobalContext>, shared_state: Arc<SharedState>) -> Self {
+        Self { global, shared_state: Some(shared_state) }
     }
 
     /// Get the global context.
@@ -57,30 +67,73 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     // ========================================================================
-    // Per-file Data (computed on-the-fly)
+    // Per-file Data (cached via SharedState or computed on-the-fly)
     // ========================================================================
 
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode> {
-        let text = self.global.file_reader.read(file_id).unwrap_or_default();
+        // Check cache first
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(file_id) {
+                return (*parsed.parse).clone();
+            }
+        }
+
+        // Cache miss - parse from disk
+        // Use SharedState's file_reader if available (for tracking), otherwise global's
+        let text = if let Some(ref shared_state) = self.shared_state {
+            shared_state.file_reader().read(file_id).unwrap_or_default()
+        } else {
+            self.global.file_reader.read(file_id).unwrap_or_default()
+        };
         parser::parse(&text)
     }
 
     fn file_text(&self, file_id: FileId) -> String {
-        self.global.file_reader.read(file_id).unwrap_or_default()
+        // Check cache first
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(file_id) {
+                return parsed.text.to_string();
+            }
+        }
+
+        // Cache miss - read from disk
+        // Use SharedState's file_reader if available (for tracking), otherwise global's
+        if let Some(ref shared_state) = self.shared_state {
+            shared_state.file_reader().read(file_id).unwrap_or_default()
+        } else {
+            self.global.file_reader.read(file_id).unwrap_or_default()
+        }
     }
 
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
+        // Check cache first
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(file_id) {
+                return Arc::clone(&parsed.item_tree);
+            }
+        }
+
+        // Cache miss - build from parse
         let parse = self.parse(file_id);
         Arc::new(ItemTree::from_parse(&parse))
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
-        // Use pre-built symbol tree from global context if available
-        self.global.symbol_trees.get(&module_id.file_id).cloned().unwrap_or_else(|| {
-            // Build on-the-fly if not pre-built
-            let item_tree = self.item_tree(module_id.file_id);
-            Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
-        })
+        // Check SharedState first (published during streaming processing)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(tree) = shared_state.get_symbol_tree(module_id.file_id) {
+                return tree;
+            }
+        }
+
+        // Check pre-built symbol tree from global context
+        if let Some(tree) = self.global.symbol_trees.get(&module_id.file_id) {
+            return tree.clone();
+        }
+
+        // Build on-the-fly if not available
+        let item_tree = self.item_tree(module_id.file_id);
+        Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {

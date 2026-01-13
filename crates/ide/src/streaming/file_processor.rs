@@ -8,11 +8,12 @@
 use std::sync::Arc;
 
 use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree};
+use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
 // Import from ide-db (infrastructure layer)
 use ide_db::provider::AnalysisProvider;
-use ide_db::streaming::{ProcessError, SharedState};
+use ide_db::streaming::{ParsedFile, ProcessError, SharedState};
 
 // Import from ide-diagnostics (NOW POSSIBLE!)
 use ide_diagnostics::DiagnosticsConfig;
@@ -71,10 +72,12 @@ impl<'a> FileProcessor<'a> {
     pub fn process_file(&self, file_id: FileId) -> FileResult {
         let _span = tracing::info_span!("process_file", ?file_id).entered();
 
-        // Phase 1: Build and publish SymbolTree
-        match self.build_and_publish_symbol_tree(file_id) {
+        // Phase 1: Build SymbolTree and start diagnostics atomically
+        // Uses publish_symbol_tree_and_start_diagnostics to skip SymbolTreeReady state
+        // This prevents second pass from grabbing this file
+        match self.build_symbol_tree_and_start_diagnostics(file_id) {
             Ok(()) => {
-                tracing::debug!(file_id = ?file_id, "SymbolTree published");
+                tracing::debug!(file_id = ?file_id, "SymbolTree published, diagnostics started");
             }
             Err(err) => {
                 tracing::error!(file_id = ?file_id, error = %err, "Failed to build SymbolTree");
@@ -87,14 +90,43 @@ impl<'a> FileProcessor<'a> {
             }
         }
 
-        // Phase 2: Collect diagnostics (NOW IMPLEMENTED!)
+        // Phase 2: Collect diagnostics (status already DiagnosticsInProgress)
         let diagnostics = self.collect_diagnostics(file_id);
 
-        // Phase 3: Cleanup (automatic via drop of local variables)
-        // AST, ItemTree, and other temporary data released here
+        // Phase 3: Cleanup - release cached ParsedFile
+        self.shared_state.remove_parsed_file(file_id);
 
         self.shared_state.mark_completed(file_id);
         tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "File processing completed");
+
+        FileResult { file_id, diagnostics, error: None }
+    }
+
+    /// Process diagnostics only (Phase 2) for a file that already has SymbolTree.
+    ///
+    /// This is used in the second pass to process files that were resolved
+    /// recursively via dependency_resolver (they only had Phase 1 done).
+    ///
+    /// Pre-conditions:
+    /// - SymbolTree already published
+    /// - ParsedFile cached from Phase 1
+    /// - file_status == FileStatus::DiagnosticsInProgress
+    ///
+    /// Post-conditions:
+    /// - Diagnostics collected
+    /// - ParsedFile removed from cache
+    /// - file_status == FileStatus::Completed
+    pub fn process_diagnostics_only(&self, file_id: FileId) -> FileResult {
+        let _span = tracing::info_span!("process_diagnostics_only", ?file_id).entered();
+
+        // Phase 2: Collect diagnostics
+        let diagnostics = self.collect_diagnostics(file_id);
+
+        // Phase 3: Cleanup - release cached ParsedFile
+        self.shared_state.remove_parsed_file(file_id);
+
+        self.shared_state.mark_completed(file_id);
+        tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "Diagnostics-only processing completed");
 
         FileResult { file_id, diagnostics, error: None }
     }
@@ -107,33 +139,39 @@ impl<'a> FileProcessor<'a> {
     /// - Lower to ItemTree (signatures only)
     /// - Build SymbolTree from ItemTree
     /// - Publish to SharedState
+    /// - Cache ParsedFile for Phase 2
     ///
     /// Pre-conditions:
     /// - file_id claimed via SharedState.try_claim()
     ///
     /// Post-conditions:
     /// - SymbolTree published to SharedState
+    /// - ParsedFile cached in SharedState
     /// - file_status == FileStatus::SymbolTreeReady
+    ///
+    /// Note: This method transitions to SymbolTreeReady which can be grabbed
+    /// by second pass. For full-cycle processing, use build_symbol_tree_and_start_diagnostics.
+    #[cfg(test)]
     fn build_and_publish_symbol_tree(&self, file_id: FileId) -> Result<(), ProcessError> {
         let _span = tracing::debug_span!("build_symbol_tree", ?file_id).entered();
 
-        // Read file text
-        let text = self.provider.file_text(file_id);
+        // Read file text ONCE
+        let text: Arc<str> = Arc::from(self.provider.file_text(file_id));
 
         if text.is_empty() {
             tracing::warn!(file_id = ?file_id, "Empty file");
         }
 
-        // Parse to AST
-        let parse = self.provider.parse(file_id);
+        // Parse to AST ONCE
+        let parse: Arc<Parse<SyntaxNode>> = Arc::new(parser::parse(&text));
         if parse.has_errors() {
             let errors: Vec<_> = parse.errors().iter().take(3).map(|e| e.to_string()).collect();
             tracing::warn!(file_id = ?file_id, errors = ?errors, "Parse errors");
             // Continue - we can still build ItemTree from partial AST
         }
 
-        // Lower to ItemTree (signatures only, no dependencies)
-        let item_tree: Arc<ItemTree> = self.provider.item_tree(file_id);
+        // Lower to ItemTree (signatures only, no dependencies) ONCE
+        let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
         tracing::trace!(
             file_id = ?file_id,
             num_procedures = item_tree.procedures().count(),
@@ -141,12 +179,66 @@ impl<'a> FileProcessor<'a> {
             "ItemTree built"
         );
 
+        // Cache ParsedFile for Phase 2
+        let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
+        self.shared_state.cache_parsed_file(file_id, parsed_file);
+
         // Build SymbolTree from ItemTree
         let module_id = ModuleId::new(file_id);
         let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
 
         // Publish to SharedState
         self.shared_state.publish_symbol_tree(file_id, symbol_tree);
+
+        Ok(())
+    }
+
+    /// Phase 1 variant for full-cycle processing.
+    ///
+    /// Same as build_and_publish_symbol_tree, but transitions directly to
+    /// DiagnosticsInProgress to prevent second pass from grabbing this file.
+    ///
+    /// Post-conditions:
+    /// - SymbolTree published to SharedState
+    /// - ParsedFile cached in SharedState
+    /// - file_status == FileStatus::DiagnosticsInProgress (NOT SymbolTreeReady)
+    fn build_symbol_tree_and_start_diagnostics(&self, file_id: FileId) -> Result<(), ProcessError> {
+        let _span = tracing::debug_span!("build_symbol_tree", ?file_id).entered();
+
+        // Read file text ONCE
+        let text: Arc<str> = Arc::from(self.provider.file_text(file_id));
+
+        if text.is_empty() {
+            tracing::warn!(file_id = ?file_id, "Empty file");
+        }
+
+        // Parse to AST ONCE
+        let parse: Arc<Parse<SyntaxNode>> = Arc::new(parser::parse(&text));
+        if parse.has_errors() {
+            let errors: Vec<_> = parse.errors().iter().take(3).map(|e| e.to_string()).collect();
+            tracing::warn!(file_id = ?file_id, errors = ?errors, "Parse errors");
+        }
+
+        // Lower to ItemTree ONCE
+        let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
+        tracing::trace!(
+            file_id = ?file_id,
+            num_procedures = item_tree.procedures().count(),
+            num_functions = item_tree.functions().count(),
+            "ItemTree built"
+        );
+
+        // Cache ParsedFile for Phase 2
+        let parsed_file = Arc::new(ParsedFile { text, parse, item_tree: Arc::clone(&item_tree) });
+        self.shared_state.cache_parsed_file(file_id, parsed_file);
+
+        // Build SymbolTree from ItemTree
+        let module_id = ModuleId::new(file_id);
+        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+        // Publish and immediately transition to DiagnosticsInProgress
+        // This prevents second pass from grabbing this file
+        self.shared_state.publish_symbol_tree_and_start_diagnostics(file_id, symbol_tree);
 
         Ok(())
     }

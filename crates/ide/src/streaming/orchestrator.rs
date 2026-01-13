@@ -175,7 +175,10 @@ impl AnalysisOrchestrator {
         // Phase 2: Create SharedState and spawn workers
         let sorted_files = self.sort_files_by_priority(files);
         let shared_state = SharedState::new(global_context.as_ref().clone(), sorted_files.clone());
-        let provider = Arc::new(StreamingProvider::new(global_context));
+        let provider = Arc::new(StreamingProvider::with_shared_state(
+            global_context,
+            Arc::clone(&shared_state),
+        ));
 
         // Load diagnostics configuration (default for now - CLI will load from file)
         let config = Arc::new(DiagnosticsConfig::default());

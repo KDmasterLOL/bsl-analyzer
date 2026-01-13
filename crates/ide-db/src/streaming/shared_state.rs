@@ -8,16 +8,39 @@ use std::sync::Arc;
 
 use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
-use hir_def::{ModuleIndex, SymbolTree, WorkspaceSymbols};
+use hir_def::{ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxBuildHasher;
+use syntax::{Parse, SyntaxNode};
 use vfs::{file_set::FileSet, FileId};
 
 use super::{FileReader, GlobalContext};
 
+/// Cached parsed file data.
+///
+/// Contains text, AST and ItemTree for a file.
+/// This cache eliminates redundant parsing during:
+/// - Phase 1: item_tree() no longer re-parses
+/// - Phase 2: diagnostics collection reuses parsed data
+///
+/// Memory: ~10-50 KB per file (depends on file size)
+/// Lifecycle: Created in Phase 1, removed after Phase 2
+#[derive(Debug)]
+pub struct ParsedFile {
+    /// Original source text (needed for diagnostics output conversion).
+    pub text: Arc<str>,
+
+    /// Parsed AST (green tree + errors).
+    pub parse: Arc<Parse<SyntaxNode>>,
+
+    /// ItemTree (method signatures, no bodies).
+    pub item_tree: Arc<ItemTree>,
+}
+
 /// File processing status - single source of truth.
 ///
-/// Transitions are monotonic: NotStarted → Parsing → SymbolTreeReady → Completed
+/// Transitions are monotonic:
+/// NotStarted → Parsing → SymbolTreeReady → DiagnosticsInProgress → Completed
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum FileStatus {
@@ -29,12 +52,16 @@ pub enum FileStatus {
     Parsing = 1,
 
     /// SymbolTree has been published to shared cache.
-    /// Worker is now computing diagnostics.
+    /// File may need Phase 2 (diagnostics) if processed recursively.
     SymbolTreeReady = 2,
 
+    /// Worker is computing diagnostics for this file.
+    /// Used to prevent double-claiming during Phase 2 pass.
+    DiagnosticsInProgress = 3,
+
     /// File processing completely finished.
-    /// All resources released.
-    Completed = 3,
+    /// All resources released, cache cleared.
+    Completed = 4,
 }
 
 impl FileStatus {
@@ -44,7 +71,8 @@ impl FileStatus {
             0 => Some(FileStatus::NotStarted),
             1 => Some(FileStatus::Parsing),
             2 => Some(FileStatus::SymbolTreeReady),
-            3 => Some(FileStatus::Completed),
+            3 => Some(FileStatus::DiagnosticsInProgress),
+            4 => Some(FileStatus::Completed),
             _ => None,
         }
     }
@@ -61,6 +89,9 @@ pub enum ClaimResult {
 
     /// File already completed (race condition).
     AlreadyDone,
+
+    /// File not ready for this operation (wrong status).
+    NotReady,
 }
 
 /// Error during file processing.
@@ -128,6 +159,15 @@ pub struct SharedState {
     /// Lifetime: Populated during Phase 1, kept until analysis completes.
     symbol_trees: Arc<DashMap<FileId, Arc<SymbolTree>, FxBuildHasher>>,
 
+    // === PARSED FILE CACHE (concurrent hashmap) ===
+    /// Cache of parsed files for avoiding redundant parsing.
+    /// Memory: ~10-50 KB per file (depends on file size).
+    /// Lifecycle:
+    /// - Populated during Phase 1 (build_and_publish_symbol_tree)
+    /// - Consumed during Phase 2 (diagnostics collection)
+    /// - Removed after Phase 2 completion (mark_completed)
+    parsed_files: DashMap<FileId, Arc<ParsedFile>, FxBuildHasher>,
+
     // === WORK QUEUE (lock-free work stealing) ===
     /// Pre-sorted list of files to process.
     /// Order: CommonModules first (Server→CallServer→ClientServer→Client),
@@ -189,6 +229,8 @@ impl SharedState {
                 FxBuildHasher,
                 16, // Shard count for concurrent access
             )),
+
+            parsed_files: DashMap::with_hasher_and_shard_amount(FxBuildHasher, 16),
 
             sorted_files: Arc::new(sorted_files),
             next_file_idx: CachePadded::new(AtomicUsize::new(0)),
@@ -262,8 +304,8 @@ impl SharedState {
 
             match self.try_claim(file_id) {
                 ClaimResult::ByUs => return Some(file_id),
-                ClaimResult::ByOther | ClaimResult::AlreadyDone => {
-                    // Another worker got it first, try next file
+                ClaimResult::ByOther | ClaimResult::AlreadyDone | ClaimResult::NotReady => {
+                    // Another worker got it first or file not ready, try next file
                     continue;
                 }
             }
@@ -300,6 +342,33 @@ impl SharedState {
         self.condvars[idx].notify_all();
     }
 
+    /// Publish SymbolTree and immediately transition to DiagnosticsInProgress.
+    ///
+    /// This is used by full-cycle processing (process_file) to avoid the
+    /// intermediate SymbolTreeReady state that could be grabbed by the second pass.
+    ///
+    /// Transitions: Parsing → DiagnosticsInProgress (skips SymbolTreeReady)
+    ///
+    /// The SymbolTree is still published and available for other threads waiting.
+    pub fn publish_symbol_tree_and_start_diagnostics(
+        &self,
+        file_id: FileId,
+        tree: Arc<SymbolTree>,
+    ) {
+        let idx = file_id.index() as usize;
+
+        // Insert into concurrent hashmap (internally synchronized)
+        self.symbol_trees.insert(file_id, tree);
+
+        // Mark as DiagnosticsInProgress directly (Parsing → DiagnosticsInProgress)
+        // This skips SymbolTreeReady to prevent second pass from grabbing it
+        self.file_statuses[idx].store(FileStatus::DiagnosticsInProgress as u8, Ordering::SeqCst);
+
+        // Wake all threads waiting for this SymbolTree
+        // (is_symbol_tree_ready checks >= SymbolTreeReady, so DiagnosticsInProgress works)
+        self.condvars[idx].notify_all();
+    }
+
     /// Get published SymbolTree if available.
     pub fn get_symbol_tree(&self, file_id: FileId) -> Option<Arc<SymbolTree>> {
         self.symbol_trees.get(&file_id).map(|r| r.clone())
@@ -312,6 +381,47 @@ impl SharedState {
     pub fn is_symbol_tree_ready(&self, file_id: FileId) -> bool {
         let idx = file_id.index() as usize;
         self.file_statuses[idx].load(Ordering::SeqCst) >= FileStatus::SymbolTreeReady as u8
+    }
+
+    // ========================================================================
+    // Parsed File Cache
+    // ========================================================================
+
+    /// Store parsed file data in cache.
+    ///
+    /// Called after Phase 1 parsing, before SymbolTree publish.
+    /// Data will be used by Phase 2 and then removed.
+    pub fn cache_parsed_file(&self, file_id: FileId, parsed: Arc<ParsedFile>) {
+        self.parsed_files.insert(file_id, parsed);
+    }
+
+    /// Get cached parsed file data.
+    ///
+    /// Returns None if not cached (should not happen in normal flow).
+    pub fn get_parsed_file(&self, file_id: FileId) -> Option<Arc<ParsedFile>> {
+        self.parsed_files.get(&file_id).map(|r| r.clone())
+    }
+
+    /// Remove parsed file from cache.
+    ///
+    /// Called after Phase 2 completion to free memory.
+    /// Critical for memory management - AST can be large.
+    pub fn remove_parsed_file(&self, file_id: FileId) {
+        self.parsed_files.remove(&file_id);
+    }
+
+    /// Get the number of cached ParsedFile entries.
+    ///
+    /// For testing: verify cache is cleared after processing.
+    pub fn parsed_cache_len(&self) -> usize {
+        self.parsed_files.len()
+    }
+
+    /// Check if a file has a cached ParsedFile.
+    ///
+    /// For testing: verify specific file is in/out of cache.
+    pub fn has_parsed_file(&self, file_id: FileId) -> bool {
+        self.parsed_files.contains_key(&file_id)
     }
 
     // ========================================================================
@@ -385,6 +495,49 @@ impl SharedState {
     }
 
     // ========================================================================
+    // Phase 2 (Diagnostics) Claiming
+    // ========================================================================
+
+    /// Try to claim a file for Phase 2 (diagnostics) processing.
+    ///
+    /// Only claims files in SymbolTreeReady status.
+    /// Used during the second pass to process recursively-resolved files.
+    ///
+    /// Returns ClaimResult::ByUs if transition SymbolTreeReady → DiagnosticsInProgress succeeded.
+    pub fn try_claim_for_diagnostics(&self, file_id: FileId) -> ClaimResult {
+        let idx = file_id.index() as usize;
+
+        match self.file_statuses[idx].compare_exchange(
+            FileStatus::SymbolTreeReady as u8,
+            FileStatus::DiagnosticsInProgress as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => ClaimResult::ByUs,
+            Err(current) => {
+                if current >= FileStatus::Completed as u8 {
+                    ClaimResult::AlreadyDone
+                } else if current == FileStatus::DiagnosticsInProgress as u8 {
+                    ClaimResult::ByOther
+                } else {
+                    // NotStarted, Parsing - file not ready for Phase 2 yet
+                    ClaimResult::NotReady
+                }
+            }
+        }
+    }
+
+    /// Get number of files (for iteration in second pass).
+    pub fn num_files(&self) -> usize {
+        self.sorted_files.len()
+    }
+
+    /// Get file ID by index (for iteration in second pass).
+    pub fn file_id_at(&self, idx: usize) -> Option<FileId> {
+        self.sorted_files.get(idx).copied()
+    }
+
+    // ========================================================================
     // Global Context Access
     // ========================================================================
 
@@ -442,8 +595,11 @@ mod tests {
         // Parsing → SymbolTreeReady
         assert!(FileStatus::Parsing < FileStatus::SymbolTreeReady);
 
-        // SymbolTreeReady → Completed
-        assert!(FileStatus::SymbolTreeReady < FileStatus::Completed);
+        // SymbolTreeReady → DiagnosticsInProgress
+        assert!(FileStatus::SymbolTreeReady < FileStatus::DiagnosticsInProgress);
+
+        // DiagnosticsInProgress → Completed
+        assert!(FileStatus::DiagnosticsInProgress < FileStatus::Completed);
     }
 
     #[test]
@@ -575,5 +731,127 @@ mod tests {
 
         // Check error recorded
         assert_eq!(state.failed_files.get(&file_id).unwrap().as_ref(), "Test error");
+    }
+
+    #[test]
+    fn test_cache_parsed_file() {
+        use crate::hir_def::ItemTree;
+        use syntax::Parse;
+
+        let state = create_test_state(10);
+        let file_id = FileId(0);
+
+        // Create minimal ParsedFile
+        let text: Arc<str> = Arc::from("Процедура Тест() КонецПроцедуры");
+        let parse: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text));
+        let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
+
+        let parsed = Arc::new(ParsedFile { text: text.clone(), parse, item_tree });
+
+        // Cache it
+        state.cache_parsed_file(file_id, Arc::clone(&parsed));
+
+        // Get it back
+        let retrieved = state.get_parsed_file(file_id);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().text.as_ref(), text.as_ref());
+
+        // Remove it
+        state.remove_parsed_file(file_id);
+        assert!(state.get_parsed_file(file_id).is_none());
+    }
+
+    #[test]
+    fn test_try_claim_for_diagnostics() {
+        use crate::hir_def::{ItemTree, ModuleId, SymbolTree};
+        use syntax::Parse;
+
+        let state = create_test_state(10);
+        let file_id = FileId(0);
+
+        // Cannot claim for diagnostics if NotStarted
+        assert_eq!(state.try_claim_for_diagnostics(file_id), ClaimResult::NotReady);
+
+        // Claim and process to SymbolTreeReady
+        state.try_claim(file_id);
+
+        // Build minimal SymbolTree
+        let text = "Процедура Тест() КонецПроцедуры";
+        let parse: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(text));
+        let item_tree = ItemTree::from_parse(&parse);
+        let module_id = ModuleId::new(file_id);
+        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+
+        state.publish_symbol_tree(file_id, symbol_tree);
+
+        // Now we can claim for diagnostics
+        assert_eq!(state.try_claim_for_diagnostics(file_id), ClaimResult::ByUs);
+        assert_eq!(state.file_status(file_id), FileStatus::DiagnosticsInProgress);
+
+        // Second claim should fail
+        assert_eq!(state.try_claim_for_diagnostics(file_id), ClaimResult::ByOther);
+    }
+
+    #[test]
+    fn test_num_files_and_file_id_at() {
+        let state = create_test_state(5);
+
+        assert_eq!(state.num_files(), 5);
+        assert_eq!(state.file_id_at(0), Some(FileId(0)));
+        assert_eq!(state.file_id_at(4), Some(FileId(4)));
+        assert_eq!(state.file_id_at(5), None);
+    }
+
+    #[test]
+    fn test_cache_lifecycle() {
+        use crate::hir_def::ItemTree;
+        use syntax::Parse;
+
+        let state = create_test_state(3);
+        let file_0 = FileId(0);
+        let file_1 = FileId(1);
+
+        // Initially cache is empty
+        assert_eq!(state.parsed_cache_len(), 0);
+        assert!(!state.has_parsed_file(file_0));
+        assert!(!state.has_parsed_file(file_1));
+
+        // Cache first file
+        let text_0: Arc<str> = Arc::from("Процедура Тест0() КонецПроцедуры");
+        let parse_0: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_0));
+        let item_tree_0: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_0));
+        let parsed_0 =
+            Arc::new(ParsedFile { text: text_0, parse: parse_0, item_tree: item_tree_0 });
+        state.cache_parsed_file(file_0, parsed_0);
+
+        // Verify cache state after first file
+        assert_eq!(state.parsed_cache_len(), 1);
+        assert!(state.has_parsed_file(file_0));
+        assert!(!state.has_parsed_file(file_1));
+
+        // Cache second file
+        let text_1: Arc<str> = Arc::from("Процедура Тест1() КонецПроцедуры");
+        let parse_1: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_1));
+        let item_tree_1: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_1));
+        let parsed_1 =
+            Arc::new(ParsedFile { text: text_1, parse: parse_1, item_tree: item_tree_1 });
+        state.cache_parsed_file(file_1, parsed_1);
+
+        // Verify cache state after second file
+        assert_eq!(state.parsed_cache_len(), 2);
+        assert!(state.has_parsed_file(file_0));
+        assert!(state.has_parsed_file(file_1));
+
+        // Remove first file from cache
+        state.remove_parsed_file(file_0);
+        assert_eq!(state.parsed_cache_len(), 1);
+        assert!(!state.has_parsed_file(file_0));
+        assert!(state.has_parsed_file(file_1));
+
+        // Remove second file from cache
+        state.remove_parsed_file(file_1);
+        assert_eq!(state.parsed_cache_len(), 0);
+        assert!(!state.has_parsed_file(file_0));
+        assert!(!state.has_parsed_file(file_1));
     }
 }
