@@ -45,6 +45,10 @@ pub struct ParsedFile {
     /// Lazily computed CFGs for all methods.
     /// Computed on first access during Phase 2 (requires module_bodies).
     module_cfgs: OnceLock<Arc<cfg::ModuleCfgs>>,
+
+    /// Lazily computed SDBL HIR for all queries.
+    /// Computed on first access during Phase 2 (requires configuration for type inference).
+    sdbl_hir: OnceLock<crate::SdblHirEntries>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -54,6 +58,7 @@ impl std::fmt::Debug for ParsedFile {
             .field("module_id", &self.module_id)
             .field("has_bodies", &self.module_bodies.get().is_some())
             .field("has_cfgs", &self.module_cfgs.get().is_some())
+            .field("has_sdbl_hir", &self.sdbl_hir.get().is_some())
             .finish()
     }
 }
@@ -73,6 +78,7 @@ impl ParsedFile {
             module_id,
             module_bodies: OnceLock::new(),
             module_cfgs: OnceLock::new(),
+            sdbl_hir: OnceLock::new(),
         }
     }
 
@@ -107,6 +113,62 @@ impl ParsedFile {
                 }
 
                 Arc::new(cfg::ModuleCfgs::new(cfgs))
+            })
+            .clone()
+    }
+
+    /// Get or compute SDBL HIR for all queries in file.
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Requires configuration for metadata-based type inference.
+    ///
+    /// # Arguments
+    /// * `configuration` - Optional 1C configuration metadata for type inference
+    pub fn sdbl_hir(
+        &self,
+        configuration: Option<&Arc<bsl_metadata::Configuration>>,
+    ) -> crate::SdblHirEntries {
+        self.sdbl_hir
+            .get_or_init(|| {
+                let module_bodies = self.module_bodies();
+                let config_ref = configuration.map(|c| c.as_ref());
+
+                // Collect queries with position for sorting
+                let mut queries_with_pos: Vec<_> = Vec::new();
+
+                // Collect from method bodies
+                for (_local_id, body) in module_bodies.iter_bodies() {
+                    for (expr_id, query_info) in body.sdbl_exprs() {
+                        if let Some(ref sdbl_ast) = query_info.query_ast {
+                            let pos = query_info.bsl_literal_range.start();
+                            queries_with_pos.push((pos, *expr_id, sdbl_ast.clone()));
+                        }
+                    }
+                }
+
+                // Collect from module-level code
+                if let Some(module_code) = module_bodies.module_code() {
+                    for (expr_id, query_info) in module_code.sdbl_exprs() {
+                        if let Some(ref sdbl_ast) = query_info.query_ast {
+                            let pos = query_info.bsl_literal_range.start();
+                            queries_with_pos.push((pos, *expr_id, sdbl_ast.clone()));
+                        }
+                    }
+                }
+
+                // Sort by position for deterministic output
+                queries_with_pos.sort_by_key(|(pos, _, _)| *pos);
+
+                // Lower to HIR
+                let result: Vec<_> = queries_with_pos
+                    .into_iter()
+                    .map(|(_, expr_id, sdbl_ast)| {
+                        let sdbl_package = sdbl_hir::lower_sdbl_to_hir(&sdbl_ast, config_ref);
+                        (expr_id, Arc::new(sdbl_package))
+                    })
+                    .collect();
+
+                Arc::new(result)
             })
             .clone()
     }

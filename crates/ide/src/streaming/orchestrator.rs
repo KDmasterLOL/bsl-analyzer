@@ -267,10 +267,20 @@ impl AnalysisOrchestrator {
         let workspace_symbols = Arc::new(WorkspaceSymbols::default());
         info!("WorkspaceSymbols built (empty for now)");
 
-        // 5. Build ModuleIndex
-        // TODO: Extract module names from file paths and build proper index
-        let module_index = Arc::new(ide_db::hir_def::ModuleIndex::new());
-        info!("ModuleIndex built (empty for now)");
+        // 5. Build ModuleIndex from file paths (no parsing required)
+        let module_index = {
+            let paths = files.iter().filter_map(|&file_id| {
+                let vfs_path = file_set.path_for_file(&file_id)?;
+                let path_str = vfs_path.as_path().to_str()?;
+                Some((file_id, path_str))
+            });
+            Arc::new(ide_db::hir_def::ModuleIndex::build_from_paths(paths))
+        };
+        info!(
+            common_modules = module_index.common_module_count(),
+            managers = module_index.manager_count(),
+            "ModuleIndex built"
+        );
 
         Ok(Arc::new(GlobalContext {
             configuration,

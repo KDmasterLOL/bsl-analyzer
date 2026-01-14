@@ -336,17 +336,21 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> crate::SdblHirEntries {
-        // Get SDBL queries from BSL HIR
-        let sdbl_queries = self.all_sdbl_in_file(file_id);
+        // Check ParsedFile cache (lazy computation via OnceLock)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(file_id) {
+                let configuration = self.configuration();
+                return parsed.sdbl_hir(configuration.as_ref());
+            }
+        }
 
-        // Try to get configuration for metadata-based type inference
+        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
+        let sdbl_queries = self.all_sdbl_in_file(file_id);
         let configuration = self.configuration();
         let config_ref = configuration.as_deref();
 
-        // Lower each SDBL query to HIR
         let mut result = Vec::with_capacity(sdbl_queries.len());
         for (expr_id, query_info) in sdbl_queries.iter() {
-            // Only lower if we have a parsed AST
             if let Some(ref sdbl_ast) = query_info.query_ast {
                 let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
                 result.push((*expr_id, Arc::new(sdbl_package)));

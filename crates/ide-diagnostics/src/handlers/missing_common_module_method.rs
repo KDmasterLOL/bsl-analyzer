@@ -55,22 +55,21 @@
 //! - MissingCommonModuleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use ide_db::hir_def::resolver::Resolver;
-use ide_db::hir_def::{Name, PathResolution, QualifiedName};
+use ide_db::hir_def::{Name, PathResolution};
 use syntax::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::MissingCommonModuleMethod` is encountered.
 ///
-/// This function validates a qualified call using path resolution:
-/// 1. Constructs QualifiedName from module and method names
-/// 2. Uses Resolver with WorkspaceScope to resolve the qualified path
-/// 3. PathResolution::Method(id) → check if method is exported (via metadata fallback)
-/// 4. PathResolution::Unresolved → method or module doesn't exist
+/// Uses provider-first pattern via `ctx.resolve_qualified_path()` for Clean Architecture
+/// compliance. Domain layer (diagnostics) depends on abstraction (ctx), not implementation (db).
 ///
-/// This approach leverages the new workspace indexing and path resolution infrastructure
-/// from Phases 1-3, providing more accurate diagnostics than metadata-only checking.
+/// ## Resolution Algorithm
+///
+/// 1. Use `ctx.resolve_qualified_path()` which handles provider-first pattern internally
+/// 2. PathResolution::Method(id) → valid exported method, no diagnostic
+/// 3. PathResolution::Unresolved → method or module doesn't exist, emit diagnostic
 pub fn from_hir(
     module: &str,
     method: &str,
@@ -81,15 +80,10 @@ pub fn from_hir(
         return None;
     }
 
-    // Build qualified path
-    let qualified_name = QualifiedName::from_segments([Name::new(module), Name::new(method)]);
-
-    // Create resolver with workspace scope for cross-module resolution
-    let module_id = hir_def::ModuleId::new(ctx.file_id);
-    let resolver = Resolver::with_workspace_scope(module_id);
-
-    // Resolve the qualified path using workspace symbols
-    let resolution = resolver.resolve_path(ctx.db, &qualified_name);
+    // Resolve using DiagnosticsContext helper (provider-first pattern)
+    let module_name = Name::new(module);
+    let method_name = Name::new(method);
+    let resolution = ctx.resolve_qualified_path(&module_name, &method_name);
 
     tracing::trace!(
         module_name = module,
@@ -99,63 +93,28 @@ pub fn from_hir(
     );
 
     match resolution {
-        PathResolution::Method(method_id) => {
-            // Method found - check if it's exported via SymbolTree
-            let method_module_id = method_id.module;
-            let symbol_tree = ctx.symbol_tree_for(method_module_id);
-            let method_name_obj = Name::new(method);
-
-            if let Some(method_sym) = symbol_tree.find_method(&method_name_obj) {
-                if !method_sym.is_export {
-                    // Method exists but not exported
-                    return Some(create_diagnostic_from_hir(
-                        range,
-                        ErrorType::NonExportMethod,
-                        method,
-                        module,
-                    ));
-                }
-            }
-
-            // Valid exported method
+        PathResolution::Method(_) => {
+            // Valid exported method found
             None
         }
         PathResolution::Unresolved(_) => {
-            // Could not resolve - method or module doesn't exist
-            // Conservative approach: report as method not found
-            // (could be module not found, or method not found in existing module)
-            Some(create_diagnostic_from_hir(range, ErrorType::MethodNotFound, method, module))
+            // Could not resolve - method or module doesn't exist, or method not exported
+            Some(create_diagnostic_from_hir(range, method, module))
         }
         _ => None,
     }
 }
 
-/// Error types for MissingCommonModuleMethod diagnostic.
-enum ErrorType {
-    /// Method does not exist in CommonModule
-    MethodNotFound,
-    /// Method exists but is not exported
-    NonExportMethod,
-}
-
-/// Create a diagnostic for a missing or non-export CommonModule method (HIR-based).
+/// Create a diagnostic for a missing CommonModule method (HIR-based).
+///
+/// Note: Both "method not found" and "method not exported" cases result
+/// in Unresolved from resolve_qualified_path. The message covers both.
 fn create_diagnostic_from_hir(
     range: TextRange,
-    error_type: ErrorType,
     method_name: &str,
     module_name: &str,
 ) -> Diagnostic {
-    let message = match error_type {
-        ErrorType::MethodNotFound => {
-            format!("Метод {} общего модуля {} не существует", method_name, module_name)
-        }
-        ErrorType::NonExportMethod => {
-            format!(
-                "Исправьте обращение к закрытому, неэкспортному методу {} общего модуля {}",
-                method_name, module_name
-            )
-        }
-    };
+    let message = format!("Метод {} общего модуля {} не существует", method_name, module_name);
 
     Diagnostic {
         code: DiagnosticCode::MissingCommonModuleMethod,

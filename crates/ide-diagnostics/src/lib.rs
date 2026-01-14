@@ -851,6 +851,15 @@ impl<'a> DiagnosticsContext<'a> {
         self.db.workspace_symbols(source_root_id)
     }
 
+    /// Get module index for cross-module resolution.
+    pub fn module_index(&self) -> std::sync::Arc<hir_def::ModuleIndex> {
+        let source_root_id = self.source_root_id();
+        if let Some(provider) = self.provider {
+            return provider.module_index(source_root_id);
+        }
+        self.db.module_index(source_root_id)
+    }
+
     /// Get module CFGs (batch).
     pub fn module_cfgs(&self) -> std::sync::Arc<cfg::ModuleCfgs> {
         if let Some(provider) = self.provider {
@@ -969,6 +978,52 @@ impl<'a> DiagnosticsContext<'a> {
             return provider.resolve_vfs_path(source_root_id, vfs_path);
         }
         self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
+
+    /// Resolve qualified path (Module.Method) using provider-first pattern.
+    ///
+    /// Enables streaming mode support without direct database access.
+    /// Domain layer (diagnostics) depends on abstraction (ctx), not implementation (db).
+    ///
+    /// ## Algorithm
+    ///
+    /// 1. Get module_index (provider-first)
+    /// 2. Resolve module_name → FileId
+    /// 3. Get symbol_tree for target module
+    /// 4. Find method and check export flag
+    pub fn resolve_qualified_path(
+        &self,
+        module_name: &hir_def::Name,
+        method_name: &hir_def::Name,
+    ) -> hir_def::PathResolution {
+        // 1. Get module_index (provider-first)
+        let module_index = self.module_index();
+
+        // 2. Resolve module name → FileId
+        let target_file_id = match module_index.resolve_common_module(module_name) {
+            Some(id) => id,
+            None => {
+                return hir_def::PathResolution::Unresolved(hir_def::QualifiedName::from_segments(
+                    [module_name.clone(), method_name.clone()],
+                ));
+            }
+        };
+
+        // 3. Get symbol_tree for target module (provider-first via symbol_tree_for)
+        let target_module_id = hir_def::ModuleId::new(target_file_id);
+        let symbol_tree = self.symbol_tree_for(target_module_id);
+
+        // 4. Find method and check export flag
+        if let Some(method_symbol) = symbol_tree.find_method(method_name) {
+            if method_symbol.is_export {
+                return hir_def::PathResolution::Method(method_symbol.id);
+            }
+        }
+
+        hir_def::PathResolution::Unresolved(hir_def::QualifiedName::from_segments([
+            module_name.clone(),
+            method_name.clone(),
+        ]))
     }
 }
 
