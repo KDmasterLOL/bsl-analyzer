@@ -265,33 +265,9 @@ fn analyze_salsa(
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
-    // Load metadata if available
+    // Load metadata if available (for validation/logging, Salsa loads per-file)
+    let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
-    if let Some(ref cfg_path) = configuration_path {
-        tracing::info!("Configuration root: {:?}", cfg_path);
-
-        if cfg_path.exists() {
-            tracing::info!("Loading metadata from {:?}", cfg_path);
-            let metadata_start = Instant::now();
-            match bsl_metadata::load_from_directory(cfg_path) {
-                Ok(config) => {
-                    let metadata_elapsed = metadata_start.elapsed();
-                    tracing::info!(
-                        "Metadata loaded in {:.2?} ({} common modules)",
-                        metadata_elapsed,
-                        config.common_modules().len()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load metadata: {}", e);
-                }
-            }
-        } else {
-            tracing::warn!("Configuration root not found: {:?}", cfg_path);
-        }
-    } else {
-        tracing::info!("No configuration root specified");
-    }
 
     // Create database
     tracing::info!("Creating database");

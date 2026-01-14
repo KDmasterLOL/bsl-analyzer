@@ -229,16 +229,8 @@ impl AnalysisOrchestrator {
 
         info!(num_files = files.len(), "Building GlobalContext");
 
-        // 1. Load configuration (optional)
-        let configuration = if let Some(ref config_path) = self.configuration_path {
-            info!(path = ?config_path, "Loading configuration");
-            // TODO: Load Configuration from JSON
-            // For now, return None
-            None
-        } else {
-            info!("No configuration specified");
-            None
-        };
+        // 1. Load 1C metadata (Configuration.xml, CommonModules, etc.)
+        let configuration = self.load_metadata();
 
         // 2. Create FileReader
         let file_set_arc = Arc::new(file_set.clone());
@@ -318,6 +310,17 @@ impl AnalysisOrchestrator {
 
         // Placeholder: no sorting yet
         files
+    }
+
+    /// Load 1C metadata via ProjectConfig.
+    fn load_metadata(&self) -> Option<Arc<bsl_metadata::Configuration>> {
+        let proj_config = if let Some(ref path) = self.configuration_path {
+            project_model::ProjectConfig::load_from_file(path)
+        } else {
+            project_model::ProjectConfig::load(&self.workspace_root)
+        }?;
+
+        proj_config.load_metadata(&self.workspace_root).map(Arc::new)
     }
 
     /// Load diagnostics configuration from project config file.

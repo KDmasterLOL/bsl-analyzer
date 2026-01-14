@@ -201,6 +201,40 @@ impl ProjectConfig {
     pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
         self.configuration_root.as_ref().map(|root| project_root.join(root))
     }
+
+    /// Load 1C metadata (Configuration.xml, CommonModules, etc.) from configuration root.
+    ///
+    /// Returns `None` if:
+    /// - No `configurationRoot` specified in config
+    /// - Configuration root directory doesn't exist
+    /// - Failed to parse metadata files
+    pub fn load_metadata(&self, workspace_root: &Path) -> Option<bsl_metadata::Configuration> {
+        let cfg_path = self.configuration_path(workspace_root)?;
+
+        if !cfg_path.exists() {
+            tracing::warn!(path = ?cfg_path, "Configuration root not found");
+            return None;
+        }
+
+        tracing::info!(path = ?cfg_path, "Loading 1C metadata");
+        let start = std::time::Instant::now();
+
+        match bsl_metadata::load_from_directory(&cfg_path) {
+            Ok(config) => {
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    elapsed_ms = elapsed.as_millis(),
+                    common_modules = config.common_modules().len(),
+                    "1C metadata loaded"
+                );
+                Some(config)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load 1C metadata");
+                None
+            }
+        }
+    }
 }
 
 /// Code Lens configuration.
