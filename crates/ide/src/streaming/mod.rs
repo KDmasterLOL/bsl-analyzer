@@ -24,6 +24,7 @@
 //!         └── FileReader         - I/O abstraction
 //! ```
 
+mod file_priority;
 mod file_processor;
 mod orchestrator;
 mod worker_thread;

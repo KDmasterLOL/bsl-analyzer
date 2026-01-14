@@ -52,7 +52,7 @@ use std::thread;
 
 use crossbeam_channel::unbounded;
 use rustc_hash::FxHashMap;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use vfs::{file_set::FileSet, FileId};
 
 use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
@@ -173,7 +173,7 @@ impl AnalysisOrchestrator {
         let global_context = self.initialize_global_context(&files, file_set)?;
 
         // Phase 2: Create SharedState and spawn workers
-        let sorted_files = self.sort_files_by_priority(files);
+        let sorted_files = self.sort_files_by_priority(files, &global_context);
         let shared_state = SharedState::new(global_context.as_ref().clone(), sorted_files.clone());
         let provider = Arc::new(StreamingProvider::with_shared_state(
             global_context,
@@ -303,13 +303,53 @@ impl AnalysisOrchestrator {
     /// Without sorting:
     /// - ~10% of files cause waits
     /// - More contention on condvars
-    fn sort_files_by_priority(&self, files: Vec<FileId>) -> Vec<FileId> {
-        // TODO: Implement actual priority sorting based on metadata
-        // For now, just return files as-is
-        info!(num_files = files.len(), "Sorting files by priority");
+    fn sort_files_by_priority(
+        &self,
+        files: Vec<FileId>,
+        global_context: &Arc<GlobalContext>,
+    ) -> Vec<FileId> {
+        let _span =
+            tracing::info_span!("sort_files_by_priority", num_files = files.len()).entered();
 
-        // Placeholder: no sorting yet
-        files
+        let configuration = global_context.configuration.as_ref();
+        let file_set = &global_context.file_set;
+
+        let mut files_with_priority: Vec<(FileId, u8)> = files
+            .into_iter()
+            .map(|file_id| {
+                let priority = file_set
+                    .path_for_file(&file_id)
+                    .map(|vfs_path| {
+                        super::file_priority::compute_priority(vfs_path.as_path(), configuration)
+                    })
+                    .unwrap_or(super::file_priority::priority::OTHER);
+                (file_id, priority)
+            })
+            .collect();
+
+        files_with_priority.sort_by_key(|&(_, priority)| priority);
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let mut counts = [0usize; 8];
+            for &(_, priority) in &files_with_priority {
+                if (priority as usize) < counts.len() {
+                    counts[priority as usize] += 1;
+                }
+            }
+            debug!(
+                server = counts[0],
+                server_call = counts[1],
+                client_server = counts[2],
+                client = counts[3],
+                manager = counts[4],
+                object = counts[5],
+                form = counts[6],
+                other = counts[7],
+                "file priority distribution"
+            );
+        }
+
+        files_with_priority.into_iter().map(|(file_id, _)| file_id).collect()
     }
 
     /// Load 1C metadata via ProjectConfig.
