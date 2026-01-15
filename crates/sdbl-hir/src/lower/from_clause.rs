@@ -2,7 +2,7 @@
 
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
-use crate::standard_fields::{is_virtual_table_name, standard_fields_for_mdo};
+use crate::standard_fields::is_virtual_table_name;
 use crate::SdblType;
 use bsl_metadata::MdoType;
 use syntax::ast::AstNode;
@@ -256,13 +256,8 @@ impl<'a> LoweringContext<'a> {
         // Build resolved table
         let full_name_for_logging = parts.join(".");
 
-        // For tabular sections, don't add standard fields for the main object
-        // (they will be added inside add_metadata_fields)
-        let mut fields = if tabular_section_name.is_none() {
-            standard_fields_for_mdo(mdo_type)
-        } else {
-            Vec::new()
-        };
+        // Start with empty fields - metadata will provide all fields including standard ones
+        let mut fields = Vec::new();
 
         tracing::info!(
             full_name = %full_name_for_logging,

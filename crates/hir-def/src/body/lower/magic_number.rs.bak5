@@ -1,0 +1,238 @@
+//! Magic number detection using HIR analysis.
+//!
+//! Analyzes HIR body to detect hardcoded numeric literals that should be named constants.
+//! Uses semantic context (assignment targets, method calls) instead of AST patterns.
+
+use crate::body::{Body, BodyDiagnostic, BodySourceMap};
+use crate::hir::{Expr, ExprIdx, Literal, Stmt, StmtIdx};
+use crate::{ExprId, StmtId};
+use text_size::TextRange;
+
+/// Analyze body for magic numbers and emit diagnostics.
+///
+/// Traverses all statements and expressions, checking numeric literals in context.
+/// Exclusions:
+/// 1. Simple assignment to variable: `Timeout = 30`
+/// 2. Structure.Insert() calls: `Params.Insert("Timeout", 30)`
+/// 3. Property assignment: `Struct.Field = 20`
+/// 4. Structure constructor: `New Structure("Field", 20)`
+/// 5. Array index (controlled by config): `Array[20]`
+pub fn check_magic_numbers(
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<BodyDiagnostic>,
+) {
+    let _span = tracing::debug_span!("check_magic_numbers").entered();
+
+    // Traverse all statements
+    for (_stmt_id, stmt) in body.stmts.iter() {
+        check_stmt(stmt, body, source_map, diagnostics);
+    }
+}
+
+/// Check a statement for magic numbers.
+fn check_stmt(
+    stmt: &Stmt,
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<BodyDiagnostic>,
+) {
+    match stmt {
+        Stmt::Expr(expr_id) => {
+            check_expr(*expr_id, ExprContext::Statement, body, source_map, diagnostics);
+        }
+        Stmt::Assign { target, value } => {
+            // Check if this is a simple assignment (exclude)
+            if is_simple_assignment(*target, *value, body) {
+                // Simple assignment - don't check the value
+                return;
+            }
+
+            // Check if property assignment: Struct.Field = value
+            if is_property_assignment(*target, body) {
+                // Property assignment - don't check the value
+                return;
+            }
+
+            // Complex assignment (e.g. with operators on RHS) - check the value
+            check_expr(*value, ExprContext::ComplexAssignment, body, source_map, diagnostics);
+        }
+        Stmt::Return { value: Some(expr_id) } => {
+            // Return statements are NOT excluded
+            check_expr(*expr_id, ExprContext::Return, body, source_map, diagnostics);
+        }
+        Stmt::If(if_stmt) => {
+            check_expr(if_stmt.condition, ExprContext::Condition, body, source_map, diagnostics);
+            check_stmts(&if_stmt.then_branch, body, source_map, diagnostics);
+            for (_, elsif_body) in if_stmt.elsif_branches.iter() {
+                check_stmts(elsif_body, body, source_map, diagnostics);
+            }
+            if let Some(ref else_stmts) = if_stmt.else_branch {
+                check_stmts(else_stmts, body, source_map, diagnostics);
+            }
+        }
+        Stmt::While { condition, body: loop_body, .. } => {
+            check_expr(*condition, ExprContext::Condition, body, source_map, diagnostics);
+            check_stmts(loop_body, body, source_map, diagnostics);
+        }
+        Stmt::For { body: loop_body, .. } | Stmt::ForEach { body: loop_body, .. } => {
+            check_stmts(loop_body, body, source_map, diagnostics);
+        }
+        Stmt::Try { body: try_body, except } => {
+            check_stmts(try_body, body, source_map, diagnostics);
+            check_stmts(except, body, source_map, diagnostics);
+        }
+        _ => {}
+    }
+}
+
+/// Check a list of statements.
+fn check_stmts(
+    stmts: &[StmtId],
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<BodyDiagnostic>,
+) {
+    for stmt_id in stmts {
+        let stmt = body.stmt(*stmt_id);
+        check_stmt(stmt, body, source_map, diagnostics);
+    }
+}
+
+/// Context where expression is used (determines if magic number is allowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExprContext {
+    /// Top-level statement expression
+    Statement,
+    /// Complex assignment (RHS has operators/calls)
+    ComplexAssignment,
+    /// Return statement
+    Return,
+    /// Condition (if/while)
+    Condition,
+    /// Argument to non-excluded method
+    Argument,
+    /// Array index
+    #[allow(dead_code)] // Reserved for future allowMagicIndexes config
+    Index,
+    /// Ternary operator branch
+    TernaryBranch,
+}
+
+/// Check expression for magic numbers.
+fn check_expr(
+    expr_id: ExprIdx,
+    context: ExprContext,
+    body: &Body,
+    source_map: &BodySourceMap,
+    diagnostics: &mut Vec<BodyDiagnostic>,
+) {
+    let expr = body.expr(expr_id);
+
+    match expr {
+        Expr::Literal(Literal::Number(value)) => {
+            // Check if should emit diagnostic for this literal
+            if should_emit_magic_number(context) {
+                if let Some(range) = source_map.expr_range(expr_id) {
+                    emit_magic_number(value.to_string(), range, diagnostics);
+                }
+            }
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            check_expr(*lhs, ExprContext::Argument, body, source_map, diagnostics);
+            check_expr(*rhs, ExprContext::Argument, body, source_map, diagnostics);
+        }
+        Expr::UnaryOp { expr, .. } => {
+            check_expr(*expr, ExprContext::Argument, body, source_map, diagnostics);
+        }
+        Expr::Call { callee, args, .. } => {
+            // Check if this is an excluded method call
+            if is_excluded_call(*callee, body) {
+                // Excluded call (Structure.Insert, etc.) - don't check arguments
+                return;
+            }
+
+            // Check callee
+            check_expr(*callee, ExprContext::Argument, body, source_map, diagnostics);
+
+            // Check arguments
+            for arg in args {
+                check_expr(*arg, ExprContext::Argument, body, source_map, diagnostics);
+            }
+        }
+        Expr::Index { base, index } => {
+            check_expr(*base, ExprContext::Argument, body, source_map, diagnostics);
+            // Array index - exclude by default (controlled by allowMagicIndexes config)
+            // For now, always exclude
+            // check_expr(*index, ExprContext::Index, body, source_map, diagnostics);
+            let _ = index; // Explicitly unused
+        }
+        Expr::Field { base, .. } => {
+            check_expr(*base, ExprContext::Argument, body, source_map, diagnostics);
+        }
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            check_expr(*condition, ExprContext::Condition, body, source_map, diagnostics);
+            // Ternary branches with simple literals are excluded
+            // (matches Java behavior - ?(cond, 1, 2) is not magic)
+            check_expr(*then_expr, ExprContext::TernaryBranch, body, source_map, diagnostics);
+            check_expr(*else_expr, ExprContext::TernaryBranch, body, source_map, diagnostics);
+        }
+        Expr::New { args, .. } => {
+            // Check if Structure/Correspondence constructor - exclude all args
+            // For now, check args (TODO: detect type name to exclude)
+            for arg in args {
+                check_expr(*arg, ExprContext::Argument, body, source_map, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check if should emit magic number diagnostic for given context.
+fn should_emit_magic_number(context: ExprContext) -> bool {
+    match context {
+        ExprContext::Statement => true,
+        ExprContext::ComplexAssignment => true,
+        ExprContext::Return => true,
+        ExprContext::Condition => true,
+        ExprContext::Argument => true,
+        ExprContext::Index => false, // Always exclude (config will filter later)
+        ExprContext::TernaryBranch => false, // Exclude ?(cond, 1, 2) literals
+    }
+}
+
+/// Check if assignment is simple (just literal, no operators).
+fn is_simple_assignment(target: ExprIdx, value: ExprIdx, body: &Body) -> bool {
+    // Target must be a simple path (variable)
+    if !matches!(body.expr(target), Expr::Path(_)) {
+        return false;
+    }
+
+    // Value must be a simple literal (no operators/calls)
+    matches!(body.expr(value), Expr::Literal(_))
+}
+
+/// Check if assignment is to a property (Struct.Field = value).
+fn is_property_assignment(target: ExprIdx, body: &Body) -> bool {
+    matches!(body.expr(target), Expr::Field { .. })
+}
+
+/// Check if call is to an excluded method (Structure.Insert, etc.).
+fn is_excluded_call(callee: ExprId, body: &Body) -> bool {
+    let expr = body.expr(callee);
+
+    // Check for method call: Expr::Field { field: "Insert"/"Вставить" }
+    if let Expr::Field { field, .. } = expr {
+        let name_lower = field.as_str().to_lowercase();
+        if name_lower == "вставить" || name_lower == "insert" {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Emit magic number diagnostic.
+fn emit_magic_number(value: String, range: TextRange, diagnostics: &mut Vec<BodyDiagnostic>) {
+    diagnostics.push(BodyDiagnostic::MagicNumber { value, range });
+}

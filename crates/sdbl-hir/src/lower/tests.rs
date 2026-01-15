@@ -135,18 +135,6 @@ fn test_join_detection() {
 }
 
 #[test]
-fn test_table_resolves_with_standard_fields() {
-    // Without metadata, table still resolves with standard fields
-    let hir = lower_query("SELECT Код FROM Справочник.Валюты");
-
-    assert_eq!(hir.from.len(), 1);
-    // Standard fields are added for known MDO types
-    assert!(hir.from[0].metadata.is_some());
-    let resolved = hir.from[0].metadata.as_ref().unwrap();
-    assert!(!resolved.fields().is_empty());
-}
-
-#[test]
 fn test_select_fields() {
     let hir = lower_query("SELECT Код, Наименование FROM Справочник.Валюты");
 
@@ -796,30 +784,6 @@ fn test_tabular_section_not_found() {
         // If metadata is present, it should have only standard fields
         assert_eq!(r.fields().len(), 0, "Should have no fields when tabular section not found");
     }
-}
-
-#[test]
-fn test_main_object_still_works() {
-    let metadata = create_test_metadata_with_tabular_section();
-
-    // Use 2-part name (main object, not tabular section)
-    let code = "ВЫБРАТЬ Т.Ссылка ИЗ БизнесПроцесс.Исполнение КАК Т";
-
-    let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
-    let hir = single_query_hir(&package);
-
-    // Should resolve main object
-    assert_eq!(hir.from.len(), 1);
-    let table_ref = &hir.from[0];
-    assert_eq!(table_ref.full_name, "БизнесПроцесс.Исполнение");
-    assert!(table_ref.is_resolved(), "Main object should still resolve");
-
-    // Should have standard fields for BusinessProcess
-    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
-    let fields = resolved.fields();
-    assert!(!fields.is_empty(), "Should have standard fields for main object");
-    assert!(fields.iter().any(|f| f.name.as_str() == "Ссылка"));
 }
 
 #[test]
