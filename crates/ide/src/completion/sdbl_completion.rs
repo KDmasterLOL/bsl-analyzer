@@ -161,6 +161,8 @@ fn complete_mdo_types() -> Vec<CompletionItem> {
             kind: CompletionItemKind::MdoType,
             insert_text: mdo_type.russian_name().to_string(),
             documentation: None,
+            sort_text: None,
+            filter_text: None,
         });
 
         // English variant
@@ -170,6 +172,8 @@ fn complete_mdo_types() -> Vec<CompletionItem> {
             kind: CompletionItemKind::MdoType,
             insert_text: mdo_type.english_name().to_string(),
             documentation: None,
+            sort_text: None,
+            filter_text: None,
         });
     }
 
@@ -225,6 +229,8 @@ fn complete_join_types(prefix: &str) -> Vec<CompletionItem> {
             kind: CompletionItemKind::Keyword,
             insert_text: keyword.to_string(),
             documentation: Some(desc.to_string()),
+            sort_text: None,
+            filter_text: None,
         })
         .collect()
 }
@@ -257,6 +263,8 @@ fn complete_table_aliases(scope: &Scope, prefix: &str) -> Vec<CompletionItem> {
                         kind: CompletionItemKind::Keyword,
                         insert_text: alias.to_string(),
                         documentation: Some(format!("Псевдоним таблицы {}", table.full_name)),
+                        sort_text: None,
+                        filter_text: None,
                     })
                 } else {
                     None
@@ -288,6 +296,8 @@ fn complete_alias_suggestion(suggestion: Option<String>) -> Vec<CompletionItem> 
             kind: CompletionItemKind::Keyword,
             insert_text: alias,
             documentation: Some("Псевдоним на основе имени поля или таблицы".to_string()),
+            sort_text: None,
+            filter_text: None,
         }]
     } else {
         // No suggestion available - return empty
@@ -393,6 +403,8 @@ fn complete_fields_by_alias(scope: &Scope, alias: &str, prefix: &str) -> Vec<Com
                 kind: CompletionItemKind::Field,
                 insert_text: field_name,
                 documentation: Some(documentation),
+                sort_text: None,
+                filter_text: None,
             }
         })
         .collect();
@@ -463,6 +475,8 @@ fn complete_sdbl_keywords(prefix: &str) -> Vec<CompletionItem> {
                 kind: CompletionItemKind::Keyword,
                 insert_text: russian.to_string(),
                 documentation: Some(description.to_string()),
+                sort_text: None,
+                filter_text: None,
             });
         }
 
@@ -474,6 +488,8 @@ fn complete_sdbl_keywords(prefix: &str) -> Vec<CompletionItem> {
                 kind: CompletionItemKind::Keyword,
                 insert_text: english.to_string(),
                 documentation: Some(description.to_string()),
+                sort_text: None,
+                filter_text: None,
             });
         }
     }
@@ -527,6 +543,8 @@ fn complete_mdo_objects(
                 kind: CompletionItemKind::MdoObject,
                 insert_text: obj.name.clone(),
                 documentation: None,
+                sort_text: None,
+                filter_text: None,
             }
         })
         .collect();
@@ -620,6 +638,8 @@ fn complete_tabular_sections(
                 kind: CompletionItemKind::Field,
                 insert_text: ts.name().to_string(),
                 documentation: ts.synonym().map(|s| s.to_string()),
+                sort_text: None,
+                filter_text: None,
             }
         })
         .collect();
@@ -686,6 +706,8 @@ fn complete_virtual_tables(
                 kind: CompletionItemKind::Field,
                 insert_text: vt.to_string(),
                 documentation: Some(format!("Виртуальная таблица {}", vt)),
+                sort_text: None,
+                filter_text: None,
             }
         })
         .collect();

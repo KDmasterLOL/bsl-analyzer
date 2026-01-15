@@ -7,6 +7,7 @@
 
 mod bsl_completion;
 mod platform_completion;
+mod sdbl;
 mod sdbl_completion;
 
 use ide_db::RootDatabase;
@@ -39,6 +40,27 @@ pub struct CompletionItem {
 
     /// Documentation (optional)
     pub documentation: Option<String>,
+
+    /// Sort text (for ordering in completion list)
+    pub sort_text: Option<String>,
+
+    /// Filter text (for filtering when user types)
+    pub filter_text: Option<String>,
+}
+
+impl CompletionItem {
+    /// Create a simple completion item with defaults for optional fields.
+    pub fn simple(label: String, kind: CompletionItemKind, insert_text: String) -> Self {
+        Self {
+            label,
+            kind,
+            detail: None,
+            documentation: None,
+            insert_text,
+            sort_text: None,
+            filter_text: None,
+        }
+    }
 }
 
 /// Kind of completion item.
@@ -109,10 +131,27 @@ mod tests {
             kind: CompletionItemKind::MdoObject,
             insert_text: "Валюты".to_string(),
             documentation: None,
+            sort_text: None,
+            filter_text: None,
         };
 
         assert_eq!(item.label, "Валюты");
         assert_eq!(item.detail, Some("Справочник".to_string()));
         assert_eq!(item.kind, CompletionItemKind::MdoObject);
+    }
+
+    #[test]
+    fn test_completion_item_simple() {
+        let item = CompletionItem::simple(
+            "Test".to_string(),
+            CompletionItemKind::Field,
+            "Test".to_string(),
+        );
+
+        assert_eq!(item.label, "Test");
+        assert_eq!(item.kind, CompletionItemKind::Field);
+        assert_eq!(item.detail, None);
+        assert_eq!(item.sort_text, None);
+        assert_eq!(item.filter_text, None);
     }
 }

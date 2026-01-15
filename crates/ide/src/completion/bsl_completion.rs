@@ -107,6 +107,8 @@ pub(super) fn bsl_completions(
                 kind: CompletionItemKind::Keyword,
                 insert_text: token_text.to_string(),
                 documentation: Some(documentation),
+                sort_text: None,
+                filter_text: None,
             };
             completions.push(keyword_item);
         }
@@ -177,6 +179,8 @@ fn render_global_function(function: &GlobalFunction) -> CompletionItem {
         kind: CompletionItemKind::Function,
         insert_text,
         documentation,
+        sort_text: None,
+        filter_text: None,
     }
 }
 

@@ -120,6 +120,8 @@ fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
         kind: CompletionItemKind::Method,
         insert_text,
         documentation,
+        sort_text: None,
+        filter_text: None,
     }
 }
 
