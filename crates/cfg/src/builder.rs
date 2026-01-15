@@ -23,7 +23,9 @@
 use crate::edge::CfgEdgeType;
 use crate::graph::ControlFlowGraph;
 use crate::vertex::{BasicBlockVertex, CfgVertex};
-use hir_def::{Body, BodySourceMap, Stmt, StmtId};
+use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
+use hir_def::hir::StmtIdx;
+use hir_def::{Body, BodySourceMap, Stmt};
 use petgraph::graph::NodeIndex;
 
 /// CFG Builder for BSL functions/procedures
@@ -120,7 +122,7 @@ impl CfgBuilder {
     /// ```
     pub fn build_graph_from_hir(
         mut self,
-        body_stmts: &[StmtId],
+        body_stmts: &[StmtIdx],
         body: &Body,
         _source_map: Option<&BodySourceMap>,
     ) -> ControlFlowGraph {
@@ -214,8 +216,8 @@ impl CfgBuilder {
     /// Walk a single HIR statement (Phase 6.2)
     ///
     /// Pattern matches on Stmt enum - no AST traversal needed.
-    fn walk_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
-        let stmt = body.stmt(stmt_id);
+    fn walk_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
+        let stmt = body.stmt_idx(stmt_id);
         match stmt {
             Stmt::Return { .. } => self.walk_return_statement_hir(stmt_id, body),
             Stmt::Raise { .. } => self.walk_raise_statement_hir(stmt_id, body),
@@ -250,10 +252,11 @@ impl CfgBuilder {
     */
 
     /// Add a HIR statement to the current basic block (Phase 6.2)
-    fn add_to_current_block_hir(&mut self, stmt_id: StmtId) {
+    fn add_to_current_block_hir(&mut self, stmt_id: StmtIdx) {
         if let Some(block_idx) = self.current_block {
             if let Some(CfgVertex::BasicBlock(block)) = self.cfg.vertex_mut(block_idx) {
-                block.add_statement(stmt_id);
+                // Convert typed StmtIdx to opaque StmtId for storage
+                block.add_statement(StmtId::from_idx(stmt_id));
             }
         }
     }
@@ -315,7 +318,7 @@ impl CfgBuilder {
     */
 
     /// Walk a HIR return statement (Phase 6.2)
-    fn walk_return_statement_hir(&mut self, stmt_id: StmtId, _body: &Body) {
+    fn walk_return_statement_hir(&mut self, stmt_id: StmtIdx, _body: &Body) {
         // Add return statement to current block
         self.add_to_current_block_hir(stmt_id);
 
@@ -337,7 +340,7 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR raise statement (Phase 6.2)
-    fn walk_raise_statement_hir(&mut self, stmt_id: StmtId, _body: &Body) {
+    fn walk_raise_statement_hir(&mut self, stmt_id: StmtIdx, _body: &Body) {
         // Add raise statement to current block
         self.add_to_current_block_hir(stmt_id);
 
@@ -358,7 +361,7 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR break statement (Phase 6.2)
-    fn walk_break_statement_hir(&mut self, stmt_id: StmtId) {
+    fn walk_break_statement_hir(&mut self, stmt_id: StmtIdx) {
         // Add break to current block
         self.add_to_current_block_hir(stmt_id);
 
@@ -372,7 +375,7 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR continue statement (Phase 6.2)
-    fn walk_continue_statement_hir(&mut self, stmt_id: StmtId) {
+    fn walk_continue_statement_hir(&mut self, stmt_id: StmtIdx) {
         // Add continue to current block
         self.add_to_current_block_hir(stmt_id);
 
@@ -386,7 +389,7 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR goto statement (Phase 6.2)
-    fn walk_goto_statement_hir(&mut self, stmt_id: StmtId, _body: &Body) {
+    fn walk_goto_statement_hir(&mut self, stmt_id: StmtIdx, _body: &Body) {
         // Add goto to current block
         self.add_to_current_block_hir(stmt_id);
 
@@ -400,11 +403,11 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR label statement (Phase 6.2)
-    fn walk_label_statement_hir(&mut self, _stmt_id: StmtId, body: &Body) {
+    fn walk_label_statement_hir(&mut self, _stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::LabelVertex;
 
         // Extract label name from statement
-        if let Stmt::Label(name) = body.stmt(_stmt_id) {
+        if let Stmt::Label(name) = body.stmt_idx(_stmt_id) {
             // Create label vertex
             let label_vertex =
                 self.cfg.add_vertex(CfgVertex::Label(LabelVertex::new(name.clone())));
@@ -608,14 +611,14 @@ impl CfgBuilder {
     /// 5. Walk ELSE branch if present (Option<Box<[StmtId]>>)
     /// 6. Create merge block
     /// 7. Connect all branch exits → merge
-    fn walk_if_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
+    fn walk_if_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::ConditionalVertex;
 
-        if let Stmt::If(if_stmt) = body.stmt(stmt_id) {
-            // Create conditional vertex (condition is ExprId - no searching!)
-            let cond_vertex = self
-                .cfg
-                .add_vertex(CfgVertex::Conditional(ConditionalVertex::new(if_stmt.condition)));
+        if let Stmt::If(if_stmt) = body.stmt_idx(stmt_id) {
+            // Create conditional vertex - convert typed to opaque
+            let cond_vertex = self.cfg.add_vertex(CfgVertex::Conditional(ConditionalVertex::new(
+                ExprId::from_idx(if_stmt.condition),
+            )));
 
             // Connect current block to conditional
             if let Some(current) = self.current_block {
@@ -646,10 +649,10 @@ impl CfgBuilder {
             let mut current_cond = cond_vertex;
 
             for (elsif_condition, elsif_body) in if_stmt.elsif_branches.iter() {
-                // Create elsif conditional (condition is ExprId - no searching!)
-                let elsif_cond = self
-                    .cfg
-                    .add_vertex(CfgVertex::Conditional(ConditionalVertex::new(*elsif_condition)));
+                // Create elsif conditional - convert typed to opaque
+                let elsif_cond = self.cfg.add_vertex(CfgVertex::Conditional(
+                    ConditionalVertex::new(ExprId::from_idx(*elsif_condition)),
+                ));
 
                 // Connect previous cond FALSE → this elsif cond
                 let _ = self.cfg.add_edge(current_cond, elsif_cond, CfgEdgeType::FalseBranch);
@@ -786,13 +789,14 @@ impl CfgBuilder {
     */
 
     /// Walk a HIR while statement (Phase 6.2)
-    fn walk_while_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
+    fn walk_while_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::WhileLoopVertex;
 
-        if let Stmt::While { condition, body: loop_body } = body.stmt(stmt_id) {
-            // Create while loop vertex (condition is ExprId - no searching!)
-            let loop_vertex =
-                self.cfg.add_vertex(CfgVertex::WhileLoop(WhileLoopVertex::new(*condition)));
+        if let Stmt::While { condition, body: loop_body } = body.stmt_idx(stmt_id) {
+            // Create while loop vertex - convert typed to opaque
+            let loop_vertex = self.cfg.add_vertex(CfgVertex::WhileLoop(WhileLoopVertex::new(
+                ExprId::from_idx(*condition),
+            )));
 
             // Connect current block to loop
             if let Some(current) = self.current_block {
@@ -837,12 +841,14 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR for statement (Phase 6.2)
-    fn walk_for_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
+    fn walk_for_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::ForLoopVertex;
 
-        if let Stmt::For { var, from: _, to: _, body: loop_body } = body.stmt(stmt_id) {
-            // Create for loop vertex (var is BindingId - no searching!)
-            let loop_vertex = self.cfg.add_vertex(CfgVertex::ForLoop(ForLoopVertex::new(*var)));
+        if let Stmt::For { var, from: _, to: _, body: loop_body } = body.stmt_idx(stmt_id) {
+            // Create for loop vertex - convert typed to opaque
+            let loop_vertex = self
+                .cfg
+                .add_vertex(CfgVertex::ForLoop(ForLoopVertex::new(BindingId::from_idx(*var))));
 
             // Connect current block to loop
             if let Some(current) = self.current_block {
@@ -883,14 +889,15 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR foreach statement (Phase 6.2)
-    fn walk_foreach_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
+    fn walk_foreach_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::ForEachLoopVertex;
 
-        if let Stmt::ForEach { var, collection, body: loop_body } = body.stmt(stmt_id) {
-            // Create foreach loop vertex (var is BindingId - no searching!)
-            let loop_vertex = self
-                .cfg
-                .add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::new(*var, *collection)));
+        if let Stmt::ForEach { var, collection, body: loop_body } = body.stmt_idx(stmt_id) {
+            // Create foreach loop vertex - convert typed to opaque
+            let loop_vertex = self.cfg.add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::new(
+                BindingId::from_idx(*var),
+                ExprId::from_idx(*collection),
+            )));
 
             // Connect current block to loop
             if let Some(current) = self.current_block {
@@ -931,10 +938,10 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR try statement (Phase 6.2)
-    fn walk_try_statement_hir(&mut self, stmt_id: StmtId, body: &Body) {
+    fn walk_try_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::TryExceptVertex;
 
-        if let Stmt::Try { body: try_body, except } = body.stmt(stmt_id) {
+        if let Stmt::Try { body: try_body, except } = body.stmt_idx(stmt_id) {
             // Create try-except vertex
             let try_vertex = self.cfg.add_vertex(CfgVertex::TryExcept(TryExceptVertex::new()));
 
@@ -1250,20 +1257,21 @@ mod tests {
         let mut body = Body::default();
 
         // Create binding for variable А
-        let var_a = body.bindings.alloc(Binding::var(hir_def::Name::new("А")));
+        let var_a = body.bindings_mut().alloc(Binding::var(hir_def::Name::new("А")));
 
         // Create statements
-        let lit_42 = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
-        let path_a = body.exprs.alloc(Expr::Path(hir_def::Name::new("А")));
+        let lit_42 =
+            body.exprs_mut().alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
+        let path_a = body.exprs_mut().alloc(Expr::Path(hir_def::Name::new("А")));
 
-        let var_decl = body.stmts.alloc(Stmt::VarDecl { bindings: vec![var_a].into() });
-        let assign = body.stmts.alloc(Stmt::Assign { target: path_a, value: lit_42 });
-        let return_stmt = body.stmts.alloc(Stmt::Return { value: Some(path_a) });
+        let var_decl = body.stmts_mut().alloc(Stmt::VarDecl { bindings: vec![var_a].into() });
+        let assign = body.stmts_mut().alloc(Stmt::Assign { target: path_a, value: lit_42 });
+        let return_stmt = body.stmts_mut().alloc(Stmt::Return { value: Some(path_a) });
 
-        body.body_stmts = vec![var_decl, assign, return_stmt].into();
+        body.set_body_stmts(vec![var_decl, assign, return_stmt].into());
 
         // Build CFG from HIR
-        let cfg = CfgBuilder::new().build_graph_from_hir(&body.body_stmts, &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
 
         // Verify CFG structure
         assert!(cfg.entry_point().is_some(), "CFG should have entry point");
@@ -1297,24 +1305,26 @@ mod tests {
         // КонецЕсли;
         let mut body = Body::default();
 
-        let true_lit = body.exprs.alloc(Expr::Literal(Literal::Bool(true)));
-        let lit_1 = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(1.0).unwrap())));
-        let lit_2 = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(2.0).unwrap())));
+        let true_lit = body.exprs_mut().alloc(Expr::Literal(Literal::Bool(true)));
+        let lit_1 =
+            body.exprs_mut().alloc(Expr::Literal(Literal::Number(NotNan::new(1.0).unwrap())));
+        let lit_2 =
+            body.exprs_mut().alloc(Expr::Literal(Literal::Number(NotNan::new(2.0).unwrap())));
 
-        let return_1 = body.stmts.alloc(Stmt::Return { value: Some(lit_1) });
-        let return_2 = body.stmts.alloc(Stmt::Return { value: Some(lit_2) });
+        let return_1 = body.stmts_mut().alloc(Stmt::Return { value: Some(lit_1) });
+        let return_2 = body.stmts_mut().alloc(Stmt::Return { value: Some(lit_2) });
 
-        let if_stmt = body.stmts.alloc(Stmt::If(Box::new(hir_def::IfStmt {
+        let if_stmt = body.stmts_mut().alloc(Stmt::If(Box::new(hir_def::IfStmt {
             condition: true_lit,
             then_branch: vec![return_1].into(),
             elsif_branches: vec![].into(),
             else_branch: Some(vec![return_2].into()),
         })));
 
-        body.body_stmts = vec![if_stmt].into();
+        body.set_body_stmts(vec![if_stmt].into());
 
         // Build CFG
-        let cfg = CfgBuilder::new().build_graph_from_hir(&body.body_stmts, &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
 
         // Verify CFG has conditional structure
         let vertex_count = cfg.graph().node_count();

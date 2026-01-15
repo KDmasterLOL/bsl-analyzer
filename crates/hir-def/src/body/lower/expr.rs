@@ -5,7 +5,7 @@
 use syntax::{SyntaxKind, SyntaxNode};
 
 use crate::body::{Body, BodyDiagnostic, ExternalRef, ManagerType};
-use crate::hir::{BinaryOp, Expr, ExprId, Literal, UnaryOp};
+use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
 use crate::{Name, QualifiedName};
 
 use super::diagnostics::is_deprecated_method;
@@ -13,7 +13,7 @@ use super::utils::{extract_string_content, looks_like_sdbl};
 use super::LoweringCtx;
 
 /// Lower an expression node (handles EXPR wrapper).
-pub(crate) fn lower_expr_node(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
+pub(crate) fn lower_expr_node(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
     // Handle EXPR wrapper - unwrap to get actual expression
     let actual_node = if node.kind() == SyntaxKind::EXPR {
         node.children().next().unwrap_or_else(|| node.clone())
@@ -25,7 +25,7 @@ pub(crate) fn lower_expr_node(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprI
 }
 
 /// Lower an expression.
-fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprId {
+fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
     let range = node.text_range();
 
     let expr = match node.kind() {
@@ -576,7 +576,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             let method_name = method_token.text().to_lowercase();
             if matches!(method_name.as_str(), "execute" | "выполнить") {
                 // Extract receiver from HIR (callee can be Field or MethodCall)
-                let receiver = match ctx.body.expr(callee) {
+                let receiver = match ctx.body.expr_idx(callee) {
                     Expr::Field { base, .. } => Some(*base),
                     Expr::MethodCall { receiver, .. } => Some(*receiver),
                     _ => None,
@@ -653,7 +653,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             let method_name = method_token.text().to_lowercase();
             if matches!(method_name.as_str(), "delete" | "удалить") {
                 // Extract receiver from HIR (callee can be Field or MethodCall)
-                let receiver = match ctx.body.expr(callee) {
+                let receiver = match ctx.body.expr_idx(callee) {
                     Expr::Field { base, .. } => Some(*base),
                     Expr::MethodCall { receiver, .. } => Some(*receiver),
                     _ => None,
@@ -700,7 +700,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 }
 
 /// Lower argument list.
-fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprId> {
+fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprIdx> {
     // Check for trailing comma before lowering
     if let Some(comma_range) = find_trailing_comma(node) {
         ctx.diagnostics.push(BodyDiagnostic::ExtraCommas { range: comma_range });
@@ -942,7 +942,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         // === NEW: Build QualifiedPath for qualified method calls ===
         // Check if this is a qualified call (Module.Method or A.B.Method)
         // by examining the base expression type
-        let base_expr = ctx.body.expr(base);
+        let base_expr = ctx.body.expr_idx(base);
         let qualified_path_opt = match base_expr {
             Expr::Path(module_name) => {
                 // Two-level qualified call: Module.Method()
@@ -1007,8 +1007,8 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 /// Extracts variable name from expressions like:
 /// - Запрос -> "Запрос"
 /// - Запрос2.info -> "Запрос2.info"
-fn extract_receiver_name(ctx: &LoweringCtx, expr_id: ExprId) -> Option<String> {
-    let expr = ctx.body.expr(expr_id);
+fn extract_receiver_name(ctx: &LoweringCtx, expr_id: ExprIdx) -> Option<String> {
+    let expr = ctx.body.expr_idx(expr_id);
     match expr {
         Expr::Path(name) => Some(name.as_str().to_string()),
         Expr::Field { base, field } => {
@@ -1139,8 +1139,8 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
 /// Check if two expressions are semantically equal (case-insensitive for names).
 /// Used for detecting self-assignment patterns like `a = a` or `obj.field = obj.field`.
-pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprId, rhs: ExprId) -> bool {
-    match (body.expr(lhs), body.expr(rhs)) {
+pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
+    match (body.expr_idx(lhs), body.expr_idx(rhs)) {
         // Missing expressions are equal (used for global function calls like Mass())
         (Expr::Missing, Expr::Missing) => true,
 

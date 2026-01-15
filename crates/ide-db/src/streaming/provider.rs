@@ -212,8 +212,11 @@ impl AnalysisProvider for StreamingProvider {
         let mut cfgs = FxHashMap::default();
         for (local_id, body) in module_bodies.iter_bodies() {
             let source_map = module_bodies.source_map(local_id);
-            let cfg =
-                cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, source_map);
+            let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+                body.body_stmts_typed(),
+                body,
+                source_map,
+            );
             cfgs.insert(local_id, Arc::new(cfg));
         }
 
@@ -261,9 +264,8 @@ impl AnalysisProvider for StreamingProvider {
 
             // Build definition index from body with parameters
             let params: Vec<_> = body
-                .params
-                .iter()
-                .map(|&param_id| {
+                .params()
+                .map(|param_id| {
                     let binding = body.binding(param_id);
                     (binding.name.clone(), param_id)
                 })
@@ -273,7 +275,7 @@ impl AnalysisProvider for StreamingProvider {
 
             // Initialize entry state with parameters
             let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
-            for &param_id in body.params.iter() {
+            for param_id in body.params() {
                 let binding = body.binding(param_id);
                 let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
                 initial_defs.insert(&def);
@@ -372,14 +374,14 @@ impl AnalysisProvider for StreamingProvider {
         // Collect from all method bodies (procedures and functions)
         for (_local_id, body) in module_bodies.iter_bodies() {
             for (expr_id, query_info) in body.sdbl_exprs() {
-                result.push((*expr_id, query_info.clone()));
+                result.push((expr_id, query_info.clone()));
             }
         }
 
         // Collect from module-level code (statements outside methods)
         if let Some(module_code) = module_bodies.module_code() {
             for (expr_id, query_info) in module_code.sdbl_exprs() {
-                result.push((*expr_id, query_info.clone()));
+                result.push((expr_id, query_info.clone()));
             }
         }
 

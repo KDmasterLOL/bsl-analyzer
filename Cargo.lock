@@ -235,6 +235,7 @@ dependencies = [
 name = "cfg"
 version = "0.1.0"
 dependencies = [
+ "cfg-types",
  "expect-test",
  "hir-def",
  "la-arena",
@@ -250,6 +251,17 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cfg-types"
+version = "0.1.0"
+dependencies = [
+ "la-arena",
+]
+
+[[package]]
+name = "cfg-types-research"
+version = "0.1.0"
 
 [[package]]
 name = "cfg_aliases"
@@ -453,6 +465,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "cfg",
+ "cfg-types",
  "expect-test",
  "fixedbitset 0.5.7",
  "hir-def",
@@ -677,6 +690,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
+ "cfg-types",
  "expect-test",
  "ide-db",
  "intern",
@@ -702,6 +716,7 @@ name = "hir-ty"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "cfg-types",
  "expect-test",
  "hir-def",
  "intern",
@@ -878,6 +893,7 @@ dependencies = [
  "base-db",
  "bsl-metadata",
  "cfg",
+ "cfg-types",
  "dataflow",
  "expect-test",
  "fixedbitset 0.5.7",

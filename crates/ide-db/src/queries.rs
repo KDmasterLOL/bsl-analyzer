@@ -157,14 +157,14 @@ pub fn all_sdbl_in_file_query<'db>(
     // Collect from all method bodies (procedures and functions)
     for (_local_id, body) in module_bodies.iter_bodies() {
         for (expr_id, query_info) in body.sdbl_exprs() {
-            result.push((*expr_id, query_info.clone()));
+            result.push((expr_id, query_info.clone()));
         }
     }
 
     // Collect from module-level code (statements outside methods)
     if let Some(module_code) = module_bodies.module_code() {
         for (expr_id, query_info) in module_code.sdbl_exprs() {
-            result.push((*expr_id, query_info.clone()));
+            result.push((expr_id, query_info.clone()));
         }
     }
 
@@ -334,7 +334,8 @@ pub fn module_cfgs_query<'db>(
     let mut cfgs = rustc_hash::FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
         let source_map = module_bodies.source_map(local_id);
-        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, source_map);
+        let cfg =
+            cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, source_map);
         cfgs.insert(local_id, Arc::new(cfg));
     }
 
@@ -422,9 +423,8 @@ pub fn module_reaching_definitions_query<'db>(
 
         // Build definition index from body with parameters
         let params: Vec<_> = body
-            .params
-            .iter()
-            .map(|&param_id| {
+            .params()
+            .map(|param_id| {
                 let binding = body.binding(param_id);
                 (binding.name.clone(), param_id)
             })
@@ -434,7 +434,7 @@ pub fn module_reaching_definitions_query<'db>(
 
         // Initialize entry state with parameters
         let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
-        for &param_id in body.params.iter() {
+        for param_id in body.params() {
             let binding = body.binding(param_id);
             let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
             initial_defs.insert(&def);
@@ -614,7 +614,7 @@ pub fn module_level_cfg_query<'db>(
     };
 
     // Build CFG from HIR body
-    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(&body.body_stmts, body, None);
+    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
     tracing::debug!("Built module-level CFG: {} vertices", cfg.vertices().count());
 
     Arc::new(cfg)

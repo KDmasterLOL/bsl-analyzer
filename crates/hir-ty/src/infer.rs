@@ -26,11 +26,12 @@
 //! - Shadowing detection
 //! - Diagnostic collection (UnresolvedMethodCall, MismatchedArgCount)
 
+use cfg_types::IdConversion;
 use hir_def::body::Body;
-use hir_def::hir::{BinaryOp, Expr, ExprId, Literal, UnaryOp};
+use hir_def::hir::{BinaryOp, Expr, Literal, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::Ty;
-use hir_def::Name;
+use hir_def::{ExprId, Name};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
@@ -170,7 +171,7 @@ impl<'db> InferenceContext<'db> {
 
         // Infer types for all expressions in the arena
         // We collect all ExprIds first to avoid borrowing issues
-        let expr_ids: Vec<ExprId> = self.body.exprs.iter().map(|(id, _)| id).collect();
+        let expr_ids: Vec<ExprId> = self.body.exprs_iter().map(|(id, _)| id).collect();
 
         for expr_id in expr_ids {
             self.infer_expr(expr_id);
@@ -195,7 +196,7 @@ impl<'db> InferenceContext<'db> {
 
         // Clone the expression to avoid borrow checker issues
         // (we need &mut self for recursive infer_expr calls)
-        let expr = self.body.exprs[expr_id].clone();
+        let expr = self.body.expr(expr_id).clone();
         trace!("inferring expr {:?}: {:?}", expr_id, expr);
 
         let ty = match &expr {
@@ -220,15 +221,17 @@ impl<'db> InferenceContext<'db> {
                 Ty::Unknown
             }
 
-            Expr::BinaryOp { lhs, rhs, op } => self.infer_binary_op(*lhs, *rhs, *op),
+            Expr::BinaryOp { lhs, rhs, op } => {
+                self.infer_binary_op(ExprId::from_idx(*lhs), ExprId::from_idx(*rhs), *op)
+            }
 
-            Expr::UnaryOp { expr, op } => self.infer_unary_op(*expr, *op),
+            Expr::UnaryOp { expr, op } => self.infer_unary_op(ExprId::from_idx(*expr), *op),
 
             Expr::Ternary { condition, then_expr, else_expr } => {
                 // Infer all branches
-                self.infer_expr(*condition);
-                let then_ty = self.infer_expr(*then_expr);
-                let else_ty = self.infer_expr(*else_expr);
+                self.infer_expr(ExprId::from_idx(*condition));
+                let then_ty = self.infer_expr(ExprId::from_idx(*then_expr));
+                let else_ty = self.infer_expr(ExprId::from_idx(*else_expr));
 
                 // Unify types
                 if then_ty == else_ty {
@@ -238,13 +241,17 @@ impl<'db> InferenceContext<'db> {
                 }
             }
 
-            Expr::Call { callee, args } => self.infer_call(*callee, args),
+            Expr::Call { callee, args } => {
+                let converted_args: Vec<ExprId> =
+                    args.iter().map(|&arg| ExprId::from_idx(arg)).collect();
+                self.infer_call(ExprId::from_idx(*callee), &converted_args)
+            }
 
             Expr::MethodCall { receiver, method: _, args } => {
                 // Infer receiver and args
-                self.infer_expr(*receiver);
-                for arg in args.iter() {
-                    self.infer_expr(*arg);
+                self.infer_expr(ExprId::from_idx(*receiver));
+                for &arg in args.iter() {
+                    self.infer_expr(ExprId::from_idx(arg));
                 }
 
                 // Phase 1: Return Unknown
@@ -253,8 +260,8 @@ impl<'db> InferenceContext<'db> {
             }
 
             Expr::Index { base, index } => {
-                self.infer_expr(*base);
-                self.infer_expr(*index);
+                self.infer_expr(ExprId::from_idx(*base));
+                self.infer_expr(ExprId::from_idx(*index));
 
                 // Phase 1: Return Unknown
                 // Phase 2+: Could infer element type for arrays
@@ -262,7 +269,7 @@ impl<'db> InferenceContext<'db> {
             }
 
             Expr::Field { base, field: _ } => {
-                self.infer_expr(*base);
+                self.infer_expr(ExprId::from_idx(*base));
 
                 // Phase 1: Return Unknown
                 // Phase 2+: Resolve field type from base type
@@ -271,8 +278,8 @@ impl<'db> InferenceContext<'db> {
 
             Expr::New { type_name, args } => {
                 // Infer arguments
-                for arg in args.iter() {
-                    self.infer_expr(*arg);
+                for &arg in args.iter() {
+                    self.infer_expr(ExprId::from_idx(arg));
                 }
 
                 // Infer type from constructor
@@ -284,8 +291,8 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Array(elements) => {
                 // Infer element types
-                for elem in elements.iter() {
-                    self.infer_expr(*elem);
+                for &elem in elements.iter() {
+                    self.infer_expr(ExprId::from_idx(elem));
                 }
 
                 Ty::Array
@@ -293,7 +300,7 @@ impl<'db> InferenceContext<'db> {
 
             Expr::Await { expr } => {
                 // BSL Await returns the same type as the awaited expression
-                self.infer_expr(*expr)
+                self.infer_expr(ExprId::from_idx(*expr))
             }
         };
 
@@ -370,7 +377,7 @@ impl<'db> InferenceContext<'db> {
     fn infer_call(&mut self, callee: ExprId, args: &[ExprId]) -> Ty {
         // Phase 3: Check if callee is a qualified path (Module.Method)
         // If yes, try to resolve it
-        let callee_expr = &self.body.exprs[callee];
+        let callee_expr = self.body.expr(callee);
         if let Expr::QualifiedPath(qualified_path) = callee_expr {
             // Phase 3: Handle two-level qualified calls (Module.Method)
             if qualified_path.segments().len() == 2 {

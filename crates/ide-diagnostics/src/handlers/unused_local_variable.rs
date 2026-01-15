@@ -37,6 +37,8 @@
 //! КонецПроцедуры
 //! ```
 
+use cfg_types::{BindingId, IdConversion};
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticTag, DiagnosticsContext, Severity};
 use hir_def::ModuleId;
 use ide_db::{RootDatabase, TextRange};
@@ -150,8 +152,8 @@ fn check_method_with_module_liveness(
     let mut declared_vars = rustc_hash::FxHashSet::default();
 
     // Add parameters
-    for &param_id in body.params.iter() {
-        let binding = &body.bindings[param_id];
+    for param_id in body.params() {
+        let binding = body.binding(param_id);
         declared_vars.insert(binding.name.as_str().to_lowercase());
     }
 
@@ -160,15 +162,17 @@ fn check_method_with_module_liveness(
 
     // Check each declared variable
     // 1. Check VarDecl bindings
-    for stmt_id in body.body_stmts.iter() {
-        if let hir_def::hir::Stmt::VarDecl { bindings } = &body.stmts[*stmt_id] {
+    for stmt_id in body.body_stmts() {
+        if let hir_def::hir::Stmt::VarDecl { bindings } = body.stmt(stmt_id) {
             for &binding_id in bindings.iter() {
-                let binding = &body.bindings[binding_id];
+                let binding_id_opaque = BindingId::from_idx(binding_id);
+                let binding = body.binding(binding_id_opaque);
                 declared_vars.insert(binding.name.as_str().to_lowercase());
 
                 // Variable is unused if it's not live at entry
                 // Fast path: use pre-computed binding index (O(1), no allocation)
-                let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id) {
+                let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id_opaque)
+                {
                     !live_at_entry.is_live_by_idx(idx)
                 } else {
                     // Fallback to string-based check
@@ -177,7 +181,7 @@ fn check_method_with_module_liveness(
 
                 if is_unused {
                     // Get source range for the variable name
-                    if let Some(range) = source_map.binding_range(binding_id) {
+                    if let Some(range) = source_map.binding_range(binding_id_opaque) {
                         diagnostics.push(create_diagnostic(binding.name.as_str(), range));
                     }
                 }
@@ -186,20 +190,21 @@ fn check_method_with_module_liveness(
     }
 
     // 2. Check For loop variables
-    for stmt_id in body.body_stmts.iter() {
-        if let hir_def::hir::Stmt::For { var, .. } = &body.stmts[*stmt_id] {
-            let binding = &body.bindings[*var];
+    for stmt_id in body.body_stmts() {
+        if let hir_def::hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
+            let var_opaque = BindingId::from_idx(*var);
+            let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
 
             // Fast path: use pre-computed binding index (O(1), no allocation)
-            let is_unused = if let Some(idx) = var_index.get_index_by_binding(*var) {
+            let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !live_at_entry.is_live_by_idx(idx)
             } else {
                 !live_at_entry.is_live(binding.name.as_str())
             };
 
             if is_unused {
-                if let Some(range) = source_map.binding_range(*var) {
+                if let Some(range) = source_map.binding_range(var_opaque) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range));
                 }
             }
@@ -207,20 +212,21 @@ fn check_method_with_module_liveness(
     }
 
     // 3. Check ForEach loop variables
-    for stmt_id in body.body_stmts.iter() {
-        if let hir_def::hir::Stmt::ForEach { var, .. } = &body.stmts[*stmt_id] {
-            let binding = &body.bindings[*var];
+    for stmt_id in body.body_stmts() {
+        if let hir_def::hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
+            let var_opaque = BindingId::from_idx(*var);
+            let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
 
             // Fast path: use pre-computed binding index (O(1), no allocation)
-            let is_unused = if let Some(idx) = var_index.get_index_by_binding(*var) {
+            let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
                 !live_at_entry.is_live_by_idx(idx)
             } else {
                 !live_at_entry.is_live(binding.name.as_str())
             };
 
             if is_unused {
-                if let Some(range) = source_map.binding_range(*var) {
+                if let Some(range) = source_map.binding_range(var_opaque) {
                     diagnostics.push(create_diagnostic(binding.name.as_str(), range));
                 }
             }
@@ -232,10 +238,11 @@ fn check_method_with_module_liveness(
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
 
-    for stmt_id in body.body_stmts.iter() {
-        if let hir_def::hir::Stmt::Assign { target, .. } = &body.stmts[*stmt_id] {
+    for stmt_id in body.body_stmts() {
+        if let hir_def::hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
-            if let hir_def::hir::Expr::Path(name) = &body.exprs[*target] {
+            let target_opaque = cfg_types::ExprId::from_idx(*target);
+            if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
                 // Skip if already declared or is a parameter
@@ -244,7 +251,7 @@ fn check_method_with_module_liveness(
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
                     {
-                        if let Some(range) = source_map.expr_range(*target) {
+                        if let Some(range) = source_map.expr_range(target_opaque) {
                             e.insert((name.as_str().to_string(), range));
                         }
                     }
@@ -320,17 +327,18 @@ fn check_module_level_code(
     let mut implicit_vars: rustc_hash::FxHashMap<String, (String, ide_db::TextRange)> =
         rustc_hash::FxHashMap::default();
 
-    for stmt_id in body.body_stmts.iter() {
-        if let hir_def::hir::Stmt::Assign { target, .. } = &body.stmts[*stmt_id] {
+    for stmt_id in body.body_stmts() {
+        if let hir_def::hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
-            if let hir_def::hir::Expr::Path(name) = &body.exprs[*target] {
+            let target_opaque = cfg_types::ExprId::from_idx(*target);
+            if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
                 // Save first assignment location for each variable
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     implicit_vars.entry(lowercase_name)
                 {
-                    if let Some(range) = source_map.expr_range(*target) {
+                    if let Some(range) = source_map.expr_range(target_opaque) {
                         e.insert((name.as_str().to_string(), range));
                     }
                 }

@@ -80,7 +80,7 @@
 //! - RewriteMethodParameterDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::hir::StmtId;
+use hir_def::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -95,7 +95,7 @@ use ide_db::TextRange;
 /// 4. Handle self-assign case: if RHS uses parameter, skip this assignment
 /// 5. Emit diagnostic if parameter not used before overwrite
 pub fn from_hir(
-    param_id: hir_def::hir::BindingId,
+    param_id: BindingId,
     _stmt_id: StmtId, // Placeholder from lowering - we'll find real one via range
     range: TextRange,
     ctx: &DiagnosticsContext,
@@ -183,8 +183,8 @@ pub fn from_hir(
 /// Self-assigns (Param = Param) are NOT considered meaningful uses.
 fn parameter_used_before_stmt(
     body: &hir_def::Body,
-    target_stmt_id: hir_def::hir::StmtId,
-    param_id: hir_def::hir::BindingId,
+    target_stmt_id: StmtId,
+    param_id: BindingId,
 ) -> bool {
     // Scan all statements before target (by RawIdx ordering)
     for (stmt_id, _stmt) in body.stmts_iter() {
@@ -208,25 +208,21 @@ fn parameter_used_before_stmt(
 }
 
 /// Check if statement is a self-assign to the binding (Param = Param).
-fn is_self_assign_to_binding(
-    body: &hir_def::Body,
-    stmt_id: hir_def::hir::StmtId,
-    binding_id: hir_def::hir::BindingId,
-) -> bool {
+fn is_self_assign_to_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir_def::hir::{Expr, Stmt};
 
     let stmt = body.stmt(stmt_id);
     match stmt {
         Stmt::Assign { target, value } => {
             // Check if target is our binding
-            if let Expr::Path(target_name) = body.expr(*target) {
+            if let Expr::Path(target_name) = body.expr(ExprId::from_idx(*target)) {
                 let binding = body.binding(binding_id);
                 if !target_name.as_str().eq_ignore_ascii_case(binding.name.as_str()) {
                     return false; // Target is not our binding
                 }
 
                 // Check if value is also our binding (self-assign)
-                if let Expr::Path(value_name) = body.expr(*value) {
+                if let Expr::Path(value_name) = body.expr(ExprId::from_idx(*value)) {
                     return value_name.as_str().eq_ignore_ascii_case(binding.name.as_str());
                 }
             }
@@ -237,43 +233,39 @@ fn is_self_assign_to_binding(
 }
 
 /// Check if a statement uses a specific binding anywhere.
-fn stmt_uses_binding(
-    body: &hir_def::Body,
-    stmt_id: hir_def::hir::StmtId,
-    binding_id: hir_def::hir::BindingId,
-) -> bool {
+fn stmt_uses_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir_def::hir::Stmt;
 
     let stmt = body.stmt(stmt_id);
     match stmt {
-        Stmt::Expr(expr_id) => expr_uses_binding(body, *expr_id, binding_id),
+        Stmt::Expr(expr_id) => expr_uses_binding(body, ExprId::from_idx(*expr_id), binding_id),
         Stmt::Assign { target, value } => {
-            expr_uses_binding(body, *target, binding_id)
-                || expr_uses_binding(body, *value, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*target), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*value), binding_id)
         }
         Stmt::If(if_stmt) => {
-            if expr_uses_binding(body, if_stmt.condition, binding_id) {
+            if expr_uses_binding(body, ExprId::from_idx(if_stmt.condition), binding_id) {
                 return true;
             }
             // Check branches
-            for &stmt_id in if_stmt.then_branch.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in if_stmt.then_branch.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
             for (cond, branch) in if_stmt.elsif_branches.iter() {
-                if expr_uses_binding(body, *cond, binding_id) {
+                if expr_uses_binding(body, ExprId::from_idx(*cond), binding_id) {
                     return true;
                 }
-                for &stmt_id in branch.iter() {
-                    if stmt_uses_binding(body, stmt_id, binding_id) {
+                for &stmt_idx in branch.iter() {
+                    if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                         return true;
                     }
                 }
             }
             if let Some(ref branch) = if_stmt.else_branch {
-                for &stmt_id in branch.iter() {
-                    if stmt_uses_binding(body, stmt_id, binding_id) {
+                for &stmt_idx in branch.iter() {
+                    if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                         return true;
                     }
                 }
@@ -281,65 +273,69 @@ fn stmt_uses_binding(
             false
         }
         Stmt::While { condition, body: loop_body } => {
-            if expr_uses_binding(body, *condition, binding_id) {
+            if expr_uses_binding(body, ExprId::from_idx(*condition), binding_id) {
                 return true;
             }
-            for &stmt_id in loop_body.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in loop_body.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
             false
         }
         Stmt::For { from, to, body: loop_body, .. } => {
-            if expr_uses_binding(body, *from, binding_id)
-                || expr_uses_binding(body, *to, binding_id)
+            if expr_uses_binding(body, ExprId::from_idx(*from), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*to), binding_id)
             {
                 return true;
             }
-            for &stmt_id in loop_body.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in loop_body.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
             false
         }
         Stmt::ForEach { collection, body: loop_body, .. } => {
-            if expr_uses_binding(body, *collection, binding_id) {
+            if expr_uses_binding(body, ExprId::from_idx(*collection), binding_id) {
                 return true;
             }
-            for &stmt_id in loop_body.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in loop_body.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
             false
         }
         Stmt::Try { body: try_body, except } => {
-            for &stmt_id in try_body.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in try_body.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
-            for &stmt_id in except.iter() {
-                if stmt_uses_binding(body, stmt_id, binding_id) {
+            for &stmt_idx in except.iter() {
+                if stmt_uses_binding(body, StmtId::from_idx(stmt_idx), binding_id) {
                     return true;
                 }
             }
             false
         }
-        Stmt::Return { value: Some(expr_id) } => expr_uses_binding(body, *expr_id, binding_id),
+        Stmt::Return { value: Some(expr_id) } => {
+            expr_uses_binding(body, ExprId::from_idx(*expr_id), binding_id)
+        }
         Stmt::Return { value: None } => false,
-        Stmt::Raise { value: Some(expr_id) } => expr_uses_binding(body, *expr_id, binding_id),
+        Stmt::Raise { value: Some(expr_id) } => {
+            expr_uses_binding(body, ExprId::from_idx(*expr_id), binding_id)
+        }
         Stmt::Raise { value: None } => false,
-        Stmt::Execute { expr } => expr_uses_binding(body, *expr, binding_id),
+        Stmt::Execute { expr } => expr_uses_binding(body, ExprId::from_idx(*expr), binding_id),
         Stmt::AddHandler { event, handler } => {
-            expr_uses_binding(body, *event, binding_id)
-                || expr_uses_binding(body, *handler, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*event), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*handler), binding_id)
         }
         Stmt::RemoveHandler { event, handler } => {
-            expr_uses_binding(body, *event, binding_id)
-                || expr_uses_binding(body, *handler, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*event), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*handler), binding_id)
         }
         // Other statements don't use expressions
         _ => false,
@@ -351,14 +347,14 @@ fn stmt_uses_binding(
 /// Returns true if the parameter binding appears anywhere in the value expression.
 fn parameter_used_in_assignment_rhs(
     body: &hir_def::Body,
-    stmt_id: hir_def::hir::StmtId,
-    param_id: hir_def::hir::BindingId,
+    stmt_id: StmtId,
+    param_id: BindingId,
 ) -> bool {
     use hir_def::hir::Stmt;
 
     let stmt = body.stmt(stmt_id);
     let value_expr_id = match stmt {
-        Stmt::Assign { value, .. } => *value,
+        Stmt::Assign { value, .. } => ExprId::from_idx(*value),
         _ => return false, // Not an assignment
     };
 
@@ -367,11 +363,7 @@ fn parameter_used_in_assignment_rhs(
 }
 
 /// Recursively check if an expression uses a specific binding.
-fn expr_uses_binding(
-    body: &hir_def::Body,
-    expr_id: hir_def::hir::ExprId,
-    binding_id: hir_def::hir::BindingId,
-) -> bool {
+fn expr_uses_binding(body: &hir_def::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
     use hir_def::hir::Expr;
 
     let expr = body.expr(expr_id);
@@ -383,22 +375,27 @@ fn expr_uses_binding(
             name.as_str().eq_ignore_ascii_case(binding.name.as_str())
         }
         Expr::BinaryOp { lhs, rhs, .. } => {
-            expr_uses_binding(body, *lhs, binding_id) || expr_uses_binding(body, *rhs, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*lhs), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*rhs), binding_id)
         }
         Expr::Call { callee, args, .. } => {
-            expr_uses_binding(body, *callee, binding_id)
-                || args.iter().any(|&arg| expr_uses_binding(body, arg, binding_id))
+            expr_uses_binding(body, ExprId::from_idx(*callee), binding_id)
+                || args
+                    .iter()
+                    .any(|&arg| expr_uses_binding(body, ExprId::from_idx(arg), binding_id))
         }
         Expr::Index { base, index, .. } => {
-            expr_uses_binding(body, *base, binding_id)
-                || expr_uses_binding(body, *index, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*base), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*index), binding_id)
         }
-        Expr::Field { base, .. } => expr_uses_binding(body, *base, binding_id),
-        Expr::New { args, .. } => args.iter().any(|&arg| expr_uses_binding(body, arg, binding_id)),
+        Expr::Field { base, .. } => expr_uses_binding(body, ExprId::from_idx(*base), binding_id),
+        Expr::New { args, .. } => {
+            args.iter().any(|&arg| expr_uses_binding(body, ExprId::from_idx(arg), binding_id))
+        }
         Expr::Ternary { condition, then_expr, else_expr } => {
-            expr_uses_binding(body, *condition, binding_id)
-                || expr_uses_binding(body, *then_expr, binding_id)
-                || expr_uses_binding(body, *else_expr, binding_id)
+            expr_uses_binding(body, ExprId::from_idx(*condition), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*then_expr), binding_id)
+                || expr_uses_binding(body, ExprId::from_idx(*else_expr), binding_id)
         }
         // Literals, missing expressions don't use bindings
         Expr::Literal(_) | Expr::Missing => false,

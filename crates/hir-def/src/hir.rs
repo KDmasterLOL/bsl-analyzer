@@ -27,14 +27,11 @@ use ordered_float::NotNan;
 
 use crate::Name;
 
-/// Expression ID - index into Body's expression arena.
-pub type ExprId = Idx<Expr>;
-
-/// Statement ID - index into Body's statement arena.
-pub type StmtId = Idx<Stmt>;
-
-/// Binding ID - index into Body's binding arena.
-pub type BindingId = Idx<Binding>;
+// Typed arena indices for internal use (lowering, cfg building).
+// For opaque IDs in public APIs, use cfg_types::{ExprId, StmtId, BindingId}.
+pub type ExprIdx = Idx<Expr>;
+pub type StmtIdx = Idx<Stmt>;
+pub type BindingIdx = Idx<Binding>;
 
 /// Literal value in BSL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -114,35 +111,35 @@ pub enum Expr {
     QualifiedPath(Box<crate::path::QualifiedName>),
 
     /// Binary operation (a + b, a И b, etc.).
-    BinaryOp { lhs: ExprId, rhs: ExprId, op: BinaryOp },
+    BinaryOp { lhs: ExprIdx, rhs: ExprIdx, op: BinaryOp },
 
     /// Unary operation (-a, Не a).
-    UnaryOp { expr: ExprId, op: UnaryOp },
+    UnaryOp { expr: ExprIdx, op: UnaryOp },
 
     /// Ternary conditional expression (?(condition, then, else)).
-    Ternary { condition: ExprId, then_expr: ExprId, else_expr: ExprId },
+    Ternary { condition: ExprIdx, then_expr: ExprIdx, else_expr: ExprIdx },
 
     /// Function/procedure call (Func(args)).
-    Call { callee: ExprId, args: Box<[ExprId]> },
+    Call { callee: ExprIdx, args: Box<[ExprIdx]> },
 
     /// Method call (obj.Method(args)).
-    MethodCall { receiver: ExprId, method: Name, args: Box<[ExprId]> },
+    MethodCall { receiver: ExprIdx, method: Name, args: Box<[ExprIdx]> },
 
     /// Index access (array[index]).
-    Index { base: ExprId, index: ExprId },
+    Index { base: ExprIdx, index: ExprIdx },
 
     /// Field access (obj.field).
-    Field { base: ExprId, field: Name },
+    Field { base: ExprIdx, field: Name },
 
     /// New expression (Новый Type(args) or New Type(args)).
-    New { type_name: Option<Name>, args: Box<[ExprId]> },
+    New { type_name: Option<Name>, args: Box<[ExprIdx]> },
 
     /// Array literal ([a, b, c]).
     /// Note: BSL doesn't have array literals in syntax, but we may need this for analysis.
-    Array(Box<[ExprId]>),
+    Array(Box<[ExprIdx]>),
 
     /// Await expression (Ждать expr).
-    Await { expr: ExprId },
+    Await { expr: ExprIdx },
 }
 
 /// If statement data.
@@ -151,10 +148,10 @@ pub enum Expr {
 /// saving ~313 MB for large projects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IfStmt {
-    pub condition: ExprId,
-    pub then_branch: Box<[StmtId]>,
-    pub elsif_branches: Box<[(ExprId, Box<[StmtId]>)]>,
-    pub else_branch: Option<Box<[StmtId]>>,
+    pub condition: ExprIdx,
+    pub then_branch: Box<[StmtIdx]>,
+    pub elsif_branches: Box<[(ExprIdx, Box<[StmtIdx]>)]>,
+    pub else_branch: Option<Box<[StmtIdx]>>,
 }
 
 /// HIR statement.
@@ -163,34 +160,34 @@ pub struct IfStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// Expression statement (standalone expression like function call).
-    Expr(ExprId),
+    Expr(ExprIdx),
 
     /// Assignment statement (target = value).
-    Assign { target: ExprId, value: ExprId },
+    Assign { target: ExprIdx, value: ExprIdx },
 
     /// Variable declaration (Перем a, b, c).
-    VarDecl { bindings: Box<[BindingId]> },
+    VarDecl { bindings: Box<[BindingIdx]> },
 
     /// If statement (boxed to reduce enum size).
     If(Box<IfStmt>),
 
     /// While loop (Пока condition Цикл ... КонецЦикла).
-    While { condition: ExprId, body: Box<[StmtId]> },
+    While { condition: ExprIdx, body: Box<[StmtIdx]> },
 
     /// For loop (Для var = from По to Цикл ... КонецЦикла).
-    For { var: BindingId, from: ExprId, to: ExprId, body: Box<[StmtId]> },
+    For { var: BindingIdx, from: ExprIdx, to: ExprIdx, body: Box<[StmtIdx]> },
 
     /// For-each loop (Для Каждого var Из collection Цикл ... КонецЦикла).
-    ForEach { var: BindingId, collection: ExprId, body: Box<[StmtId]> },
+    ForEach { var: BindingIdx, collection: ExprIdx, body: Box<[StmtIdx]> },
 
     /// Try-except block.
-    Try { body: Box<[StmtId]>, except: Box<[StmtId]> },
+    Try { body: Box<[StmtIdx]>, except: Box<[StmtIdx]> },
 
     /// Return statement (Возврат value).
-    Return { value: Option<ExprId> },
+    Return { value: Option<ExprIdx> },
 
     /// Raise statement (ВызватьИсключение value).
-    Raise { value: Option<ExprId> },
+    Raise { value: Option<ExprIdx> },
 
     /// Break statement (Прервать).
     Break,
@@ -205,13 +202,13 @@ pub enum Stmt {
     Label(Name),
 
     /// Execute statement (Выполнить expr).
-    Execute { expr: ExprId },
+    Execute { expr: ExprIdx },
 
     /// AddHandler statement (ДобавитьОбработчик event, handler).
-    AddHandler { event: ExprId, handler: ExprId },
+    AddHandler { event: ExprIdx, handler: ExprIdx },
 
     /// RemoveHandler statement (УдалитьОбработчик event, handler).
-    RemoveHandler { event: ExprId, handler: ExprId },
+    RemoveHandler { event: ExprIdx, handler: ExprIdx },
 }
 
 /// Local binding (variable or parameter).
@@ -223,7 +220,7 @@ pub struct Binding {
     pub is_val: bool,
     /// Default value for parameter (if any).
     /// Only set for function/procedure parameters with default values.
-    pub default_value: Option<ExprId>,
+    pub default_value: Option<ExprIdx>,
 }
 
 impl Binding {
@@ -233,7 +230,7 @@ impl Binding {
     }
 
     /// Create a new parameter binding with default value.
-    pub fn with_default(name: Name, is_val: bool, default_value: ExprId) -> Self {
+    pub fn with_default(name: Name, is_val: bool, default_value: ExprIdx) -> Self {
         Self { name, is_val, default_value: Some(default_value) }
     }
 
@@ -323,7 +320,7 @@ mod tests {
     fn test_stmt_size() {
         let stmt_size = std::mem::size_of::<Stmt>();
         // After Box<IfStmt> optimization, Stmt should be 40 bytes (down from 56)
-        // The largest variant is now Try with two Box<[StmtId]> = 32 bytes
+        // The largest variant is now Try with two Box<[StmtIdx]> = 32 bytes
         assert!(
             stmt_size <= 40,
             "Stmt size {} bytes exceeds expected 40 bytes. Consider boxing large variants.",

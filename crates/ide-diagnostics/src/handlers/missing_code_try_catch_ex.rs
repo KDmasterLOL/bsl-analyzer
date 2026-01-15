@@ -49,7 +49,8 @@
 //! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::hir::{Stmt, StmtId};
+use hir_def::hir::Stmt;
+use hir_def::{IdConversion, StmtId};
 use syntax::SyntaxKind;
 
 /// Main entry point for MissingCodeTryCatchEx diagnostic.
@@ -101,8 +102,8 @@ fn check_body_for_empty_except(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Recursively scan all statements
-    for stmt_id in body.body_stmts.iter() {
-        check_stmt_recursive(*stmt_id, body, source_map, comment_as_code, ctx, diagnostics);
+    for stmt_id in body.body_stmts() {
+        check_stmt_recursive(stmt_id, body, source_map, comment_as_code, ctx, diagnostics);
     }
 }
 
@@ -192,9 +193,9 @@ fn check_stmt_recursive(
         }
 
         // Recursively check nested statements in try body
-        for &nested_stmt_id in try_body.iter() {
+        for &nested_stmt_idx in try_body.iter() {
             check_stmt_recursive(
-                nested_stmt_id,
+                StmtId::from_idx(nested_stmt_idx),
                 body,
                 source_map,
                 comment_as_code,
@@ -204,9 +205,9 @@ fn check_stmt_recursive(
         }
 
         // Recursively check nested statements in except body
-        for &nested_stmt_id in except.iter() {
+        for &nested_stmt_idx in except.iter() {
             check_stmt_recursive(
-                nested_stmt_id,
+                StmtId::from_idx(nested_stmt_idx),
                 body,
                 source_map,
                 comment_as_code,
@@ -218,9 +219,9 @@ fn check_stmt_recursive(
         // Recursively check nested statements for other statement types
         match stmt {
             Stmt::If(if_stmt) => {
-                for &nested in if_stmt.then_branch.iter() {
+                for &nested_idx in if_stmt.then_branch.iter() {
                     check_stmt_recursive(
-                        nested,
+                        StmtId::from_idx(nested_idx),
                         body,
                         source_map,
                         comment_as_code,
@@ -229,9 +230,9 @@ fn check_stmt_recursive(
                     );
                 }
                 for (_, branch) in if_stmt.elsif_branches.iter() {
-                    for &nested in branch.iter() {
+                    for &nested_idx in branch.iter() {
                         check_stmt_recursive(
-                            nested,
+                            StmtId::from_idx(nested_idx),
                             body,
                             source_map,
                             comment_as_code,
@@ -241,9 +242,9 @@ fn check_stmt_recursive(
                     }
                 }
                 if let Some(ref branch) = if_stmt.else_branch {
-                    for &nested in branch.iter() {
+                    for &nested_idx in branch.iter() {
                         check_stmt_recursive(
-                            nested,
+                            StmtId::from_idx(nested_idx),
                             body,
                             source_map,
                             comment_as_code,
@@ -254,9 +255,9 @@ fn check_stmt_recursive(
                 }
             }
             Stmt::While { body: while_body, .. } => {
-                for &nested in while_body.iter() {
+                for &nested_idx in while_body.iter() {
                     check_stmt_recursive(
-                        nested,
+                        StmtId::from_idx(nested_idx),
                         body,
                         source_map,
                         comment_as_code,
@@ -266,9 +267,9 @@ fn check_stmt_recursive(
                 }
             }
             Stmt::For { body: for_body, .. } | Stmt::ForEach { body: for_body, .. } => {
-                for &nested in for_body.iter() {
+                for &nested_idx in for_body.iter() {
                     check_stmt_recursive(
-                        nested,
+                        StmtId::from_idx(nested_idx),
                         body,
                         source_map,
                         comment_as_code,

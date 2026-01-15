@@ -40,6 +40,8 @@
 //! - Module-level code coverage (not just methods)
 //! - Cleaner recursive checking via ExprId references
 
+use cfg_types::{ExprId, IdConversion};
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::{Body, BodySourceMap, Expr, Name};
 
@@ -74,7 +76,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// HIR-based approach: iterates over expressions and checks New expressions semantically.
 fn check_body(body: &Body, source_map: &BodySourceMap, diagnostics: &mut Vec<Diagnostic>) {
     // Walk all expressions in the body
-    for (expr_id, expr) in body.exprs.iter() {
+    for (expr_id, expr) in body.exprs_iter() {
         // Only check New expressions
         let Expr::New { type_name, args } = expr else {
             continue;
@@ -93,7 +95,7 @@ fn check_body(body: &Body, source_map: &BodySourceMap, diagnostics: &mut Vec<Dia
         // Check if any argument is a New expression with non-empty parameters
         let has_nested_constructor_with_params = args.iter().any(|&arg_id| {
             matches!(
-                body.expr(arg_id),
+                body.expr(ExprId::from_idx(arg_id)),
                 Expr::New { args: nested_args, .. } if !nested_args.is_empty()
             )
         });

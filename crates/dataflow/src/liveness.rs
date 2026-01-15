@@ -50,10 +50,11 @@
 //! Forward analysis would require computing all future uses, which is less efficient.
 
 use super::{Lattice, Transfer};
+use cfg_types::IdConversion;
 use fixedbitset::FixedBitSet;
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Stmt};
-use hir_def::ExprId;
+use hir_def::{BindingId, ExprId};
 use la_arena::RawIdx;
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
@@ -87,7 +88,7 @@ impl VariableIndex {
         let mut idx_to_name = Vec::new();
 
         // Collect all variable names from bindings
-        for (_local_id, binding) in body.bindings.iter() {
+        for (_local_id, binding) in body.bindings_iter() {
             let lowercase: SmolStr = binding.name.as_str().to_lowercase().into();
 
             if !name_to_idx.contains_key(&lowercase) {
@@ -100,15 +101,15 @@ impl VariableIndex {
         // Also collect implicit variables (from Assign statements without Перем declaration)
         // These are Path expressions on the LHS of assignments
         fn collect_implicit_vars(
-            stmts: &[hir_def::StmtId],
+            stmts: &[hir_def::hir::StmtIdx],
             body: &Body,
             name_to_idx: &mut FxHashMap<SmolStr, usize>,
             idx_to_name: &mut Vec<SmolStr>,
         ) {
-            for stmt_id in stmts {
-                match &body.stmts[*stmt_id] {
-                    hir_def::hir::Stmt::Assign { target, .. } => {
-                        if let Expr::Path(name) = &body.exprs[*target] {
+            for &stmt_id in stmts {
+                match body.stmt_idx(stmt_id) {
+                    Stmt::Assign { target, .. } => {
+                        if let Expr::Path(name) = body.expr_idx(*target) {
                             let lowercase: SmolStr = name.as_str().to_lowercase().into();
                             if !name_to_idx.contains_key(&lowercase) {
                                 let idx = idx_to_name.len();
@@ -118,7 +119,7 @@ impl VariableIndex {
                         }
                     }
                     // Recursively check nested statements in control flow
-                    hir_def::hir::Stmt::If(if_stmt) => {
+                    Stmt::If(if_stmt) => {
                         collect_implicit_vars(&if_stmt.then_branch, body, name_to_idx, idx_to_name);
                         for (_cond, stmts) in if_stmt.elsif_branches.iter() {
                             collect_implicit_vars(stmts, body, name_to_idx, idx_to_name);
@@ -127,16 +128,16 @@ impl VariableIndex {
                             collect_implicit_vars(else_stmts, body, name_to_idx, idx_to_name);
                         }
                     }
-                    hir_def::hir::Stmt::While { body: loop_body, .. } => {
+                    Stmt::While { body: loop_body, .. } => {
                         collect_implicit_vars(loop_body, body, name_to_idx, idx_to_name);
                     }
-                    hir_def::hir::Stmt::For { body: loop_body, .. } => {
+                    Stmt::For { body: loop_body, .. } => {
                         collect_implicit_vars(loop_body, body, name_to_idx, idx_to_name);
                     }
-                    hir_def::hir::Stmt::ForEach { body: loop_body, .. } => {
+                    Stmt::ForEach { body: loop_body, .. } => {
                         collect_implicit_vars(loop_body, body, name_to_idx, idx_to_name);
                     }
-                    hir_def::hir::Stmt::Try { body: try_body, except, .. } => {
+                    Stmt::Try { body: try_body, except, .. } => {
                         collect_implicit_vars(try_body, body, name_to_idx, idx_to_name);
                         collect_implicit_vars(except, body, name_to_idx, idx_to_name);
                     }
@@ -145,12 +146,12 @@ impl VariableIndex {
             }
         }
 
-        collect_implicit_vars(&body.body_stmts, body, &mut name_to_idx, &mut idx_to_name);
+        collect_implicit_vars(body.body_stmts_typed(), body, &mut name_to_idx, &mut idx_to_name);
 
         // Build expr_idx_cache: map all Path expressions to their variable indices
         // This enables O(1) lookup in collect_expr_vars without string allocation
         let mut expr_idx_cache = FxHashMap::default();
-        for (expr_id, expr) in body.exprs.iter() {
+        for (expr_id, expr) in body.exprs_iter() {
             if let Expr::Path(name) = expr {
                 let lowercase: SmolStr = name.as_str().to_lowercase().into();
                 if let Some(&idx) = name_to_idx.get(&lowercase) {
@@ -162,7 +163,7 @@ impl VariableIndex {
         // Build binding_idx_cache: map all bindings to their variable indices
         // This enables O(1) lookup in transfer_stmt for VarDecl, For, ForEach
         let mut binding_idx_cache = FxHashMap::default();
-        for (binding_id, binding) in body.bindings.iter() {
+        for (binding_id, binding) in body.bindings_iter() {
             let lowercase: SmolStr = binding.name.as_str().to_lowercase().into();
             if let Some(&idx) = name_to_idx.get(&lowercase) {
                 binding_idx_cache.insert(binding_id, idx);
@@ -405,7 +406,9 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // Kill: remove all declared variables from live set (they're defined here)
                 for &binding_id in bindings.iter() {
                     // Fast path: use pre-computed binding index (O(1), no allocation)
-                    if let Some(idx) = in_state.var_index().get_index_by_binding(binding_id) {
+                    if let Some(idx) =
+                        in_state.var_index().get_index_by_binding(BindingId::from_idx(binding_id))
+                    {
                         in_state.remove_by_idx(idx);
                     }
                 }
@@ -418,44 +421,45 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // Assignment: DEF(target), USE(value)
 
                 // Kill: target variable (if simple path)
-                if matches!(body.expr(*target), Expr::Path(_)) {
+                let target_id = ExprId::from_idx(*target);
+                if matches!(body.expr(target_id), Expr::Path(_)) {
                     // Fast path: use pre-computed expr index (O(1), no allocation)
-                    if let Some(idx) = in_state.var_index().get_index_by_expr(*target) {
+                    if let Some(idx) = in_state.var_index().get_index_by_expr(target_id) {
                         in_state.remove_by_idx(idx);
                     }
                 } else {
                     // Complex assignment: Obj.Field = ... or Arr[i] = ...
                     // Base object is used (read), not killed
-                    collect_expr_vars(*target, body, &mut in_state);
+                    collect_expr_vars(target_id, body, &mut in_state);
                 }
 
                 // Gen: value expression variables are used
-                collect_expr_vars(*value, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*value), body, &mut in_state);
             }
 
             Stmt::Expr(expr_id) => {
                 // Expression statement: USE(expr)
                 // Gen: all variables in expression are used
-                collect_expr_vars(*expr_id, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*expr_id), body, &mut in_state);
             }
 
             Stmt::Return { value } => {
                 // Return statement: USE(return_value)
                 if let Some(expr_id) = value {
-                    collect_expr_vars(*expr_id, body, &mut in_state);
+                    collect_expr_vars(ExprId::from_idx(*expr_id), body, &mut in_state);
                 }
             }
 
             Stmt::Raise { value } => {
                 // Raise statement: USE(value)
                 if let Some(expr_id) = value {
-                    collect_expr_vars(*expr_id, body, &mut in_state);
+                    collect_expr_vars(ExprId::from_idx(*expr_id), body, &mut in_state);
                 }
             }
 
             Stmt::If(if_stmt) => {
                 // If statement: USE(condition)
-                collect_expr_vars(if_stmt.condition, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(if_stmt.condition), body, &mut in_state);
 
                 // Branches are handled by CFG - each branch is a separate basic block
                 // We just need to handle condition here
@@ -464,7 +468,7 @@ impl Transfer<Liveness> for LivenessTransfer {
 
             Stmt::While { condition, .. } => {
                 // While loop: USE(condition)
-                collect_expr_vars(*condition, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*condition), body, &mut in_state);
 
                 // Loop body is in separate basic blocks (handled by CFG)
                 // Transfer function will be called for each basic block in the loop
@@ -474,12 +478,14 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // For loop: DEF(var), USE(from), USE(to)
 
                 // Gen: from and to expressions
-                collect_expr_vars(*from, body, &mut in_state);
-                collect_expr_vars(*to, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*from), body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*to), body, &mut in_state);
 
                 // Kill: loop variable (it's defined by for loop)
                 // Fast path: use pre-computed binding index (O(1), no allocation)
-                if let Some(idx) = in_state.var_index().get_index_by_binding(*var) {
+                if let Some(idx) =
+                    in_state.var_index().get_index_by_binding(BindingId::from_idx(*var))
+                {
                     in_state.remove_by_idx(idx);
                 }
 
@@ -490,11 +496,13 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // ForEach loop: DEF(var), USE(collection)
 
                 // Gen: collection expression
-                collect_expr_vars(*collection, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*collection), body, &mut in_state);
 
                 // Kill: loop variable
                 // Fast path: use pre-computed binding index (O(1), no allocation)
-                if let Some(idx) = in_state.var_index().get_index_by_binding(*var) {
+                if let Some(idx) =
+                    in_state.var_index().get_index_by_binding(BindingId::from_idx(*var))
+                {
                     in_state.remove_by_idx(idx);
                 }
 
@@ -512,7 +520,7 @@ impl Transfer<Liveness> for LivenessTransfer {
 
             Stmt::Execute { expr } => {
                 // Execute statement: USE(expr)
-                collect_expr_vars(*expr, body, &mut in_state);
+                collect_expr_vars(ExprId::from_idx(*expr), body, &mut in_state);
             }
 
             Stmt::AddHandler { .. } | Stmt::RemoveHandler { .. } => {
@@ -545,58 +553,63 @@ impl Transfer<Liveness> for LivenessTransfer {
         match stmt {
             Stmt::VarDecl { bindings } => {
                 for &binding_id in bindings.iter() {
-                    if let Some(idx) = state.var_index().get_index_by_binding(binding_id) {
+                    if let Some(idx) =
+                        state.var_index().get_index_by_binding(BindingId::from_idx(binding_id))
+                    {
                         state.remove_by_idx(idx);
                     }
                 }
             }
 
             Stmt::Assign { target, value } => {
-                if matches!(body.expr(*target), Expr::Path(_)) {
-                    if let Some(idx) = state.var_index().get_index_by_expr(*target) {
+                let target_id = ExprId::from_idx(*target);
+                if matches!(body.expr(target_id), Expr::Path(_)) {
+                    if let Some(idx) = state.var_index().get_index_by_expr(target_id) {
                         state.remove_by_idx(idx);
                     }
                 } else {
-                    collect_expr_vars(*target, body, state);
+                    collect_expr_vars(target_id, body, state);
                 }
-                collect_expr_vars(*value, body, state);
+                collect_expr_vars(ExprId::from_idx(*value), body, state);
             }
 
             Stmt::Expr(expr_id) => {
-                collect_expr_vars(*expr_id, body, state);
+                collect_expr_vars(ExprId::from_idx(*expr_id), body, state);
             }
 
             Stmt::Return { value } => {
                 if let Some(expr_id) = value {
-                    collect_expr_vars(*expr_id, body, state);
+                    collect_expr_vars(ExprId::from_idx(*expr_id), body, state);
                 }
             }
 
             Stmt::Raise { value } => {
                 if let Some(expr_id) = value {
-                    collect_expr_vars(*expr_id, body, state);
+                    collect_expr_vars(ExprId::from_idx(*expr_id), body, state);
                 }
             }
 
             Stmt::If(if_stmt) => {
-                collect_expr_vars(if_stmt.condition, body, state);
+                collect_expr_vars(ExprId::from_idx(if_stmt.condition), body, state);
             }
 
             Stmt::While { condition, .. } => {
-                collect_expr_vars(*condition, body, state);
+                collect_expr_vars(ExprId::from_idx(*condition), body, state);
             }
 
             Stmt::For { var, from, to, .. } => {
-                collect_expr_vars(*from, body, state);
-                collect_expr_vars(*to, body, state);
-                if let Some(idx) = state.var_index().get_index_by_binding(*var) {
+                collect_expr_vars(ExprId::from_idx(*from), body, state);
+                collect_expr_vars(ExprId::from_idx(*to), body, state);
+                if let Some(idx) = state.var_index().get_index_by_binding(BindingId::from_idx(*var))
+                {
                     state.remove_by_idx(idx);
                 }
             }
 
             Stmt::ForEach { var, collection, .. } => {
-                collect_expr_vars(*collection, body, state);
-                if let Some(idx) = state.var_index().get_index_by_binding(*var) {
+                collect_expr_vars(ExprId::from_idx(*collection), body, state);
+                if let Some(idx) = state.var_index().get_index_by_binding(BindingId::from_idx(*var))
+                {
                     state.remove_by_idx(idx);
                 }
             }
@@ -606,7 +619,7 @@ impl Transfer<Liveness> for LivenessTransfer {
             Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Label(_) => {}
 
             Stmt::Execute { expr } => {
-                collect_expr_vars(*expr, body, state);
+                collect_expr_vars(ExprId::from_idx(*expr), body, state);
             }
 
             Stmt::AddHandler { .. } | Stmt::RemoveHandler { .. } => {}
@@ -652,51 +665,51 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
         }
 
         Expr::BinaryOp { lhs, rhs, .. } => {
-            collect_expr_vars(*lhs, body, liveness);
-            collect_expr_vars(*rhs, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*lhs), body, liveness);
+            collect_expr_vars(ExprId::from_idx(*rhs), body, liveness);
         }
 
         Expr::UnaryOp { expr, .. } => {
-            collect_expr_vars(*expr, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*expr), body, liveness);
         }
 
         Expr::Call { callee, args } => {
-            collect_expr_vars(*callee, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*callee), body, liveness);
             for &arg_expr in args.iter() {
-                collect_expr_vars(arg_expr, body, liveness);
+                collect_expr_vars(ExprId::from_idx(arg_expr), body, liveness);
             }
         }
 
         Expr::MethodCall { receiver, args, .. } => {
-            collect_expr_vars(*receiver, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*receiver), body, liveness);
             for &arg_expr in args.iter() {
-                collect_expr_vars(arg_expr, body, liveness);
+                collect_expr_vars(ExprId::from_idx(arg_expr), body, liveness);
             }
         }
 
         Expr::Field { base, .. } => {
-            collect_expr_vars(*base, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*base), body, liveness);
         }
 
         Expr::Index { base, index } => {
-            collect_expr_vars(*base, body, liveness);
-            collect_expr_vars(*index, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*base), body, liveness);
+            collect_expr_vars(ExprId::from_idx(*index), body, liveness);
         }
 
         Expr::Ternary { condition, then_expr, else_expr } => {
-            collect_expr_vars(*condition, body, liveness);
-            collect_expr_vars(*then_expr, body, liveness);
-            collect_expr_vars(*else_expr, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*condition), body, liveness);
+            collect_expr_vars(ExprId::from_idx(*then_expr), body, liveness);
+            collect_expr_vars(ExprId::from_idx(*else_expr), body, liveness);
         }
 
         Expr::New { args, .. } => {
             for &arg_expr in args.iter() {
-                collect_expr_vars(arg_expr, body, liveness);
+                collect_expr_vars(ExprId::from_idx(arg_expr), body, liveness);
             }
         }
 
         Expr::Await { expr } => {
-            collect_expr_vars(*expr, body, liveness);
+            collect_expr_vars(ExprId::from_idx(*expr), body, liveness);
         }
 
         Expr::QualifiedPath(_) => {
@@ -706,7 +719,7 @@ fn collect_expr_vars(expr_id: ExprId, body: &Body, liveness: &mut Liveness) {
         Expr::Array(elements) => {
             // Array literal: [expr1, expr2, ...]
             for &elem_expr in elements.iter() {
-                collect_expr_vars(elem_expr, body, liveness);
+                collect_expr_vars(ExprId::from_idx(elem_expr), body, liveness);
             }
         }
     }

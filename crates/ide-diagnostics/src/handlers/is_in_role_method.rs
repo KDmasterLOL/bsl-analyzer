@@ -58,7 +58,8 @@
 //! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::hir::{Expr, ExprId, Stmt};
+use hir_def::hir::{Expr, Stmt};
+use hir_def::{ExprId, IdConversion};
 use ide_db::TextRange;
 use std::collections::HashSet;
 
@@ -126,7 +127,7 @@ impl<'a> IsInRoleChecker<'a> {
     fn collect_variables(&mut self) {
         for (_stmt_id, stmt) in self.body.stmts_iter() {
             if let Stmt::Assign { target, value } = stmt {
-                self.handle_assignment(*target, *value);
+                self.handle_assignment(ExprId::from_idx(*target), ExprId::from_idx(*value));
             }
         }
     }
@@ -136,11 +137,11 @@ impl<'a> IsInRoleChecker<'a> {
         for (_stmt_id, stmt) in self.body.stmts_iter() {
             if let Stmt::If(if_stmt) = stmt {
                 // Check main if condition
-                self.check_expression(if_stmt.condition);
+                self.check_expression(ExprId::from_idx(if_stmt.condition));
 
                 // Check elsif conditions
                 for (elsif_condition, _elsif_stmts) in if_stmt.elsif_branches.iter() {
-                    self.check_expression(*elsif_condition);
+                    self.check_expression(ExprId::from_idx(*elsif_condition));
                 }
             }
         }
@@ -205,16 +206,16 @@ impl<'a> IsInRoleChecker<'a> {
         // Recursively check subexpressions
         match self.body.expr(expr_id) {
             Expr::BinaryOp { lhs, rhs, .. } => {
-                self.find_is_in_role_usages(*lhs, has_protection);
-                self.find_is_in_role_usages(*rhs, has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*lhs), has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*rhs), has_protection);
             }
             Expr::UnaryOp { expr, .. } => {
-                self.find_is_in_role_usages(*expr, has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*expr), has_protection);
             }
             Expr::Ternary { condition, then_expr, else_expr } => {
-                self.find_is_in_role_usages(*condition, has_protection);
-                self.find_is_in_role_usages(*then_expr, has_protection);
-                self.find_is_in_role_usages(*else_expr, has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*condition), has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*then_expr), has_protection);
+                self.find_is_in_role_usages(ExprId::from_idx(*else_expr), has_protection);
             }
             _ => {}
         }
@@ -223,7 +224,7 @@ impl<'a> IsInRoleChecker<'a> {
     /// Check if expression is a call to IsInRole() / РольДоступна().
     fn is_is_in_role_call(&self, expr_id: ExprId) -> bool {
         if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
-            if let Expr::Path(name) = self.body.expr(*callee) {
+            if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
                 return is_is_in_role_method(name.as_str());
             }
         }
@@ -233,7 +234,7 @@ impl<'a> IsInRoleChecker<'a> {
     /// Check if expression is a call to PrivilegedMode() / ПривилегированныйРежим().
     fn is_privileged_mode_call(&self, expr_id: ExprId) -> bool {
         if let Expr::Call { callee, .. } = self.body.expr(expr_id) {
-            if let Expr::Path(name) = self.body.expr(*callee) {
+            if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
                 return is_privileged_mode_method(name.as_str());
             }
         }
@@ -255,7 +256,7 @@ impl<'a> IsInRoleChecker<'a> {
         match self.body.expr(expr_id) {
             // Direct PrivilegedMode() call
             Expr::Call { callee, .. } => {
-                if let Expr::Path(name) = self.body.expr(*callee) {
+                if let Expr::Path(name) = self.body.expr(ExprId::from_idx(*callee)) {
                     if is_privileged_mode_method(name.as_str()) {
                         return true;
                     }
@@ -271,17 +272,18 @@ impl<'a> IsInRoleChecker<'a> {
 
             // Binary operations - recursively check both sides
             Expr::BinaryOp { lhs, rhs, .. } => {
-                self.contains_privileged_mode(*lhs) || self.contains_privileged_mode(*rhs)
+                self.contains_privileged_mode(ExprId::from_idx(*lhs))
+                    || self.contains_privileged_mode(ExprId::from_idx(*rhs))
             }
 
             // Unary operations
-            Expr::UnaryOp { expr, .. } => self.contains_privileged_mode(*expr),
+            Expr::UnaryOp { expr, .. } => self.contains_privileged_mode(ExprId::from_idx(*expr)),
 
             // Ternary operations
             Expr::Ternary { condition, then_expr, else_expr } => {
-                self.contains_privileged_mode(*condition)
-                    || self.contains_privileged_mode(*then_expr)
-                    || self.contains_privileged_mode(*else_expr)
+                self.contains_privileged_mode(ExprId::from_idx(*condition))
+                    || self.contains_privileged_mode(ExprId::from_idx(*then_expr))
+                    || self.contains_privileged_mode(ExprId::from_idx(*else_expr))
             }
 
             _ => false,

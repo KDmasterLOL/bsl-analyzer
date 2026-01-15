@@ -6,8 +6,9 @@ use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
-use crate::hir::{Binding, BindingId, Expr, Stmt, StmtId};
-use crate::Name;
+use crate::hir::{Binding, BindingIdx, Expr, Stmt, StmtIdx};
+use crate::{Name, StmtId};
+use cfg_types::IdConversion;
 
 use super::control_flow::{
     find_first_unreachable_stmt, if_all_branches_terminate, is_control_flow_terminator,
@@ -281,7 +282,7 @@ fn find_foreach_do_range(foreach_stmt: &SyntaxNode) -> TextRange {
 }
 
 /// Lower parameter list.
-pub(crate) fn lower_params(ctx: &mut LoweringCtx, param_list: &SyntaxNode) -> Vec<BindingId> {
+pub(crate) fn lower_params(ctx: &mut LoweringCtx, param_list: &SyntaxNode) -> Vec<BindingIdx> {
     let mut params = Vec::new();
 
     for param in param_list.children().filter(|n| n.kind() == SyntaxKind::PARAM) {
@@ -294,7 +295,7 @@ pub(crate) fn lower_params(ctx: &mut LoweringCtx, param_list: &SyntaxNode) -> Ve
 }
 
 /// Lower a single parameter.
-fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
+fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingIdx> {
     let name_token = param
         .children_with_tokens()
         .filter_map(|el| el.into_token())
@@ -340,7 +341,7 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingId> {
 ///
 /// Also detects unreachable code after control flow statements (return, raise, break, continue)
 /// and after if-else where all branches terminate.
-pub(crate) fn lower_stmt_list(ctx: &mut LoweringCtx, stmt_list: &SyntaxNode) -> Vec<StmtId> {
+pub(crate) fn lower_stmt_list(ctx: &mut LoweringCtx, stmt_list: &SyntaxNode) -> Vec<StmtIdx> {
     lower_stmt_list_with_unreachable(ctx, stmt_list, true)
 }
 
@@ -353,7 +354,7 @@ pub(super) fn lower_stmt_list_with_unreachable(
     ctx: &mut LoweringCtx,
     stmt_list: &SyntaxNode,
     emit_diagnostics: bool,
-) -> Vec<StmtId> {
+) -> Vec<StmtIdx> {
     let mut stmts = Vec::new();
     let mut unreachable_start: Option<TextRange> = None;
     let mut unreachable_end: Option<TextRange> = None;
@@ -498,7 +499,7 @@ pub(super) fn lower_stmt_list_with_unreachable(
 }
 
 /// Lower a single statement.
-pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<StmtId> {
+pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<StmtIdx> {
     let range = node.text_range();
     let kind = node.kind();
 
@@ -554,7 +555,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     //
     // Also, if the target is a simple Path and not already in local_vars,
     // this is an implicit variable declaration (BSL allows this).
-    let target_name = if let Expr::Path(name) = ctx.body.expr(target) {
+    let target_name = if let Expr::Path(name) = ctx.body.expr_idx(target) {
         Some((name.clone(), get_target_range(&target_node)))
     } else {
         None
@@ -582,10 +583,12 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         // Check for RewriteMethodParameter diagnostic
         // Emit for assignments to byValue parameters - validation with reaching defs happens in from_hir()
         if let Some(&param_id) = ctx.by_value_params.get(&key) {
+            // Convert typed BindingIdx to opaque BindingId for diagnostic
+            let opaque_param_id = cfg_types::BindingId::from_idx(param_id);
             // Use full statement range for BodySourceMap lookup
             // (identifier range is used for displaying diagnostic to user)
             ctx.emit(BodyDiagnostic::RewriteMethodParameter {
-                param_id,
+                param_id: opaque_param_id,
                 stmt_id: StmtId::from_raw(la_arena::RawIdx::from(0)), // Placeholder - will find via range in handler
                 range: node.text_range(), // Full statement range for lookup
             });
@@ -606,7 +609,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         use super::QueryVarType;
 
         // Check if value is "New Query()" or similar
-        if let Expr::New { type_name: Some(type_name), .. } = ctx.body.expr(value) {
+        if let Expr::New { type_name: Some(type_name), .. } = ctx.body.expr_idx(value) {
             let type_str = type_name.as_str().to_lowercase();
             let query_type = match type_str.as_str() {
                 "запрос" | "query" => QueryVarType::Query,
@@ -619,7 +622,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
                 _ => QueryVarType::Undefined,
             };
             ctx.register_query_var(target_name.as_str().to_string(), query_type);
-        } else if let Expr::Path(source_name) = ctx.body.expr(value) {
+        } else if let Expr::Path(source_name) = ctx.body.expr_idx(value) {
             // Handle: Запрос2 = Запрос (copy query reference)
             if let Some(source_type) = ctx.get_query_var_type(source_name.as_str()) {
                 ctx.register_query_var(target_name.as_str().to_string(), source_type);

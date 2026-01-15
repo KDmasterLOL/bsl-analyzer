@@ -39,6 +39,8 @@
 //! - DataExchangeLoadingDiagnostic.java (bsl-language-server) - Java reference
 //! - data_exchange_loading.rs (bsl-language-server-rust) - Rust reference
 
+use cfg_types::IdConversion;
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, Name, Stmt, StmtId};
 
@@ -136,14 +138,12 @@ fn has_guard_pattern(body: &Body, find_first: bool) -> bool {
     // With findFirst=true, we need to skip Var declarations and check first executable statement
     let stmts_to_check: Vec<StmtId> = if find_first {
         // Skip Var declarations and take first non-var statement
-        body.body_stmts
-            .iter()
-            .copied()
+        body.body_stmts()
             .filter(|&stmt_id| !matches!(body.stmt(stmt_id), Stmt::VarDecl { .. }))
             .take(1)
             .collect()
     } else {
-        body.body_stmts.to_vec()
+        body.body_stmts().collect()
     };
 
     // Check statements for guard pattern
@@ -163,12 +163,15 @@ fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
     match stmt {
         Stmt::If(if_stmt) => {
             // Check condition contains DataExchange.Load
-            if !condition_has_data_exchange_load(body, if_stmt.condition) {
+            if !condition_has_data_exchange_load(body, ExprId::from_idx(if_stmt.condition)) {
                 return false;
             }
 
             // Check then_branch has Return
-            has_return_in_branch(body, &if_stmt.then_branch)
+            // Convert &[StmtIdx] to Vec<StmtId>
+            let then_branch_ids: Vec<StmtId> =
+                if_stmt.then_branch.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+            has_return_in_branch(body, &then_branch_ids)
         }
         _ => false,
     }
@@ -183,21 +186,23 @@ fn condition_has_data_exchange_load(body: &Body, expr_id: ExprId) -> bool {
     match expr {
         // Direct field access: ОбменДанными.Загрузка
         Expr::Field { base, field } => {
-            if is_data_exchange_load_field(body, *base, field) {
+            if is_data_exchange_load_field(body, ExprId::from_idx(*base), field) {
                 return true;
             }
             // Also check nested fields
-            condition_has_data_exchange_load(body, *base)
+            condition_has_data_exchange_load(body, ExprId::from_idx(*base))
         }
 
         // Binary operators (И/OR) - check both sides
         Expr::BinaryOp { lhs, rhs, .. } => {
-            condition_has_data_exchange_load(body, *lhs)
-                || condition_has_data_exchange_load(body, *rhs)
+            condition_has_data_exchange_load(body, ExprId::from_idx(*lhs))
+                || condition_has_data_exchange_load(body, ExprId::from_idx(*rhs))
         }
 
         // Unary operators (НЕ/NOT) - check inner expression
-        Expr::UnaryOp { expr, .. } => condition_has_data_exchange_load(body, *expr),
+        Expr::UnaryOp { expr, .. } => {
+            condition_has_data_exchange_load(body, ExprId::from_idx(*expr))
+        }
 
         _ => false,
     }
@@ -245,15 +250,14 @@ fn has_return_anywhere(body: &Body, stmt_id: StmtId) -> bool {
     match stmt {
         Stmt::Return { .. } => true,
         Stmt::If(if_stmt) => {
-            if_stmt.then_branch.iter().any(|&s| has_return_anywhere(body, s))
-                || if_stmt
-                    .elsif_branches
-                    .iter()
-                    .any(|(_, branch)| branch.iter().any(|&s| has_return_anywhere(body, s)))
+            if_stmt.then_branch.iter().any(|&s| has_return_anywhere(body, StmtId::from_idx(s)))
+                || if_stmt.elsif_branches.iter().any(|(_, branch)| {
+                    branch.iter().any(|&s| has_return_anywhere(body, StmtId::from_idx(s)))
+                })
                 || if_stmt
                     .else_branch
                     .as_ref()
-                    .map(|b| b.iter().any(|&s| has_return_anywhere(body, s)))
+                    .map(|b| b.iter().any(|&s| has_return_anywhere(body, StmtId::from_idx(s))))
                     .unwrap_or(false)
         }
         _ => false,

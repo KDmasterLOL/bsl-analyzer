@@ -40,29 +40,35 @@ use rustc_hash::FxHashMap;
 use syntax::SyntaxNode;
 use text_size::TextRange;
 
-use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
+use crate::hir::{Binding, BindingIdx, Expr, ExprIdx, Stmt, StmtIdx};
 use crate::Name;
+
+// Opaque ID types for public API
+use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 /// HIR representation of a method body.
 ///
 /// Contains all expressions, statements, and bindings in arena-allocated form.
 /// This allows efficient storage and stable IDs for referencing HIR nodes.
+///
+/// **NOTE**: Internal fields use typed Idx<T> for type safety during lowering.
+/// Public API methods return opaque IDs (cfg_types) for external consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
-    /// All expressions in this body.
-    pub exprs: Arena<Expr>,
-    /// All statements in this body.
-    pub stmts: Arena<Stmt>,
-    /// All local bindings (variables and parameters).
-    pub bindings: Arena<Binding>,
-    /// Parameter binding IDs (in declaration order).
-    pub params: Box<[BindingId]>,
-    /// Top-level statements in the method body.
-    pub body_stmts: Box<[StmtId]>,
+    /// All expressions in this body (internal arena with typed indices).
+    pub(crate) exprs: Arena<Expr>,
+    /// All statements in this body (internal arena with typed indices).
+    pub(crate) stmts: Arena<Stmt>,
+    /// All local bindings (variables and parameters, internal arena).
+    pub(crate) bindings: Arena<Binding>,
+    /// Parameter binding IDs (in declaration order, typed for internal use).
+    pub(crate) params: Box<[BindingIdx]>,
+    /// Top-level statements in the method body (typed for internal use).
+    pub(crate) body_stmts: Box<[StmtIdx]>,
 
-    /// SDBL queries found in this method body.
-    /// Maps ExprId (Expr::Literal with SDBL string) to parsed SDBL query info.
-    pub sdbl_exprs: Vec<(ExprId, syntax::SdblQueryInfo)>,
+    /// SDBL queries found in this method body (typed ExprIdx for internal use).
+    /// Maps ExprIdx (Expr::Literal with SDBL string) to parsed SDBL query info.
+    pub(crate) sdbl_exprs: Vec<(ExprIdx, syntax::SdblQueryInfo)>,
 }
 
 impl Default for Body {
@@ -84,18 +90,36 @@ impl Body {
         }
     }
 
-    /// Get an expression by ID.
+    /// Get an expression by ID (opaque → typed conversion).
     pub fn expr(&self, id: ExprId) -> &Expr {
+        let typed_id: ExprIdx = id.to_idx();
+        &self.exprs[typed_id]
+    }
+
+    /// Get a statement by ID (opaque → typed conversion).
+    pub fn stmt(&self, id: StmtId) -> &Stmt {
+        let typed_id: StmtIdx = id.to_idx();
+        &self.stmts[typed_id]
+    }
+
+    /// Get a binding by ID (opaque → typed conversion).
+    pub fn binding(&self, id: BindingId) -> &Binding {
+        let typed_id: BindingIdx = id.to_idx();
+        &self.bindings[typed_id]
+    }
+
+    /// Get expression by typed index (used during lowering and cfg building).
+    pub fn expr_idx(&self, id: ExprIdx) -> &Expr {
         &self.exprs[id]
     }
 
-    /// Get a statement by ID.
-    pub fn stmt(&self, id: StmtId) -> &Stmt {
+    /// Get statement by typed index (used during lowering and cfg building).
+    pub fn stmt_idx(&self, id: StmtIdx) -> &Stmt {
         &self.stmts[id]
     }
 
-    /// Get a binding by ID.
-    pub fn binding(&self, id: BindingId) -> &Binding {
+    /// Get binding by typed index (used during lowering and cfg building).
+    pub fn binding_idx(&self, id: BindingIdx) -> &Binding {
         &self.bindings[id]
     }
 
@@ -114,24 +138,79 @@ impl Body {
         self.bindings.len()
     }
 
-    /// Iterate over all expressions.
-    pub fn exprs_iter(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
-        self.exprs.iter()
+    /// Get top-level statements as typed indices (for dataflow analysis).
+    pub fn body_stmts_typed(&self) -> &[StmtIdx] {
+        &self.body_stmts
     }
 
-    /// Iterate over all statements.
-    pub fn stmts_iter(&self) -> impl Iterator<Item = (StmtId, &Stmt)> {
-        self.stmts.iter()
+    /// Iterate over all expressions (converts internal Idx to opaque ExprId).
+    pub fn exprs_iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (ExprId, &Expr)> + DoubleEndedIterator + Clone {
+        self.exprs.iter().map(|(idx, expr)| (ExprId::from_idx(idx), expr))
     }
 
-    /// Iterate over all bindings.
-    pub fn bindings_iter(&self) -> impl Iterator<Item = (BindingId, &Binding)> {
-        self.bindings.iter()
+    /// Iterate over all statements (converts internal Idx to opaque StmtId).
+    pub fn stmts_iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (StmtId, &Stmt)> + DoubleEndedIterator + Clone {
+        self.stmts.iter().map(|(idx, stmt)| (StmtId::from_idx(idx), stmt))
     }
 
-    /// Get all SDBL expressions in this body.
-    pub fn sdbl_exprs(&self) -> &[(ExprId, syntax::SdblQueryInfo)] {
-        &self.sdbl_exprs
+    /// Iterate over all bindings (converts internal Idx to opaque BindingId).
+    pub fn bindings_iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (BindingId, &Binding)> + DoubleEndedIterator + Clone {
+        self.bindings.iter().map(|(idx, binding)| (BindingId::from_idx(idx), binding))
+    }
+
+    /// Get all SDBL expressions in this body (with opaque ExprId).
+    pub fn sdbl_exprs(&self) -> impl Iterator<Item = (ExprId, &syntax::SdblQueryInfo)> {
+        self.sdbl_exprs.iter().map(|(idx, info)| (ExprId::from_idx(*idx), info))
+    }
+
+    /// Get parameter binding IDs (opaque, in declaration order).
+    pub fn params(&self) -> impl Iterator<Item = BindingId> + '_ {
+        self.params.iter().map(|&idx| BindingId::from_idx(idx))
+    }
+
+    /// Get top-level statement IDs (opaque).
+    pub fn body_stmts(&self) -> impl Iterator<Item = StmtId> + '_ {
+        self.body_stmts.iter().map(|&idx| StmtId::from_idx(idx))
+    }
+
+    // ===== Test helpers =====
+    // These methods are public to allow test code in other crates (like cfg tests)
+    // to construct Body instances directly without going through the lowering pipeline.
+
+    /// Access expression arena mutably (for tests only).
+    #[doc(hidden)]
+    pub fn exprs_mut(&mut self) -> &mut Arena<Expr> {
+        &mut self.exprs
+    }
+
+    /// Access statement arena mutably (for tests only).
+    #[doc(hidden)]
+    pub fn stmts_mut(&mut self) -> &mut Arena<Stmt> {
+        &mut self.stmts
+    }
+
+    /// Access binding arena mutably (for tests only).
+    #[doc(hidden)]
+    pub fn bindings_mut(&mut self) -> &mut Arena<Binding> {
+        &mut self.bindings
+    }
+
+    /// Set body statements (for tests only).
+    #[doc(hidden)]
+    pub fn set_body_stmts(&mut self, stmts: Box<[StmtIdx]>) {
+        self.body_stmts = stmts;
+    }
+
+    /// Set parameters (for tests only).
+    #[doc(hidden)]
+    pub fn set_params(&mut self, params: Box<[BindingIdx]>) {
+        self.params = params;
     }
 }
 
@@ -169,28 +248,30 @@ impl BodySourceMap {
         Self::default()
     }
 
-    /// Record expression source range.
-    pub fn record_expr(&mut self, id: ExprId, range: TextRange) {
+    /// Record expression source range (accepts typed Idx during lowering).
+    pub(crate) fn record_expr(&mut self, id: ExprIdx, range: TextRange) {
+        let opaque_id = ExprId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.expr_ranges.len() {
             self.expr_ranges.resize(idx + 1, None);
         }
         self.expr_ranges[idx] = Some(range);
-        self.range_to_expr.insert(range, id);
+        self.range_to_expr.insert(range, opaque_id);
     }
 
-    /// Record statement source range.
-    pub fn record_stmt(&mut self, id: StmtId, range: TextRange) {
+    /// Record statement source range (accepts typed Idx during lowering).
+    pub(crate) fn record_stmt(&mut self, id: StmtIdx, range: TextRange) {
+        let opaque_id = StmtId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.stmt_ranges.len() {
             self.stmt_ranges.resize(idx + 1, None);
         }
         self.stmt_ranges[idx] = Some(range);
-        self.range_to_stmt.insert(range, id);
+        self.range_to_stmt.insert(range, opaque_id);
     }
 
-    /// Record binding source range.
-    pub fn record_binding(&mut self, id: BindingId, range: TextRange) {
+    /// Record binding source range (accepts typed Idx during lowering).
+    pub(crate) fn record_binding(&mut self, id: BindingIdx, range: TextRange) {
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.binding_ranges.len() {
             self.binding_ranges.resize(idx + 1, None);
@@ -642,7 +723,7 @@ mod tests {
         let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
         assert_eq!(body.expr_count(), 1);
 
-        let expr = body.expr(expr_id);
+        let expr = body.expr(ExprId::from_idx(expr_id));
         assert!(
             matches!(expr, Expr::Literal(Literal::Number(n)) if *n == NotNan::new(42.0).unwrap())
         );
@@ -656,7 +737,7 @@ mod tests {
         let stmt_id = body.stmts.alloc(Stmt::Expr(expr_id));
 
         assert_eq!(body.stmt_count(), 1);
-        let stmt = body.stmt(stmt_id);
+        let stmt = body.stmt(StmtId::from_idx(stmt_id));
         assert!(matches!(stmt, Stmt::Expr(id) if *id == expr_id));
     }
 
@@ -667,7 +748,7 @@ mod tests {
         let binding_id = body.bindings.alloc(Binding::var(Name::new("Переменная")));
         assert_eq!(body.binding_count(), 1);
 
-        let binding = body.binding(binding_id);
+        let binding = body.binding(BindingId::from_idx(binding_id));
         assert_eq!(binding.name.as_str(), "Переменная");
         assert!(!binding.is_val);
     }
@@ -682,8 +763,8 @@ mod tests {
 
         source_map.record_expr(expr_id, range);
 
-        assert_eq!(source_map.expr_range(expr_id), Some(range));
-        assert_eq!(source_map.expr_at_range(range), Some(expr_id));
+        assert_eq!(source_map.expr_range(ExprId::from_idx(expr_id)), Some(range));
+        assert_eq!(source_map.expr_at_range(range), Some(ExprId::from_idx(expr_id)));
     }
 
     #[test]

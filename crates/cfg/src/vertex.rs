@@ -30,7 +30,8 @@
 //! - Structured access via pattern matching (no tree traversal)
 //! - Follows rust-analyzer patterns
 
-use hir_def::{BindingId, ExprId, Name, StmtId};
+use cfg_types::{BindingId, ExprId, StmtId};
+use hir_def::Name;
 
 /// Vertex in the control flow graph
 ///

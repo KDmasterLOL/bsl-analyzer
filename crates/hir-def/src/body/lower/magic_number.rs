@@ -4,7 +4,8 @@
 //! Uses semantic context (assignment targets, method calls) instead of AST patterns.
 
 use crate::body::{Body, BodyDiagnostic, BodySourceMap};
-use crate::hir::{Expr, ExprId, Literal, Stmt, StmtId};
+use crate::hir::{Expr, ExprIdx, Literal, Stmt, StmtIdx};
+use cfg_types::IdConversion;
 use text_size::TextRange;
 
 /// Analyze body for magic numbers and emit diagnostics.
@@ -87,13 +88,13 @@ fn check_stmt(
 
 /// Check a list of statements.
 fn check_stmts(
-    stmts: &[StmtId],
+    stmts: &[StmtIdx],
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<BodyDiagnostic>,
 ) {
     for stmt_id in stmts {
-        let stmt = body.stmt(*stmt_id);
+        let stmt = body.stmt_idx(*stmt_id);
         check_stmt(stmt, body, source_map, diagnostics);
     }
 }
@@ -120,19 +121,21 @@ enum ExprContext {
 
 /// Check expression for magic numbers.
 fn check_expr(
-    expr_id: ExprId,
+    expr_id: ExprIdx,
     context: ExprContext,
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<BodyDiagnostic>,
 ) {
-    let expr = body.expr(expr_id);
+    let expr = body.expr_idx(expr_id);
 
     match expr {
         Expr::Literal(Literal::Number(value)) => {
             // Check if should emit diagnostic for this literal
             if should_emit_magic_number(context) {
-                if let Some(range) = source_map.expr_range(expr_id) {
+                // Convert typed ExprIdx to opaque ExprId for source_map
+                let opaque_id = cfg_types::ExprId::from_idx(expr_id);
+                if let Some(range) = source_map.expr_range(opaque_id) {
                     emit_magic_number(value.to_string(), range, diagnostics);
                 }
             }
@@ -201,24 +204,24 @@ fn should_emit_magic_number(context: ExprContext) -> bool {
 }
 
 /// Check if assignment is simple (just literal, no operators).
-fn is_simple_assignment(target: ExprId, value: ExprId, body: &Body) -> bool {
+fn is_simple_assignment(target: ExprIdx, value: ExprIdx, body: &Body) -> bool {
     // Target must be a simple path (variable)
-    if !matches!(body.expr(target), Expr::Path(_)) {
+    if !matches!(body.expr_idx(target), Expr::Path(_)) {
         return false;
     }
 
     // Value must be a simple literal (no operators/calls)
-    matches!(body.expr(value), Expr::Literal(_))
+    matches!(body.expr_idx(value), Expr::Literal(_))
 }
 
 /// Check if assignment is to a property (Struct.Field = value).
-fn is_property_assignment(target: ExprId, body: &Body) -> bool {
-    matches!(body.expr(target), Expr::Field { .. })
+fn is_property_assignment(target: ExprIdx, body: &Body) -> bool {
+    matches!(body.expr_idx(target), Expr::Field { .. })
 }
 
 /// Check if call is to an excluded method (Structure.Insert, etc.).
-fn is_excluded_call(callee: ExprId, body: &Body) -> bool {
-    let expr = body.expr(callee);
+fn is_excluded_call(callee: ExprIdx, body: &Body) -> bool {
+    let expr = body.expr_idx(callee);
 
     // Check for method call: Expr::Field { field: "Insert"/"Вставить" }
     if let Expr::Field { field, .. } = expr {

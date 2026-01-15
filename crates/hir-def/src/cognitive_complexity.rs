@@ -29,7 +29,7 @@
 //! - Code lens (showing complexity in editor)
 //! - Metrics collection
 
-use crate::hir::{BinaryOp, Expr, ExprId, Stmt, StmtId};
+use crate::hir::{BinaryOp, Expr, ExprIdx, Stmt, StmtIdx};
 use crate::Body;
 
 /// Calculate cognitive complexity for a method body.
@@ -48,8 +48,8 @@ pub fn calculate_complexity(body: &Body) -> u32 {
 }
 
 /// Recursively count complexity for a statement.
-fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32, nesting: u32) {
-    let stmt = body.stmt(stmt_id);
+fn count_stmt_complexity(body: &Body, stmt_id: StmtIdx, complexity: &mut u32, nesting: u32) {
+    let stmt = body.stmt_idx(stmt_id);
 
     match stmt {
         // Structural increment: +1 + nesting, then increase nesting for children
@@ -182,8 +182,8 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtId, complexity: &mut u32, nes
 }
 
 /// Count complexity in an expression (for ternary and logical operators).
-fn count_expr_complexity(body: &Body, expr_id: ExprId, complexity: &mut u32) {
-    let expr = body.expr(expr_id);
+fn count_expr_complexity(body: &Body, expr_id: ExprIdx, complexity: &mut u32) {
+    let expr = body.expr_idx(expr_id);
 
     match expr {
         // Ternary: structural increment (we don't track nesting inside expressions)

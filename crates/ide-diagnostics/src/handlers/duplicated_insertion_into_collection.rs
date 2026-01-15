@@ -38,8 +38,8 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext, Severity};
 use hir::{Body, BodySourceMap};
-use hir_def::hir::{Expr, ExprId, Literal, Stmt, StmtId};
-use hir_def::Name;
+use hir_def::hir::{Expr, Literal, Stmt};
+use hir_def::{ExprId, IdConversion, Name, StmtId};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
@@ -67,15 +67,8 @@ pub fn check_body(
     let mut tracker = InsertionTracker::new(body);
     let mut diagnostics = Vec::new();
 
-    check_stmt_list(
-        body,
-        source_map,
-        &body.body_stmts,
-        &mut tracker,
-        &mut diagnostics,
-        0,
-        allow_add,
-    );
+    let body_stmts: Vec<StmtId> = body.body_stmts().collect();
+    check_stmt_list(body, source_map, &body_stmts, &mut tracker, &mut diagnostics, 0, allow_add);
     tracker.report_duplicates(&mut diagnostics, 0);
 
     tracing::debug!(count = diagnostics.len(), "diagnostics found");
@@ -115,7 +108,7 @@ fn is_special_value(body: &Body, expr_id: ExprId) -> bool {
         },
         // Символы.ПС / Chars.LF etc.
         Expr::Field { base, field: _ } => {
-            if let Expr::Path(name) = body.expr(*base) {
+            if let Expr::Path(name) = body.expr(ExprId::from_idx(*base)) {
                 let base_lower = name.as_str().to_lowercase();
                 base_lower == "символы" || base_lower == "chars"
             } else {
@@ -303,7 +296,7 @@ impl<'a> InsertionTracker<'a> {
 
             Expr::Field { base, field } => {
                 hasher.write_u8(expr_tag::FIELD);
-                self.hash_expr_into(*base, hasher);
+                self.hash_expr_into(ExprId::from_idx(*base), hasher);
                 // Hash lowercase field name
                 for c in field.as_str().chars() {
                     for lc in c.to_lowercase() {
@@ -314,7 +307,7 @@ impl<'a> InsertionTracker<'a> {
 
             Expr::MethodCall { receiver, method, args } => {
                 hasher.write_u8(expr_tag::METHOD_CALL);
-                self.hash_expr_into(*receiver, hasher);
+                self.hash_expr_into(ExprId::from_idx(*receiver), hasher);
                 // Hash lowercase method name
                 for c in method.as_str().chars() {
                     for lc in c.to_lowercase() {
@@ -323,15 +316,15 @@ impl<'a> InsertionTracker<'a> {
                 }
                 hasher.write_usize(args.len());
                 for arg in args.iter() {
-                    self.hash_expr_into(*arg, hasher);
+                    self.hash_expr_into(ExprId::from_idx(*arg), hasher);
                 }
             }
 
             Expr::Call { callee, args } => {
                 // Check if this is actually a method call (Call with Field as callee)
-                if let Expr::Field { base, field } = self.body.expr(*callee) {
+                if let Expr::Field { base, field } = self.body.expr(ExprId::from_idx(*callee)) {
                     hasher.write_u8(expr_tag::METHOD_CALL);
-                    self.hash_expr_into(*base, hasher);
+                    self.hash_expr_into(ExprId::from_idx(*base), hasher);
                     for c in field.as_str().chars() {
                         for lc in c.to_lowercase() {
                             hasher.write_u32(lc as u32);
@@ -339,28 +332,28 @@ impl<'a> InsertionTracker<'a> {
                     }
                     hasher.write_usize(args.len());
                     for arg in args.iter() {
-                        self.hash_expr_into(*arg, hasher);
+                        self.hash_expr_into(ExprId::from_idx(*arg), hasher);
                     }
                 } else {
                     hasher.write_u8(expr_tag::CALL);
-                    self.hash_expr_into(*callee, hasher);
+                    self.hash_expr_into(ExprId::from_idx(*callee), hasher);
                     hasher.write_usize(args.len());
                     for arg in args.iter() {
-                        self.hash_expr_into(*arg, hasher);
+                        self.hash_expr_into(ExprId::from_idx(*arg), hasher);
                     }
                 }
             }
 
             Expr::Index { base, index } => {
                 hasher.write_u8(expr_tag::INDEX);
-                self.hash_expr_into(*base, hasher);
-                self.hash_expr_into(*index, hasher);
+                self.hash_expr_into(ExprId::from_idx(*base), hasher);
+                self.hash_expr_into(ExprId::from_idx(*index), hasher);
             }
 
             Expr::BinaryOp { lhs, rhs, op } => {
                 hasher.write_u8(expr_tag::BINARY_OP);
-                self.hash_expr_into(*lhs, hasher);
-                self.hash_expr_into(*rhs, hasher);
+                self.hash_expr_into(ExprId::from_idx(*lhs), hasher);
+                self.hash_expr_into(ExprId::from_idx(*rhs), hasher);
                 // Hash discriminant of op
                 std::mem::discriminant(op).hash(hasher);
             }
@@ -379,7 +372,7 @@ impl<'a> InsertionTracker<'a> {
                 }
                 hasher.write_usize(args.len());
                 for arg in args.iter() {
-                    self.hash_expr_into(*arg, hasher);
+                    self.hash_expr_into(ExprId::from_idx(*arg), hasher);
                 }
             }
 
@@ -409,13 +402,13 @@ impl<'a> InsertionTracker<'a> {
         match self.body.expr(expr_id) {
             Expr::Path(name) => Some(name.to_string()),
             Expr::Field { base, field } => {
-                let base_name = self.extract_target_name(*base)?;
+                let base_name = self.extract_target_name(ExprId::from_idx(*base))?;
                 Some(format!("{}.{}", base_name, field))
             }
-            Expr::Index { base, .. } => self.extract_target_name(*base),
+            Expr::Index { base, .. } => self.extract_target_name(ExprId::from_idx(*base)),
             Expr::MethodCall { receiver, method, .. } => {
                 // For method calls like Данные.Метод().Поле, include the method
-                let base_name = self.extract_target_name(*receiver)?;
+                let base_name = self.extract_target_name(ExprId::from_idx(*receiver))?;
                 Some(format!("{}.{}()", base_name, method))
             }
             _ => None,
@@ -483,29 +476,34 @@ impl<'a> InsertionTracker<'a> {
             },
             Expr::Path(name) => name.to_string(),
             Expr::Field { base, field } => {
-                format!("{}.{}", self.expr_to_display_string(*base), field)
+                format!("{}.{}", self.expr_to_display_string(ExprId::from_idx(*base)), field)
             }
             Expr::MethodCall { receiver, method, args } => {
                 let args_str = args
                     .iter()
-                    .map(|a| self.expr_to_display_string(*a))
+                    .map(|&a| self.expr_to_display_string(ExprId::from_idx(a)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{}.{}({})", self.expr_to_display_string(*receiver), method, args_str)
+                format!(
+                    "{}.{}({})",
+                    self.expr_to_display_string(ExprId::from_idx(*receiver)),
+                    method,
+                    args_str
+                )
             }
             Expr::Call { callee, args } => {
                 let args_str = args
                     .iter()
-                    .map(|a| self.expr_to_display_string(*a))
+                    .map(|&a| self.expr_to_display_string(ExprId::from_idx(a)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{}({})", self.expr_to_display_string(*callee), args_str)
+                format!("{}({})", self.expr_to_display_string(ExprId::from_idx(*callee)), args_str)
             }
             Expr::Index { base, index } => {
                 format!(
                     "{}[{}]",
-                    self.expr_to_display_string(*base),
-                    self.expr_to_display_string(*index)
+                    self.expr_to_display_string(ExprId::from_idx(*base)),
+                    self.expr_to_display_string(ExprId::from_idx(*index))
                 )
             }
             _ => "...".to_string(),
@@ -626,13 +624,20 @@ fn check_stmt(
 
     match body.stmt(stmt_id) {
         Stmt::Assign { target, value: _ } => {
-            tracker.record_assignment(*target);
+            tracker.record_assignment(ExprId::from_idx(*target));
         }
 
         Stmt::Expr(expr_id) => {
-            check_expr_for_insertion(body, source_map, *expr_id, tracker, scope_depth, allow_add);
+            check_expr_for_insertion(
+                body,
+                source_map,
+                ExprId::from_idx(*expr_id),
+                tracker,
+                scope_depth,
+                allow_add,
+            );
             // Track variable modifications when passed to functions
-            check_expr_for_side_effects(body, *expr_id, tracker, allow_add);
+            check_expr_for_side_effects(body, ExprId::from_idx(*expr_id), tracker, allow_add);
         }
 
         Stmt::Return { .. } => {
@@ -661,10 +666,12 @@ fn check_stmt(
 
         Stmt::If(if_stmt) => {
             // Check then branch
+            let then_stmts: Vec<StmtId> =
+                if_stmt.then_branch.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                &if_stmt.then_branch,
+                &then_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -674,10 +681,12 @@ fn check_stmt(
 
             // Check elsif branches
             for (_, branch_stmts) in if_stmt.elsif_branches.iter() {
+                let elsif_stmts: Vec<StmtId> =
+                    branch_stmts.iter().map(|&idx| StmtId::from_idx(idx)).collect();
                 check_stmt_list(
                     body,
                     source_map,
-                    branch_stmts,
+                    &elsif_stmts,
                     tracker,
                     diagnostics,
                     scope_depth + 1,
@@ -688,10 +697,12 @@ fn check_stmt(
 
             // Check else branch
             if let Some(ref else_stmts) = if_stmt.else_branch {
+                let else_stmts_vec: Vec<StmtId> =
+                    else_stmts.iter().map(|&idx| StmtId::from_idx(idx)).collect();
                 check_stmt_list(
                     body,
                     source_map,
-                    else_stmts,
+                    &else_stmts_vec,
                     tracker,
                     diagnostics,
                     scope_depth + 1,
@@ -703,10 +714,12 @@ fn check_stmt(
 
         Stmt::While { condition: _, body: loop_body } => {
             let saved_local_breaker = tracker.last_local_breaker;
+            let loop_stmts: Vec<StmtId> =
+                loop_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                loop_body,
+                &loop_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -718,10 +731,12 @@ fn check_stmt(
 
         Stmt::For { var: _, from: _, to: _, body: loop_body } => {
             let saved_local_breaker = tracker.last_local_breaker;
+            let loop_stmts: Vec<StmtId> =
+                loop_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                loop_body,
+                &loop_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -733,10 +748,12 @@ fn check_stmt(
 
         Stmt::ForEach { var: _, collection: _, body: loop_body } => {
             let saved_local_breaker = tracker.last_local_breaker;
+            let loop_stmts: Vec<StmtId> =
+                loop_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                loop_body,
+                &loop_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -747,10 +764,12 @@ fn check_stmt(
         }
 
         Stmt::Try { body: try_body, except } => {
+            let try_stmts: Vec<StmtId> =
+                try_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                try_body,
+                &try_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -758,10 +777,12 @@ fn check_stmt(
             );
             tracker.report_duplicates(diagnostics, scope_depth + 1);
 
+            let except_stmts: Vec<StmtId> =
+                except.iter().map(|&idx| StmtId::from_idx(idx)).collect();
             check_stmt_list(
                 body,
                 source_map,
-                except,
+                &except_stmts,
                 tracker,
                 diagnostics,
                 scope_depth + 1,
@@ -800,16 +821,22 @@ fn check_expr_for_insertion(
         Expr::MethodCall { receiver, method, args } => {
             if is_insertion_method(method, allow_add) && !args.is_empty() {
                 if let Some(range) = source_map.expr_range(expr_id) {
-                    tracker.record_insertion(*receiver, args, range, scope_depth);
+                    let receiver_id = ExprId::from_idx(*receiver);
+                    let args_vec: Vec<ExprId> =
+                        args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
+                    tracker.record_insertion(receiver_id, &args_vec, range, scope_depth);
                 }
             }
         }
         // Pattern 2: Call with Field as callee (common for method calls in BSL)
         Expr::Call { callee, args } => {
-            if let Expr::Field { base, field } = body.expr(*callee) {
+            if let Expr::Field { base, field } = body.expr(ExprId::from_idx(*callee)) {
                 if is_insertion_method(field, allow_add) && !args.is_empty() {
                     if let Some(range) = source_map.expr_range(expr_id) {
-                        tracker.record_insertion(*base, args, range, scope_depth);
+                        let base_id = ExprId::from_idx(*base);
+                        let args_vec: Vec<ExprId> =
+                            args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
+                        tracker.record_insertion(base_id, &args_vec, range, scope_depth);
                     }
                 }
             }
@@ -833,7 +860,7 @@ fn check_expr_for_side_effects(
         // Call with Field as callee: obj.Method(args)
         Expr::Call { callee, args } => {
             // Check if this is NOT an insertion method
-            if let Expr::Field { base: _, field } = body.expr(*callee) {
+            if let Expr::Field { base: _, field } = body.expr(ExprId::from_idx(*callee)) {
                 // If it's an insertion method, don't track side effects for args
                 // (we handle those separately in check_expr_for_insertion)
                 if is_insertion_method(field, allow_add) {
@@ -843,8 +870,9 @@ fn check_expr_for_side_effects(
 
             // Mark all variable arguments as potentially modified
             for arg in args.iter() {
-                if let Some(name) = tracker.extract_target_name(*arg) {
-                    if matches!(body.expr(*arg), Expr::Path(_) | Expr::Field { .. }) {
+                let arg_id = ExprId::from_idx(*arg);
+                if let Some(name) = tracker.extract_target_name(arg_id) {
+                    if matches!(body.expr(arg_id), Expr::Path(_) | Expr::Field { .. }) {
                         tracker.generations.increment(&name);
                     }
                 }
@@ -859,8 +887,9 @@ fn check_expr_for_side_effects(
 
             // Mark all variable arguments as potentially modified
             for arg in args.iter() {
-                if let Some(name) = tracker.extract_target_name(*arg) {
-                    if matches!(body.expr(*arg), Expr::Path(_) | Expr::Field { .. }) {
+                let arg_id = ExprId::from_idx(*arg);
+                if let Some(name) = tracker.extract_target_name(arg_id) {
+                    if matches!(body.expr(arg_id), Expr::Path(_) | Expr::Field { .. }) {
                         tracker.generations.increment(&name);
                     }
                 }

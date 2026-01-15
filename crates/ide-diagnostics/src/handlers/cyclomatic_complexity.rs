@@ -173,7 +173,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             if complexity > config.complexity_threshold {
                 // Get range of first statement
-                if let Some(&first_stmt_id) = module_code.body.body_stmts.first() {
+                if let Some(first_stmt_id) = module_code.body.body_stmts().next() {
                     if let Some(range) = module_code.source_map.stmt_range(first_stmt_id) {
                         diagnostics.push(Diagnostic {
                             code: DiagnosticCode::CyclomaticComplexity,

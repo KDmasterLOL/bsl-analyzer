@@ -23,6 +23,7 @@ base-db = { path = "crates/base-db" }
 bsl-metadata = { path = "crates/bsl-metadata" }
 bsl-platform = { path = "crates/bsl-platform" }
 cfg = { path = "crates/cfg" }
+cfg-types = { path = "crates/cfg-types" }
 dataflow = { path = "crates/dataflow" }
 ide = { path = "crates/ide" }
 ide-db = { path = "crates/ide-db" }

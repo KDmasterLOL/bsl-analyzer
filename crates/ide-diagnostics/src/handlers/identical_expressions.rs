@@ -58,6 +58,7 @@
 //! - See `check_preprocessor_split_expressions()` for detailed explanation
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use cfg_types::IdConversion;
 use hir_def::{BinaryOp, Body, BodySourceMap, Expr, ExprId, Literal, UnaryOp};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
@@ -105,8 +106,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// Returns true if expressions are semantically identical.
 fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> bool {
-    let lhs = &body.exprs[lhs_id];
-    let rhs = &body.exprs[rhs_id];
+    let lhs = body.expr(lhs_id);
+    let rhs = body.expr(rhs_id);
 
     match (lhs, rhs) {
         // Binary operations: check op and both operands
@@ -115,13 +116,26 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             Expr::BinaryOp { lhs: r_lhs, rhs: r_rhs, op: r_op },
         ) => {
             l_op == r_op
-                && are_exprs_semantically_equal(*l_lhs, *r_lhs, body)
-                && are_exprs_semantically_equal(*l_rhs, *r_rhs, body)
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_lhs),
+                    ExprId::from_idx(*r_lhs),
+                    body,
+                )
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_rhs),
+                    ExprId::from_idx(*r_rhs),
+                    body,
+                )
         }
 
         // Unary operations: check op and operand
         (Expr::UnaryOp { expr: l_expr, op: l_op }, Expr::UnaryOp { expr: r_expr, op: r_op }) => {
-            l_op == r_op && are_exprs_semantically_equal(*l_expr, *r_expr, body)
+            l_op == r_op
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_expr),
+                    ExprId::from_idx(*r_expr),
+                    body,
+                )
         }
 
         // Literals: compare values
@@ -134,15 +148,26 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
         (
             Expr::Field { base: l_base, field: l_field },
             Expr::Field { base: r_base, field: r_field },
-        ) => l_field == r_field && are_exprs_semantically_equal(*l_base, *r_base, body),
+        ) => {
+            l_field == r_field
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_base),
+                    ExprId::from_idx(*r_base),
+                    body,
+                )
+        }
 
         // Index access: check base and index expressions
         (
             Expr::Index { base: l_base, index: l_index },
             Expr::Index { base: r_base, index: r_index },
         ) => {
-            are_exprs_semantically_equal(*l_base, *r_base, body)
-                && are_exprs_semantically_equal(*l_index, *r_index, body)
+            are_exprs_semantically_equal(ExprId::from_idx(*l_base), ExprId::from_idx(*r_base), body)
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_index),
+                    ExprId::from_idx(*r_index),
+                    body,
+                )
         }
 
         // Function calls: check callee and all arguments
@@ -153,13 +178,20 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             if l_args.len() != r_args.len() {
                 return false;
             }
-            if !are_exprs_semantically_equal(*l_callee, *r_callee, body) {
+            if !are_exprs_semantically_equal(
+                ExprId::from_idx(*l_callee),
+                ExprId::from_idx(*r_callee),
+                body,
+            ) {
                 return false;
             }
-            l_args
-                .iter()
-                .zip(r_args.iter())
-                .all(|(l_arg, r_arg)| are_exprs_semantically_equal(*l_arg, *r_arg, body))
+            l_args.iter().zip(r_args.iter()).all(|(l_arg, r_arg)| {
+                are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_arg),
+                    ExprId::from_idx(*r_arg),
+                    body,
+                )
+            })
         }
 
         // Ternary expressions: check condition, then_expr, else_expr
@@ -167,9 +199,17 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             Expr::Ternary { condition: l_cond, then_expr: l_then, else_expr: l_else },
             Expr::Ternary { condition: r_cond, then_expr: r_then, else_expr: r_else },
         ) => {
-            are_exprs_semantically_equal(*l_cond, *r_cond, body)
-                && are_exprs_semantically_equal(*l_then, *r_then, body)
-                && are_exprs_semantically_equal(*l_else, *r_else, body)
+            are_exprs_semantically_equal(ExprId::from_idx(*l_cond), ExprId::from_idx(*r_cond), body)
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_then),
+                    ExprId::from_idx(*r_then),
+                    body,
+                )
+                && are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_else),
+                    ExprId::from_idx(*r_else),
+                    body,
+                )
         }
 
         // New keyword with type and args
@@ -180,10 +220,13 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
             if l_type != r_type || l_args.len() != r_args.len() {
                 return false;
             }
-            l_args
-                .iter()
-                .zip(r_args.iter())
-                .all(|(l_arg, r_arg)| are_exprs_semantically_equal(*l_arg, *r_arg, body))
+            l_args.iter().zip(r_args.iter()).all(|(l_arg, r_arg)| {
+                are_exprs_semantically_equal(
+                    ExprId::from_idx(*l_arg),
+                    ExprId::from_idx(*r_arg),
+                    body,
+                )
+            })
         }
 
         // Different expression kinds are never equal
@@ -198,11 +241,11 @@ fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> 
 ///
 /// Returns normalized string representation (e.g., "a=1" for both `A = 1` and `1 = A`).
 fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
-    let expr = &body.exprs[expr_id];
+    let expr = body.expr(expr_id);
     match expr {
         Expr::BinaryOp { lhs, rhs, op } => {
-            let lhs_str = expr_to_string(*lhs, body);
-            let rhs_str = expr_to_string(*rhs, body);
+            let lhs_str = expr_to_string(ExprId::from_idx(*lhs), body);
+            let rhs_str = expr_to_string(ExprId::from_idx(*rhs), body);
             let op_str = match op {
                 BinaryOp::Add => "+",
                 BinaryOp::Sub => "-",
@@ -221,7 +264,7 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
             format!("{}{}{}", lhs_str, op_str, rhs_str)
         }
         Expr::UnaryOp { expr, op } => {
-            let expr_str = expr_to_string(*expr, body);
+            let expr_str = expr_to_string(ExprId::from_idx(*expr), body);
             let op_str = match op {
                 UnaryOp::Not => "not",
                 UnaryOp::Neg => "-",
@@ -239,50 +282,67 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
         },
         Expr::Path(name) => name.as_str().to_lowercase(),
         Expr::Field { base, field } => {
-            format!("{}.{}", expr_to_string(*base, body), field.as_str().to_lowercase())
+            format!(
+                "{}.{}",
+                expr_to_string(ExprId::from_idx(*base), body),
+                field.as_str().to_lowercase()
+            )
         }
         Expr::Index { base, index } => {
-            format!("{}[{}]", expr_to_string(*base, body), expr_to_string(*index, body))
+            format!(
+                "{}[{}]",
+                expr_to_string(ExprId::from_idx(*base), body),
+                expr_to_string(ExprId::from_idx(*index), body)
+            )
         }
         Expr::Call { callee, args } => {
-            let callee_str = expr_to_string(*callee, body);
-            let args_str =
-                args.iter().map(|arg| expr_to_string(*arg, body)).collect::<Vec<_>>().join(",");
+            let callee_str = expr_to_string(ExprId::from_idx(*callee), body);
+            let args_str = args
+                .iter()
+                .map(|arg| expr_to_string(ExprId::from_idx(*arg), body))
+                .collect::<Vec<_>>()
+                .join(",");
             format!("{}({})", callee_str, args_str)
         }
         Expr::Ternary { condition, then_expr, else_expr } => {
             format!(
                 "?({},{},{})",
-                expr_to_string(*condition, body),
-                expr_to_string(*then_expr, body),
-                expr_to_string(*else_expr, body)
+                expr_to_string(ExprId::from_idx(*condition), body),
+                expr_to_string(ExprId::from_idx(*then_expr), body),
+                expr_to_string(ExprId::from_idx(*else_expr), body)
             )
         }
         Expr::New { type_name, args } => {
             let type_str = type_name.as_ref().map(|t| t.as_str()).unwrap_or("?");
-            let args_str =
-                args.iter().map(|arg| expr_to_string(*arg, body)).collect::<Vec<_>>().join(",");
+            let args_str = args
+                .iter()
+                .map(|arg| expr_to_string(ExprId::from_idx(*arg), body))
+                .collect::<Vec<_>>()
+                .join(",");
             format!("new({}({}))", type_str.to_lowercase(), args_str)
         }
         Expr::QualifiedPath(qname) => {
             qname.segments().iter().map(|s| s.as_str().to_lowercase()).collect::<Vec<_>>().join(".")
         }
         Expr::MethodCall { receiver, method, args } => {
-            let receiver_str = expr_to_string(*receiver, body);
-            let args_str =
-                args.iter().map(|arg| expr_to_string(*arg, body)).collect::<Vec<_>>().join(",");
+            let receiver_str = expr_to_string(ExprId::from_idx(*receiver), body);
+            let args_str = args
+                .iter()
+                .map(|arg| expr_to_string(ExprId::from_idx(*arg), body))
+                .collect::<Vec<_>>()
+                .join(",");
             format!("{}.{}({})", receiver_str, method.as_str().to_lowercase(), args_str)
         }
         Expr::Array(elements) => {
             let elements_str = elements
                 .iter()
-                .map(|elem| expr_to_string(*elem, body))
+                .map(|elem| expr_to_string(ExprId::from_idx(*elem), body))
                 .collect::<Vec<_>>()
                 .join(",");
             format!("[{}]", elements_str)
         }
         Expr::Await { expr } => {
-            format!("await({})", expr_to_string(*expr, body))
+            format!("await({})", expr_to_string(ExprId::from_idx(*expr), body))
         }
         Expr::Missing => "<missing>".to_string(),
     }
@@ -298,13 +358,13 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
 /// Returns true if expression appears as direct child of a statement.
 fn is_statement_expr(expr_id: ExprId, body: &Body, _source_map: &BodySourceMap) -> bool {
     // Check if any statement contains this expression as its direct child
-    for stmt_id in body.body_stmts.iter() {
-        let stmt = &body.stmts[*stmt_id];
+    for stmt_id in body.body_stmts() {
+        let stmt = body.stmt(stmt_id);
         match stmt {
-            hir_def::Stmt::Expr(expr) if *expr == expr_id => {
+            hir_def::Stmt::Expr(expr) if ExprId::from_idx(*expr) == expr_id => {
                 return true;
             }
-            hir_def::Stmt::Assign { value, .. } if value == &expr_id => {
+            hir_def::Stmt::Assign { value, .. } if ExprId::from_idx(*value) == expr_id => {
                 return true;
             }
             _ => {}
@@ -327,9 +387,18 @@ fn check_body(
     ctx: &DiagnosticsContext,
 ) {
     // Walk all expressions in the body
-    for (expr_id, expr) in body.exprs.iter() {
+    for (expr_id, expr) in body.exprs_iter() {
         if let Expr::BinaryOp { lhs, rhs, op } = expr {
-            check_binary_expr_hir(expr_id, *lhs, *rhs, *op, body, source_map, diagnostics, ctx);
+            check_binary_expr_hir(
+                expr_id,
+                ExprId::from_idx(*lhs),
+                ExprId::from_idx(*rhs),
+                *op,
+                body,
+                source_map,
+                diagnostics,
+                ctx,
+            );
         }
     }
 }
@@ -427,7 +496,7 @@ fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContex
         popular_divisors.split(',').map(|s| s.trim().to_string()).collect();
 
     // Check if expression is a literal number matching popular divisors
-    let expr = &body.exprs[expr_id];
+    let expr = body.expr(expr_id);
     if let Expr::Literal(Literal::Number(n)) = expr {
         let text = n.to_string();
         if divisors.contains(&text) {
@@ -447,10 +516,12 @@ fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContex
 /// Used to detect top-level of chain and avoid duplicate reports.
 fn is_nested_in_logical_chain(expr_id: ExprId, op: BinaryOp, body: &Body) -> bool {
     // Walk all expressions looking for parent binary ops
-    for (_parent_id, parent_expr) in body.exprs.iter() {
+    for (_parent_id, parent_expr) in body.exprs_iter() {
         if let Expr::BinaryOp { lhs, rhs, op: parent_op } = parent_expr {
             // Check if current expr is operand of same-type binary op
-            if parent_op == &op && (*lhs == expr_id || *rhs == expr_id) {
+            if parent_op == &op
+                && (ExprId::from_idx(*lhs) == expr_id || ExprId::from_idx(*rhs) == expr_id)
+            {
                 return true;
             }
         }
@@ -520,13 +591,13 @@ fn collect_logical_chain_hir(
     body: &Body,
     operands: &mut Vec<ExprId>,
 ) {
-    let expr = &body.exprs[expr_id];
+    let expr = body.expr(expr_id);
 
     // If this is a binary op of the same type, recurse into operands
     if let Expr::BinaryOp { lhs, rhs, op } = expr {
         if op == &chain_op {
-            collect_logical_chain_hir(*lhs, chain_op, body, operands);
-            collect_logical_chain_hir(*rhs, chain_op, body, operands);
+            collect_logical_chain_hir(ExprId::from_idx(*lhs), chain_op, body, operands);
+            collect_logical_chain_hir(ExprId::from_idx(*rhs), chain_op, body, operands);
             return;
         }
     }

@@ -105,7 +105,7 @@ impl ParsedFile {
                 for (local_id, body) in bodies.iter_bodies() {
                     let source_map = bodies.source_map(local_id);
                     let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
-                        &body.body_stmts,
+                        body.body_stmts_typed(),
                         body,
                         source_map,
                     );
@@ -141,7 +141,7 @@ impl ParsedFile {
                     for (expr_id, query_info) in body.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            queries_with_pos.push((pos, *expr_id, sdbl_ast.clone()));
+                            queries_with_pos.push((pos, expr_id, sdbl_ast.clone()));
                         }
                     }
                 }
@@ -151,7 +151,7 @@ impl ParsedFile {
                     for (expr_id, query_info) in module_code.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            queries_with_pos.push((pos, *expr_id, sdbl_ast.clone()));
+                            queries_with_pos.push((pos, expr_id, sdbl_ast.clone()));
                         }
                     }
                 }

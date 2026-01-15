@@ -38,8 +38,10 @@ use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::body::{Body, BodyDiagnostic, BodySourceMap, LowerResult};
-use crate::hir::{Binding, BindingId, Expr, ExprId, Stmt, StmtId};
+use crate::hir::{Binding, BindingIdx, Expr, ExprIdx, Stmt, StmtIdx};
 use crate::Name;
+
+// Opaque IDs for external API (conversion at boundaries)
 
 // check_missing_return_paths is deprecated - kept for backwards compatibility only
 #[allow(deprecated)]
@@ -74,11 +76,11 @@ pub(crate) struct LoweringCtx {
     /// Used for FunctionOutParameter diagnostic.
     pub(crate) by_ref_param_names: FxHashSet<String>,
 
-    /// By-value parameter mapping: lowercase name -> BindingId.
+    /// By-value parameter mapping: lowercase name -> BindingIdx (typed).
     /// Used for RewriteMethodParameter diagnostic to detect overwrites of byValue params.
-    pub(crate) by_value_params: FxHashMap<String, BindingId>,
+    pub(crate) by_value_params: FxHashMap<String, BindingIdx>,
 
-    /// Pending SDBL queries (before ExprId allocation).
+    /// Pending SDBL queries (before ExprIdx allocation).
     /// Stores (literal_range, query_info) to match by TextRange instead of String comparison.
     pub(crate) pending_sdbl: Vec<(syntax::TextRange, syntax::SdblQueryInfo)>,
 
@@ -90,10 +92,10 @@ pub(crate) struct LoweringCtx {
     /// Tracks Query, QueryBuilder, ReportBuilder variables for CreateQueryInCycle diagnostic.
     pub(crate) query_vars: FxHashMap<String, QueryVarType>,
 
-    /// ForEach collection stack: (collection_expr_id, collection_text) tuples.
+    /// ForEach collection stack: (collection_expr_idx, collection_text) tuples.
     /// Tracks the collection being iterated for DeletingCollectionItem diagnostic.
     /// Stack handles nested ForEach loops.
-    pub(crate) foreach_collections: Vec<(ExprId, String)>,
+    pub(crate) foreach_collections: Vec<(ExprIdx, String)>,
 
     /// Whether current method is client-only (&НаКлиенте annotation ONLY).
     /// Used for ExecuteExternalCode diagnostic - Execute/Eval is allowed only in client-only context.
@@ -169,28 +171,32 @@ impl LoweringCtx {
     }
 
     /// Allocate an expression and record its source range.
-    pub(crate) fn alloc_expr(&mut self, expr: Expr, range: TextRange) -> ExprId {
+    /// Returns typed index for internal use in lowering.
+    pub(crate) fn alloc_expr(&mut self, expr: Expr, range: TextRange) -> ExprIdx {
         let id = self.body.exprs.alloc(expr);
         self.source_map.record_expr(id, range);
         id
     }
 
     /// Allocate a statement and record its source range.
-    pub(crate) fn alloc_stmt(&mut self, stmt: Stmt, range: TextRange) -> StmtId {
+    /// Returns typed index for internal use in lowering.
+    pub(crate) fn alloc_stmt(&mut self, stmt: Stmt, range: TextRange) -> StmtIdx {
         let id = self.body.stmts.alloc(stmt);
         self.source_map.record_stmt(id, range);
         id
     }
 
     /// Allocate a binding and record its source range.
-    pub(crate) fn alloc_binding(&mut self, binding: Binding, range: TextRange) -> BindingId {
+    /// Returns typed index for internal use in lowering.
+    pub(crate) fn alloc_binding(&mut self, binding: Binding, range: TextRange) -> BindingIdx {
         let id = self.body.bindings.alloc(binding);
         self.source_map.record_binding(id, range);
         id
     }
 
     /// Allocate a missing expression (for error recovery).
-    pub(crate) fn missing_expr(&mut self) -> ExprId {
+    /// Returns typed index for internal use in lowering.
+    pub(crate) fn missing_expr(&mut self) -> ExprIdx {
         self.body.exprs.alloc(Expr::Missing)
     }
 
@@ -230,7 +236,7 @@ impl LoweringCtx {
     }
 
     /// Enter a ForEach loop, tracking the collection being iterated.
-    pub(crate) fn enter_foreach(&mut self, collection_expr: ExprId, collection_text: String) {
+    pub(crate) fn enter_foreach(&mut self, collection_expr: ExprIdx, collection_text: String) {
         self.foreach_collections.push((collection_expr, collection_text));
     }
 
@@ -241,7 +247,7 @@ impl LoweringCtx {
 
     /// Check if an expression matches any active ForEach collection (case-insensitive).
     /// Returns collection text for diagnostic message if matched.
-    pub(crate) fn matches_foreach_collection(&self, expr: ExprId) -> Option<&str> {
+    pub(crate) fn matches_foreach_collection(&self, expr: ExprIdx) -> Option<&str> {
         use crate::body::lower::expr::exprs_are_equal;
 
         for (collection_expr, collection_text) in self.foreach_collections.iter().rev() {
@@ -661,8 +667,8 @@ fn collect_referenced_externals(body: &Body) -> FxHashSet<String> {
     }
 
     // 2. VarDecl bindings, For/ForEach variables (recursively scan all statements)
-    fn collect_declared(body: &Body, stmt_id: StmtId, declared: &mut FxHashSet<String>) {
-        match &body.stmts[stmt_id] {
+    fn collect_declared(body: &Body, stmt_id: StmtIdx, declared: &mut FxHashSet<String>) {
+        match body.stmt_idx(stmt_id) {
             Stmt::VarDecl { bindings } => {
                 for &binding_id in bindings.iter() {
                     let binding = &body.bindings[binding_id];

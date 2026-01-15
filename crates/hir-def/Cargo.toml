@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cfg-types.workspace = true
 base-db.workspace = true
 syntax.workspace = true
 vfs.workspace = true
@@ -18,9 +19,12 @@ smol_str.workspace = true
 smallvec.workspace = true
 text-size.workspace = true
 tracing.workspace = true
-# NOTE: cfg dependency creates circular dependency (hir-def → cfg → hir-def)
-# Solution: Use CFG directly in ide-diagnostics, not in hir-def lowering
-# check_missing_return_paths() remains stubbed (returns false)
+# NOTE: cfg dependency creates circular crate dependency (hir-def → cfg → hir-def)
+# However, this is acceptable because:
+# 1. Cargo supports circular crate dependencies (not same as type cycles)
+# 2. No circular type dependencies: cfg uses hir-def types (StmtId, ExprId), hir-def uses CFG for analysis
+# 3. Enables check_missing_return_paths() and other CFG-based diagnostics in hir-def
+# TODO: Uncomment after cfg-types refactoring completes
 # cfg.workspace = true
 parser.workspace = true
 bsl-metadata.workspace = true

@@ -18,11 +18,12 @@
 //! - Dead code elimination
 //! - Variable usage tracking
 
+use cfg_types::IdConversion;
 use fixedbitset::FixedBitSet;
 use hir_def::{
     body::Body,
-    hir::{BindingId, Expr, Stmt},
-    Name,
+    hir::{Expr, Stmt},
+    BindingId, Name,
 };
 use la_arena::RawIdx;
 use rustc_hash::FxHashMap;
@@ -169,36 +170,45 @@ impl DefinitionIndex {
             definitions.push(def);
         };
 
-        // Collect definitions from statements
+        // Collect definitions from statements (uses typed StmtIdx internally)
         fn collect_stmt_defs<F: FnMut(Definition)>(
-            stmts: &[hir_def::StmtId],
+            stmts: &[hir_def::hir::StmtIdx],
             body: &Body,
             add_def: &mut F,
         ) {
             for &stmt_id in stmts {
-                match &body.stmts[stmt_id] {
+                // Convert typed to opaque for body.stmt() call
+                let opaque_id = hir_def::StmtId::from_idx(stmt_id);
+                match body.stmt(opaque_id) {
                     Stmt::Assign { target, .. } => {
-                        if let Some(var_name) = extract_var_name_from_expr(*target, body) {
+                        // Convert typed ExprIdx to opaque ExprId
+                        if let Some(var_name) =
+                            extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
+                        {
                             let def = Definition::assignment(var_name, stmt_id.into_raw());
                             add_def(def);
                         }
                     }
                     Stmt::VarDecl { bindings } => {
                         for &binding_id in bindings.iter() {
-                            let binding = &body.bindings[binding_id];
-                            let def = Definition::var_decl(&binding.name, binding_id);
+                            let binding = body.binding_idx(binding_id);
+                            let def = Definition::var_decl(
+                                &binding.name,
+                                BindingId::from_idx(binding_id),
+                            );
                             add_def(def);
                         }
                     }
                     Stmt::For { var, body: loop_body, .. } => {
-                        let binding = &body.bindings[*var];
-                        let def = Definition::for_loop(&binding.name, *var);
+                        let binding = body.binding_idx(*var);
+                        let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
                         add_def(def);
                         collect_stmt_defs(loop_body, body, add_def);
                     }
                     Stmt::ForEach { var, body: loop_body, .. } => {
-                        let binding = &body.bindings[*var];
-                        let def = Definition::for_each_loop(&binding.name, *var);
+                        let binding = body.binding_idx(*var);
+                        let def =
+                            Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
                         add_def(def);
                         collect_stmt_defs(loop_body, body, add_def);
                     }
@@ -224,7 +234,7 @@ impl DefinitionIndex {
             }
         }
 
-        collect_stmt_defs(&body.body_stmts, body, &mut add_def);
+        collect_stmt_defs(body.body_stmts_typed(), body, &mut add_def);
 
         Arc::new(Self { definitions, var_to_defs, def_to_idx })
     }
@@ -258,36 +268,45 @@ impl DefinitionIndex {
             add_def(def);
         }
 
-        // Collect definitions from statements
+        // Collect definitions from statements (uses typed StmtIdx internally)
         fn collect_stmt_defs<F: FnMut(Definition)>(
-            stmts: &[hir_def::StmtId],
+            stmts: &[hir_def::hir::StmtIdx],
             body: &Body,
             add_def: &mut F,
         ) {
             for &stmt_id in stmts {
-                match &body.stmts[stmt_id] {
+                // Convert typed to opaque for body.stmt() call
+                let opaque_id = hir_def::StmtId::from_idx(stmt_id);
+                match body.stmt(opaque_id) {
                     Stmt::Assign { target, .. } => {
-                        if let Some(var_name) = extract_var_name_from_expr(*target, body) {
+                        // Convert typed ExprIdx to opaque ExprId
+                        if let Some(var_name) =
+                            extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
+                        {
                             let def = Definition::assignment(var_name, stmt_id.into_raw());
                             add_def(def);
                         }
                     }
                     Stmt::VarDecl { bindings } => {
                         for &binding_id in bindings.iter() {
-                            let binding = &body.bindings[binding_id];
-                            let def = Definition::var_decl(&binding.name, binding_id);
+                            let binding = body.binding_idx(binding_id);
+                            let def = Definition::var_decl(
+                                &binding.name,
+                                BindingId::from_idx(binding_id),
+                            );
                             add_def(def);
                         }
                     }
                     Stmt::For { var, body: loop_body, .. } => {
-                        let binding = &body.bindings[*var];
-                        let def = Definition::for_loop(&binding.name, *var);
+                        let binding = body.binding_idx(*var);
+                        let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
                         add_def(def);
                         collect_stmt_defs(loop_body, body, add_def);
                     }
                     Stmt::ForEach { var, body: loop_body, .. } => {
-                        let binding = &body.bindings[*var];
-                        let def = Definition::for_each_loop(&binding.name, *var);
+                        let binding = body.binding_idx(*var);
+                        let def =
+                            Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
                         add_def(def);
                         collect_stmt_defs(loop_body, body, add_def);
                     }
@@ -313,7 +332,7 @@ impl DefinitionIndex {
             }
         }
 
-        collect_stmt_defs(&body.body_stmts, body, &mut add_def);
+        collect_stmt_defs(body.body_stmts_typed(), body, &mut add_def);
 
         Arc::new(Self { definitions, var_to_defs, def_to_idx })
     }
@@ -366,13 +385,17 @@ impl DefinitionIndex {
 /// - Field access: `obj.field = 5` → "obj.field"
 /// - Index access: `arr[i] = 5` → "arr"
 fn extract_var_name_from_expr(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
-    match &body.exprs[expr_id] {
+    match body.expr(expr_id) {
         Expr::Path(name) => Some(SmolStr::new(name.as_str().to_lowercase())),
         Expr::Field { base, field } => {
-            let base_name = extract_var_name_from_expr(*base, body)?;
+            // Convert typed ExprIdx to opaque ExprId for recursive call
+            let base_name = extract_var_name_from_expr(hir_def::ExprId::from_idx(*base), body)?;
             Some(SmolStr::new(format!("{}.{}", base_name, field.as_str().to_lowercase())))
         }
-        Expr::Index { base, .. } => extract_var_name_from_expr(*base, body),
+        Expr::Index { base, .. } => {
+            // Convert typed ExprIdx to opaque ExprId for recursive call
+            extract_var_name_from_expr(hir_def::ExprId::from_idx(*base), body)
+        }
         _ => None,
     }
 }
@@ -566,19 +589,19 @@ impl ReachingDefsTransfer {
     /// - Index access: `arr[i] = 5` → "arr"
     ///
     /// Returns None for complex expressions.
-    fn extract_var_name(expr_id: hir_def::hir::ExprId, body: &Body) -> Option<SmolStr> {
+    fn extract_var_name(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
         match body.expr(expr_id) {
             Expr::Path(name) => Some(SmolStr::new(name.as_str())),
 
             Expr::Field { base, field } => {
                 // For field access, track the full path (obj.field)
-                let base_name = Self::extract_var_name(*base, body)?;
+                let base_name = Self::extract_var_name(hir_def::ExprId::from_idx(*base), body)?;
                 Some(SmolStr::new(format!("{}.{}", base_name, field.as_str())))
             }
 
             Expr::Index { base, .. } => {
                 // For index access, track the base variable (arr[i] → arr)
-                Self::extract_var_name(*base, body)
+                Self::extract_var_name(hir_def::ExprId::from_idx(*base), body)
             }
 
             _ => None,
@@ -602,7 +625,7 @@ pub struct ReachingDefsResult {
 
     /// Reverse mapping: StmtId → BasicBlock that contains it.
     /// Allows fast lookup of which block a statement belongs to.
-    stmt_to_block: rustc_hash::FxHashMap<hir_def::hir::StmtId, petgraph::graph::NodeIndex>,
+    stmt_to_block: rustc_hash::FxHashMap<hir_def::StmtId, petgraph::graph::NodeIndex>,
 
     /// Statements in each block (for intra-block analysis).
     /// Stored separately to avoid holding non-Send CFG reference.
@@ -651,7 +674,7 @@ impl ReachingDefsResult {
     /// Get all definitions that reach the beginning of a statement.
     ///
     /// Returns None if the statement is not found in the CFG.
-    pub fn defs_before_stmt(&self, stmt_id: hir_def::hir::StmtId) -> Option<&ReachingDefs> {
+    pub fn defs_before_stmt(&self, stmt_id: hir_def::StmtId) -> Option<&ReachingDefs> {
         let block_idx = self.stmt_to_block.get(&stmt_id)?;
         self.block_in.get(block_idx)
     }
@@ -659,7 +682,7 @@ impl ReachingDefsResult {
     /// Get all definitions that reach the end of a statement.
     ///
     /// Returns None if the statement is not found in the CFG.
-    pub fn defs_after_stmt(&self, stmt_id: hir_def::hir::StmtId) -> Option<&ReachingDefs> {
+    pub fn defs_after_stmt(&self, stmt_id: hir_def::StmtId) -> Option<&ReachingDefs> {
         let block_idx = self.stmt_to_block.get(&stmt_id)?;
         self.block_out.get(block_idx)
     }
@@ -670,7 +693,7 @@ impl ReachingDefsResult {
     /// to all statements in the block before the target statement.
     ///
     /// This is more precise than `defs_before_stmt()` which only returns block_in.
-    pub fn defs_up_to_stmt(&self, stmt_id: hir_def::hir::StmtId) -> Option<ReachingDefs> {
+    pub fn defs_up_to_stmt(&self, stmt_id: hir_def::StmtId) -> Option<ReachingDefs> {
         let block_idx = self.stmt_to_block.get(&stmt_id)?;
         let stmt_list = self.block_stmts.get(block_idx)?;
 
@@ -679,7 +702,7 @@ impl ReachingDefsResult {
 
         // Apply transfer function to all statements before target in this block
         for &hir_stmt_raw in stmt_list {
-            let hir_stmt_id = hir_def::hir::StmtId::from_raw(hir_stmt_raw);
+            let hir_stmt_id = hir_def::StmtId::from_raw(hir_stmt_raw);
 
             // Stop before the target statement
             if hir_stmt_id == stmt_id {
@@ -703,7 +726,7 @@ impl ReachingDefsResult {
     pub fn defs_for_var_at_stmt(
         &self,
         var_name: &str,
-        stmt_id: hir_def::hir::StmtId,
+        stmt_id: hir_def::StmtId,
     ) -> Option<Vec<Definition>> {
         let reaching = self.defs_up_to_stmt(stmt_id)?;
         Some(reaching.defs_for_var(var_name).cloned().collect())
@@ -712,7 +735,7 @@ impl ReachingDefsResult {
     /// Check if a variable has any definition reaching a statement.
     ///
     /// Useful for uninitialized variable detection.
-    pub fn var_is_defined_at_stmt(&self, var_name: &str, stmt_id: hir_def::hir::StmtId) -> bool {
+    pub fn var_is_defined_at_stmt(&self, var_name: &str, stmt_id: hir_def::StmtId) -> bool {
         self.defs_before_stmt(stmt_id)
             .map(|reaching| reaching.has_def_for_var(var_name))
             .unwrap_or(false)
@@ -731,9 +754,9 @@ impl ReachingDefsResult {
 
 impl Transfer<ReachingDefs> for ReachingDefsTransfer {
     fn transfer_stmt(&self, stmt_id: RawIdx, state: &ReachingDefs, body: &Body) -> ReachingDefs {
-        use hir_def::hir::StmtId;
+        use cfg_types::StmtId;
 
-        // Convert RawIdx back to StmtId
+        // Convert RawIdx back to opaque StmtId
         let stmt_id = StmtId::from_raw(stmt_id);
 
         let mut new_state = state.clone();
@@ -741,7 +764,9 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
         match body.stmt(stmt_id) {
             // Assignment: kill old definitions for target, gen new definition
             Stmt::Assign { target, .. } => {
-                if let Some(var_name) = Self::extract_var_name(*target, body) {
+                if let Some(var_name) =
+                    Self::extract_var_name(hir_def::ExprId::from_idx(*target), body)
+                {
                     let def = Definition::assignment(var_name.clone(), stmt_id.into_raw());
                     new_state.gen_kill(&var_name, &def);
                 }
@@ -750,23 +775,23 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
             // Variable declaration: gen definition for each declared variable
             Stmt::VarDecl { bindings } => {
                 for &binding_id in bindings.iter() {
-                    let binding = body.binding(binding_id);
-                    let def = Definition::var_decl(&binding.name, binding_id);
+                    let binding = body.binding_idx(binding_id);
+                    let def = Definition::var_decl(&binding.name, BindingId::from_idx(binding_id));
                     new_state.insert(&def);
                 }
             }
 
             // For loop: gen definition for loop variable
             Stmt::For { var, .. } => {
-                let binding = body.binding(*var);
-                let def = Definition::for_loop(&binding.name, *var);
+                let binding = body.binding_idx(*var);
+                let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
                 new_state.gen_kill(binding.name.as_str(), &def);
             }
 
             // ForEach loop: gen definition for loop variable
             Stmt::ForEach { var, .. } => {
-                let binding = body.binding(*var);
-                let def = Definition::for_each_loop(&binding.name, *var);
+                let binding = body.binding_idx(*var);
+                let def = Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
                 new_state.gen_kill(binding.name.as_str(), &def);
             }
 

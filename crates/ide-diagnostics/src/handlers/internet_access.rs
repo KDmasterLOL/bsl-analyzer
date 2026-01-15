@@ -68,6 +68,8 @@
 //! - Consistent with other diagnostics - same pattern as identical_expressions, incorrect_use_of_str_template
 //! - Better error recovery - HIR handles parse errors gracefully
 
+use cfg_types::{ExprId, IdConversion};
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::hir::{Expr, Literal};
 use ide_db::TextRange;
@@ -147,7 +149,7 @@ fn check_body_for_internet_access(
     source_map: &hir_def::body::BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (expr_id, expr) in body.exprs.iter() {
+    for (expr_id, expr) in body.exprs_iter() {
         if let Expr::New { type_name, args } = expr {
             let mut detected = false;
 
@@ -160,7 +162,8 @@ fn check_body_for_internet_access(
             } else {
                 // Pattern 2: Новый("HTTPСоединение")
                 if !args.is_empty() {
-                    if let Expr::Literal(Literal::String(s)) = body.expr(args[0]) {
+                    if let Expr::Literal(Literal::String(s)) = body.expr(ExprId::from_idx(args[0]))
+                    {
                         let type_text = s.to_lowercase();
                         if NEW_EXPRESSION_PATTERNS.contains(&type_text.as_str()) {
                             detected = true;

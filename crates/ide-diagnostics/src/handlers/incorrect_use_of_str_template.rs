@@ -60,10 +60,12 @@
 //! З = СтрШаблон("Наименование %%1 (версия %%2)");
 //! ```
 
+use cfg_types::IdConversion;
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::{
     hir::{Expr, Literal, Stmt},
-    MethodId, ModuleId,
+    ExprId, MethodId, ModuleId, StmtId,
 };
 use ide_db::TextRange;
 
@@ -110,13 +112,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             };
 
             if let Some(expr_id) = expr_id {
-                let expr = body.expr(expr_id);
+                let expr = body.expr(ExprId::from_idx(expr_id));
 
                 // Check if this is a Call expression (function call like СтрШаблон(...))
                 let (method_name, args) = match expr {
                     Expr::Call { callee, args } => {
                         // For Call, the callee should be a Path (function name)
-                        if let Expr::Path(name) = body.expr(*callee) {
+                        if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
                             (name.as_str().to_lowercase(), args)
                         } else {
                             continue; // Not a simple function call
@@ -136,7 +138,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     continue;
                 }
 
-                let template_expr_id = args[0];
+                let template_expr_id = ExprId::from_idx(args[0]);
                 let param_count = args.len() - 1; // Excluding template itself
 
                 // Skip string literals - they're already validated by HIR lowering
@@ -185,20 +187,20 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// Uses recursive resolution with depth limit to prevent infinite loops.
 fn resolve_expr_to_string(
-    expr_id: hir_def::hir::ExprId,
+    expr_id: ExprId,
     body: &hir_def::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
-    stmt_id: hir_def::hir::StmtId,
+    stmt_id: StmtId,
 ) -> Option<String> {
     resolve_expr_to_string_impl(expr_id, body, reaching_defs, stmt_id, 0)
 }
 
 /// Internal implementation with depth tracking for cycle protection.
 fn resolve_expr_to_string_impl(
-    expr_id: hir_def::hir::ExprId,
+    expr_id: ExprId,
     body: &hir_def::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
-    stmt_id: hir_def::hir::StmtId,
+    stmt_id: StmtId,
     depth: u32,
 ) -> Option<String> {
     const MAX_DEPTH: u32 = 10;
@@ -248,17 +250,23 @@ fn resolve_definition(
     def: &dataflow::reaching_defs::Definition,
     body: &hir_def::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
-    _current_stmt: hir_def::hir::StmtId,
+    _current_stmt: StmtId,
     depth: u32,
 ) -> Option<String> {
     match def.def_site {
         dataflow::reaching_defs::DefSite::Assignment(assign_raw_idx) => {
-            let assign_stmt_id = hir_def::hir::StmtId::from_raw(assign_raw_idx);
+            let assign_stmt_id = StmtId::from_raw(assign_raw_idx);
 
             if let Stmt::Assign { value, .. } = body.stmt(assign_stmt_id) {
                 // Recursively resolve the assigned value
                 // This handles both direct literals and transitive assignments
-                resolve_expr_to_string_impl(*value, body, reaching_defs, assign_stmt_id, depth)
+                resolve_expr_to_string_impl(
+                    ExprId::from_idx(*value),
+                    body,
+                    reaching_defs,
+                    assign_stmt_id,
+                    depth,
+                )
             } else {
                 None
             }

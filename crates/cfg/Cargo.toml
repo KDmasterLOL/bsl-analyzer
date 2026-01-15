@@ -11,6 +11,7 @@ rust-version.workspace = true
 petgraph = "0.6"
 rustc-hash.workspace = true
 syntax = { path = "../syntax" }
+cfg-types.workspace = true
 hir-def = { path = "../hir-def" }
 
 [dev-dependencies]

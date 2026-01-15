@@ -42,7 +42,8 @@
 //! - Module-level code coverage (not just methods)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use hir_def::{Body, BodySourceMap, Expr, ExprId, Name};
+use hir_def::hir::ExprIdx;
+use hir_def::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
@@ -141,13 +142,13 @@ fn check_body(
     root: &SyntaxNode,
 ) {
     // Walk all expressions in the body
-    for (expr_id, expr) in body.exprs.iter() {
+    for (expr_id, expr) in body.exprs_iter() {
         // Check all three types of calls: Call, MethodCall, New
         match expr {
             Expr::Call { callee, args } => {
                 check_call_expr(
                     expr_id,
-                    callee,
+                    ExprId::from_idx(*callee),
                     args,
                     body,
                     source_map,
@@ -281,8 +282,8 @@ fn find_type_name_or_new_keyword(node: &SyntaxNode) -> Option<SyntaxToken> {
 #[allow(clippy::too_many_arguments)]
 fn check_call_expr(
     expr_id: ExprId,
-    callee: &ExprId,
-    args: &[ExprId],
+    callee: ExprId,
+    args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
@@ -320,7 +321,7 @@ fn check_call_expr(
     }
 
     // Get method name from callee
-    let method_name = match body.expr(*callee) {
+    let method_name = match body.expr(callee) {
         Expr::Path(name) => name.as_str(),
         _ => "метод", // fallback
     };
@@ -346,7 +347,7 @@ fn check_call_expr(
 fn check_method_call_expr(
     expr_id: ExprId,
     method: &Name,
-    args: &[ExprId],
+    args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
@@ -402,7 +403,7 @@ fn check_method_call_expr(
 fn check_new_expr(
     expr_id: ExprId,
     type_name: &Option<Name>,
-    args: &[ExprId],
+    args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
@@ -456,8 +457,8 @@ fn check_new_expr(
 }
 
 /// Check if any argument has forbidden nested calls (HIR-based).
-fn has_forbidden_nested_call(args: &[ExprId], body: &Body, config: &Config) -> bool {
-    args.iter().any(|&arg_id| is_forbidden_call(arg_id, body, config))
+fn has_forbidden_nested_call(args: &[ExprIdx], body: &Body, config: &Config) -> bool {
+    args.iter().any(|&arg_idx| is_forbidden_call(ExprId::from_idx(arg_idx), body, config))
 }
 
 /// Recursively check if an expression is or contains a forbidden call (HIR-based).
@@ -465,7 +466,7 @@ fn is_forbidden_call(expr_id: ExprId, body: &Body, config: &Config) -> bool {
     match body.expr(expr_id) {
         Expr::Call { callee, .. } => {
             // Global call - check if it's allowed
-            if let Expr::Path(name) = body.expr(*callee) {
+            if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
                 if config.is_allowed_method(name.as_str()) {
                     // Allowed global method - don't recurse into its arguments
                     return false;
@@ -484,30 +485,33 @@ fn is_forbidden_call(expr_id: ExprId, body: &Body, config: &Config) -> bool {
         }
         Expr::BinaryOp { lhs, rhs, .. } => {
             // Check both operands
-            is_forbidden_call(*lhs, body, config) || is_forbidden_call(*rhs, body, config)
+            is_forbidden_call(ExprId::from_idx(*lhs), body, config)
+                || is_forbidden_call(ExprId::from_idx(*rhs), body, config)
         }
-        Expr::UnaryOp { expr, .. } => is_forbidden_call(*expr, body, config),
+        Expr::UnaryOp { expr, .. } => is_forbidden_call(ExprId::from_idx(*expr), body, config),
         Expr::Ternary { condition, then_expr, else_expr } => {
-            is_forbidden_call(*condition, body, config)
-                || is_forbidden_call(*then_expr, body, config)
-                || is_forbidden_call(*else_expr, body, config)
+            is_forbidden_call(ExprId::from_idx(*condition), body, config)
+                || is_forbidden_call(ExprId::from_idx(*then_expr), body, config)
+                || is_forbidden_call(ExprId::from_idx(*else_expr), body, config)
         }
         Expr::Index { base, index } => {
-            is_forbidden_call(*base, body, config) || is_forbidden_call(*index, body, config)
+            is_forbidden_call(ExprId::from_idx(*base), body, config)
+                || is_forbidden_call(ExprId::from_idx(*index), body, config)
         }
-        Expr::Field { base, .. } => is_forbidden_call(*base, body, config),
+        Expr::Field { base, .. } => is_forbidden_call(ExprId::from_idx(*base), body, config),
         _ => false,
     }
 }
 
 /// Check if any argument spans multiple lines (HIR-based).
 fn has_multiline_param_hir(
-    args: &[ExprId],
+    args: &[ExprIdx],
     _body: &Body,
     source_map: &BodySourceMap,
     line_index: &LineIndex,
 ) -> bool {
-    for &arg_id in args {
+    for &arg_idx in args {
+        let arg_id = ExprId::from_idx(arg_idx);
         let Some(range) = source_map.expr_range(arg_id) else {
             continue;
         };

@@ -52,7 +52,11 @@ pub use body::{
     lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, ExternalRef, LowerResult,
     ManagerType,
 };
-pub use hir::{BinaryOp, Binding, BindingId, Expr, ExprId, IfStmt, Literal, Stmt, StmtId, UnaryOp};
+pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
+
+// Re-export opaque ID types from cfg-types for backward compatibility.
+// These are used by CFG and other external consumers.
+pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 // ModuleBodies, ModuleMetadata, ExecutionContext are defined in this file, not in modules
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
