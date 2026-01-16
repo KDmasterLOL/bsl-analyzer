@@ -407,20 +407,45 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
     let base_ident = extract_leftmost_ident(&base_node)?;
     let base_text = base_ident.text();
 
+    // DEBUG: Log what we're processing
+    tracing::debug!(
+        "highlight_metadata_object_name: token={}, base={}, base_kind={:?}",
+        name_text,
+        base_text,
+        base_node.kind()
+    );
+
     // Case 1: Base is MDO plural form (Документы, Справочники, etc.)
     // Token is metadata object name: Документы.ПКО
     if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(base_text) {
         // Get configuration (required for highlighting)
-        let config = ctx.db.get_configuration(ctx.file_id)?;
+        let config = ctx.db.get_configuration(ctx.file_id);
 
-        // If this is a method call, highlight as Function (manager method)
-        if is_method_call(&parent) {
-            return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
-        }
+        tracing::debug!(
+            "highlight_metadata_object_name: mdo_type={:?}, config_loaded={}",
+            mdo_type,
+            config.is_some()
+        );
 
-        // Otherwise, highlight as Type if object exists in configuration
-        if config.has_metadata_object(mdo_type, name_text) {
-            return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
+        if let Some(config) = config {
+            // Check if this FIELD_EXPR is part of a method call
+            let is_method = is_method_call(&parent);
+
+            tracing::debug!(
+                "highlight_metadata_object_name: is_method={}, has_object={}",
+                is_method,
+                config.has_metadata_object(mdo_type, name_text)
+            );
+
+            // If this is a method call, highlight as Function (manager method)
+            if is_method {
+                return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
+            }
+
+            // Otherwise, highlight as Type if object exists in configuration
+            if config.has_metadata_object(mdo_type, name_text) {
+                return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
+            }
         }
     }
 
@@ -430,7 +455,14 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
     if base_node.kind() == SyntaxKind::FIELD_EXPR {
         // Check if grandparent base is MDO plural form
         let grandbase_ident = extract_leftmost_ident(&base_node)?;
-        if bsl_metadata::MdoType::from_plural(grandbase_ident.text()).is_some() {
+
+        tracing::debug!(
+            "highlight_metadata_object_name: case2 token={}, grandbase={}",
+            name_text,
+            grandbase_ident.text()
+        );
+
+        if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(grandbase_ident.text()) {
             // Get configuration (required for highlighting)
             let config = ctx.db.get_configuration(ctx.file_id)?;
 
@@ -441,11 +473,15 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
                 .filter_map(|it| it.into_token())
                 .find(|it| it.kind() == SyntaxKind::IDENT)?;
 
-            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(grandbase_ident.text()) {
-                if config.has_metadata_object(mdo_type, intermediate_token.text()) {
-                    // This is a valid manager method call, highlight as Function
-                    return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
-                }
+            tracing::debug!(
+                "highlight_metadata_object_name: case2 intermediate={}, has_object={}",
+                intermediate_token.text(),
+                config.has_metadata_object(mdo_type, intermediate_token.text())
+            );
+
+            if config.has_metadata_object(mdo_type, intermediate_token.text()) {
+                // This is a valid manager method call, highlight as Function
+                return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
             }
         }
     }
@@ -481,8 +517,11 @@ fn extract_leftmost_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
 }
 
 /// Check if the parent node represents a method call (next sibling is L_PAREN).
+///
+/// Checks if the FIELD_EXPR is followed by L_PAREN, indicating a method call.
+/// Also checks parent FIELD_EXPR in case of nested field access.
 fn is_method_call(node: &SyntaxNode) -> bool {
-    // Check if next sibling token is L_PAREN (skip whitespace)
+    // Check direct next sibling
     let mut next = node.next_sibling_or_token();
     while let Some(next_token) = next {
         if next_token.kind() == SyntaxKind::WHITESPACE {
@@ -491,8 +530,19 @@ fn is_method_call(node: &SyntaxNode) -> bool {
         }
 
         // First non-whitespace token should be L_PAREN for method call
-        return next_token.kind() == SyntaxKind::L_PAREN;
+        if next_token.kind() == SyntaxKind::L_PAREN {
+            return true;
+        }
+        break;
     }
+
+    // Check if parent is also a FIELD_EXPR and has L_PAREN
+    if let Some(parent) = node.parent() {
+        if parent.kind() == SyntaxKind::FIELD_EXPR {
+            return is_method_call(&parent);
+        }
+    }
+
     false
 }
 
