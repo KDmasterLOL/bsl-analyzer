@@ -6,6 +6,7 @@ mod catalog;
 mod common_module;
 mod constant;
 mod defined_type;
+mod enum_parser;
 mod event_subscription;
 mod helpers;
 mod register;
@@ -21,6 +22,7 @@ pub use catalog::{
 pub use common_module::parse_common_module_xml;
 pub use constant::parse_constant_xml;
 pub use defined_type::parse_defined_type_xml;
+pub use enum_parser::parse_enum_xml;
 pub use event_subscription::parse_event_subscription_xml;
 pub use register::{
     parse_accounting_register_xml, parse_accumulation_register_xml, parse_calculation_register_xml,

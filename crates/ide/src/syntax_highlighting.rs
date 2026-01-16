@@ -63,6 +63,14 @@ pub enum HlTag {
     UnresolvedReference,
     /// Built-in platform function (НачатьТранзакцию, Формат, Сообщить, etc.)
     BuiltinFunction,
+    /// Type names / Class names (SDBL table names: Справочник.Валюты)
+    Type,
+    /// Enum member / Constant (SDBL field aliases: КАК АлиасПоля)
+    EnumMember,
+    /// Namespace / Module (SDBL table aliases: Валюты.Наименование)
+    Namespace,
+    /// Class (SDBL MDO types: Справочник, Документ, Перечисление)
+    Class,
 }
 
 impl HlTag {
@@ -84,6 +92,10 @@ impl HlTag {
             HlTag::Operator => "operator",
             HlTag::UnresolvedReference => "unresolvedReference",
             HlTag::BuiltinFunction => "function",
+            HlTag::Type => "type",
+            HlTag::EnumMember => "enumMember",
+            HlTag::Namespace => "namespace",
+            HlTag::Class => "class",
         }
     }
 }
@@ -952,6 +964,136 @@ mod tests {
 
         // Should find 3 КАК keywords (2 in field aliases + 1 in table alias)
         assert_eq!(as_keywords.len(), 3, "Expected 3 КАК keywords, got {}", as_keywords.len());
+    }
+
+    #[test]
+    fn test_sdbl_field_alias_highlighting() {
+        let code = r#"
+Функция Тест()
+    Запрос = "ВЫБРАТЬ
+             |    Валюты.Наименование КАК СимвольныйКод,
+             |    Валюты.Код КАК КодВалюты
+             |ИЗ
+             |    Справочник.Валюты КАК Валюты";
+    Возврат Запрос;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Find field aliases - should be highlighted as EnumMember
+        let field_aliases: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::EnumMember && {
+                    let text = &code[hl.range.start().into()..hl.range.end().into()];
+                    text == "СимвольныйКод" || text == "КодВалюты"
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            field_aliases.len(),
+            2,
+            "Expected 2 field aliases (СимвольныйКод, КодВалюты) highlighted as EnumMember, got {}",
+            field_aliases.len()
+        );
+
+        // Find table alias - should be highlighted as Namespace
+        let table_aliases: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Namespace && {
+                    let text = &code[hl.range.start().into()..hl.range.end().into()];
+                    text == "Валюты"
+                }
+            })
+            .collect();
+
+        // Should find table alias after КАК
+        assert!(
+            !table_aliases.is_empty(),
+            "Expected table alias 'Валюты' highlighted as Namespace"
+        );
+
+        // Find table name - should be highlighted as Type
+        let table_names: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Type && {
+                    let text = &code[hl.range.start().into()..hl.range.end().into()];
+                    text == "Справочник" || text == "Валюты"
+                }
+            })
+            .collect();
+
+        assert!(
+            !table_names.is_empty(),
+            "Expected table names (Справочник, Валюты) highlighted as Type"
+        );
+    }
+
+    #[test]
+    fn test_sdbl_user_example_highlighting() {
+        let code = r#"
+Функция Тест()
+    ТекстЗапроса =
+    "ВЫБРАТЬ
+    |    Валюты.Наименование КАК СимвольныйКод
+    |ИЗ
+    |    Справочник.Валюты КАК Валюты";
+    Возврат ТекстЗапроса;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        println!("\n=== Highlights for user example ===");
+        for hl in &highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            if text.contains("Валюты")
+                || text.contains("Наименование")
+                || text.contains("СимвольныйКод")
+                || text.contains("Справочник")
+            {
+                println!("{:?}: '{}'", hl.tag, text);
+            }
+        }
+
+        // Check that different elements have different tags
+        let mut has_type = false;
+        let mut has_namespace = false;
+        let mut has_enum_member = false;
+        let mut has_property_or_unresolved = false;
+
+        for hl in &highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            match hl.tag {
+                HlTag::Type if text.contains("Справочник") || text.contains("Валюты") =>
+                {
+                    has_type = true;
+                }
+                HlTag::Namespace if text == "Валюты" => {
+                    has_namespace = true;
+                }
+                HlTag::EnumMember if text == "СимвольныйКод" => {
+                    has_enum_member = true;
+                }
+                HlTag::Property | HlTag::UnresolvedReference if text == "Наименование" =>
+                {
+                    has_property_or_unresolved = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(has_type, "Table names should be highlighted as Type");
+        assert!(has_namespace, "Table alias should be highlighted as Namespace");
+        assert!(has_enum_member, "Field alias should be highlighted as EnumMember");
+        assert!(
+            has_property_or_unresolved,
+            "Field name should be highlighted as Property or UnresolvedReference"
+        );
     }
 
     #[test]

@@ -154,6 +154,35 @@ pub enum SdblCompletionContext {
         prefix: String,
     },
 
+    /// Cursor inside VALUE() function - suggest MDO types
+    /// Example: "ЗНАЧЕНИЕ($0)" -> suggest Перечисление, Справочник, Документ
+    InsideValueFunction,
+
+    /// Cursor after MDO type in VALUE() - suggest MDO objects
+    /// Example: "ЗНАЧЕНИЕ(Перечисление.$0)" -> suggest all enums
+    InsideValueMdoType {
+        /// Metadata object type
+        mdo_type: bsl_metadata::MdoType,
+        /// Prefix already typed
+        prefix: String,
+        /// True if Russian keywords used (Перечисление vs Enum)
+        is_russian: bool,
+    },
+
+    /// Cursor after MDO object in VALUE() - suggest enum values or predefined items + EmptyRef
+    /// Example: "ЗНАЧЕНИЕ(Перечисление.Статусы.$0)" -> suggest enum values + ПустаяСсылка
+    /// Example: "ЗНАЧЕНИЕ(Справочник.Номенклатура.$0)" -> suggest predefined items + ПустаяСсылка
+    InsideValueMdoObject {
+        /// Metadata object type
+        mdo_type: bsl_metadata::MdoType,
+        /// Object name (e.g., "Статусы")
+        object_name: String,
+        /// Prefix already typed
+        prefix: String,
+        /// True if Russian keywords used (Перечисление vs Enum)
+        is_russian: bool,
+    },
+
     /// No specific completion context detected
     None,
 }
@@ -1055,6 +1084,57 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
         "detect_context"
     );
 
+    // Check for VALUE() function pattern FIRST (before other patterns)
+    // This must come before parse_table_alias_field and parse_dot_path
+    // to avoid mis-interpreting "ЗНАЧЕНИЕ(Перечисление." as a table alias
+    if let Some((parts, prefix)) = parse_value_function_path(text_before_cursor) {
+        return match parts.len() {
+            0 => {
+                tracing::info!("detected InsideValueFunction");
+                SdblCompletionContext::InsideValueFunction
+            }
+            1 => {
+                if let Ok(mdo_type) = parts[0].parse::<bsl_metadata::MdoType>() {
+                    // Determine language based on the MDO type keyword
+                    let is_russian = mdo_type.is_russian_keyword(&parts[0]);
+                    tracing::info!(?mdo_type, prefix = %prefix, is_russian, "detected InsideValueMdoType");
+                    SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian }
+                } else {
+                    tracing::info!("detected InsideValueFunction (invalid MDO type)");
+                    SdblCompletionContext::InsideValueFunction
+                }
+            }
+            2 => {
+                if let Ok(mdo_type) = parts[0].parse::<bsl_metadata::MdoType>() {
+                    // Determine language based on the MDO type keyword
+                    let is_russian = mdo_type.is_russian_keyword(&parts[0]);
+                    tracing::info!(
+                        ?mdo_type,
+                        object_name = %parts[1],
+                        prefix = %prefix,
+                        is_russian,
+                        "detected InsideValueMdoObject"
+                    );
+                    SdblCompletionContext::InsideValueMdoObject {
+                        mdo_type,
+                        object_name: parts[1].clone(),
+                        prefix,
+                        is_russian,
+                    }
+                } else {
+                    tracing::info!(
+                        "detected InsideValueFunction (invalid MDO type in 3-part path)"
+                    );
+                    SdblCompletionContext::InsideValueFunction
+                }
+            }
+            _ => {
+                tracing::info!("detected None (too many parts in VALUE path)");
+                SdblCompletionContext::None
+            }
+        };
+    }
+
     // Check for "FROM " or "ИЗ " keyword immediately before cursor
     if is_after_from_keyword(text_before_cursor) {
         tracing::info!("detected AfterFromKeyword");
@@ -1158,6 +1238,53 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
 
     tracing::info!(prefix = %prefix, "detected SdblKeywords context");
     SdblCompletionContext::SdblKeywords { prefix }
+}
+
+/// Parse path inside VALUE() function.
+///
+/// Detects patterns like:
+/// - "ЗНАЧЕНИЕ(<cursor>)" -> ([], "")
+/// - "ЗНАЧЕНИЕ(Перечисление.<cursor>)" -> (["Перечисление"], "")
+/// - "ЗНАЧЕНИЕ(Перечисление.Статусы.<cursor>)" -> (["Перечисление", "Статусы"], "")
+/// - "ЗНАЧЕНИЕ(Перечисление.Стат<cursor>)" -> (["Перечисление"], "Стат")
+///
+/// Returns Some((completed_parts, prefix)) if inside VALUE(), None otherwise.
+fn parse_value_function_path(text_before: &str) -> Option<(Vec<String>, String)> {
+    // Find the last opening parenthesis
+    let open_paren_pos = text_before.rfind('(')?;
+
+    // Check if there's text before the paren ending with ЗНАЧЕНИЕ or VALUE
+    let before_paren = &text_before[..open_paren_pos].trim_end();
+    let before_upper = before_paren.to_uppercase();
+
+    if !before_upper.ends_with("ЗНАЧЕНИЕ") && !before_upper.ends_with("VALUE") {
+        return None;
+    }
+
+    // Extract content after the opening paren
+    let inside_paren = &text_before[open_paren_pos + 1..].trim_start();
+
+    // Check that there's no closing paren (we're still inside the function)
+    if inside_paren.contains(')') {
+        return None;
+    }
+
+    // Split by dots
+    let segments: Vec<&str> = inside_paren.split('.').collect();
+
+    if segments.is_empty() || (segments.len() == 1 && segments[0].is_empty()) {
+        // Empty or just whitespace -> ЗНАЧЕНИЕ(<cursor>)
+        return Some((vec![], String::new()));
+    }
+
+    // Last segment is the prefix (possibly incomplete)
+    let prefix = segments.last().unwrap().to_string();
+
+    // Everything before last segment are completed parts
+    let completed_parts: Vec<String> =
+        segments[..segments.len().saturating_sub(1)].iter().map(|s| s.to_string()).collect();
+
+    Some((completed_parts, prefix))
 }
 
 /// Check if cursor is after FROM/ИЗ keyword.
@@ -2254,6 +2381,209 @@ mod tests {
                 assert_eq!(prefix, "Код");
             }
             _ => panic!("Expected AfterTableAlias for 2-part path, got {:?}", context),
+        }
+    }
+
+    // VALUE() function completion tests
+
+    #[test]
+    fn test_parse_value_function_path_empty() {
+        let text = "ЗНАЧЕНИЕ(";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, Vec::<String>::new());
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_after_type() {
+        let text = "ЗНАЧЕНИЕ(Перечисление.";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, vec!["Перечисление"]);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_after_object() {
+        let text = "ЗНАЧЕНИЕ(Перечисление.МоеПеречисление.";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, vec!["Перечисление", "МоеПеречисление"]);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_with_prefix() {
+        let text = "ЗНАЧЕНИЕ(Перечисление.Статус";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, vec!["Перечисление"]);
+        assert_eq!(prefix, "Статус");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_english() {
+        let text = "VALUE(Enum.";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, vec!["Enum"]);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_case_insensitive() {
+        let text = "значение(перечисление.";
+        let result = parse_value_function_path(text);
+        assert!(result.is_some());
+        let (parts, prefix) = result.unwrap();
+        assert_eq!(parts, vec!["перечисление"]);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_parse_value_function_path_not_value() {
+        let text = "ВЫБРАТЬ * ИЗ Справочник.";
+        let result = parse_value_function_path(text);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_value_function_path_closed_paren() {
+        let text = "ЗНАЧЕНИЕ(Перечисление.Статус)";
+        let result = parse_value_function_path(text);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_function() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        assert!(
+            matches!(context, SdblCompletionContext::InsideValueFunction),
+            "Expected InsideValueFunction, got {:?}",
+            context
+        );
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_mdo_type() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Enum);
+                assert_eq!(prefix, "");
+                assert!(is_russian, "Expected Russian context for 'Перечисление'");
+            }
+            _ => panic!("Expected InsideValueMdoType, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_mdo_type_with_prefix() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.Стат";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Enum);
+                assert_eq!(prefix, "Стат");
+                assert!(is_russian, "Expected Russian context for 'Перечисление'");
+            }
+            _ => panic!("Expected InsideValueMdoType, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_mdo_object() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.Статусы.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoObject {
+                mdo_type,
+                object_name,
+                prefix,
+                is_russian,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Enum);
+                assert_eq!(object_name, "Статусы");
+                assert_eq!(prefix, "");
+                assert!(is_russian, "Expected Russian context for 'Перечисление'");
+            }
+            _ => panic!("Expected InsideValueMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_mdo_object_with_prefix() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.Статусы.Акт";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoObject {
+                mdo_type,
+                object_name,
+                prefix,
+                is_russian,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Enum);
+                assert_eq!(object_name, "Статусы");
+                assert_eq!(prefix, "Акт");
+                assert!(is_russian, "Expected Russian context for 'Перечисление'");
+            }
+            _ => panic!("Expected InsideValueMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_english() {
+        let query = "SELECT VALUE(Enum.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Enum);
+                assert_eq!(prefix, "");
+                assert!(!is_russian, "Expected English context for 'Enum'");
+            }
+            _ => panic!("Expected InsideValueMdoType, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_inside_value_catalog() {
+        let query = "ВЫБРАТЬ ЗНАЧЕНИЕ(Справочник.Валюты.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::InsideValueMdoObject {
+                mdo_type,
+                object_name,
+                prefix,
+                is_russian,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Catalog);
+                assert_eq!(object_name, "Валюты");
+                assert_eq!(prefix, "");
+                assert!(is_russian, "Expected Russian context for 'Справочник'");
+            }
+            _ => panic!("Expected InsideValueMdoObject, got {:?}", context),
         }
     }
 }

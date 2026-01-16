@@ -104,12 +104,13 @@ fn sdbl_category_to_tag(category: sdbl_hir::TokenCategory) -> HlTag {
         TokenCategory::Modifier => HlTag::Keyword,
         TokenCategory::AggregateFunction => HlTag::Function,
         // Identifiers
-        TokenCategory::TableName => HlTag::Variable,
+        TokenCategory::MdoType => HlTag::Class, // MDO types (Справочник, Документ)
+        TokenCategory::TableName => HlTag::Type, // Object names (Валюты, Продажи)
         TokenCategory::UnresolvedTableName => HlTag::UnresolvedReference,
-        TokenCategory::TableAlias => HlTag::Variable,
-        TokenCategory::FieldName => HlTag::Property,
+        TokenCategory::TableAlias => HlTag::Namespace, // Table aliases (Валюты в Валюты.Код)
+        TokenCategory::FieldName => HlTag::Property,   // Field names (Код, Наименование)
         TokenCategory::UnresolvedFieldName => HlTag::UnresolvedReference,
-        TokenCategory::FieldAlias => HlTag::Variable,
+        TokenCategory::FieldAlias => HlTag::EnumMember, // Field aliases (AS ИмяПоля)
     }
 }
 

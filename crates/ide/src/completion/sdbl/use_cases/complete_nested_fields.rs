@@ -142,6 +142,8 @@ mod tests {
             ],
             tabular_sections: vec![],
             children: vec![],
+            enum_values: vec![],
+            predefined_items: vec![],
         };
         config.add_metadata_object(catalog);
 

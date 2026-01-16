@@ -18,7 +18,7 @@ use sdbl_hir::{detect_context, detect_sdbl_at_position, SdblCompletionContext};
 use use_cases::{
     CompleteAliasesUseCase, CompleteFieldsUseCase, CompleteJoinTypesUseCase,
     CompleteKeywordsUseCase, CompleteMdoUseCase, CompleteNestedElementsUseCase,
-    CompleteNestedFieldsUseCase,
+    CompleteNestedFieldsUseCase, CompleteValueElementsUseCase,
 };
 
 /// Main SDBL completion entry point (Facade).
@@ -167,6 +167,49 @@ pub(super) fn sdbl_completions(
                 mdo_type,
                 &object_name,
                 &prefix,
+            )
+        }
+
+        // InsideValueFunction - suggest MDO types (level 1)
+        (SdblCompletionContext::InsideValueFunction, _) => {
+            tracing::info!("completion context: InsideValueFunction");
+            CompleteMdoUseCase::execute_types("")
+        }
+
+        // InsideValueMdoType - suggest MDO objects (level 2)
+        (SdblCompletionContext::InsideValueMdoType { mdo_type, prefix, is_russian }, _) => {
+            tracing::info!(
+                ?mdo_type,
+                prefix = %prefix,
+                is_russian,
+                "completion context: InsideValueMdoType"
+            );
+            CompleteMdoUseCase::execute_objects(&metadata_provider, mdo_type, &prefix)
+        }
+
+        // InsideValueMdoObject - suggest enum values / predefined items + EmptyRef (level 3)
+        (
+            SdblCompletionContext::InsideValueMdoObject {
+                mdo_type,
+                object_name,
+                prefix,
+                is_russian,
+            },
+            _,
+        ) => {
+            tracing::info!(
+                ?mdo_type,
+                object_name = %object_name,
+                prefix = %prefix,
+                is_russian,
+                "completion context: InsideValueMdoObject"
+            );
+            CompleteValueElementsUseCase::execute(
+                &metadata_provider,
+                mdo_type,
+                &object_name,
+                &prefix,
+                is_russian,
             )
         }
 

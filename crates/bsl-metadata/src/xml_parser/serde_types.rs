@@ -324,6 +324,57 @@ pub(crate) struct ExchangePlanRoot {
     pub exchange_plan: MetadataObjectXml,
 }
 
+/// Root XML structure for Enum
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumRoot {
+    #[serde(rename = "Enum")]
+    pub enum_xml: EnumXml,
+}
+
+/// Enum XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: EnumProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    pub child_objects: Option<EnumChildObjects>,
+}
+
+/// Enum properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+}
+
+/// Child objects container for Enum (contains EnumValue elements)
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumChildObjects {
+    #[serde(rename = "EnumValue", default)]
+    pub enum_values: Vec<EnumValueXml>,
+}
+
+/// EnumValue XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumValueXml {
+    #[serde(rename = "@uuid")]
+    pub uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: EnumValueProperties,
+}
+
+/// EnumValue properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct EnumValueProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+}
+
 /// Root XML structure for Constant
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConstantRoot {

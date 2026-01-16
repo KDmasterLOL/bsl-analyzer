@@ -100,9 +100,14 @@ impl<'a> LoweringContext<'a> {
             .collect();
 
         // NEW: Record each table name part in source_map
-        for (part, range) in parts.iter().zip(ident_ranges.iter()) {
+        for (idx, (part, range)) in parts.iter().zip(ident_ranges.iter()).enumerate() {
             let category = if resolved.is_some() {
-                crate::source_map::TokenCategory::TableName
+                // First part is MDO type (Справочник, Документ), rest are object names
+                if idx == 0 && parts.len() > 1 {
+                    crate::source_map::TokenCategory::MdoType
+                } else {
+                    crate::source_map::TokenCategory::TableName
+                }
             } else {
                 crate::source_map::TokenCategory::UnresolvedTableName
             };

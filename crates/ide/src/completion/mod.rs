@@ -77,6 +77,10 @@ pub enum CompletionItemKind {
     Method,
     /// Keyword
     Keyword,
+    /// Constant (ПустаяСсылка, predefined items)
+    Constant,
+    /// Enumeration member (enum value)
+    EnumMember,
 }
 
 /// Main completion entry point.

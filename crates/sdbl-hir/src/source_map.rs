@@ -63,7 +63,10 @@ pub struct SdblSourceMap {
     pub(crate) aggregate_functions: Vec<TokenInfo>,
 
     // Identifiers
-    /// Resolved table names (Справочник, Валюты).
+    /// MDO type names (Справочник, Документ, Перечисление).
+    pub(crate) mdo_types: Vec<TokenInfo>,
+
+    /// Resolved table names (Валюты, Продажи).
     pub(crate) table_names: Vec<TokenInfo>,
 
     /// Unresolved table names (table not found in metadata).
@@ -152,6 +155,7 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => &self.join_keywords,
             TokenCategory::Modifier => &self.modifiers,
             TokenCategory::AggregateFunction => &self.aggregate_functions,
+            TokenCategory::MdoType => &self.mdo_types,
             TokenCategory::TableName => &self.table_names,
             TokenCategory::UnresolvedTableName => &self.unresolved_table_names,
             TokenCategory::TableAlias => &self.table_aliases,
@@ -172,6 +176,7 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => self.join_keywords.push(info),
             TokenCategory::Modifier => self.modifiers.push(info),
             TokenCategory::AggregateFunction => self.aggregate_functions.push(info),
+            TokenCategory::MdoType => self.mdo_types.push(info),
             TokenCategory::TableName => self.table_names.push(info),
             TokenCategory::UnresolvedTableName => self.unresolved_table_names.push(info),
             TokenCategory::TableAlias => self.table_aliases.push(info),
@@ -236,7 +241,9 @@ pub enum TokenCategory {
     AggregateFunction,
 
     // Identifiers
-    /// Resolved table name parts (Справочник, Валюты).
+    /// MDO type name (first part: Справочник, Документ, Перечисление).
+    MdoType,
+    /// Object name (second part: Валюты, Продажи).
     TableName,
     /// Unresolved table name (table not found in metadata).
     UnresolvedTableName,

@@ -92,7 +92,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load other metadata types
     load_exchange_plans(&path.join("ExchangePlans"), &mut config)?;
     load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
-    load_simple_metadata_objects(&path.join("Enums"), &mut config, MdoType::Enum)?;
+    load_enums(&path.join("Enums"), &mut config)?;
     load_tasks(&path.join("Tasks"), &mut config)?;
     load_simple_metadata_objects(
         &path.join("ChartsOfAccounts"),
@@ -386,6 +386,52 @@ fn load_exchange_plans(dir: &Path, config: &mut Configuration) -> Result<()> {
 
                     config.add_metadata_object(exchange_plan);
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load Enums from directory with EnumValue elements
+///
+/// Designer format structure:
+/// - XML: `Enums/<Name>.xml` (next to folder)
+/// - Folder: `Enums/<Name>/` (may exist but has no code files for Enums)
+fn load_enums(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_enums", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    // Collect all XML files to avoid duplicates
+    // (some enums have both directory and XML file with same name)
+    let mut processed = std::collections::HashSet::new();
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process XML files
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
+                // Skip if already processed
+                if !processed.insert(name.to_string()) {
+                    continue;
+                }
+
+                let xml = fs::read_to_string(&path)?;
+                let enum_obj = xml_parser::parse_enum_xml(&xml)?;
+
+                tracing::debug!(
+                    enum_name = %name,
+                    enum_values = enum_obj.enum_values.len(),
+                    "loaded enum"
+                );
+
+                config.add_metadata_object(enum_obj);
             }
         }
     }
@@ -724,6 +770,83 @@ mod tests {
             assert_eq!(cat.tabular_sections.len(), 1, "Expected 1 tabular section");
             let ts = &cat.tabular_sections[0];
             assert_eq!(ts.name(), "ТабличнаяЧасть1");
+        }
+    }
+
+    /// Test loading enum values from doc3 project
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_load_enum_values_from_doc3() {
+        let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
+
+        if !std::path::Path::new(doc3_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", doc3_path);
+            return;
+        }
+
+        let config = load_from_directory(doc3_path).expect("Failed to load doc3 configuration");
+
+        // Find Enums
+        let enums: Vec<_> = config
+            .metadata_objects()
+            .iter()
+            .filter(|obj| obj.mdo_type == crate::metadata_object::MdoType::Enum)
+            .collect();
+
+        println!("Total Enums loaded: {}", enums.len());
+        assert!(!enums.is_empty(), "No enums loaded");
+
+        // Print first 10 enums
+        println!("\nFirst 10 Enums:");
+        for (i, enum_obj) in enums.iter().take(10).enumerate() {
+            println!("  {}: {} (values: {})", i + 1, enum_obj.name, enum_obj.enum_values.len());
+        }
+
+        // Check for specific enum
+        let target_name = "СпособыУстановкиКурсаВалюты";
+        let target_enum_specific = enums.iter().find(|e| e.name == target_name);
+
+        if let Some(enum_obj) = target_enum_specific {
+            println!("\n✅ Found target enum: {}", target_name);
+            println!("  EnumValues count: {}", enum_obj.enum_values.len());
+            for (i, ev) in enum_obj.enum_values.iter().enumerate() {
+                println!("    {}: {}", i + 1, ev.name);
+            }
+        } else {
+            println!("\n❌ Target enum '{}' NOT FOUND", target_name);
+            println!("\nAll enum names:");
+            for (i, e) in enums.iter().enumerate() {
+                println!("  {}: {}", i + 1, e.name);
+            }
+        }
+
+        // Find specific enum - use first one with values
+        let target_enum = enums.iter().find(|e| !e.enum_values.is_empty());
+
+        if let Some(enum_obj) = target_enum {
+            println!("✅ Found enum: {}", enum_obj.name);
+            println!("  EnumValues count: {}", enum_obj.enum_values.len());
+
+            // Check that enum values are loaded
+            assert!(!enum_obj.enum_values.is_empty(), "EnumValues should not be empty");
+
+            // Print first 5 enum values
+            println!("  First 5 EnumValues:");
+            for (i, ev) in enum_obj.enum_values.iter().take(5).enumerate() {
+                println!("    {}: {} (uuid: {})", i + 1, ev.name, ev.uuid);
+            }
+
+            // Test find_enum_value method
+            if let Some(first_value) = enum_obj.enum_values.first() {
+                let found = enum_obj.find_enum_value(&first_value.name);
+                assert!(found.is_some(), "find_enum_value should work");
+
+                // Test case-insensitive search
+                let found_lower = enum_obj.find_enum_value(&first_value.name.to_lowercase());
+                assert!(found_lower.is_some(), "find_enum_value should be case-insensitive");
+            }
+        } else {
+            panic!("❌ Enum 'ЗаданияОчередиОбновленияПрав' not found");
         }
     }
 

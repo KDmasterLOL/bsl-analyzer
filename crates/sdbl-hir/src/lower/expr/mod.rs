@@ -279,6 +279,7 @@ impl<'a> LoweringContext<'a> {
             "ЕСТЬNULL" | "ISNULL" => FunctionKind::Isnull,
             "ВЫРАЗИТЬ" | "CAST" => FunctionKind::Cast,
             "ПРЕДСТАВЛЕНИЕ" | "PRESENTATION" => FunctionKind::Presentation,
+            "ЗНАЧЕНИЕ" | "VALUE" => FunctionKind::Value,
             _ => FunctionKind::Unknown(func_name.clone()),
         };
 
@@ -367,6 +368,9 @@ impl<'a> LoweringContext<'a> {
 
             // Type/ValueType return type descriptors
             FunctionKind::Type | FunctionKind::ValueType => SdblType::Unknown,
+
+            // VALUE returns typed reference (simplified to AnyRef for now)
+            FunctionKind::Value => SdblType::AnyRef,
 
             // Ref returns Boolean
             FunctionKind::Ref => SdblType::Boolean,

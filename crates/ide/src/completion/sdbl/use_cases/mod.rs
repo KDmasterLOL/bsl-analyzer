@@ -16,6 +16,7 @@ pub mod complete_keywords;
 pub mod complete_mdo;
 pub mod complete_nested_elements;
 pub mod complete_nested_fields;
+pub mod complete_value_elements;
 
 pub use complete_aliases::CompleteAliasesUseCase;
 pub use complete_fields::CompleteFieldsUseCase;
@@ -24,3 +25,4 @@ pub use complete_keywords::CompleteKeywordsUseCase;
 pub use complete_mdo::CompleteMdoUseCase;
 pub use complete_nested_elements::CompleteNestedElementsUseCase;
 pub use complete_nested_fields::CompleteNestedFieldsUseCase;
+pub use complete_value_elements::CompleteValueElementsUseCase;

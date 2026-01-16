@@ -148,6 +148,13 @@ impl MdoType {
         }
     }
 
+    /// Check if the given keyword is the Russian variant (case-insensitive)
+    pub fn is_russian_keyword(&self, keyword: &str) -> bool {
+        let keyword_lower = keyword.to_lowercase();
+        let russian_lower = self.russian_name().to_lowercase();
+        keyword_lower == russian_lower
+    }
+
     /// Get all MDO types
     pub fn all() -> &'static [MdoType] {
         &[
@@ -228,6 +235,30 @@ impl MdoType {
     }
 }
 
+/// Enumeration value (element of Enum)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnumValue {
+    /// Russian name
+    pub name: String,
+    /// English name (optional)
+    #[serde(default)]
+    pub name_en: Option<String>,
+    /// UUID
+    pub uuid: String,
+}
+
+/// Predefined item (for Catalogs, Documents, etc.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PredefinedItem {
+    /// Russian name
+    pub name: String,
+    /// English name (optional)
+    #[serde(default)]
+    pub name_en: Option<String>,
+    /// UUID
+    pub uuid: String,
+}
+
 /// Simple metadata object
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataObject {
@@ -247,6 +278,12 @@ pub struct MetadataObject {
     /// Child objects (e.g., Cubes for ExternalDataSource, DimensionTables for Cube)
     #[serde(default)]
     pub children: Vec<MetadataObject>,
+    /// Enumeration values (for Enum type only)
+    #[serde(default)]
+    pub enum_values: Vec<EnumValue>,
+    /// Predefined items (for Catalog, Document, etc.)
+    #[serde(default)]
+    pub predefined_items: Vec<PredefinedItem>,
 }
 
 /// Metadata object attribute (custom field).
@@ -442,6 +479,8 @@ impl MetadataObject {
             attributes: Vec::new(),
             tabular_sections: Vec::new(),
             children: Vec::new(),
+            enum_values: Vec::new(),
+            predefined_items: Vec::new(),
         }
     }
 
@@ -458,6 +497,8 @@ impl MetadataObject {
             attributes: Vec::new(),
             tabular_sections: Vec::new(),
             children,
+            enum_values: Vec::new(),
+            predefined_items: Vec::new(),
         }
     }
 
@@ -475,6 +516,8 @@ impl MetadataObject {
             attributes,
             tabular_sections: Vec::new(),
             children: Vec::new(),
+            enum_values: Vec::new(),
+            predefined_items: Vec::new(),
         }
     }
 
@@ -519,6 +562,24 @@ impl MetadataObject {
         self.tabular_sections.iter().find(|ts| {
             ts.name().to_lowercase() == name_lower
                 || ts.name_en().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+        })
+    }
+
+    /// Find enum value by name (case-insensitive, bilingual)
+    pub fn find_enum_value(&self, name: &str) -> Option<&EnumValue> {
+        let name_lower = name.to_lowercase();
+        self.enum_values.iter().find(|ev| {
+            ev.name.to_lowercase() == name_lower
+                || ev.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+        })
+    }
+
+    /// Find predefined item by name (case-insensitive, bilingual)
+    pub fn find_predefined_item(&self, name: &str) -> Option<&PredefinedItem> {
+        let name_lower = name.to_lowercase();
+        self.predefined_items.iter().find(|pi| {
+            pi.name.to_lowercase() == name_lower
+                || pi.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
         })
     }
 }

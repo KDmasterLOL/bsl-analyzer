@@ -695,6 +695,8 @@ pub enum FunctionKind {
     Type,
     ValueType,
     Presentation,
+    /// VALUE/ЗНАЧЕНИЕ - returns typed reference to metadata object or enum value
+    Value,
 
     // Other
     Ref,
@@ -739,6 +741,7 @@ impl FunctionKind {
             Self::Type => "ТИП",
             Self::ValueType => "ТИПЗНАЧЕНИЯ",
             Self::Presentation => "ПРЕДСТАВЛЕНИЕ",
+            Self::Value => "ЗНАЧЕНИЕ",
             Self::Ref => "ССЫЛКА",
             Self::Unknown(name) => name.as_str(),
         }
