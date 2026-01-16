@@ -99,13 +99,14 @@ impl ScopeProvider for DbScopeProvider<'_> {
 
         // Log all query ranges in package
         for (idx, query) in sdbl_package.queries().iter().enumerate() {
+            let in_range = query.range.start() <= sdbl_offset && sdbl_offset <= query.range.end();
             tracing::info!(
                 query_idx = idx,
                 query_range_start = u32::from(query.range.start()),
                 query_range_end = u32::from(query.range.end()),
                 query_range_len = u32::from(query.range.end()) - u32::from(query.range.start()),
                 sdbl_offset = u32::from(sdbl_offset),
-                contains = query.range.contains(sdbl_offset),
+                in_range = in_range,
                 "DIAGNOSTIC: query range in package"
             );
         }

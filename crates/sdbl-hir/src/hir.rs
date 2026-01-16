@@ -788,11 +788,12 @@ pub struct SdblPackage {
 }
 
 impl SdblPackage {
-    /// Find query containing the given offset (in SDBL text space).
+    /// Find query at given offset (in SDBL text space).
     ///
-    /// Returns the query whose range contains the offset.
+    /// Note: Uses inclusive end check (start <= offset <= end) instead of contains()
+    /// to support completion at the exact end of query (e.g., after "TableAlias.")
     pub fn query_at_offset(&self, offset: TextSize) -> Option<&SdblQuery> {
-        self.queries.iter().find(|q| q.range.contains(offset))
+        self.queries.iter().find(|q| q.range.start() <= offset && offset <= q.range.end())
     }
 
     /// Get all queries in the package.
