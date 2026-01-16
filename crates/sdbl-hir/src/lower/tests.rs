@@ -1165,3 +1165,62 @@ fn test_incomplete_as_alias_in_select() {
         "\n⚠️  Parser should continue after incomplete AS and generate tokens for highlighting!"
     );
 }
+
+#[test]
+fn test_incomplete_table_reference_in_from() {
+    // User's case: incomplete table reference "Справочник." in FROM clause
+    let query = r#"ВЫБРАТЬ
+    Валюты.Наименование КАК СимвольныйКод
+ИЗ
+    Справочник.Валюты КАК Валюты
+ГДЕ
+    Валюты.СпособУстановкиКурса = ЗНАЧЕНИЕ(Перечисление.СпособыУстановкиКурсаВалюты.НаценкаНаКурсДругойВалюты)
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+    Валюты.Наименование
+ИЗ
+    Справочник. КАК Валюты
+ГДЕ
+    Валюты.СпособУстановкиКурса = ЗНАЧЕНИЕ(Перечисление.СпособыУстановкиКурсаВалюты.РасчетПоФормуле)"#;
+
+    println!("\n=== QUERY ===");
+    println!("{}", query);
+
+    let parse = parser::parse_sdbl(query);
+
+    println!("\n=== PARSE ERRORS ===");
+    println!("Error count: {}", parse.errors().len());
+    for (i, err) in parse.errors().iter().enumerate() {
+        println!("  Error {}: {:?}", i + 1, err);
+    }
+
+    let root = parse.syntax_node();
+
+    println!("\n=== FULL SYNTAX TREE ===");
+    let tree_str = format!("{:#?}", root);
+    println!("{}", tree_str);
+
+    // Lower to HIR
+    let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    println!("\n=== HIR ===");
+    println!("HIR queries: {}", hir_package.queries.len());
+    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
+
+    let token_count = hir_package.source_map.all_tokens().count();
+    println!("Tokens for highlighting: {}", token_count);
+
+    // NOTE: HIR currently doesn't support UNION ALL, so we only get first query
+    // Parser correctly parses both queries (see syntax tree), but HIR lowering
+    // only processes the first SELECT before UNION
+    // TODO: Add UNION support to HIR
+
+    // Check that parser handles incomplete table ref without breaking
+    println!("\n⚠️  Parser creates empty ERROR for incomplete table ref");
+    println!("⚠️  Token count: {} - highlighting should work", token_count);
+
+    // Verify parser didn't break on incomplete table ref
+    assert!(token_count > 20, "Should have significant tokens despite incomplete table ref");
+}

@@ -438,7 +438,27 @@ fn table_ref(p: &mut Parser) {
     // Parse additional segments (DOT identifier)*
     while p.eat(TokenKind::Dot) {
         p.skip_trivia();
-        p.expect(TokenKind::Ident);
+
+        // ERROR RECOVERY: After DOT, only Ident is valid for table/MDO name
+        // Whitelist approach: if NOT Ident, mark incomplete and stop
+        if !p.at(TokenKind::Ident) {
+            // Incomplete: operators, punctuation, EOF, etc.
+            let err = p.start();
+            err.complete(p, NodeKind::Error);
+            break;
+        }
+
+        // Check if this Ident is clause keyword (FROM, WHERE) or AS keyword
+        // Prevents "Справочник.\nКАК" from consuming КАК as table name
+        if is_clause_keyword(p) || p.at_keyword("AS") || p.at_keyword("КАК") {
+            // Incomplete table ref - don't consume keyword
+            let err = p.start();
+            err.complete(p, NodeKind::Error);
+            break;
+        }
+
+        // Consume the identifier - it's a valid table/MDO name
+        p.bump(); // Ident
     }
 
     m.complete(p, NodeKind::SdblTableRef);
