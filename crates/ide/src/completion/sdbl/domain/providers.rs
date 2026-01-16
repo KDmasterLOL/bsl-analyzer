@@ -29,6 +29,16 @@ pub trait MetadataProvider {
 pub trait ScopeProvider {
     /// Get SDBL scope at given position.
     ///
+    /// ## Parameters
+    /// - `file_id`: FileId containing the SDBL query
+    /// - `bsl_literal_range`: TextRange of the BSL string literal containing SDBL query
+    /// - `sdbl_offset`: Offset within the SDBL query text (NOT BSL offset)
+    ///
     /// Returns None if position is not inside SDBL query or scope cannot be built.
-    fn get_scope(&self, file_id: FileId, offset: TextSize) -> Option<Scope>;
+    fn get_scope(
+        &self,
+        file_id: FileId,
+        bsl_literal_range: syntax::TextRange,
+        sdbl_offset: TextSize,
+    ) -> Option<Scope>;
 }

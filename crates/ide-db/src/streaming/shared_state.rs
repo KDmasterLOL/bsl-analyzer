@@ -137,11 +137,12 @@ impl ParsedFile {
                 let mut queries_with_pos: Vec<_> = Vec::new();
 
                 // Collect from method bodies
-                for (_local_id, body) in module_bodies.iter_bodies() {
+                for (local_id, body) in module_bodies.iter_bodies() {
                     for (expr_id, query_info) in body.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            queries_with_pos.push((pos, expr_id, sdbl_ast.clone()));
+                            let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+                            queries_with_pos.push((pos, sdbl_expr_id, sdbl_ast.clone()));
                         }
                     }
                 }
@@ -151,7 +152,8 @@ impl ParsedFile {
                     for (expr_id, query_info) in module_code.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            queries_with_pos.push((pos, expr_id, sdbl_ast.clone()));
+                            let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+                            queries_with_pos.push((pos, sdbl_expr_id, sdbl_ast.clone()));
                         }
                     }
                 }
@@ -162,9 +164,9 @@ impl ParsedFile {
                 // Lower to HIR
                 let result: Vec<_> = queries_with_pos
                     .into_iter()
-                    .map(|(_, expr_id, sdbl_ast)| {
+                    .map(|(_, sdbl_expr_id, sdbl_ast)| {
                         let sdbl_package = sdbl_hir::lower_sdbl_to_hir(&sdbl_ast, config_ref);
-                        (expr_id, Arc::new(sdbl_package))
+                        (sdbl_expr_id, Arc::new(sdbl_package))
                     })
                     .collect();
 

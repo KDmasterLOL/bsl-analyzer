@@ -102,11 +102,12 @@ pub trait AnalysisProvider {
 
     /// Get all SDBL queries (parsed AST) in file.
     ///
-    /// Returns Vec<(ExprId in BSL HIR, SDBL query info with source position)>.
+    /// Returns Vec<(SdblExprId, SDBL query info with source position)>.
+    /// SdblExprId uniquely identifies SDBL expression across all bodies in file.
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>;
+    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>;
 
     // ========================================================================
     // Module Information

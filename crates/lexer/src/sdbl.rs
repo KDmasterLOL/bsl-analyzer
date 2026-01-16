@@ -769,6 +769,32 @@ mod tests {
     }
 
     #[test]
+    fn test_comment_separator_line() {
+        let input = "SELECT 1;\n////////////////////////////////////////////////////////////////////////////////\nSELECT 2";
+        let tokens = tokenize_sdbl(input);
+
+        // Find semicolon and comment
+        let semicolon_pos = tokens.iter().position(|t| t.kind == SdblTokenKind::Semicolon).unwrap();
+        let comment_pos = tokens.iter().position(|t| t.kind == SdblTokenKind::Comment);
+
+        println!("Tokens around semicolon:");
+        for (i, token) in tokens.iter().enumerate() {
+            if i >= semicolon_pos.saturating_sub(2) && i <= semicolon_pos + 5 {
+                println!(
+                    "  [{} {}]: {:?} = {:?}",
+                    i,
+                    if i == semicolon_pos { "←" } else { " " },
+                    token.kind,
+                    token.text
+                );
+            }
+        }
+
+        assert!(comment_pos.is_some(), "Comment token should be found for ////////////////");
+        println!("Comment found at position {}", comment_pos.unwrap());
+    }
+
+    #[test]
     fn test_date_functions() {
         let tokens = tokenize_sdbl("YEAR(Date) MONTH(Date) DAY(Date)");
         // YEAR(0) ((1) Date(2) )(3) WS(4) MONTH(5) ((6) Date(7) )(8) WS(9) DAY(10) ((11) Date(12) )(13)

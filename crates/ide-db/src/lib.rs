@@ -21,8 +21,8 @@ pub use vfs;
 
 /// Type alias for SDBL HIR entries in a file.
 ///
-/// Maps ExprId (from BSL HIR) to the corresponding SDBL package.
-pub type SdblHirEntries = Arc<Vec<(hir_def::ExprId, Arc<sdbl_hir::SdblPackage>)>>;
+/// Maps SdblExprId (unique across all bodies in file) to the corresponding SDBL package.
+pub type SdblHirEntries = Arc<Vec<(hir_def::SdblExprId, Arc<sdbl_hir::SdblPackage>)>>;
 
 pub mod metadata;
 pub mod provider;
@@ -69,13 +69,14 @@ pub struct SymbolInfo {
 pub trait RootDatabase:
     SourceDatabase + RootQueryDb + DefDatabase + hir_ty::db::HirDatabase + metadata::MetadataDb
 {
-    /// Get all SDBL queries in a file with their ExprId in BSL HIR.
+    /// Get all SDBL queries in a file with their SdblExprId.
     ///
     /// Reuses BSL HIR lowering - no separate AST traversal!
+    /// SdblExprId uniquely identifies SDBL expression across all bodies in file.
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>;
+    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>;
 
     /// Get SDBL HIR for all queries in a file.
     ///
@@ -605,7 +606,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
         // Call Salsa tracked query (caching handled by Salsa)
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         all_sdbl_in_file_query(self, file_id_input)

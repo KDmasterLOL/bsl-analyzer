@@ -144,16 +144,16 @@ fn convert_sdbl_tokens_to_highlights(
 #[allow(clippy::type_complexity)]
 fn find_sdbl_entry_by_range<'a>(
     sdbl_hir_entries: &'a std::sync::Arc<
-        Vec<(hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>,
+        Vec<(hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>,
     >,
-    sdbl_queries: &'a std::sync::Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>>,
+    sdbl_queries: &'a std::sync::Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>,
     literal_range: TextRange,
 ) -> Option<(
-    &'a (hir_def::ExprId, std::sync::Arc<sdbl_hir::SdblPackage>),
-    &'a (hir_def::ExprId, syntax::SdblQueryInfo),
+    &'a (hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>),
+    &'a (hir_def::SdblExprId, syntax::SdblQueryInfo),
 )> {
     for (hir_entry, query_entry) in sdbl_hir_entries.iter().zip(sdbl_queries.iter()) {
-        let (_query_expr_id, query_info) = query_entry;
+        let (_query_sdbl_expr_id, query_info) = query_entry;
         if query_info.bsl_literal_range == literal_range {
             return Some((hir_entry, query_entry));
         }

@@ -33,7 +33,7 @@ use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 pub use crate::metadata::load_configuration;
 
 // Helper types for internal use
-type SdblInFile = Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>;
+type SdblInFile = Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>;
 
 /// Get metadata for a module (type and execution context).
 ///
@@ -120,7 +120,7 @@ pub fn module_metadata_query<'db>(
     Arc::new(hir_def::ModuleMetadata { module_type, execution_context, common_module, mdo: None })
 }
 
-/// Get all SDBL queries in a file with their ExprId in BSL HIR.
+/// Get all SDBL queries in a file with their SdblExprId.
 ///
 /// This Salsa tracked query extracts SDBL queries from already-lowered BSL HIR bodies.
 /// No separate AST traversal needed - reuses module_bodies query!
@@ -137,10 +137,11 @@ pub fn module_metadata_query<'db>(
 /// # Performance
 /// - First call: ~1-5ms (iterates HIR bodies to find SDBL exprs)
 /// - Cached: < 1ms
-/// - Memory: ~100 bytes per SDBL query (ExprId + SdblQueryInfo)
+/// - Memory: ~100 bytes per SDBL query (SdblExprId + SdblQueryInfo)
 ///
 /// # Returns
-/// Vec of (ExprId, SdblQueryInfo) sorted by position in source file
+/// Vec of (SdblExprId, SdblQueryInfo) sorted by position in source file.
+/// SdblExprId uniquely identifies SDBL expression across all bodies in file.
 #[salsa::tracked(lru = 128)]
 pub fn all_sdbl_in_file_query<'db>(
     db: &'db dyn hir_def::DefDatabase,
@@ -155,16 +156,18 @@ pub fn all_sdbl_in_file_query<'db>(
     let mut result = Vec::new();
 
     // Collect from all method bodies (procedures and functions)
-    for (_local_id, body) in module_bodies.iter_bodies() {
+    for (local_id, body) in module_bodies.iter_bodies() {
         for (expr_id, query_info) in body.sdbl_exprs() {
-            result.push((expr_id, query_info.clone()));
+            let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+            result.push((sdbl_expr_id, query_info.clone()));
         }
     }
 
     // Collect from module-level code (statements outside methods)
     if let Some(module_code) = module_bodies.module_code() {
         for (expr_id, query_info) in module_code.sdbl_exprs() {
-            result.push((expr_id, query_info.clone()));
+            let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+            result.push((sdbl_expr_id, query_info.clone()));
         }
     }
 
@@ -220,7 +223,8 @@ pub fn all_sdbl_in_file_query<'db>(
 /// - Semantic diagnostics (unknown tables, type mismatches, etc.)
 ///
 /// # Returns
-/// Vec of (ExprId, Arc<SdblLowerResult>) - one entry per successfully parsed SDBL query with source map
+/// Vec of (SdblExprId, Arc<SdblPackage>) - one entry per successfully parsed SDBL query.
+/// SdblExprId uniquely identifies SDBL expression across all bodies in file.
 #[salsa::tracked(lru = 64)]
 pub fn sdbl_hir_in_file_query<'db>(
     db: &'db dyn RootDatabase,

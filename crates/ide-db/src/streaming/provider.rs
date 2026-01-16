@@ -352,10 +352,10 @@ impl AnalysisProvider for StreamingProvider {
         let config_ref = configuration.as_deref();
 
         let mut result = Vec::with_capacity(sdbl_queries.len());
-        for (expr_id, query_info) in sdbl_queries.iter() {
+        for (sdbl_expr_id, query_info) in sdbl_queries.iter() {
             if let Some(ref sdbl_ast) = query_info.query_ast {
                 let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
-                result.push((*expr_id, Arc::new(sdbl_package)));
+                result.push((*sdbl_expr_id, Arc::new(sdbl_package)));
             }
         }
 
@@ -365,23 +365,25 @@ impl AnalysisProvider for StreamingProvider {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.module_bodies(module_id);
 
         let mut result = Vec::new();
 
         // Collect from all method bodies (procedures and functions)
-        for (_local_id, body) in module_bodies.iter_bodies() {
+        for (local_id, body) in module_bodies.iter_bodies() {
             for (expr_id, query_info) in body.sdbl_exprs() {
-                result.push((expr_id, query_info.clone()));
+                let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+                result.push((sdbl_expr_id, query_info.clone()));
             }
         }
 
         // Collect from module-level code (statements outside methods)
         if let Some(module_code) = module_bodies.module_code() {
             for (expr_id, query_info) in module_code.sdbl_exprs() {
-                result.push((expr_id, query_info.clone()));
+                let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+                result.push((sdbl_expr_id, query_info.clone()));
             }
         }
 

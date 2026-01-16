@@ -916,7 +916,7 @@ impl<'a> DiagnosticsContext<'a> {
     /// Get all SDBL queries (parsed AST) in current file.
     pub fn all_sdbl_in_file(
         &self,
-    ) -> std::sync::Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+    ) -> std::sync::Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
         if let Some(provider) = self.provider {
             return provider.all_sdbl_in_file(self.file_id);
         }

@@ -70,6 +70,8 @@ pub struct SdblQueryInfo {
     pub query_text: String,
     /// Offset within the query string (relative to query start, after opening quote)
     pub offset_in_query: TextSize,
+    /// Text range of the BSL string literal containing this SDBL query
+    pub bsl_literal_range: syntax::TextRange,
 }
 
 /// SDBL completion context - describes what kind of completion is appropriate at cursor position.
@@ -580,7 +582,11 @@ pub fn detect_sdbl_at_position(root: &SyntaxNode, offset: TextSize) -> Option<Sd
         "detected SDBL query at position"
     );
 
-    Some(SdblQueryInfo { query_text, offset_in_query })
+    Some(SdblQueryInfo {
+        query_text,
+        offset_in_query,
+        bsl_literal_range: literal_node.text_range(),
+    })
 }
 
 /// Detect completion context within an SDBL query.

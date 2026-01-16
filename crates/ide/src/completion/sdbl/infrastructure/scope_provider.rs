@@ -19,58 +19,98 @@ impl<'a> DbScopeProvider<'a> {
 }
 
 impl ScopeProvider for DbScopeProvider<'_> {
-    fn get_scope(&self, file_id: FileId, bsl_offset: TextSize) -> Option<Scope> {
+    fn get_scope(
+        &self,
+        file_id: FileId,
+        bsl_literal_range: syntax::TextRange,
+        sdbl_offset: TextSize,
+    ) -> Option<Scope> {
         let _span = tracing::info_span!(
             "DbScopeProvider::get_scope",
             ?file_id,
-            bsl_offset = u32::from(bsl_offset)
+            bsl_literal_range = ?bsl_literal_range,
+            sdbl_offset = u32::from(sdbl_offset)
         )
         .entered();
 
-        // 1. Get all SDBL queries from HIR to find ExprId by BSL range
+        // 1. Get all SDBL queries from HIR to find ExprId by BSL literal range
         let all_sdbl = self.db.all_sdbl_in_file(file_id);
 
         tracing::info!(
             total_queries = all_sdbl.len(),
-            bsl_offset = u32::from(bsl_offset),
+            sdbl_offset = u32::from(sdbl_offset),
             "searching for query containing cursor"
         );
 
-        // 2. Find the ExprId and QueryInfo of the query containing the cursor
-        let (target_expr_id, query_info) = all_sdbl.iter().find_map(|(expr_id, qinfo)| {
-            let contains = qinfo.bsl_literal_range.contains(bsl_offset);
-            tracing::debug!(
-                expr_id = ?expr_id,
-                bsl_range_start = u32::from(qinfo.bsl_literal_range.start()),
-                bsl_range_end = u32::from(qinfo.bsl_literal_range.end()),
-                bsl_offset = u32::from(bsl_offset),
-                contains = contains,
-                "checking if query BSL range contains cursor offset"
-            );
-            if contains {
-                Some((*expr_id, qinfo.clone()))
-            } else {
-                None
-            }
-        })?;
+        // 2. Find the SdblExprId and QueryInfo by matching BSL literal range
+        let (target_sdbl_expr_id, _query_info) =
+            all_sdbl.iter().find_map(|(sdbl_expr_id, qinfo)| {
+                let matches = qinfo.bsl_literal_range == bsl_literal_range;
+                let range_len = u32::from(qinfo.bsl_literal_range.end())
+                    - u32::from(qinfo.bsl_literal_range.start());
+                tracing::info!(
+                    sdbl_expr_id = ?sdbl_expr_id,
+                    bsl_range_start = u32::from(qinfo.bsl_literal_range.start()),
+                    bsl_range_end = u32::from(qinfo.bsl_literal_range.end()),
+                    range_len = range_len,
+                    matches = matches,
+                    "DIAGNOSTIC: checking if query BSL range matches"
+                );
+                if matches {
+                    Some((*sdbl_expr_id, qinfo.clone()))
+                } else {
+                    None
+                }
+            })?;
 
         tracing::info!(
-            target_expr_id = ?target_expr_id,
+            target_sdbl_expr_id = ?target_sdbl_expr_id,
             "found target query by BSL offset"
         );
 
         // 3. Get lowered HIR through Salsa query (CACHED!)
         let sdbl_hirs = self.db.sdbl_hir_in_file(file_id);
 
-        tracing::debug!(sdbl_hirs_count = sdbl_hirs.len(), "retrieved SDBL HIRs from cache");
+        tracing::info!(
+            sdbl_hirs_count = sdbl_hirs.len(),
+            "DIAGNOSTIC: retrieved SDBL HIRs from cache"
+        );
 
-        // 4. Find the package for the target ExprId
-        let (_expr_id, sdbl_package) =
-            sdbl_hirs.iter().find(|(expr_id, _)| *expr_id == target_expr_id)?;
+        // Log all SdblExprIds and their package query counts
+        for (sdbl_expr_id, package) in sdbl_hirs.iter() {
+            tracing::info!(
+                sdbl_expr_id = ?sdbl_expr_id,
+                package_queries_count = package.queries().len(),
+                is_target = *sdbl_expr_id == target_sdbl_expr_id,
+                "DIAGNOSTIC: SDBL HIR package from cache"
+            );
+        }
 
-        // 5. Find query containing cursor using SDBL-space offset
-        let offset_in_query = bsl_offset - query_info.bsl_literal_range.start();
-        let target_query = sdbl_package.query_at_offset(offset_in_query)?;
+        // 4. Find the package for the target SdblExprId
+        let (_sdbl_expr_id, sdbl_package) =
+            sdbl_hirs.iter().find(|(sdbl_expr_id, _)| *sdbl_expr_id == target_sdbl_expr_id)?;
+
+        // 5. Find query containing cursor using SDBL offset (already converted from BSL)
+        tracing::info!(
+            sdbl_offset = u32::from(sdbl_offset),
+            package_queries_count = sdbl_package.queries().len(),
+            "DIAGNOSTIC: about to call query_at_offset"
+        );
+
+        // Log all query ranges in package
+        for (idx, query) in sdbl_package.queries().iter().enumerate() {
+            tracing::info!(
+                query_idx = idx,
+                query_range_start = u32::from(query.range.start()),
+                query_range_end = u32::from(query.range.end()),
+                query_range_len = u32::from(query.range.end()) - u32::from(query.range.start()),
+                sdbl_offset = u32::from(sdbl_offset),
+                contains = query.range.contains(sdbl_offset),
+                "DIAGNOSTIC: query range in package"
+            );
+        }
+
+        let target_query = sdbl_package.query_at_offset(sdbl_offset)?;
 
         tracing::info!(
             query_range = ?target_query.range,

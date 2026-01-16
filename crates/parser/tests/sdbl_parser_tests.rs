@@ -631,3 +631,104 @@ fn test_join_with_complex_on_condition() {
     let ast_end: usize = ast_range.end().into();
     assert_eq!(ast_end, input.len(), "AST should cover full input");
 }
+
+#[test]
+fn test_into_clause_with_union_and_semicolon_separator() {
+    // Real query from completion logs with INTO clause
+    let query = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ
+	ГруппыКонтактовПользователей.Ссылка
+ПОМЕСТИТЬ Папки
+ИЗ
+	Справочник.ГруппыКонтактовПользователей КАК ГруппыКонтактовПользователей
+ГДЕ
+	ГруппыКонтактовПользователей.Родитель В ИЕРАРХИИ(&Папка)
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	&Папка
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+	ГруппыКонтактовПользователейКонтакты.Контакт,
+	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация
+ИЗ
+	Папки КАК Папки
+		ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.ГруппыКонтактовПользователей.Контакты КАК ГруппыКонтактовПользователейКонтакты
+		ПО Папки.Ссылка = ГруппыКонтактовПользователейКонтакты.Ссылка
+
+СГРУППИРОВАТЬ ПО
+	ГруппыКонтактовПользователейКонтакты.Контакт,
+	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация"#;
+
+    let parse = parse_sdbl(query);
+    assert!(
+        !parse.has_errors(),
+        "Should parse query with INTO, UNION ALL, and semicolon separator: {:?}",
+        parse.errors()
+    );
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+    assert_eq!(count, 2, "Expected 2 queries separated by semicolon (first with INTO and UNION ALL, second with JOIN)");
+}
+
+#[test]
+fn test_exact_extracted_query_from_logs() {
+    // EXACT text extracted from logs (08:16:50) - with incomplete ON condition "Папки. ="
+    let query = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ
+	ГруппыКонтактовПользователей.Ссылка
+ПОМЕСТИТЬ Папки
+ИЗ
+	Справочник.ГруппыКонтактовПользователей КАК ГруппыКонтактовПользователей
+ГДЕ
+	ГруппыКонтактовПользователей.Родитель В ИЕРАРХИИ(&Папка)
+
+ОБЪЕДИНИТЬ ВСЕ
+
+ВЫБРАТЬ
+	&Папка
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+	ГруппыКонтактовПользователейКонтакты.Контакт,
+	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация
+ИЗ
+	Папки КАК Папки
+		ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.ГруппыКонтактовПользователей.Контакты КАК ГруппыКонтактовПользователейКонтакты
+		ПО Папки. = ГруппыКонтактовПользователейКонтакты.Ссылка
+
+СГРУППИРОВАТЬ ПО
+	ГруппыКонтактовПользователейКонтакты.Контакт,
+	ГруппыКонтактовПользователейКонтакты.КонтактнаяИнформация"#;
+
+    println!("Query length: {}", query.len());
+
+    let parse = parse_sdbl(query);
+
+    // Check for errors
+    if parse.has_errors() {
+        println!("Parse errors:");
+        for error in parse.errors() {
+            println!("  - {:?}", error);
+        }
+    }
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+
+    println!("Found {} queries", count);
+
+    // Debug: print all queries
+    for (i, query) in package.queries().enumerate() {
+        println!("Query {}: {:?}", i, query.syntax().text());
+    }
+
+    assert_eq!(count, 2, "Expected 2 queries separated by semicolon, but found {}", count);
+}

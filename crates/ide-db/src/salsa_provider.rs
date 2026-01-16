@@ -126,7 +126,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::ExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
         self.db.all_sdbl_in_file(file_id)
     }
 

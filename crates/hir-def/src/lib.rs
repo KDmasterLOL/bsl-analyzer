@@ -389,6 +389,43 @@ pub struct VariableId {
     pub local_id: u32,
 }
 
+/// Owner of a Body (analogous to rust-analyzer's DefWithBodyId).
+///
+/// Identifies which top-level definition contains a Body.
+/// Used to disambiguate ExprId across different bodies in the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefWithBodyId {
+    /// Procedure or function (local_id from ItemTree)
+    Method(u32),
+    /// Module-level code (executed on module load)
+    ModuleCode,
+}
+
+/// Unique identifier for SDBL expression in a file context.
+///
+/// Combines the Body owner and the ExprId within that Body.
+/// This is necessary because ExprId is only unique within a single Body,
+/// but we need to identify SDBL expressions across all bodies in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SdblExprId {
+    /// Owner of the Body containing this expression
+    pub owner: DefWithBodyId,
+    /// ExprId within the Body
+    pub expr_id: ExprId,
+}
+
+impl SdblExprId {
+    /// Create a new SdblExprId for a method body.
+    pub fn from_method(local_id: u32, expr_id: ExprId) -> Self {
+        Self { owner: DefWithBodyId::Method(local_id), expr_id }
+    }
+
+    /// Create a new SdblExprId for module-level code.
+    pub fn from_module_code(expr_id: ExprId) -> Self {
+        Self { owner: DefWithBodyId::ModuleCode, expr_id }
+    }
+}
+
 /// Data about a module (derived from ItemTree).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleData {

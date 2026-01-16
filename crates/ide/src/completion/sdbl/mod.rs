@@ -49,7 +49,9 @@ pub(super) fn sdbl_completions(
     let scope_provider = DbScopeProvider::new(db);
 
     // Try to get Scope for the query at cursor position
-    let scope = scope_provider.get_scope(file_id, offset);
+    // Pass BSL literal range and SDBL offset (already converted from BSL offset)
+    let scope =
+        scope_provider.get_scope(file_id, query_info.bsl_literal_range, query_info.offset_in_query);
     if scope.is_some() {
         tracing::debug!("successfully built Scope from query HIR");
     } else {
