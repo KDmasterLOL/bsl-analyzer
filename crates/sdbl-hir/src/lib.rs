@@ -142,6 +142,18 @@ pub enum SdblCompletionContext {
         prefix: String,
     },
 
+    /// Cursor after nested field reference chain (3+ levels)
+    /// Example: "ВЫБРАТЬ Т.Владелец.Родитель.$0" -> suggest fields from Родитель's type
+    /// Example: "ВЫБРАТЬ Т.ВидНоменклатуры.$0" -> suggest fields from ВидНоменклатуры's underlying type
+    AfterNestedField {
+        /// Table alias (e.g., "Т")
+        alias: String,
+        /// Chain of field names already traversed (e.g., ["Владелец", "Родитель"])
+        field_chain: Vec<String>,
+        /// Prefix for filtering final field list
+        prefix: String,
+    },
+
     /// No specific completion context detected
     None,
 }
@@ -877,6 +889,85 @@ fn is_mdo_type(s: &str) -> bool {
     )
 }
 
+/// Parse nested field reference chain from "alias.field1.field2.field3..." pattern.
+///
+/// Returns (alias, field_chain, prefix) where field_chain contains all intermediate fields
+/// and prefix is the incomplete field name being typed.
+///
+/// # Distinguishing from simple 2-part paths
+///
+/// This function handles 3+ part paths (nested fields), while `parse_table_alias_field()`
+/// handles 2-part paths (simple field access). The distinction:
+///
+/// - 2 parts: "Т.Код" → handled by `parse_table_alias_field()`
+/// - 3+ parts: "Т.Владелец.Родитель.Код" → handled by this function
+///
+/// # Heuristics
+///
+/// First component is considered an alias if:
+/// - Not empty
+/// - Starts with uppercase letter
+/// - NOT an MDO type keyword (Справочник, Документ, etc.)
+///
+/// # Examples
+///
+/// ```ignore
+/// parse_nested_field_chain("ВЫБРАТЬ Т.Владелец.Родитель.Код")
+/// // → Some(("Т", vec!["Владелец", "Родитель"], "Код"))
+///
+/// parse_nested_field_chain("ВЫБРАТЬ Т.ВидНоменклатуры.")
+/// // → Some(("Т", vec!["ВидНоменклатуры"], ""))
+///
+/// parse_nested_field_chain("ВЫБРАТЬ Т.Код")
+/// // → None (only 2 parts, handled by parse_table_alias_field)
+///
+/// parse_nested_field_chain("ВЫБРАТЬ Справочник.Валюты.Штрихкоды")
+/// // → None (MDO type, not alias)
+/// ```
+fn parse_nested_field_chain(text_before: &str) -> Option<(String, Vec<String>, String)> {
+    // Get last whitespace-separated word
+    let words: Vec<&str> = text_before.split_whitespace().collect();
+    let last_word = words.last()?;
+
+    // Check if it contains a dot (otherwise not a path)
+    if !last_word.contains('.') {
+        return None;
+    }
+
+    // Split by dots
+    let parts: Vec<&str> = last_word.split('.').collect();
+
+    // We only handle 3+ part patterns (nested fields)
+    // 2-part patterns are handled by parse_table_alias_field()
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let potential_alias = parts[0];
+
+    // Check heuristics for table alias (same as parse_table_alias_field):
+    // 1. Not empty
+    // 2. Starts with uppercase letter
+    // 3. NOT an MDO type keyword
+    if !potential_alias.is_empty()
+        && potential_alias.chars().next()?.is_uppercase()
+        && !is_mdo_type(potential_alias)
+    {
+        let alias = potential_alias.to_string();
+
+        // Middle parts are the field chain (all except first and last)
+        let field_chain: Vec<String> =
+            parts[1..parts.len() - 1].iter().map(|s| s.to_string()).collect();
+
+        // Last part is the prefix for filtering
+        let prefix = parts.last().unwrap().to_string();
+
+        return Some((alias, field_chain, prefix));
+    }
+
+    None
+}
+
 /// Parse table alias and field name from "alias.field" pattern.
 ///
 /// Distinguishes between table aliases (e.g., "Т", "Т1", "Очередь") and MDO types (e.g., "Справочник").
@@ -968,6 +1059,19 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
     if is_after_from_keyword(text_before_cursor) {
         tracing::info!("detected AfterFromKeyword");
         return SdblCompletionContext::AfterFromKeyword;
+    }
+
+    // Check for nested field chain pattern (3+ parts: "Т.Field1.Field2.Field3...")
+    // IMPORTANT: Check this BEFORE parse_table_alias_field (which handles 2-part paths)
+    // This ensures nested chains are detected first, before falling through to simple field access
+    if let Some((alias, field_chain, prefix)) = parse_nested_field_chain(text_before_cursor) {
+        tracing::info!(
+            alias = %alias,
+            field_chain_len = field_chain.len(),
+            prefix = %prefix,
+            "detected AfterNestedField (nested field chain pattern)"
+        );
+        return SdblCompletionContext::AfterNestedField { alias, field_chain, prefix };
     }
 
     // Check for table alias field pattern (e.g., "Т.Код" or "Т1.")
@@ -2007,6 +2111,149 @@ mod tests {
                 assert_eq!(prefix, "");
             }
             _ => panic!("Expected AfterTableAlias, got {:?}", context),
+        }
+    }
+
+    // ========================================
+    // Tests for parse_nested_field_chain()
+    // ========================================
+
+    #[test]
+    fn test_parse_nested_field_chain_three_levels() {
+        let text = "ВЫБРАТЬ Т.Владелец.Родитель.Код";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(
+            result,
+            Some((
+                "Т".to_string(),
+                vec!["Владелец".to_string(), "Родитель".to_string()],
+                "Код".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_empty_prefix() {
+        let text = "ВЫБРАТЬ Т.ВидНоменклатуры.";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(
+            result,
+            Some(("Т".to_string(), vec!["ВидНоменклатуры".to_string()], "".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_four_levels() {
+        let text = "WHERE Т1.Field1.Field2.Field3.Field4";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(
+            result,
+            Some((
+                "Т1".to_string(),
+                vec!["Field1".to_string(), "Field2".to_string(), "Field3".to_string()],
+                "Field4".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_two_parts_only() {
+        // Should not match simple 2-part path (handled by parse_table_alias_field)
+        let text = "ВЫБРАТЬ Т.Код";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_mdo_type() {
+        // Should not match MDO type (not an alias)
+        let text = "ВЫБРАТЬ Справочник.Номенклатура.Владелец";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_english() {
+        let text = "SELECT T.Owner.Parent.Code";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(
+            result,
+            Some((
+                "T".to_string(),
+                vec!["Owner".to_string(), "Parent".to_string()],
+                "Code".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_no_dots() {
+        let text = "ВЫБРАТЬ Код";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_nested_field_chain_lowercase_alias() {
+        // Should not match lowercase alias (not following conventions)
+        let text = "ВЫБРАТЬ т.Владелец.Родитель.Код";
+        let result = parse_nested_field_chain(text);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_context_nested_field_three_levels() {
+        let query = "ВЫБРАТЬ Т.Владелец.Родитель.Код";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterNestedField { alias, field_chain, prefix } => {
+                assert_eq!(alias, "Т");
+                assert_eq!(field_chain, vec!["Владелец", "Родитель"]);
+                assert_eq!(prefix, "Код");
+            }
+            _ => panic!("Expected AfterNestedField, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_nested_field_empty_prefix() {
+        let query = "ВЫБРАТЬ Т.ВидНоменклатуры.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterNestedField { alias, field_chain, prefix } => {
+                assert_eq!(alias, "Т");
+                assert_eq!(field_chain, vec!["ВидНоменклатуры"]);
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterNestedField, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_simple_field_not_nested() {
+        // Simple 2-part path should still be AfterTableAlias, not AfterNestedField
+        let query = "ВЫБРАТЬ Т.Код";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "Т");
+                assert_eq!(prefix, "Код");
+            }
+            _ => panic!("Expected AfterTableAlias for 2-part path, got {:?}", context),
         }
     }
 }

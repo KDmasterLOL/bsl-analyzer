@@ -120,8 +120,9 @@ impl ScopeProvider for DbScopeProvider<'_> {
             "found target query for completion"
         );
 
-        // 6. Rebuild Scope from HIR
-        let mut scope = Scope::new();
+        // 6. Rebuild Scope from HIR with metadata for reference resolution
+        let metadata = self.db.get_configuration(file_id);
+        let mut scope = Scope::new_with_metadata(metadata);
 
         // НОВОЕ: Добавить временные таблицы из всех предыдущих queries в батче
         // Это нужно для completion во втором+ запросе батча, который использует

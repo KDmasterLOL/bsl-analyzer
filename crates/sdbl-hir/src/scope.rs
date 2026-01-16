@@ -2,6 +2,8 @@
 //!
 //! Tracks available tables and their fields for column resolution.
 
+use std::sync::Arc;
+
 use rustc_hash::FxHashMap;
 
 use crate::hir::{FieldDef, Name, TableRef};
@@ -10,10 +12,20 @@ use crate::types::SdblType;
 /// Scope for name resolution in SDBL queries.
 ///
 /// Maintains a stack of scopes for handling subqueries.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scope {
     /// Stack of scope frames (innermost last).
     frames: Vec<ScopeFrame>,
+
+    /// Metadata provider for resolving references.
+    /// Wrapped in Arc for cheap cloning.
+    metadata: Option<Arc<bsl_metadata::Configuration>>,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Single scope frame.
@@ -38,9 +50,18 @@ pub struct TempTableDef {
 }
 
 impl Scope {
-    /// Create a new empty scope.
+    /// Create a new empty scope without metadata.
+    ///
+    /// For backwards compatibility. Prefer `new_with_metadata()` for full functionality.
     pub fn new() -> Self {
-        Self { frames: vec![ScopeFrame::default()] }
+        Self { frames: vec![ScopeFrame::default()], metadata: None }
+    }
+
+    /// Create a new empty scope with metadata provider.
+    ///
+    /// Metadata is used for resolving nested field references through reference types.
+    pub fn new_with_metadata(metadata: Option<Arc<bsl_metadata::Configuration>>) -> Self {
+        Self { frames: vec![ScopeFrame::default()], metadata }
     }
 
     /// Push a new scope frame (for subqueries).
@@ -251,6 +272,284 @@ impl Scope {
         }
 
         result
+    }
+
+    // ========================================
+    // Nested field type resolution
+    // ========================================
+
+    /// Resolve type through chain of field references.
+    ///
+    /// Recursively resolves each field in the chain, following reference types.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_alias` - Starting table alias
+    /// * `field_chain` - Chain of field names to traverse (e.g., ["Владелец", "Родитель"])
+    ///
+    /// # Returns
+    ///
+    /// Final `SdblType` after traversing the chain, or `SdblType::Unknown` if any step fails.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Start with table from alias
+    /// 2. For each field in chain:
+    ///    a. Resolve field type in current context
+    ///    b. If type is Ref, Composite, or DefinedType:
+    ///       - Extract metadata reference(s)
+    ///       - Update current context to referenced table
+    ///         c. If type is primitive, stop (cannot traverse further)
+    /// 3. Return final type
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Т.Владелец.Родитель
+    /// // Step 1: Т (Справочник.Номенклатура)
+    /// // Step 2: Владелец → Справочник.Контрагенты (Ref)
+    /// // Step 3: Родитель → Справочник.Контрагенты (Ref)
+    /// // Step 4: Ready to complete fields of Контрагенты
+    /// ```
+    pub fn resolve_nested_field_type(&self, table_alias: &str, field_chain: &[String]) -> SdblType {
+        const MAX_DEPTH: usize = 10; // Protection from cycles
+
+        if field_chain.len() > MAX_DEPTH {
+            tracing::warn!(
+                depth = field_chain.len(),
+                "exceeded max nesting depth, possible circular reference"
+            );
+            return SdblType::Error;
+        }
+
+        // Find starting table
+        let Some(table) = self.find_table(table_alias) else {
+            tracing::warn!(alias = %table_alias, "table not found in scope");
+            return SdblType::Unknown;
+        };
+
+        tracing::info!(alias = %table_alias, table_name = %table.full_name, "found table");
+
+        let Some(metadata) = &table.metadata else {
+            tracing::warn!(alias = %table_alias, "table has no metadata");
+            return SdblType::Unknown;
+        };
+
+        let mut current_fields = metadata.fields().to_vec();
+        let mut current_type = SdblType::Unknown;
+
+        tracing::info!(
+            alias = %table_alias,
+            initial_fields_count = current_fields.len(),
+            "starting field resolution"
+        );
+
+        // Traverse field chain
+        for (i, field_name) in field_chain.iter().enumerate() {
+            tracing::info!(
+                step = i + 1,
+                field = %field_name,
+                available_fields = current_fields.len(),
+                "resolving nested field"
+            );
+
+            // Find field in current context
+            let Some(field) = current_fields.iter().find(|f| f.matches_name(field_name)) else {
+                tracing::warn!(
+                    field = %field_name,
+                    available_fields = ?current_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                    "field not found"
+                );
+                return SdblType::Unknown;
+            };
+
+            tracing::info!(
+                field = %field_name,
+                field_type = ?field.ty,
+                "found field"
+            );
+
+            current_type = field.ty.clone();
+
+            // Resolve next level based on type
+            match &current_type {
+                SdblType::Ref(mdo_ref) => {
+                    // Follow reference to metadata object
+                    tracing::info!(
+                        mdo_ref = ?mdo_ref,
+                        "following reference"
+                    );
+                    match self.resolve_ref_fields(mdo_ref) {
+                        Some(fields) => {
+                            tracing::info!(
+                                fields_count = fields.len(),
+                                "resolved reference fields"
+                            );
+                            current_fields = fields;
+                        }
+                        None => {
+                            tracing::warn!(
+                                mdo_ref = ?mdo_ref,
+                                has_metadata = self.metadata.is_some(),
+                                "failed to resolve reference fields"
+                            );
+                            return SdblType::Unknown;
+                        }
+                    }
+                }
+                SdblType::Composite { types } => {
+                    // Merge fields from all types
+                    match self.resolve_composite_fields(types) {
+                        Some(fields) => current_fields = fields,
+                        None => {
+                            tracing::debug!("failed to resolve composite fields");
+                            return SdblType::Unknown;
+                        }
+                    }
+                }
+                SdblType::DefinedType { name, underlying_type } => {
+                    // Unwrap DefinedType
+                    match self.resolve_defined_type_fields(name, underlying_type) {
+                        Some(fields) => current_fields = fields,
+                        None => {
+                            tracing::debug!(
+                                defined_type = %name,
+                                "failed to resolve DefinedType fields"
+                            );
+                            return SdblType::Unknown;
+                        }
+                    }
+                }
+                SdblType::AnyRef | SdblType::AnyObjectRef { .. } => {
+                    // Cannot traverse AnyRef - unknown concrete type
+                    tracing::debug!(
+                        ty = ?current_type,
+                        "reached AnyRef/AnyObjectRef, cannot traverse further"
+                    );
+                    return SdblType::Unknown;
+                }
+                _ => {
+                    // Primitive type - cannot traverse further
+                    tracing::debug!(
+                        field = %field_name,
+                        ty = ?current_type,
+                        "reached primitive type, cannot traverse further"
+                    );
+                    return SdblType::Unknown;
+                }
+            }
+        }
+
+        current_type
+    }
+
+    /// Resolve fields for a reference type.
+    ///
+    /// Loads metadata for the referenced object and returns its fields.
+    fn resolve_ref_fields(&self, mdo_ref: &crate::types::MdoRef) -> Option<Vec<FieldDef>> {
+        let config = self.metadata.as_ref()?;
+
+        let mdo_object = config.find_metadata_object(mdo_ref.mdo_type, &mdo_ref.name)?;
+
+        let mut fields = Vec::new();
+
+        // Add standard Ссылка field (reference to self)
+        fields.push(FieldDef::standard(
+            "Ссылка",
+            "Ref",
+            SdblType::reference(mdo_ref.mdo_type, &mdo_ref.name),
+        ));
+
+        // Add standard ПометкаУдаления field
+        fields.push(FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean));
+
+        // Add custom attributes (access public field directly)
+        for attr in &mdo_object.attributes {
+            fields.push(FieldDef::new_with_names(
+                attr.name.clone(),
+                attr.name_en.clone(),
+                SdblType::from_attribute_type(&attr.attr_type),
+                false, // is_standard
+            ));
+        }
+
+        Some(fields)
+    }
+
+    /// Merge fields from composite type.
+    ///
+    /// Returns union of all fields from all types, deduplicating by name.
+    fn resolve_composite_fields(&self, types: &[SdblType]) -> Option<Vec<FieldDef>> {
+        let mut all_fields = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        for ty in types {
+            match ty {
+                SdblType::Ref(mdo_ref) => {
+                    if let Some(fields) = self.resolve_ref_fields(mdo_ref) {
+                        for field in fields {
+                            if seen_names.insert(field.name.to_lowercase()) {
+                                all_fields.push(field);
+                            }
+                        }
+                    }
+                }
+                SdblType::DefinedType { name, underlying_type } => {
+                    if let Some(fields) = self.resolve_defined_type_fields(name, underlying_type) {
+                        for field in fields {
+                            if seen_names.insert(field.name.to_lowercase()) {
+                                all_fields.push(field);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Ignore non-reference types in composite
+                }
+            }
+        }
+
+        if all_fields.is_empty() {
+            None
+        } else {
+            Some(all_fields)
+        }
+    }
+
+    /// Resolve fields for a DefinedType.
+    ///
+    /// Unwraps DefinedType to its underlying type and returns fields.
+    fn resolve_defined_type_fields(
+        &self,
+        _name: &str,
+        underlying_type: &Option<Box<SdblType>>,
+    ) -> Option<Vec<FieldDef>> {
+        let underlying = underlying_type.as_ref()?;
+
+        match underlying.as_ref() {
+            SdblType::Ref(mdo_ref) => self.resolve_ref_fields(mdo_ref),
+            SdblType::Composite { types } => self.resolve_composite_fields(types),
+            _ => None,
+        }
+    }
+
+    /// Public API: Get fields for reference type.
+    pub fn get_fields_for_ref(&self, mdo_ref: &crate::types::MdoRef) -> Vec<FieldDef> {
+        self.resolve_ref_fields(mdo_ref).unwrap_or_default()
+    }
+
+    /// Public API: Get merged fields for composite type.
+    pub fn get_fields_for_composite(&self, types: &[SdblType]) -> Vec<FieldDef> {
+        self.resolve_composite_fields(types).unwrap_or_default()
+    }
+
+    /// Public API: Get fields for DefinedType.
+    pub fn get_fields_for_defined_type(
+        &self,
+        name: &str,
+        underlying_type: &Option<Box<SdblType>>,
+    ) -> Vec<FieldDef> {
+        self.resolve_defined_type_fields(name, underlying_type).unwrap_or_default()
     }
 }
 

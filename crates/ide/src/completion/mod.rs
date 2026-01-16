@@ -8,7 +8,6 @@
 mod bsl_completion;
 mod platform_completion;
 mod sdbl;
-mod sdbl_completion;
 
 use ide_db::RootDatabase;
 use std::path::PathBuf;

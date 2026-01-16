@@ -1,5 +1,7 @@
 //! Lowering context for SDBL HIR.
 
+use std::sync::Arc;
+
 use bsl_metadata::Configuration;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -30,10 +32,15 @@ pub struct LoweringContext<'a> {
 
 impl<'a> LoweringContext<'a> {
     /// Create a new lowering context.
+    ///
+    /// If metadata is provided, it will be passed to Scope for resolving nested field references.
     pub fn new(metadata: Option<&'a Configuration>) -> Self {
+        // Convert metadata reference to Arc for Scope
+        let metadata_arc = metadata.map(|m| Arc::new(m.clone()));
+
         Self {
             metadata,
-            scope: Scope::new(),
+            scope: Scope::new_with_metadata(metadata_arc),
             diagnostics: Vec::new(),
             source_map: SdblSourceMap::new(),
         }

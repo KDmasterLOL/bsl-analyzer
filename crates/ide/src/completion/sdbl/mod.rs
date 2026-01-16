@@ -16,7 +16,9 @@ use ide_db::RootDatabase;
 use infrastructure::{DbMetadataProvider, DbScopeProvider};
 use sdbl_hir::{detect_context, detect_sdbl_at_position, SdblCompletionContext};
 use use_cases::{
-    CompleteAliasesUseCase, CompleteFieldsUseCase, CompleteKeywordsUseCase, CompleteMdoUseCase,
+    CompleteAliasesUseCase, CompleteFieldsUseCase, CompleteJoinTypesUseCase,
+    CompleteKeywordsUseCase, CompleteMdoUseCase, CompleteNestedElementsUseCase,
+    CompleteNestedFieldsUseCase,
 };
 
 /// Main SDBL completion entry point (Facade).
@@ -82,6 +84,27 @@ pub(super) fn sdbl_completions(
             CompleteKeywordsUseCase::execute(&prefix)
         }
 
+        // Nested field completion - requires scope
+        (SdblCompletionContext::AfterNestedField { alias, field_chain, prefix }, Some(scope)) => {
+            tracing::info!(
+                alias = %alias,
+                field_chain_len = field_chain.len(),
+                prefix = %prefix,
+                "completion context: AfterNestedField (with scope)"
+            );
+            CompleteNestedFieldsUseCase::execute(scope, &alias, &field_chain, &prefix)
+        }
+        (SdblCompletionContext::AfterNestedField { alias, field_chain, prefix }, None) => {
+            tracing::warn!(
+                alias = %alias,
+                field_chain_len = field_chain.len(),
+                prefix = %prefix,
+                "completion context: AfterNestedField but no scope available"
+            );
+            // Fallback to keywords if no scope
+            CompleteKeywordsUseCase::execute(&prefix)
+        }
+
         // Alias suggestion after AS/КАК
         (SdblCompletionContext::AfterAsKeyword { context: as_context, suggestion }, _) => {
             tracing::info!(
@@ -92,11 +115,10 @@ pub(super) fn sdbl_completions(
             CompleteAliasesUseCase::execute_alias_suggestion(suggestion)
         }
 
-        // JOIN type keywords (delegates to old implementation for now)
+        // JOIN type keywords
         (SdblCompletionContext::JoinTypeKeyword { prefix }, _) => {
             tracing::info!(prefix = %prefix, "completion context: JoinTypeKeyword");
-            // TODO: Create use case for JOIN type keywords
-            return super::sdbl_completion::sdbl_completions(db, position);
+            CompleteJoinTypesUseCase::execute(&prefix)
         }
 
         // Table aliases after ON - requires scope
@@ -132,7 +154,7 @@ pub(super) fn sdbl_completions(
             CompleteMdoUseCase::execute_objects(&metadata_provider, mdo_type, &prefix)
         }
 
-        // AfterMdoObject - suggest nested elements (delegates to old implementation for now)
+        // AfterMdoObject - suggest nested elements (tabular sections, virtual tables)
         (SdblCompletionContext::AfterMdoObject { mdo_type, object_name, prefix }, _) => {
             tracing::info!(
                 ?mdo_type,
@@ -140,8 +162,12 @@ pub(super) fn sdbl_completions(
                 prefix = %prefix,
                 "completion context: AfterMdoObject"
             );
-            // TODO: Create use case for nested elements (tabular sections, virtual tables)
-            return super::sdbl_completion::sdbl_completions(db, position);
+            CompleteNestedElementsUseCase::execute(
+                &metadata_provider,
+                mdo_type,
+                &object_name,
+                &prefix,
+            )
         }
 
         // SdblKeywords - suggest SDBL keywords
