@@ -247,11 +247,12 @@ pub enum SyntaxKind {
     SDBL_IS_NULL_EXPR,        // IS NULL / IS NOT NULL predicate
     SDBL_BETWEEN_EXPR,        // BETWEEN predicate (expr BETWEEN low AND high)
     SDBL_LIKE_EXPR,           // LIKE predicate (expr LIKE pattern [ESCAPE char])
-    SDBL_ADDITIVE_EXPR,       // Additive operators (+, -)
+    SDBL_REFS_EXPR, // REFS predicate (expr REFS MDO) - checks if reference is of specific type
+    SDBL_ADDITIVE_EXPR, // Additive operators (+, -)
     SDBL_MULTIPLICATIVE_EXPR, // Multiplicative operators (*, /, MOD)
-    SDBL_UNARY_EXPR,          // Unary operators (+, -, NOT)
-    SDBL_PAREN_EXPR,          // Parenthesized expression
-    SDBL_SUBQUERY_EXPR,       // Subquery in expression context
+    SDBL_UNARY_EXPR, // Unary operators (+, -, NOT)
+    SDBL_PAREN_EXPR, // Parenthesized expression
+    SDBL_SUBQUERY_EXPR, // Subquery in expression context
 
     // Primary Expressions
     SDBL_COLUMN_REF,    // Column reference

@@ -280,4 +280,38 @@ impl<'a> LoweringContext<'a> {
             range: node.text_range(),
         }
     }
+
+    /// Lower REFS expression (type check for reference).
+    ///
+    /// Grammar: `expr REFS mdo`
+    /// Example: `Исполнители.Исполнитель ССЫЛКА Справочник.ПолныеРоли`
+    ///
+    /// Returns Boolean indicating if the expression is a reference of the specified type.
+    pub(super) fn lower_refs_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
+        // Get the expression being tested (first child)
+        let mut children = node.children();
+        let expr = children
+            .next()
+            .map(|n| self.lower_expr(&n))
+            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
+
+        // Record REFS keyword (it's mapped to IDENT token)
+        self.record_keyword_by_text(
+            node,
+            "REFS",
+            "ССЫЛКА",
+            crate::source_map::TokenCategory::SpecialKeyword,
+        );
+
+        // For now, treat REFS as a simple boolean comparison
+        // In the future, this should validate against metadata types
+        // Result type is always Boolean
+        ExprHir::BinaryOp {
+            lhs: Box::new(expr),
+            op: crate::hir::BinaryOp::Eq, // Placeholder - should be a specialized REFS op
+            rhs: Box::new(ExprHir::Missing { range: node.text_range() }), // MDO not lowered yet
+            ty: SdblType::Boolean,
+            range: node.text_range(),
+        }
+    }
 }

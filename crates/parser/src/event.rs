@@ -115,6 +115,7 @@ pub enum NodeKind {
     SdblIsNullExpr,
     SdblBetweenExpr,
     SdblLikeExpr,
+    SdblRefsExpr,
     SdblAdditiveExpr,
     SdblMultiplicativeExpr,
     SdblUnaryExpr,

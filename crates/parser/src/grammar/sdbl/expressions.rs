@@ -221,6 +221,31 @@ fn predicate_expr(p: &mut Parser) {
 
         m.complete(p, NodeKind::SdblLikeExpr);
     }
+    // Check for REFS predicate (ССЫЛКА)
+    else if p.at_keyword("REFS") || p.at_keyword("ССЫЛКА") {
+        p.bump(); // REFS / ССЫЛКА
+        p.skip_trivia();
+
+        // Parse MDO reference (e.g., Справочник.ПолныеРоли)
+        // For now, treat it as a simple path of identifiers separated by dots
+        if p.at(TokenKind::Ident) {
+            p.bump(); // First identifier (e.g., Справочник)
+            p.skip_trivia();
+
+            // Parse remaining parts (e.g., .ПолныеРоли)
+            while p.eat(TokenKind::Dot) {
+                p.skip_trivia();
+                if p.at(TokenKind::Ident) {
+                    p.bump(); // Next identifier
+                    p.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        m.complete(p, NodeKind::SdblRefsExpr);
+    }
     // Check for comparison operators
     else if matches!(
         p.current(),

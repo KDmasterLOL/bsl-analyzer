@@ -85,14 +85,50 @@ impl ScopeProvider for DbScopeProvider<'_> {
         // НОВОЕ: Добавить временные таблицы из всех предыдущих queries в батче
         // Это нужно для completion во втором+ запросе батча, который использует
         // временную таблицу, созданную в предыдущем запросе.
-        for prev_query in sdbl_package.queries() {
+
+        // DIAGNOSTIC: Log all queries before processing
+        let all_queries = sdbl_package.queries();
+        tracing::info!(
+            total_queries_in_package = all_queries.len(),
+            target_query_range = ?target_query.range,
+            "DIAGNOSTIC: Starting temp table extraction from previous queries"
+        );
+
+        for (idx, prev_query) in all_queries.iter().enumerate() {
+            tracing::info!(
+                query_idx = idx,
+                query_range = ?prev_query.range,
+                has_into_table = prev_query.hir.into_table.is_some(),
+                into_table_name = ?prev_query.hir.into_table.as_ref().map(|n| n.as_str()),
+                select_fields_count = prev_query.hir.select.fields.len(),
+                is_current_query = prev_query.range == target_query.range,
+                "DIAGNOSTIC: Examining query in batch"
+            );
+
             // Остановиться на текущем query (не включать его INTO clause)
             if prev_query.range == target_query.range {
+                tracing::info!("DIAGNOSTIC: Reached current query, stopping temp table extraction");
                 break;
             }
 
             // Если предыдущий query создал временную таблицу (INTO clause)
             if let Some(ref temp_name) = prev_query.hir.into_table {
+                // DIAGNOSTIC: Log details of each SELECT field
+                for (field_idx, field) in prev_query.hir.select.fields.iter().enumerate() {
+                    tracing::info!(
+                        field_idx = field_idx,
+                        has_alias = field.alias.is_some(),
+                        alias = ?field.alias.as_ref().map(|a| a.as_str()),
+                        has_raw_name = field.raw_name.is_some(),
+                        raw_name = ?field.raw_name.as_ref().map(|n| n.as_str()),
+                        expr_variant = ?std::mem::discriminant(&field.expr),
+                        column_name = ?field.expr.column_name().map(|n| n.as_str()),
+                        alias_or_name = ?field.alias_or_name().map(|n| n.as_str()),
+                        field_type = ?field.ty,
+                        "DIAGNOSTIC: Examining SELECT field"
+                    );
+                }
+
                 // Извлечь поля из SELECT clause предыдущего query
                 let temp_fields: Vec<sdbl_hir::FieldDef> = prev_query
                     .hir
@@ -105,11 +141,18 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     })
                     .collect();
 
-                tracing::debug!(
+                tracing::info!(
                     temp_table = %temp_name,
                     fields_count = temp_fields.len(),
                     field_names = ?temp_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
-                    "adding temporary table from previous query in batch"
+                    field_types = ?temp_fields.iter().map(|f| format!("{:?}", f.ty)).collect::<Vec<_>>(),
+                    "DIAGNOSTIC: adding temporary table from previous query in batch"
+                );
+
+                tracing::info!(
+                    total_select_fields = prev_query.hir.select.fields.len(),
+                    "DIAGNOSTIC: SELECT clause in previous query has {} fields",
+                    prev_query.hir.select.fields.len()
                 );
 
                 scope.add_temp_table(temp_name.to_string(), temp_fields);
@@ -120,10 +163,25 @@ impl ScopeProvider for DbScopeProvider<'_> {
         let hir = &target_query.hir;
 
         for table in &hir.from {
+            tracing::info!(
+                table_name = %table.full_name,
+                has_alias = table.alias.is_some(),
+                alias = ?table.alias.as_ref().map(|a| a.as_str()),
+                has_metadata = table.metadata.is_some(),
+                is_temp_table = matches!(&table.metadata, Some(sdbl_hir::ResolvedTable::TempTable { .. })),
+                metadata_fields_count = table.metadata.as_ref().map(|m| m.fields().len()).unwrap_or(0),
+                "DIAGNOSTIC: adding table from FROM clause"
+            );
+
             scope.add_table(table.clone());
         }
 
         for join in &hir.joins {
+            tracing::info!(
+                table_name = %join.table.full_name,
+                "DIAGNOSTIC: adding table from JOIN clause"
+            );
+
             scope.add_table(join.table.clone());
         }
 

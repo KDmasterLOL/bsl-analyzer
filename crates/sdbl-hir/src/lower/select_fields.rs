@@ -101,6 +101,7 @@ impl<'a> LoweringContext<'a> {
             return FieldHir {
                 expr: ExprHir::Missing { range: field.syntax().text_range() },
                 alias: None,
+                raw_name: None,
                 ty: SdblType::Unknown,
                 is_asterisk: true,
                 range: field.syntax().text_range(),
@@ -109,7 +110,19 @@ impl<'a> LoweringContext<'a> {
 
         // Lower expression (expression() returns Option<SyntaxNode>)
         let expr = if let Some(e) = field.expression() {
-            self.lower_expr(&e)
+            tracing::info!(
+                expr_text = %e.text(),
+                expr_kind = ?e.kind(),
+                "DIAGNOSTIC LOWERING: lowering SELECT field expression"
+            );
+            let lowered = self.lower_expr(&e);
+            tracing::info!(
+                expr_text = %e.text(),
+                lowered_variant = ?std::mem::discriminant(&lowered),
+                lowered_type = ?lowered.ty(),
+                "DIAGNOSTIC LOWERING: lowered SELECT field expression"
+            );
+            lowered
         } else {
             ExprHir::Missing { range: field.syntax().text_range() }
         };
@@ -146,6 +159,22 @@ impl<'a> LoweringContext<'a> {
 
         // Get type from expression
         let ty = expr.ty().clone();
+
+        // Extract raw field name from AST (last identifier in expression)
+        // For "Т.ИмяПоля" -> Some("ИмяПоля")
+        // For "COUNT(*)" -> None (not a simple field)
+        let raw_name = field.expression().and_then(|expr_node| {
+            // Find last IDENT token in expression (skip DOT)
+            let mut last_ident = None;
+            for element in expr_node.descendants_with_tokens() {
+                if let Some(token) = element.as_token() {
+                    if token.kind() == syntax::SyntaxKind::IDENT {
+                        last_ident = Some(token.text().to_string());
+                    }
+                }
+            }
+            last_ident.map(|s| Name::from(s.as_str()))
+        });
 
         // Check for AliasWithoutAsKeyword diagnostic
         // Important: UNION queries should NOT be checked (only main/first query in UNION)
@@ -211,6 +240,13 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        FieldHir { expr, alias, ty, is_asterisk: false, range: field.syntax().text_range() }
+        FieldHir {
+            expr,
+            alias,
+            raw_name,
+            ty,
+            is_asterisk: false,
+            range: field.syntax().text_range(),
+        }
     }
 }

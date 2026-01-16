@@ -9,6 +9,12 @@ impl<'a> LoweringContext<'a> {
         use crate::hir::BinaryOp;
         use syntax::SyntaxKind;
 
+        tracing::info!(
+            node_text = %node.text(),
+            node_kind = ?node.kind(),
+            "DIAGNOSTIC LOWERING: lower_binary_expr called"
+        );
+
         // Record operator token
         for element in node.descendants_with_tokens() {
             if let Some(token) = element.as_token() {
@@ -36,6 +42,20 @@ impl<'a> LoweringContext<'a> {
         let mut children = node.children();
         let lhs_node = children.next();
         let rhs_node = children.next();
+
+        // IMPORTANT: If there's only one child (no operator), just return it unwrapped.
+        // This happens when parser creates operator precedence nodes without actual operators.
+        // For example: "Таблица.Поле" may be wrapped in LOGICAL_OR_EXPR → LOGICAL_AND_EXPR →
+        // ADDITIVE_EXPR → MULTIPLICATIVE_EXPR → COLUMN_REF, even though there are no operators.
+        if rhs_node.is_none() {
+            if let Some(lhs) = lhs_node {
+                tracing::info!(
+                    node_text = %node.text(),
+                    "DIAGNOSTIC LOWERING: Binary expr with no operator - unwrapping child"
+                );
+                return self.lower_expr(&lhs);
+            }
+        }
 
         let lhs = lhs_node
             .map(|n| self.lower_expr(&n))

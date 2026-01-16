@@ -110,6 +110,12 @@ pub struct FieldHir {
     /// Field alias (if specified with AS).
     pub alias: Option<Name>,
 
+    /// Raw field name from AST (e.g., "ИмяЭлемента" from "Т.ИмяЭлемента").
+    /// This is extracted from the last identifier in the field expression,
+    /// regardless of whether we can resolve it to a ColumnRef.
+    /// Used for completion when creating temporary tables from parameters.
+    pub raw_name: Option<Name>,
+
     /// Inferred type from metadata.
     pub ty: SdblType,
 
@@ -121,9 +127,11 @@ pub struct FieldHir {
 }
 
 impl FieldHir {
-    /// Get alias if present, otherwise try to get name from expression.
+    /// Get alias if present, otherwise try to get name from expression or raw_name.
+    ///
+    /// Priority: alias > expr.column_name() > raw_name
     pub fn alias_or_name(&self) -> Option<&Name> {
-        self.alias.as_ref().or_else(|| self.expr.column_name())
+        self.alias.as_ref().or_else(|| self.expr.column_name()).or(self.raw_name.as_ref())
     }
 }
 

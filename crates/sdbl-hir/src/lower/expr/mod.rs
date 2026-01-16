@@ -16,6 +16,12 @@ impl<'a> LoweringContext<'a> {
     pub(in crate::lower) fn lower_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use syntax::SyntaxKind;
 
+        tracing::info!(
+            node_text = %node.text(),
+            node_kind = ?node.kind(),
+            "DIAGNOSTIC LOWERING: lower_expr called"
+        );
+
         match node.kind() {
             SyntaxKind::SDBL_COLUMN_REF => self.lower_column_ref(node),
             SyntaxKind::SDBL_LITERAL => self.lower_literal(node),
@@ -39,6 +45,7 @@ impl<'a> LoweringContext<'a> {
             SyntaxKind::SDBL_IN_EXPR => self.lower_in_expr(node),
             SyntaxKind::SDBL_BETWEEN_EXPR => self.lower_between_expr(node),
             SyntaxKind::SDBL_LIKE_EXPR => self.lower_like_expr(node),
+            SyntaxKind::SDBL_REFS_EXPR => self.lower_refs_expr(node),
             SyntaxKind::SDBL_CASE_EXPR => self.lower_case_expr(node),
             SyntaxKind::SDBL_PARAMETER => self.lower_parameter(node),
             _ => ExprHir::Missing { range: node.text_range() },
@@ -56,6 +63,13 @@ impl<'a> LoweringContext<'a> {
             (None, Name::from(parts[0].trim()))
         };
 
+        tracing::info!(
+            text = %text,
+            table_alias = ?table_alias.as_ref().map(|n| n.as_str()),
+            column_name = %column_name.as_str(),
+            "DIAGNOSTIC LOWERING: lower_column_ref called"
+        );
+
         // NEW: Extract IDENT ranges from AST for semantic highlighting
         let ident_ranges: Vec<TextRange> = node
             .children_with_tokens()
@@ -71,6 +85,12 @@ impl<'a> LoweringContext<'a> {
         let ty = self
             .scope
             .resolve_column_type(table_alias.as_ref().map(|n| n.as_str()), column_name.as_str());
+
+        tracing::info!(
+            text = %text,
+            resolved_type = ?ty,
+            "DIAGNOSTIC LOWERING: resolved column type from scope"
+        );
 
         // Check for unknown field
         if ty == SdblType::Unknown {

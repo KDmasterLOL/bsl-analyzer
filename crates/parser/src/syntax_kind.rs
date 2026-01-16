@@ -107,6 +107,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblIsNullExpr => SK::SDBL_IS_NULL_EXPR,
         NodeKind::SdblBetweenExpr => SK::SDBL_BETWEEN_EXPR,
         NodeKind::SdblLikeExpr => SK::SDBL_LIKE_EXPR,
+        NodeKind::SdblRefsExpr => SK::SDBL_REFS_EXPR,
         NodeKind::SdblAdditiveExpr => SK::SDBL_ADDITIVE_EXPR,
         NodeKind::SdblMultiplicativeExpr => SK::SDBL_MULTIPLICATIVE_EXPR,
         NodeKind::SdblUnaryExpr => SK::SDBL_UNARY_EXPR,
