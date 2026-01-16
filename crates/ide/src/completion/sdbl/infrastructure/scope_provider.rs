@@ -155,7 +155,23 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     prev_query.hir.select.fields.len()
                 );
 
-                scope.add_temp_table(temp_name.to_string(), temp_fields);
+                scope.add_temp_table(temp_name.to_string(), temp_fields.clone());
+
+                // IMPORTANT: Also add as TableRef for completion to find it
+                // Completion uses find_table() which searches in 'tables', not 'temp_tables'
+                let temp_table_ref = sdbl_hir::TableRef {
+                    parts: vec![temp_name.clone()],
+                    full_name: temp_name.to_string(),
+                    alias: None,
+                    metadata: Some(sdbl_hir::ResolvedTable::TempTable {
+                        name: temp_name.to_string(),
+                        fields: temp_fields,
+                    }),
+                    is_virtual_table: false,
+                    virtual_table_params: Vec::new(),
+                    range: syntax::TextRange::default(),
+                };
+                scope.add_table(temp_table_ref);
             }
         }
 
