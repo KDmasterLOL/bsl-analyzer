@@ -732,3 +732,57 @@ fn test_exact_extracted_query_from_logs() {
 
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon, but found {}", count);
 }
+
+#[test]
+fn test_nested_join_with_parameters_highlighting() {
+    // Test for highlighting issue after &Действие parameter in nested JOIN
+    let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
+    ЗадачиЭлементовСхемы.ИмяЭлемента,
+    ЗадачиЭлементовСхемы.ЗадачаПроцесса
+ПОМЕСТИТЬ ВТ_ЗадачиСхемы
+ИЗ
+    &ЗадачиЭлементовСхемы КАК ЗадачиЭлементовСхемы
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+    ВТ_ЗадачиСхемы.ИмяЭлемента
+ИЗ
+    ВТ_ЗадачиСхемы КАК ВТ_ЗадачиСхемы
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ДанныеБизнесПроцессов КАК ДанныеБизнесПроцессов
+            ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ПроцессыДействий КАК ПроцессыДействий
+            ПО ДанныеБизнесПроцессов.БизнесПроцесс = ПроцессыДействий.Процесс
+            И ПроцессыДействий.Действие = &Действие
+        ПО ВТ_ЗадачиСхемы.ЗадачаПроцесса = ДанныеБизнесПроцессов.ВедущаяЗадача"#;
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors ===");
+        for (i, error) in parse.errors().iter().enumerate() {
+            println!("Error {}: {:?}", i + 1, error);
+        }
+    }
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+
+    println!("\n=== Full syntax tree ===");
+    println!("{:#?}", root);
+
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let queries: Vec<_> = package.queries().collect();
+
+    println!("\n=== Found {} queries ===", queries.len());
+    for (i, query) in queries.iter().enumerate() {
+        println!(
+            "Query {}: range {:?}, len {:?}",
+            i,
+            query.syntax().text_range(),
+            query.syntax().text().len()
+        );
+    }
+
+    assert_eq!(queries.len(), 2, "Expected 2 queries");
+    assert!(!parse.has_errors(), "Should parse nested JOINs without errors: {:?}", parse.errors());
+}

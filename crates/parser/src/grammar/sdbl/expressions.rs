@@ -419,11 +419,14 @@ fn string_literal_or_multi(p: &mut Parser) {
 /// Grammar: `parameter: AMPERSAND identifier`
 ///
 /// SDBL &Parameter may be lexed as one token or two (Ampersand + Ident). Handle both.
+/// NOTE: Do NOT skip trivia between & and identifier - parameters must be written
+/// without whitespace: `&Param`, not `& Param`. Skipping trivia causes parser to
+/// consume following keywords (like ON/ПО) as part of parameter name.
 fn parameter_expr(p: &mut Parser) {
     let m = p.start();
-    p.bump();
-    p.skip_trivia();
+    p.bump(); // Consume AMPERSAND
 
+    // Only consume identifier if it immediately follows & (no whitespace)
     if p.at(TokenKind::Ident) {
         p.bump();
     }
