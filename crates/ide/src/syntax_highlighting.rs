@@ -396,9 +396,14 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
     let range = token.text_range();
     let name_text = token.text();
 
+    tracing::debug!("highlight_metadata_object_name: ENTRY for token={}", name_text);
+
     // Check if parent is FieldExpr (dot access)
     let parent = token.parent()?;
+    tracing::debug!("highlight_metadata_object_name: parent exists for token={}", name_text);
+
     let field_expr = ast::FieldExpr::cast(parent.clone())?;
+    tracing::debug!("highlight_metadata_object_name: parent is FieldExpr for token={}", name_text);
 
     // Get base expression (first child of FieldExpr)
     let base_node = field_expr.syntax().children().next()?;
@@ -418,13 +423,20 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
     // Case 1: Base is MDO plural form (Документы, Справочники, etc.)
     // Token is metadata object name: Документы.ПКО
     if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(base_text) {
+        tracing::debug!(
+            "highlight_metadata_object_name: Case 1 - base={} is MDO plural form, type={:?}",
+            base_text,
+            mdo_type
+        );
+
         // Get configuration (required for highlighting)
         let config = ctx.db.get_configuration(ctx.file_id);
 
         tracing::debug!(
-            "highlight_metadata_object_name: mdo_type={:?}, config_loaded={}",
+            "highlight_metadata_object_name: mdo_type={:?}, config_loaded={}, file_id={:?}",
             mdo_type,
-            config.is_some()
+            config.is_some(),
+            ctx.file_id
         );
 
         if let Some(config) = config {
@@ -561,8 +573,12 @@ fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> 
     let name_text = token.text();
     let name = Name::new(name_text);
 
+    // DEBUG: Log every IDENT token we process
+    tracing::debug!("highlight_ident_semantic: processing token={}", name_text);
+
     // Try local resolution FIRST (parameters and local variables)
     if let Some(hl) = highlight_local_symbol(ctx, token, &name) {
+        tracing::debug!("highlight_ident_semantic: {} resolved as local symbol", name_text);
         return Some(hl);
     }
 
@@ -580,15 +596,19 @@ fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> 
     // This ensures Документы/Справочники are highlighted as Class even if
     // there's no local variable/method with that name
     if bsl_metadata::MdoType::is_plural_form(name_text) {
+        tracing::debug!("highlight_ident_semantic: {} is MDO plural form", name_text);
         return Some(HlRange { range, tag: HlTag::Class, modifiers: HlMod::new() });
     }
 
     // Check if this is a metadata object name after MDO plural form
     // Example: РегистрыСведений.ОчередьЗапросовERP
     //                          ^^^^^^^^^^^^^^^^^ <- highlight as Type if exists in metadata
+    tracing::debug!("highlight_ident_semantic: checking if {} is metadata object name", name_text);
     if let Some(hl) = highlight_metadata_object_name(ctx, token) {
+        tracing::debug!("highlight_ident_semantic: {} is metadata object name", name_text);
         return Some(hl);
     }
+    tracing::debug!("highlight_ident_semantic: {} is NOT metadata object name", name_text);
 
     // Fall back to module-level resolution (methods and module variables)
     let resolver = Resolver::for_module(ctx.module_id);
