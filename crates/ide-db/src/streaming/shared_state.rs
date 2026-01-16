@@ -468,6 +468,9 @@ impl SharedState {
     pub fn publish_symbol_tree(&self, file_id: FileId, tree: Arc<SymbolTree>) {
         let idx = file_id.index() as usize;
 
+        // Lock mutex FIRST to prevent lost wakeup race condition
+        let _guard = self.mutexes[idx].lock();
+
         // Insert into concurrent hashmap (internally synchronized)
         self.symbol_trees.insert(file_id, tree);
 
@@ -476,7 +479,10 @@ impl SharedState {
         self.file_statuses[idx].store(FileStatus::SymbolTreeReady as u8, Ordering::SeqCst);
 
         // Wake all threads waiting for this SymbolTree
+        // MUST be called under mutex to prevent lost wakeup
         self.condvars[idx].notify_all();
+
+        // Drop guard (unlock)
     }
 
     /// Publish SymbolTree and immediately transition to DiagnosticsInProgress.
@@ -494,6 +500,9 @@ impl SharedState {
     ) {
         let idx = file_id.index() as usize;
 
+        // Lock mutex FIRST to prevent lost wakeup race condition
+        let _guard = self.mutexes[idx].lock();
+
         // Insert into concurrent hashmap (internally synchronized)
         self.symbol_trees.insert(file_id, tree);
 
@@ -503,7 +512,10 @@ impl SharedState {
 
         // Wake all threads waiting for this SymbolTree
         // (is_symbol_tree_ready checks >= SymbolTreeReady, so DiagnosticsInProgress works)
+        // MUST be called under mutex to prevent lost wakeup
         self.condvars[idx].notify_all();
+
+        // Drop guard (unlock)
     }
 
     /// Get published SymbolTree if available.
@@ -621,6 +633,9 @@ impl SharedState {
     pub fn mark_failed(&self, file_id: FileId, error: Arc<str>) {
         let idx = file_id.index() as usize;
 
+        // Lock mutex FIRST to prevent lost wakeup race condition
+        let _guard = self.mutexes[idx].lock();
+
         // Record error
         self.failed_files.insert(file_id, error);
 
@@ -628,7 +643,10 @@ impl SharedState {
         self.file_statuses[idx].store(FileStatus::Completed as u8, Ordering::SeqCst);
 
         // Wake waiting threads so they can detect failure
+        // MUST be called under mutex to prevent lost wakeup
         self.condvars[idx].notify_all();
+
+        // Drop guard (unlock)
     }
 
     // ========================================================================

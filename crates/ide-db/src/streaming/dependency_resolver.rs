@@ -353,8 +353,10 @@ mod tests {
 
     #[test]
     fn test_wait_scenario_with_threads() {
+        use std::sync::mpsc;
         use std::sync::Barrier;
         use std::thread;
+        use std::time::Duration;
 
         // Setup: single file, two workers will race to process it
         let file_id = FileId(0);
@@ -369,6 +371,10 @@ mod tests {
         // Barrier to ensure both threads start at same time
         let barrier = Arc::new(Barrier::new(2));
 
+        // Channels for timeout handling
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+
         let barrier1 = Arc::clone(&barrier);
         let provider1 = Arc::clone(&provider);
         let state1 = Arc::clone(&shared_state);
@@ -378,23 +384,30 @@ mod tests {
         let state2 = Arc::clone(&shared_state);
 
         // Thread 1: tries to get SymbolTree
-        let handle1 = thread::spawn(move || {
+        thread::spawn(move || {
             barrier1.wait();
-            get_or_process_symbol_tree(file_id, &*provider1, &state1)
+            let result = get_or_process_symbol_tree(file_id, &*provider1, &state1);
+            let _ = tx1.send(result);
         });
 
         // Thread 2: tries to get SymbolTree
-        let handle2 = thread::spawn(move || {
+        thread::spawn(move || {
             barrier2.wait();
-            get_or_process_symbol_tree(file_id, &*provider2, &state2)
+            let result = get_or_process_symbol_tree(file_id, &*provider2, &state2);
+            let _ = tx2.send(result);
         });
 
-        // Both threads should succeed
-        let result1 = handle1.join().expect("Thread 1 panicked");
-        let result2 = handle2.join().expect("Thread 2 panicked");
+        // Wait for both threads with 5 second timeout
+        let timeout = Duration::from_secs(5);
+        let result1 = rx1
+            .recv_timeout(timeout)
+            .expect("Thread 1 timed out after 5 seconds - possible deadlock!");
+        let result2 = rx2
+            .recv_timeout(timeout)
+            .expect("Thread 2 timed out after 5 seconds - possible deadlock!");
 
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
+        assert!(result1.is_ok(), "Thread 1 failed: {:?}", result1.err());
+        assert!(result2.is_ok(), "Thread 2 failed: {:?}", result2.err());
 
         // Both should get the same SymbolTree (by content)
         let tree1 = result1.unwrap();
