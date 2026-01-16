@@ -69,6 +69,16 @@ pub struct SymbolInfo {
 pub trait RootDatabase:
     SourceDatabase + RootQueryDb + DefDatabase + hir_ty::db::HirDatabase + metadata::MetadataDb
 {
+    /// Get configuration for a file (Salsa-cached).
+    ///
+    /// This method loads configuration metadata for the project containing the file.
+    /// The configuration is cached by Salsa for efficient reuse.
+    ///
+    /// # Returns
+    /// - `Some(Arc<Configuration>)` if configuration found and loaded successfully
+    /// - `None` if file path not found or configuration root not found
+    fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>>;
+
     /// Get all SDBL queries in a file with their SdblExprId.
     ///
     /// Reuses BSL HIR lowering - no separate AST traversal!
@@ -603,6 +613,16 @@ impl hir_ty::db::HirDatabase for RootDatabaseImpl {
 
 #[salsa::db]
 impl RootDatabase for RootDatabaseImpl {
+    fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
+        // Reuse the same logic as sdbl_hir_in_file_query
+        let file_path = get_file_path_for_sdbl(self, file_id)?;
+        let config_root = find_configuration_root_for_sdbl(self, &file_path)?;
+        let config_path_str = config_root.to_string_lossy().to_string();
+        let path_input = metadata::ConfigurationPathInput::new(self, config_path_str);
+        // Salsa-cached via load_configuration
+        Some(metadata::load_configuration(self, path_input))
+    }
+
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
