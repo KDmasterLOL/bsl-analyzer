@@ -83,6 +83,62 @@ impl ModuleIndex {
                             file_id,
                         );
                     }
+                    ModulePathType::AccountingRegister => {
+                        index.managers.insert(
+                            (ManagerType::AccountingRegisters, name.to_lowercase()),
+                            file_id,
+                        );
+                    }
+                    ModulePathType::CalculationRegister => {
+                        index.managers.insert(
+                            (ManagerType::CalculationRegisters, name.to_lowercase()),
+                            file_id,
+                        );
+                    }
+                    ModulePathType::ChartOfCharacteristicTypes => {
+                        index.managers.insert(
+                            (ManagerType::ChartsOfCharacteristicTypes, name.to_lowercase()),
+                            file_id,
+                        );
+                    }
+                    ModulePathType::ChartOfAccounts => {
+                        index
+                            .managers
+                            .insert((ManagerType::ChartsOfAccounts, name.to_lowercase()), file_id);
+                    }
+                    ModulePathType::ChartOfCalculationTypes => {
+                        index.managers.insert(
+                            (ManagerType::ChartsOfCalculationTypes, name.to_lowercase()),
+                            file_id,
+                        );
+                    }
+                    ModulePathType::BusinessProcess => {
+                        index
+                            .managers
+                            .insert((ManagerType::BusinessProcesses, name.to_lowercase()), file_id);
+                    }
+                    ModulePathType::Task => {
+                        index.managers.insert((ManagerType::Tasks, name.to_lowercase()), file_id);
+                    }
+                    ModulePathType::Enum => {
+                        index.managers.insert((ManagerType::Enums, name.to_lowercase()), file_id);
+                    }
+                    ModulePathType::ExchangePlan => {
+                        index
+                            .managers
+                            .insert((ManagerType::ExchangePlans, name.to_lowercase()), file_id);
+                    }
+                    ModulePathType::ExternalDataSource => {
+                        index.managers.insert(
+                            (ManagerType::ExternalDataSources, name.to_lowercase()),
+                            file_id,
+                        );
+                    }
+                    ModulePathType::Constant => {
+                        index
+                            .managers
+                            .insert((ManagerType::Constants, name.to_lowercase()), file_id);
+                    }
                 }
             }
         }
@@ -138,6 +194,17 @@ enum ModulePathType {
     Report,
     InformationRegister,
     AccumulationRegister,
+    AccountingRegister,
+    CalculationRegister,
+    ChartOfCharacteristicTypes,
+    ChartOfAccounts,
+    ChartOfCalculationTypes,
+    BusinessProcess,
+    Task,
+    Enum,
+    ExchangePlan,
+    ExternalDataSource,
+    Constant,
 }
 
 /// Parse module path to extract type and name.
@@ -172,6 +239,29 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
             "accumulationregisters" | "регистрынакопления" => {
                 Some(ModulePathType::AccumulationRegister)
             }
+            "accountingregisters" | "регистрыбухгалтерии" => {
+                Some(ModulePathType::AccountingRegister)
+            }
+            "calculationregisters" | "регистрырасчёта" | "регистрырасчета" => {
+                Some(ModulePathType::CalculationRegister)
+            }
+            "chartsofcharacteristictypes" | "планывидовхарактеристик" => {
+                Some(ModulePathType::ChartOfCharacteristicTypes)
+            }
+            "chartsofaccounts" | "планысчетов" => Some(ModulePathType::ChartOfAccounts),
+            "chartsofcalculationtypes" | "планывидоврасчёта" | "планывидоврасчета" => {
+                Some(ModulePathType::ChartOfCalculationTypes)
+            }
+            "businessprocesses" | "бизнеспроцессы" => {
+                Some(ModulePathType::BusinessProcess)
+            }
+            "tasks" | "задачи" => Some(ModulePathType::Task),
+            "enums" | "перечисления" => Some(ModulePathType::Enum),
+            "exchangeplans" | "планыобмена" => Some(ModulePathType::ExchangePlan),
+            "externaldatasources" | "внешниеисточникиданных" => {
+                Some(ModulePathType::ExternalDataSource)
+            }
+            "constants" | "константы" => Some(ModulePathType::Constant),
             _ => None,
         };
 

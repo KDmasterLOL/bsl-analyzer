@@ -383,6 +383,80 @@ fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut
     }
 }
 
+/// Check if token is a metadata object name after MDO plural form.
+///
+/// Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()
+///                          ^^^^^^^^^^^^^^^^^ <- highlight as Type
+///                                           ^^^^^^^^^^^^^^^^ <- highlight as Function (handled separately)
+///
+/// Returns Some(HlRange) if:
+/// 1. Parent is FieldExpr (dot access)
+/// 2. Base (left of dot) is MDO plural form (Документы, Справочники, etc.)
+/// 3. Token is not a method call (next sibling is not L_PAREN)
+/// 4. Metadata configuration is loaded and object exists
+fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
+    let range = token.text_range();
+    let name_text = token.text();
+
+    // Check if parent is FieldExpr (dot access)
+    let parent = token.parent()?;
+    let field_expr = ast::FieldExpr::cast(parent.clone())?;
+
+    // Get base expression (first child of FieldExpr)
+    let base_node = field_expr.syntax().children().next()?;
+
+    // Extract base identifier from EXPR or direct IDENT
+    let base_token = if base_node.kind() == SyntaxKind::EXPR {
+        // EXPR wrapping IDENT
+        base_node
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| it.kind() == SyntaxKind::IDENT)?
+    } else if base_node.kind() == SyntaxKind::IDENT {
+        // Direct IDENT token
+        base_node.first_token()?
+    } else {
+        return None;
+    };
+
+    let base_text = base_token.text();
+
+    // Check if base is MDO plural form
+    let mdo_type = bsl_metadata::MdoType::from_plural(base_text)?;
+
+    // Check if this is a method call (next token is L_PAREN)
+    // If yes, it will be highlighted as Function elsewhere
+    if is_method_call(&parent) {
+        return None;
+    }
+
+    // Try to get configuration metadata
+    let config = ctx.db.get_configuration(ctx.file_id)?;
+
+    // Check if metadata object exists in configuration
+    if config.has_metadata_object(mdo_type, name_text) {
+        return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
+    }
+
+    None
+}
+
+/// Check if the parent node represents a method call (next sibling is L_PAREN).
+fn is_method_call(node: &SyntaxNode) -> bool {
+    // Check if next sibling token is L_PAREN (skip whitespace)
+    let mut next = node.next_sibling_or_token();
+    while let Some(next_token) = next {
+        if next_token.kind() == SyntaxKind::WHITESPACE {
+            next = next_token.next_sibling_or_token();
+            continue;
+        }
+
+        // First non-whitespace token should be L_PAREN for method call
+        return next_token.kind() == SyntaxKind::L_PAREN;
+    }
+    false
+}
+
 /// Highlight an IDENT token using semantic analysis (name resolution).
 ///
 /// This function resolves the identifier to determine if it's a:
@@ -411,6 +485,20 @@ fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> 
             tag: HlTag::BuiltinFunction,
             modifiers: HlMod::new().with(HlMod::EXPORT), // EXPORT modifier → "defaultLibrary" in LSP
         });
+    }
+
+    // Check if this is an MDO plural form BEFORE module-level resolution
+    // This ensures Документы/Справочники are highlighted as Class even if
+    // there's no local variable/method with that name
+    if bsl_metadata::MdoType::is_plural_form(name_text) {
+        return Some(HlRange { range, tag: HlTag::Class, modifiers: HlMod::new() });
+    }
+
+    // Check if this is a metadata object name after MDO plural form
+    // Example: РегистрыСведений.ОчередьЗапросовERP
+    //                          ^^^^^^^^^^^^^^^^^ <- highlight as Type if exists in metadata
+    if let Some(hl) = highlight_metadata_object_name(ctx, token) {
+        return Some(hl);
     }
 
     // Fall back to module-level resolution (methods and module variables)
@@ -1204,5 +1292,196 @@ mod tests {
             builtin_call.is_some(),
             "НачатьТранзакцию should be highlighted as BuiltinFunction"
         );
+    }
+
+    #[test]
+    fn test_highlight_mdo_plural_forms_russian() {
+        let code = r#"
+Функция ПолучитьДокумент()
+    Ссылка = Документы.ПКО.НайтиПоНомеру("001");
+    Возврат Ссылка;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // "Документы" should be highlighted as Class
+        let documents_highlight = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Class
+                && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
+        });
+
+        assert!(documents_highlight.is_some(), "Документы should be highlighted as Class");
+    }
+
+    #[test]
+    fn test_highlight_mdo_plural_forms_english() {
+        let code = r#"
+Function GetCatalog()
+    Ref = Catalogs.Currencies.FindByCode("USD");
+    Return Ref;
+EndFunction
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        let catalogs_highlight = highlights.iter().find(|hl| {
+            hl.tag == HlTag::Class
+                && code[hl.range.start().into()..hl.range.end().into()] == *"Catalogs"
+        });
+
+        assert!(catalogs_highlight.is_some(), "Catalogs should be highlighted as Class");
+    }
+
+    #[test]
+    fn test_highlight_mdo_plural_case_insensitive() {
+        let code = r#"
+Функция Тест()
+    Результат1 = ДОКУМЕНТЫ.ПКО.Создать();
+    Результат2 = документы.ПКО.Создать();
+    Результат3 = Документы.ПКО.Создать();
+    Возврат Результат1;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Count all Class highlights that match "документы" in any case
+        let documents_highlights: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                if hl.tag != HlTag::Class {
+                    return false;
+                }
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text == "ДОКУМЕНТЫ" || text == "документы" || text == "Документы"
+            })
+            .collect();
+
+        assert_eq!(
+            documents_highlights.len(),
+            3,
+            "Expected 3 'Документы' highlights (case-insensitive)"
+        );
+    }
+
+    #[test]
+    fn test_highlight_all_mdo_plural_forms() {
+        let code = r#"
+Функция ТестВсехТипов()
+    А = Документы.ПКО.Создать();
+    Б = Справочники.Валюты.НайтиПоКоду("USD");
+    В = РегистрыСведений.КурсыВалют.СоздатьНаборЗаписей();
+    Г = РегистрыНакопления.Продажи.СоздатьНаборЗаписей();
+    Д = Перечисления.ВидыДвижений.Приход;
+    Е = Обработки.ЗагрузкаДанных.Создать();
+    Ж = Отчеты.ОстаткиТоваров.Создать();
+    Возврат А;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        let expected_classes = vec![
+            "Документы",
+            "Справочники",
+            "РегистрыСведений",
+            "РегистрыНакопления",
+            "Перечисления",
+            "Обработки",
+            "Отчеты",
+        ];
+
+        for expected in expected_classes {
+            let found = highlights.iter().any(|hl| {
+                hl.tag == HlTag::Class
+                    && code[hl.range.start().into()..hl.range.end().into()] == *expected
+            });
+
+            assert!(found, "{} should be highlighted as Class", expected);
+        }
+    }
+
+    #[test]
+    fn test_mdo_plural_shadowed_by_local_variable() {
+        let code = r#"
+Функция Тест()
+    Перем Документы;
+    Документы = 42;
+    Возврат Документы;
+КонецФункции
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // All occurrences of "Документы" should be Variable, not Class
+        // because local variable shadows the global MDO class name
+        let documents_as_variable = highlights
+            .iter()
+            .filter(|hl| {
+                hl.tag == HlTag::Variable && {
+                    let text = &code[hl.range.start().into()..hl.range.end().into()];
+                    text == "Документы"
+                }
+            })
+            .count();
+
+        assert!(
+            documents_as_variable >= 3,
+            "Local variable 'Документы' should shadow global MDO class (expected >=3 Variable highlights)"
+        );
+
+        // Ensure NO Class highlights for "Документы"
+        let documents_as_class = highlights.iter().any(|hl| {
+            hl.tag == HlTag::Class && {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text == "Документы"
+            }
+        });
+
+        assert!(
+            !documents_as_class,
+            "Local variable should prevent 'Документы' from being highlighted as Class"
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires complex metadata configuration setup"]
+    fn test_highlight_metadata_object_name_with_config() {
+        // TODO: Add test with metadata configuration once test infrastructure is ready
+        // Should highlight: РегистрыСведений.ОчередьЗапросовERP
+        //                                   ^^^^^^^^^^^^^^^^^ as Type
+    }
+
+    #[test]
+    fn test_highlight_metadata_object_without_config() {
+        let code = r#"
+Функция Тест()
+    Ссылка = Документы.ПКО.НайтиПоНомеру("001");
+    Возврат Ссылка;
+КонецФункции
+"#;
+
+        // No metadata configuration loaded
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // "ПКО" should NOT be highlighted as Type (no configuration)
+        let metadata_name_highlight = highlights.iter().any(|hl| {
+            hl.tag == HlTag::Type && code[hl.range.start().into()..hl.range.end().into()] == *"ПКО"
+        });
+
+        assert!(
+            !metadata_name_highlight,
+            "ПКО should not be highlighted as Type (no configuration loaded)"
+        );
+
+        // "Документы" should still be highlighted as Class
+        let plural_highlight = highlights.iter().any(|hl| {
+            hl.tag == HlTag::Class
+                && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
+        });
+
+        assert!(plural_highlight, "Документы should still be highlighted as Class");
     }
 }

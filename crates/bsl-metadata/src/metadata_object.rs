@@ -2,8 +2,10 @@
 //!
 //! Simplified metadata object structure for query validation and diagnostics
 
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 /// Metadata object type (MDO Type)
 ///
@@ -232,6 +234,71 @@ impl MdoType {
             "общиемодули" | "commonmodules" => Some(Self::CommonModule),
             _ => None,
         }
+    }
+
+    /// Check if a given name is an MDO plural form (case-insensitive).
+    /// Uses O(1) lookup via FxHashSet with lazy static initialization.
+    ///
+    /// # Examples
+    /// ```
+    /// use bsl_metadata::MdoType;
+    ///
+    /// assert!(MdoType::is_plural_form("Документы"));
+    /// assert!(MdoType::is_plural_form("documents"));
+    /// assert!(MdoType::is_plural_form("СПРАВОЧНИКИ"));
+    /// assert!(!MdoType::is_plural_form("Документ"));
+    /// ```
+    pub fn is_plural_form(s: &str) -> bool {
+        static PLURAL_FORMS: OnceLock<FxHashSet<String>> = OnceLock::new();
+
+        let set = PLURAL_FORMS.get_or_init(|| {
+            let mut set = FxHashSet::default();
+            // All 20 MDO types, both Russian and English, lowercase
+            set.insert("документы".to_string());
+            set.insert("documents".to_string());
+            set.insert("справочники".to_string());
+            set.insert("catalogs".to_string());
+            set.insert("регистрысведений".to_string());
+            set.insert("informationregisters".to_string());
+            set.insert("регистрынакопления".to_string());
+            set.insert("accumulationregisters".to_string());
+            set.insert("регистрыбухгалтерии".to_string());
+            set.insert("accountingregisters".to_string());
+            set.insert("регистрырасчета".to_string());
+            set.insert("calculationregisters".to_string());
+            set.insert("планывидовхарактеристик".to_string());
+            set.insert("chartsofcharacteristictypes".to_string());
+            set.insert("планысчетов".to_string());
+            set.insert("chartsofaccounts".to_string());
+            set.insert("планывидоврасчета".to_string());
+            set.insert("chartsofcalculationtypes".to_string());
+            set.insert("бизнеспроцессы".to_string());
+            set.insert("businessprocesses".to_string());
+            set.insert("задачи".to_string());
+            set.insert("tasks".to_string());
+            set.insert("перечисления".to_string());
+            set.insert("enums".to_string());
+            set.insert("планыобмена".to_string());
+            set.insert("exchangeplans".to_string());
+            set.insert("внешниеисточникиданных".to_string());
+            set.insert("externaldatasources".to_string());
+            set.insert("кубы".to_string());
+            set.insert("cubes".to_string());
+            set.insert("таблицыизмерения".to_string());
+            set.insert("dimensiontables".to_string());
+            set.insert("константы".to_string());
+            set.insert("constants".to_string());
+            set.insert("обработки".to_string());
+            set.insert("dataprocessors".to_string());
+            set.insert("отчеты".to_string());
+            set.insert("отчёты".to_string());
+            set.insert("reports".to_string());
+            set.insert("общиемодули".to_string());
+            set.insert("commonmodules".to_string());
+            set
+        });
+
+        set.contains(&s.to_lowercase())
     }
 }
 
@@ -832,5 +899,34 @@ mod tests {
 
         let enum_ref = AttributeType::AnyObjectRef { mdo_type: MdoType::Enum };
         assert_eq!(enum_ref.to_string(), "Перечисление");
+    }
+
+    #[test]
+    fn test_is_plural_form() {
+        // Russian plural forms
+        assert!(MdoType::is_plural_form("Документы"));
+        assert!(MdoType::is_plural_form("Справочники"));
+        assert!(MdoType::is_plural_form("РегистрыСведений"));
+
+        // English plural forms
+        assert!(MdoType::is_plural_form("Documents"));
+        assert!(MdoType::is_plural_form("Catalogs"));
+        assert!(MdoType::is_plural_form("InformationRegisters"));
+
+        // Case-insensitive
+        assert!(MdoType::is_plural_form("ДОКУМЕНТЫ"));
+        assert!(MdoType::is_plural_form("документы"));
+        assert!(MdoType::is_plural_form("ДоКуМеНтЫ"));
+        assert!(MdoType::is_plural_form("CATALOGS"));
+        assert!(MdoType::is_plural_form("catalogs"));
+
+        // Singular forms should return false
+        assert!(!MdoType::is_plural_form("Документ"));
+        assert!(!MdoType::is_plural_form("Document"));
+        assert!(!MdoType::is_plural_form("Справочник"));
+
+        // Invalid forms
+        assert!(!MdoType::is_plural_form(""));
+        assert!(!MdoType::is_plural_form("InvalidType"));
     }
 }

@@ -623,6 +623,60 @@ pub enum ManagerType {
     InformationRegisters,
     /// РегистрыНакопления / AccumulationRegisters
     AccumulationRegisters,
+    /// РегистрыБухгалтерии / AccountingRegisters
+    AccountingRegisters,
+    /// РегистрыРасчёта / CalculationRegisters
+    CalculationRegisters,
+    /// ПланыВидовХарактеристик / ChartsOfCharacteristicTypes
+    ChartsOfCharacteristicTypes,
+    /// ПланыСчетов / ChartsOfAccounts
+    ChartsOfAccounts,
+    /// ПланыВидовРасчёта / ChartsOfCalculationTypes
+    ChartsOfCalculationTypes,
+    /// БизнесПроцессы / BusinessProcesses
+    BusinessProcesses,
+    /// Задачи / Tasks
+    Tasks,
+    /// Перечисления / Enums
+    Enums,
+    /// ПланыОбмена / ExchangePlans
+    ExchangePlans,
+    /// ВнешниеИсточникиДанных / ExternalDataSources
+    ExternalDataSources,
+    /// Константы / Constants
+    Constants,
+}
+
+impl ManagerType {
+    /// Convert MdoType to ManagerType.
+    ///
+    /// Returns None for types that don't have manager modules
+    /// (Cube, DimensionTable, CommonModule).
+    pub fn from_mdo_type(mdo_type: bsl_metadata::MdoType) -> Option<Self> {
+        use bsl_metadata::MdoType;
+        match mdo_type {
+            MdoType::Document => Some(Self::Documents),
+            MdoType::Catalog => Some(Self::Catalogs),
+            MdoType::DataProcessor => Some(Self::DataProcessors),
+            MdoType::Report => Some(Self::Reports),
+            MdoType::InformationRegister => Some(Self::InformationRegisters),
+            MdoType::AccumulationRegister => Some(Self::AccumulationRegisters),
+            MdoType::AccountingRegister => Some(Self::AccountingRegisters),
+            MdoType::CalculationRegister => Some(Self::CalculationRegisters),
+            MdoType::ChartOfCharacteristicTypes => Some(Self::ChartsOfCharacteristicTypes),
+            MdoType::ChartOfAccounts => Some(Self::ChartsOfAccounts),
+            MdoType::ChartOfCalculationTypes => Some(Self::ChartsOfCalculationTypes),
+            MdoType::BusinessProcess => Some(Self::BusinessProcesses),
+            MdoType::Task => Some(Self::Tasks),
+            MdoType::Enum => Some(Self::Enums),
+            MdoType::ExchangePlan => Some(Self::ExchangePlans),
+            MdoType::ExternalDataSource => Some(Self::ExternalDataSources),
+            MdoType::Constant => Some(Self::Constants),
+
+            // These types don't have manager modules
+            MdoType::Cube | MdoType::DimensionTable | MdoType::CommonModule => None,
+        }
+    }
 }
 
 impl BodyDiagnostic {

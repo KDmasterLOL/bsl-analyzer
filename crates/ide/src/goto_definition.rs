@@ -408,4 +408,142 @@ mod tests {
         assert_eq!(target.file_id, file_id);
         assert_eq!(target.name, "МояПроцедура");
     }
+
+    // Helper for multi-file scenarios
+    fn create_db_with_two_files(
+        caller_source: &str,
+        caller_path: &str,
+        manager_source: &str,
+        manager_path: &str,
+    ) -> (RootDatabaseImpl, FileId, FileId) {
+        let mut db = RootDatabaseImpl::default();
+        let caller_file = FileId(0);
+        let manager_file = FileId(1);
+
+        // Set up source root with both files
+        let mut file_set = FileSet::new();
+        file_set.insert(caller_file, VfsPath::new(caller_path));
+        file_set.insert(manager_file, VfsPath::new(manager_path));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(caller_file, SourceRootId(0));
+        db.set_file_source_root(manager_file, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(caller_file, caller_source);
+        db.set_file_text(manager_file, manager_source);
+
+        (db, caller_file, manager_file)
+    }
+
+    #[test]
+    fn test_goto_definition_manager_module_method() {
+        // Setup: two-file scenario
+        let caller_source = r#"
+Процедура Тест()
+    РегистрыСведений.ТестовыйРегистр.МетодМенеджера();
+КонецПроцедуры
+        "#;
+
+        let manager_source = r#"
+Процедура МетодМенеджера() Экспорт
+    // Implementation
+КонецПроцедуры
+        "#;
+
+        let (db, caller_file, manager_file) = create_db_with_two_files(
+            caller_source,
+            "/test/Catalogs/Test/Ext/ObjectModule.bsl",
+            manager_source,
+            "/test/InformationRegisters/ТестовыйРегистр/Ext/ManagerModule.bsl",
+        );
+
+        // Position on "МетодМенеджера" in call
+        let offset = TextSize::from(caller_source.rfind("МетодМенеджера").unwrap() as u32);
+
+        let result = goto_definition(&db, caller_file, offset);
+
+        assert!(result.is_some(), "Should resolve manager module method");
+        let nav = result.unwrap();
+        assert_eq!(nav.file_id, manager_file);
+        assert_eq!(nav.name, "МетодМенеджера");
+        assert_eq!(nav.kind, SymbolKind::Procedure);
+    }
+
+    #[test]
+    fn test_goto_definition_manager_module_method_not_exported() {
+        // Manager method WITHOUT "Экспорт"
+        let caller_source = r#"
+Процедура Тест()
+    Документы.ТестовыйДокумент.ВнутреннийМетод();
+КонецПроцедуры
+        "#;
+
+        let manager_source = r#"
+Процедура ВнутреннийМетод()
+    // NOT exported - should not be resolvable
+КонецПроцедуры
+        "#;
+
+        let (db, caller_file, _manager_file) = create_db_with_two_files(
+            caller_source,
+            "/test/Catalogs/Test/Ext/ObjectModule.bsl",
+            manager_source,
+            "/test/Documents/ТестовыйДокумент/Ext/ManagerModule.bsl",
+        );
+
+        let offset = TextSize::from(caller_source.rfind("ВнутреннийМетод").unwrap() as u32);
+        let result = goto_definition(&db, caller_file, offset);
+
+        // Should NOT resolve to non-exported method
+        assert!(result.is_none(), "Non-exported methods should not resolve");
+    }
+
+    #[test]
+    fn test_goto_definition_manager_module_metadata_not_found() {
+        let caller_source = r#"
+Процедура Тест()
+    Справочники.НесуществующийОбъект.Метод();
+КонецПроцедуры
+        "#;
+
+        let (db, caller_file) = create_db_with_file(caller_source);
+
+        let offset = TextSize::from(caller_source.rfind("Метод").unwrap() as u32);
+        let result = goto_definition(&db, caller_file, offset);
+
+        // Should return None when metadata object not found
+        assert!(result.is_none(), "Should not resolve non-existent metadata object");
+    }
+
+    #[test]
+    fn test_goto_definition_manager_module_case_insensitive() {
+        let caller_source = r#"
+Процедура Тест()
+    // Lowercase call
+    регистрысведений.тестовыйрегистр.методменеджера();
+КонецПроцедуры
+        "#;
+
+        let manager_source = r#"
+Процедура МетодМенеджера() Экспорт
+КонецПроцедуры
+        "#;
+
+        let (db, caller_file, manager_file) = create_db_with_two_files(
+            caller_source,
+            "/test/Catalogs/Test/Ext/ObjectModule.bsl",
+            manager_source,
+            "/test/InformationRegisters/тестовыйрегистр/Ext/ManagerModule.bsl",
+        );
+
+        let offset = TextSize::from(caller_source.rfind("методменеджера").unwrap() as u32);
+        let result = goto_definition(&db, caller_file, offset);
+
+        assert!(result.is_some());
+        let nav = result.unwrap();
+        assert_eq!(nav.file_id, manager_file);
+        // Should preserve original case from definition
+        assert_eq!(nav.name, "МетодМенеджера");
+    }
 }
