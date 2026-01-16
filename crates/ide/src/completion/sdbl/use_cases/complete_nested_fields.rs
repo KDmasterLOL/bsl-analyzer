@@ -91,18 +91,10 @@ impl CompleteNestedFieldsUseCase {
             SdblType::Ref(mdo_ref) => {
                 format!("{}.{}", mdo_ref.mdo_type.russian_name(), mdo_ref.name)
             }
-            SdblType::Composite { types } => {
-                // For composite types, show first reference type or "Составной тип"
-                types
-                    .iter()
-                    .find_map(|t| {
-                        if let SdblType::Ref(mdo_ref) = t {
-                            Some(format!("{}.{}", mdo_ref.mdo_type.russian_name(), mdo_ref.name))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "Составной тип".to_string())
+            SdblType::Composite { .. } => {
+                // For composite types, always show "Составной тип"
+                // Individual types are already listed in documentation
+                "Составной тип".to_string()
             }
             SdblType::DefinedType { name, underlying_type } => {
                 // Unwrap DefinedType to underlying type
@@ -303,6 +295,39 @@ mod tests {
             doc.contains("Таблица: Справочник.Валюты"),
             "Expected documentation to contain 'Таблица: Справочник.Валюты', got: {}",
             doc
+        );
+    }
+
+    #[test]
+    fn test_extract_table_name_for_composite() {
+        // Test that extract_table_name returns "Составной тип" for composite types
+        let composite_type = SdblType::Composite {
+            types: vec![
+                SdblType::reference(MdoType::Catalog, "Валюты"),
+                SdblType::reference(MdoType::Document, "ПриходнаяНакладная"),
+            ],
+        };
+
+        let table_name = CompleteNestedFieldsUseCase::extract_table_name(&composite_type);
+
+        assert_eq!(
+            table_name, "Составной тип",
+            "Expected 'Составной тип' for composite type, got: {}",
+            table_name
+        );
+    }
+
+    #[test]
+    fn test_extract_table_name_for_ref() {
+        // Test that extract_table_name returns full name for reference types
+        let ref_type = SdblType::reference(MdoType::Catalog, "Валюты");
+
+        let table_name = CompleteNestedFieldsUseCase::extract_table_name(&ref_type);
+
+        assert_eq!(
+            table_name, "Справочник.Валюты",
+            "Expected 'Справочник.Валюты' for ref type, got: {}",
+            table_name
         );
     }
 }
