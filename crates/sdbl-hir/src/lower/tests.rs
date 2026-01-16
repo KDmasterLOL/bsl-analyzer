@@ -1118,3 +1118,50 @@ fn test_multiple_incomplete_fields_with_operators() {
     // Если highlighting ломается, это видно по малому количеству токенов
     println!("\n⚠️  If token count is low, highlighting will break for this query!");
 }
+
+#[test]
+fn test_incomplete_as_alias_in_select() {
+    // User's stress test: incomplete AS keyword without alias
+    let query = r#"ВЫБРАТЬ
+    Валюты.Наименование КАК
+ИЗ
+    Справочник.Валюты КАК Валюты
+ГДЕ
+    Валюты.СпособУстановкиКурса = ЗНАЧЕНИЕ(Перечисление.СпособыУстановкиКурсаВалюты.РасчетПоФормуле)"#;
+
+    println!("\n=== QUERY ===");
+    println!("{}", query);
+
+    let parse = parser::parse_sdbl(query);
+
+    println!("\n=== PARSE ERRORS ===");
+    println!("Error count: {}", parse.errors().len());
+    for (i, err) in parse.errors().iter().enumerate() {
+        println!("  Error {}: {:?}", i + 1, err);
+    }
+
+    let root = parse.syntax_node();
+
+    println!("\n=== SYNTAX TREE (first 3000 chars) ===");
+    let tree_str = format!("{:#?}", root);
+    if tree_str.len() > 3000 {
+        println!("{}...(truncated)", &tree_str[..3000]);
+    } else {
+        println!("{}", tree_str);
+    }
+
+    // Lower to HIR
+    let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    println!("\n=== HIR ===");
+    println!("HIR queries: {}", hir_package.queries.len());
+    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
+
+    let token_count = hir_package.source_map.all_tokens().count();
+    println!("Tokens for highlighting: {}", token_count);
+
+    // Parser должен продолжить работу после incomplete AS
+    println!(
+        "\n⚠️  Parser should continue after incomplete AS and generate tokens for highlighting!"
+    );
+}

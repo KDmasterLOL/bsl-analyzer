@@ -300,6 +300,16 @@ fn alias(p: &mut Parser) {
 
     p.skip_trivia();
 
+    // ERROR RECOVERY: Check if next token is clause keyword (FROM, WHERE, etc.)
+    // This prevents "КАК\nИЗ" from consuming ИЗ as alias name
+    if is_clause_keyword(p) {
+        // Incomplete AS without alias - create empty ERROR node
+        let err = p.start();
+        err.complete(p, NodeKind::Error);
+        m.complete(p, NodeKind::SdblAlias);
+        return;
+    }
+
     // Identifier (mandatory)
     if !p.expect(TokenKind::Ident) {
         // Error recovery: complete anyway
