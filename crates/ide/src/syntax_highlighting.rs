@@ -383,17 +383,15 @@ fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut
     }
 }
 
-/// Check if token is a metadata object name after MDO plural form.
+/// Check if token is a metadata object name or method after MDO plural form.
 ///
 /// Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()
-///                          ^^^^^^^^^^^^^^^^^ <- highlight as Type
-///                                           ^^^^^^^^^^^^^^^^ <- highlight as Function (handled separately)
+///                          ^^^^^^^^^^^^^^^^^ <- highlight as Type (if in config)
+///                                           ^^^^^^^^^^^^^^^^ <- highlight as Function (method)
 ///
-/// Returns Some(HlRange) if:
-/// 1. Parent is FieldExpr (dot access)
-/// 2. Base (left of dot) is MDO plural form (Документы, Справочники, etc.)
-/// 3. Token is not a method call (next sibling is not L_PAREN)
-/// 4. Metadata configuration is loaded and object exists
+/// Handles two cases:
+/// 1. Metadata object name: `РегистрыСведений.ОчередьЗапросовERP` → Type
+/// 2. Manager method: `РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь` → Function
 fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
     let range = token.text_range();
     let name_text = token.text();
@@ -405,40 +403,81 @@ fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -
     // Get base expression (first child of FieldExpr)
     let base_node = field_expr.syntax().children().next()?;
 
-    // Extract base identifier from EXPR or direct IDENT
-    let base_token = if base_node.kind() == SyntaxKind::EXPR {
-        // EXPR wrapping IDENT
-        base_node
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|it| it.kind() == SyntaxKind::IDENT)?
-    } else if base_node.kind() == SyntaxKind::IDENT {
-        // Direct IDENT token
-        base_node.first_token()?
-    } else {
-        return None;
-    };
+    // Try to extract leftmost identifier (MDO plural form or metadata object name)
+    let base_ident = extract_leftmost_ident(&base_node)?;
+    let base_text = base_ident.text();
 
-    let base_text = base_token.text();
+    // Case 1: Base is MDO plural form (Документы, Справочники, etc.)
+    // Token is metadata object name: Документы.ПКО
+    if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(base_text) {
+        // Get configuration (required for highlighting)
+        let config = ctx.db.get_configuration(ctx.file_id)?;
 
-    // Check if base is MDO plural form
-    let mdo_type = bsl_metadata::MdoType::from_plural(base_text)?;
+        // If this is a method call, highlight as Function (manager method)
+        if is_method_call(&parent) {
+            return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
+        }
 
-    // Check if this is a method call (next token is L_PAREN)
-    // If yes, it will be highlighted as Function elsewhere
-    if is_method_call(&parent) {
-        return None;
+        // Otherwise, highlight as Type if object exists in configuration
+        if config.has_metadata_object(mdo_type, name_text) {
+            return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
+        }
     }
 
-    // Try to get configuration metadata
-    let config = ctx.db.get_configuration(ctx.file_id)?;
+    // Case 2: Base is a FieldExpr with MDO plural form inside
+    // Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь
+    //          Token is "ДобавитьВОчередь", base is FIELD_EXPR for "ОчередьЗапросовERP"
+    if base_node.kind() == SyntaxKind::FIELD_EXPR {
+        // Check if grandparent base is MDO plural form
+        let grandbase_ident = extract_leftmost_ident(&base_node)?;
+        if bsl_metadata::MdoType::from_plural(grandbase_ident.text()).is_some() {
+            // Get configuration (required for highlighting)
+            let config = ctx.db.get_configuration(ctx.file_id)?;
 
-    // Check if metadata object exists in configuration
-    if config.has_metadata_object(mdo_type, name_text) {
-        return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
+            // Verify that the intermediate token (metadata object name) exists in configuration
+            // This ensures we only highlight methods for valid metadata objects
+            let intermediate_token = base_node
+                .children_with_tokens()
+                .filter_map(|it| it.into_token())
+                .find(|it| it.kind() == SyntaxKind::IDENT)?;
+
+            if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(grandbase_ident.text()) {
+                if config.has_metadata_object(mdo_type, intermediate_token.text()) {
+                    // This is a valid manager method call, highlight as Function
+                    return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
+                }
+            }
+        }
     }
 
     None
+}
+
+/// Extract leftmost IDENT token from a node (recursively descends into FIELD_EXPR/EXPR).
+fn extract_leftmost_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
+    match node.kind() {
+        SyntaxKind::IDENT => node.first_token(),
+        SyntaxKind::EXPR => {
+            // EXPR wrapping something, descend into it
+            let child = node.children().next().or_else(|| {
+                node.children_with_tokens()
+                    .filter_map(|it| it.into_token())
+                    .find(|it| it.kind() == SyntaxKind::IDENT)
+                    .map(|tok| tok.parent().unwrap())
+            })?;
+            extract_leftmost_ident(&child).or_else(|| {
+                node.children_with_tokens()
+                    .filter_map(|it| it.into_token())
+                    .find(|it| it.kind() == SyntaxKind::IDENT)
+            })
+        }
+        SyntaxKind::FIELD_EXPR => {
+            // FIELD_EXPR, get its first child (base)
+            let child = node.children().next()?;
+            extract_leftmost_ident(&child)
+        }
+        _ => None,
+    }
 }
 
 /// Check if the parent node represents a method call (next sibling is L_PAREN).
