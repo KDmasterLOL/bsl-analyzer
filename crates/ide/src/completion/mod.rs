@@ -95,8 +95,8 @@ pub enum CompletionItemKind {
 pub fn completions(db: &dyn RootDatabase, position: CompletionPosition) -> Vec<CompletionItem> {
     let _p = tracing::info_span!("completions", ?position).entered();
 
-    // Try SDBL completion first
-    if let Some(items) = sdbl_completion::sdbl_completions(db, position.clone()) {
+    // Try SDBL completion first (new Clean Architecture implementation)
+    if let Some(items) = sdbl::sdbl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning SDBL completions");
         return items;
     }

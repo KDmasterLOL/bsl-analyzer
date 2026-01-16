@@ -117,9 +117,12 @@ impl NotifyActor {
 
                         let config_version = config.version;
 
-                        let n_total = config.load.len();
                         self.watched_dir_entries.clear();
                         self.watched_file_entries.clear();
+
+                        // First pass: count total files (fast, no I/O)
+                        let n_total: usize =
+                            config.load.iter().map(Self::count_files_in_entry).sum();
 
                         self.send(loader::Message::Progress {
                             n_total,
@@ -131,6 +134,8 @@ impl NotifyActor {
                         let (entry_tx, entry_rx) = unbounded();
                         let (watch_tx, watch_rx) = unbounded();
                         let processed = AtomicUsize::new(0);
+                        let last_reported = AtomicUsize::new(0);
+                        const PROGRESS_BATCH_SIZE: usize = 50; // Report every 50 files
 
                         config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
                             let do_watch = config.watch.contains(&i);
@@ -142,6 +147,7 @@ impl NotifyActor {
                                 entry,
                                 do_watch,
                                 |file| {
+                                    // Directory progress (keep as is)
                                     self.send(loader::Message::Progress {
                                         n_total,
                                         n_done: LoadingProgress::Progress(
@@ -151,22 +157,55 @@ impl NotifyActor {
                                         config_version,
                                     });
                                 },
+                                || {
+                                    // Per-file callback for batched progress updates
+                                    let current = processed
+                                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                                        + 1;
+                                    let last =
+                                        last_reported.load(std::sync::atomic::Ordering::Relaxed);
+
+                                    // Send progress every PROGRESS_BATCH_SIZE files
+                                    if (current - last >= PROGRESS_BATCH_SIZE || current == n_total)
+                                        && last_reported
+                                            .compare_exchange(
+                                                last,
+                                                current,
+                                                std::sync::atomic::Ordering::AcqRel,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            )
+                                            .is_ok()
+                                    {
+                                        self.send(loader::Message::Progress {
+                                            n_total,
+                                            n_done: LoadingProgress::Progress(current),
+                                            config_version,
+                                            dir: None,
+                                        });
+                                    }
+                                },
                             );
+
                             self.send(loader::Message::Loaded { files });
-                            self.send(loader::Message::Progress {
-                                n_total,
-                                n_done: LoadingProgress::Progress(
-                                    processed.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1,
-                                ),
-                                config_version,
-                                dir: None,
-                            });
                         });
 
+                        // Files loaded - send Finished immediately so UI updates
+                        tracing::info!("All files loaded, sending LoadingProgress::Finished");
+                        self.send(loader::Message::Progress {
+                            n_total,
+                            n_done: LoadingProgress::Finished,
+                            config_version,
+                            dir: None,
+                        });
+
+                        // Setup watchers after reporting completion (non-blocking for UI)
                         drop(watch_tx);
+                        tracing::debug!("Setting up file watchers...");
+                        let watch_count = watch_rx.len();
                         for path in watch_rx {
                             self.watch(&path);
                         }
+                        tracing::debug!("Finished setting up {} file watchers", watch_count);
 
                         drop(entry_tx);
                         for entry in entry_rx {
@@ -179,13 +218,7 @@ impl NotifyActor {
                                 }
                             }
                         }
-
-                        self.send(loader::Message::Progress {
-                            n_total,
-                            n_done: LoadingProgress::Finished,
-                            config_version,
-                            dir: None,
-                        });
+                        tracing::debug!("File watching setup complete");
                     }
                     Message::Invalidate(path) => {
                         let contents = read(path.as_path());
@@ -252,6 +285,7 @@ impl NotifyActor {
         entry: loader::Entry,
         do_watch: bool,
         send_message: impl Fn(AbsPathBuf),
+        on_file_loaded: impl Fn(),
     ) -> Vec<(AbsPathBuf, Option<Vec<u8>>)> {
         match entry {
             loader::Entry::Files(files) => files
@@ -261,6 +295,7 @@ impl NotifyActor {
                         watch(file.as_ref());
                     }
                     let contents = read(file.as_path());
+                    on_file_loaded(); // Report progress after loading each file
                     (file, contents)
                 })
                 .collect::<Vec<_>>(),
@@ -311,10 +346,64 @@ impl NotifyActor {
 
                     res.extend(files.map(|file| {
                         let contents = read(file.as_path());
+                        on_file_loaded(); // Report progress after loading each file
                         (file, contents)
                     }));
                 }
                 res
+            }
+        }
+    }
+
+    /// Count files in an entry without reading their contents (fast).
+    fn count_files_in_entry(entry: &loader::Entry) -> usize {
+        match entry {
+            loader::Entry::Files(files) => files.len(),
+            loader::Entry::Directories(dirs) => {
+                let mut count = 0;
+                for root in &dirs.include {
+                    let walkdir =
+                        WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
+                            if !entry.file_type().is_dir() {
+                                return true;
+                            }
+                            let path = entry.path();
+
+                            if path_might_be_cyclic(path) {
+                                return false;
+                            }
+
+                            dirs.exclude.iter().all(|it| it.as_path() != path)
+                                && (root.as_path() == path
+                                    || dirs.include.iter().all(|it| it.as_path() != path))
+                        });
+
+                    count += walkdir
+                        .filter_map(|it| it.ok())
+                        .filter(|entry| {
+                            let is_file = entry.file_type().is_file();
+                            if !is_file {
+                                return false;
+                            }
+
+                            let utf8_path =
+                                match Utf8PathBuf::from_path_buf(entry.path().to_path_buf()) {
+                                    Ok(p) => p,
+                                    Err(_) => return false,
+                                };
+
+                            let path = match AbsPathBuf::try_from(utf8_path) {
+                                Ok(p) => p,
+                                Err(_) => return false,
+                            };
+
+                            dirs.extensions
+                                .iter()
+                                .any(|ext| path.as_path().extension().is_some_and(|it| it == ext))
+                        })
+                        .count();
+                }
+                count
             }
         }
     }

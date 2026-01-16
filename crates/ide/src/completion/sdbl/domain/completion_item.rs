@@ -52,12 +52,14 @@ impl SdblCompletionItem {
     }
 
     /// Set sort text.
+    #[allow(dead_code)] // Used in tests
     pub fn with_sort_text(mut self, sort_text: impl Into<String>) -> Self {
         self.sort_text = Some(sort_text.into());
         self
     }
 
     /// Check if item matches prefix (case-insensitive).
+    #[allow(dead_code)] // Used in tests
     pub fn matches_prefix(&self, prefix: &str) -> bool {
         if prefix.is_empty() {
             return true;
