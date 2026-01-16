@@ -11,6 +11,10 @@ use syntax::ast::AstNode;
 use super::context::LoweringContext;
 
 impl<'a> LoweringContext<'a> {
+    /// Lower all JOIN clauses (including nested) from query.
+    ///
+    /// Returns a flat list of all JOINs, recursively collecting nested JOINs.
+    /// This ensures all tables from nested JOINs are available in completion scope.
     pub(super) fn lower_joins(&mut self, query: &syntax::ast::SdblQuery) -> Vec<JoinHir> {
         let Some(from_clause) = query.from_clause() else {
             return Vec::new();
@@ -20,7 +24,30 @@ impl<'a> LoweringContext<'a> {
             return Vec::new();
         };
 
-        first_ds.join_clauses().map(|join| self.lower_join_clause(&join)).collect()
+        let mut all_joins = Vec::new();
+        for join in first_ds.join_clauses() {
+            self.lower_join_clause_recursive(&join, &mut all_joins);
+        }
+        all_joins
+    }
+
+    /// Recursively lower JOIN clause and collect all nested JOINs.
+    fn lower_join_clause_recursive(
+        &mut self,
+        join: &syntax::ast::SdblJoinClause,
+        out: &mut Vec<JoinHir>,
+    ) {
+        let join_hir = self.lower_join_clause(join);
+
+        // First collect nested JOINs (depth-first)
+        if let Some(ds) = join.data_source() {
+            for nested_join in ds.join_clauses() {
+                self.lower_join_clause_recursive(&nested_join, out);
+            }
+        }
+
+        // Then add this JOIN
+        out.push(join_hir);
     }
 
     /// Lower a single JOIN clause.
@@ -89,10 +116,8 @@ impl<'a> LoweringContext<'a> {
                     .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
             }
 
-            // Process nested JOINs recursively
-            for nested_join in ds.join_clauses() {
-                let _ = self.lower_join_clause(&nested_join);
-            }
+            // NOTE: Nested JOINs are now handled by lower_join_clause_recursive()
+            // which calls this function recursively. No need to process them here.
             self.lower_data_source(&ds)
         } else {
             TableRef::missing(join.syntax().text_range())

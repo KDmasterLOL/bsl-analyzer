@@ -233,9 +233,11 @@ impl ScopeProvider for DbScopeProvider<'_> {
             scope.add_table(table.clone());
         }
 
+        // Add tables from JOINs (now includes nested JOINs thanks to recursive lowering)
         for join in &hir.joins {
             tracing::info!(
                 table_name = %join.table.full_name,
+                alias = ?join.table.alias.as_ref().map(|a| a.as_str()),
                 "DIAGNOSTIC: adding table from JOIN clause"
             );
 
@@ -245,7 +247,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
         tracing::info!(
             from_tables = hir.from.len(),
             join_tables = hir.joins.len(),
-            "built Scope from HIR with temp tables from previous queries"
+            "built Scope from HIR with temp tables from previous queries (includes nested JOINs)"
         );
 
         Some(scope)
