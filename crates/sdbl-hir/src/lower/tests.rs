@@ -1058,3 +1058,63 @@ fn test_parse_continues_after_incomplete_field() {
         token_count
     );
 }
+
+#[test]
+fn test_multiple_incomplete_fields_with_operators() {
+    // User's complex example: multiple incomplete fields with = operator
+    let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
+    ЗадачиЭлементовСхемы.ИмяЭлемента,
+    ЗадачиЭлементовСхемы.ЗадачаПроцесса
+ПОМЕСТИТЬ ВТ_ЗадачиСхемы
+ИЗ
+    &ЗадачиЭлементовСхемы КАК ЗадачиЭлементовСхемы
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+    ВТ_ЗадачиСхемы.ИмяЭлемента
+ИЗ
+    ВТ_ЗадачиСхемы КАК ВТ_ЗадачиСхемы
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ДанныеБизнесПроцессов КАК ДанныеБизнесПроцессов
+            ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ПроцессыДействий КАК ПроцессыДействий
+            ПО ДанныеБизнесПроцессов.БизнесПроцесс = ПроцессыДействий.
+            И ПроцессыДействий. = &Действие
+        ПО ВТ_ЗадачиСхемы. = ДанныеБизнесПроцессов."#;
+
+    println!("\n=== QUERY ===");
+    println!("{}", query);
+
+    let parse = parser::parse_sdbl(query);
+
+    println!("\n=== PARSE ERRORS ===");
+    println!("Error count: {}", parse.errors().len());
+    for (i, err) in parse.errors().iter().enumerate() {
+        println!("  Error {}: {:?}", i + 1, err);
+    }
+
+    let root = parse.syntax_node();
+
+    println!("\n=== SYNTAX TREE (last 2000 chars) ===");
+    let tree_str = format!("{:#?}", root);
+    if tree_str.len() > 2000 {
+        let start = tree_str.len().saturating_sub(2000);
+        println!("...{}", &tree_str[start..]);
+    } else {
+        println!("{}", tree_str);
+    }
+
+    // Lower to HIR
+    let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    println!("\n=== HIR ===");
+    println!("HIR queries: {}", hir_package.queries.len());
+    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
+
+    // Check token count for highlighting
+    let token_count = hir_package.source_map.all_tokens().count();
+    println!("Tokens for highlighting: {}", token_count);
+
+    // PROBLEM: Parser должен создавать токены даже с incomplete fields
+    // Если highlighting ломается, это видно по малому количеству токенов
+    println!("\n⚠️  If token count is low, highlighting will break for this query!");
+}

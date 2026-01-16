@@ -486,37 +486,26 @@ fn column_or_function(p: &mut Parser) {
         while p.eat(TokenKind::Dot) {
             p.skip_trivia();
 
-            // ERROR RECOVERY: Check if next token is a clause keyword
-            // This prevents "Очередь.\nИЗ" from parsing ИЗ as field name
-            if super::select::is_clause_keyword(p) {
-                // Mark incomplete column ref as error WITHOUT consuming the keyword
-                // This allows FROM/WHERE/etc. parser to see and handle the keyword
+            // ERROR RECOVERY: After DOT, only Ident is valid for column/field name
+            // Whitelist approach: if NOT Ident, mark incomplete and stop
+            if !p.at(TokenKind::Ident) {
+                // Incomplete: operators (=, AND), punctuation (,), EOF, etc.
                 let err = p.start();
-                err.complete(p, NodeKind::Error); // Empty ERROR node marking the issue
-                break; // Stop parsing column ref, let clause parser handle it
-            }
-
-            // ERROR RECOVERY: Check if next token is logical operator (AND/OR)
-            // This prevents "Т2.\nИ Т2.Другое" from consuming И as field name in ON conditions
-            if p.at(TokenKind::KwAnd) || p.at(TokenKind::KwOr) {
-                let err = p.start();
-                err.complete(p, NodeKind::Error); // Empty ERROR node marking incomplete ref
-                break; // Let logical operator parser handle И/ИЛИ
-            }
-
-            // ERROR RECOVERY: Check if next token is comma or EOF
-            // This prevents "Очередь.," from consuming the comma
-            if p.at(TokenKind::Comma) || p.at_end() {
-                // Incomplete column ref - create ERROR but DON'T consume comma
-                let err = p.start();
-                err.complete(p, NodeKind::Error); // Empty ERROR node
-                break; // Let selected_fields() see the comma
-            }
-
-            if !p.expect(TokenKind::Ident) {
-                // Error recovery (p.expect already created ERROR node)
+                err.complete(p, NodeKind::Error);
                 break;
             }
+
+            // Check if this Ident is actually a clause keyword (FROM, WHERE, etc.)
+            // Lexer returns them as Ident in some contexts
+            if super::select::is_clause_keyword(p) {
+                // Incomplete: "Table.\nFROM" - don't consume FROM
+                let err = p.start();
+                err.complete(p, NodeKind::Error);
+                break;
+            }
+
+            // Consume the identifier - it's a valid field name
+            p.bump(); // Ident
             p.skip_trivia();
         }
         m.complete(p, NodeKind::SdblColumnRef);
