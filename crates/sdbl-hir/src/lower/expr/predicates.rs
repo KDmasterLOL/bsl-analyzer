@@ -157,6 +157,55 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
+    /// Lower IN HIERARCHY expression.
+    ///
+    /// Grammar: `expr IN HIERARCHY(root_expr)`
+    /// Example: `ГруппыКонтактовПользователей.Родитель В ИЕРАРХИИ(&Папка)`
+    ///
+    /// Returns Boolean indicating if the expression is in the hierarchy of the root.
+    pub(super) fn lower_in_hierarchy_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
+        // Get the expression being tested (first child)
+        let mut children = node.children();
+        let expr = children
+            .next()
+            .map(|n| self.lower_expr(&n))
+            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
+
+        // Record IN keyword
+        for element in node.descendants_with_tokens() {
+            if let Some(token) = element.as_token() {
+                if token.kind() == syntax::SyntaxKind::KW_IN {
+                    self.record_token(token, crate::source_map::TokenCategory::SpecialKeyword);
+                    break;
+                }
+            }
+        }
+
+        // Record HIERARCHY keyword (it's mapped to IDENT token)
+        self.record_keyword_by_text(
+            node,
+            "HIERARCHY",
+            "ИЕРАРХИИ",
+            crate::source_map::TokenCategory::SpecialKeyword,
+        );
+
+        // Get root expression (second child)
+        let root_expr = children
+            .next()
+            .map(|n| self.lower_expr(&n))
+            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
+
+        // For now, treat IN HIERARCHY as a binary comparison (placeholder)
+        // In the future, this should properly handle hierarchy checks
+        ExprHir::BinaryOp {
+            lhs: Box::new(expr),
+            op: crate::hir::BinaryOp::Eq, // Placeholder
+            rhs: Box::new(root_expr),
+            ty: SdblType::Boolean,
+            range: node.text_range(),
+        }
+    }
+
     /// Lower BETWEEN expression.
     ///
     /// Grammar: `expr BETWEEN low AND high`

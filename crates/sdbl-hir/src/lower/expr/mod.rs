@@ -43,6 +43,7 @@ impl<'a> LoweringContext<'a> {
             SyntaxKind::SDBL_NOT_EXPR | SyntaxKind::SDBL_UNARY_EXPR => self.lower_unary_expr(node),
             SyntaxKind::SDBL_IS_NULL_EXPR => self.lower_is_null_expr(node),
             SyntaxKind::SDBL_IN_EXPR => self.lower_in_expr(node),
+            SyntaxKind::SDBL_IN_HIERARCHY_EXPR => self.lower_in_hierarchy_expr(node),
             SyntaxKind::SDBL_BETWEEN_EXPR => self.lower_between_expr(node),
             SyntaxKind::SDBL_LIKE_EXPR => self.lower_like_expr(node),
             SyntaxKind::SDBL_REFS_EXPR => self.lower_refs_expr(node),

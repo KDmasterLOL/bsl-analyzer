@@ -112,6 +112,7 @@ pub enum NodeKind {
     SdblNotExpr,
     SdblComparisonExpr,
     SdblInExpr,
+    SdblInHierarchyExpr,
     SdblIsNullExpr,
     SdblBetweenExpr,
     SdblLikeExpr,

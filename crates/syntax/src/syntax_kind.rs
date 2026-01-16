@@ -244,6 +244,7 @@ pub enum SyntaxKind {
     SDBL_NOT_EXPR,            // NOT expression
     SDBL_COMPARISON_EXPR,     // Comparison operators (=, <>, <, >, etc.)
     SDBL_IN_EXPR,             // IN predicate (IN (values) or IN (subquery))
+    SDBL_IN_HIERARCHY_EXPR,   // IN HIERARCHY predicate (expr IN HIERARCHY(root))
     SDBL_IS_NULL_EXPR,        // IS NULL / IS NOT NULL predicate
     SDBL_BETWEEN_EXPR,        // BETWEEN predicate (expr BETWEEN low AND high)
     SDBL_LIKE_EXPR,           // LIKE predicate (expr LIKE pattern [ESCAPE char])

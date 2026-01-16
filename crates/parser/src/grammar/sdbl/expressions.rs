@@ -131,33 +131,54 @@ fn predicate_expr(p: &mut Parser) {
         p.skip_trivia();
     }
 
-    // Check for IN predicate
+    // Check for IN predicate (IN or IN HIERARCHY)
     if p.at(TokenKind::KwIn) {
         p.bump(); // IN / В
         p.skip_trivia();
 
-        if !p.expect(TokenKind::LParen) {
-            m.complete(p, NodeKind::SdblInExpr);
-            return;
-        }
-        p.skip_trivia();
+        // Check for HIERARCHY after IN
+        if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИИ") {
+            p.bump(); // HIERARCHY / ИЕРАРХИИ
+            p.skip_trivia();
 
-        // Check if it's a subquery or value list
-        if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
-            // Parse subquery
-            super::select::subquery(p);
-        } else {
-            // Parse value list: expr, expr, ...
-            expression(p);
-            while p.eat(TokenKind::Comma) {
-                p.skip_trivia();
-                expression(p);
+            // IN HIERARCHY expects single expression in parentheses
+            if !p.expect(TokenKind::LParen) {
+                m.complete(p, NodeKind::SdblInHierarchyExpr);
+                return;
             }
-        }
+            p.skip_trivia();
 
-        p.skip_trivia();
-        p.expect(TokenKind::RParen);
-        m.complete(p, NodeKind::SdblInExpr);
+            // Parse hierarchy root expression
+            expression(p);
+
+            p.skip_trivia();
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblInHierarchyExpr);
+        } else {
+            // Regular IN predicate
+            if !p.expect(TokenKind::LParen) {
+                m.complete(p, NodeKind::SdblInExpr);
+                return;
+            }
+            p.skip_trivia();
+
+            // Check if it's a subquery or value list
+            if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
+                // Parse subquery
+                super::select::subquery(p);
+            } else {
+                // Parse value list: expr, expr, ...
+                expression(p);
+                while p.eat(TokenKind::Comma) {
+                    p.skip_trivia();
+                    expression(p);
+                }
+            }
+
+            p.skip_trivia();
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblInExpr);
+        }
     }
     // Check for IS NULL predicate
     else if p.at_keyword("IS") || p.at_keyword("ЕСТЬ") {

@@ -104,6 +104,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblNotExpr => SK::SDBL_NOT_EXPR,
         NodeKind::SdblComparisonExpr => SK::SDBL_COMPARISON_EXPR,
         NodeKind::SdblInExpr => SK::SDBL_IN_EXPR,
+        NodeKind::SdblInHierarchyExpr => SK::SDBL_IN_HIERARCHY_EXPR,
         NodeKind::SdblIsNullExpr => SK::SDBL_IS_NULL_EXPR,
         NodeKind::SdblBetweenExpr => SK::SDBL_BETWEEN_EXPR,
         NodeKind::SdblLikeExpr => SK::SDBL_LIKE_EXPR,
