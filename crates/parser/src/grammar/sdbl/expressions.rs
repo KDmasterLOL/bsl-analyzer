@@ -496,6 +496,14 @@ fn column_or_function(p: &mut Parser) {
                 break; // Stop parsing column ref, let clause parser handle it
             }
 
+            // ERROR RECOVERY: Check if next token is logical operator (AND/OR)
+            // This prevents "Т2.\nИ Т2.Другое" from consuming И as field name in ON conditions
+            if p.at(TokenKind::KwAnd) || p.at(TokenKind::KwOr) {
+                let err = p.start();
+                err.complete(p, NodeKind::Error); // Empty ERROR node marking incomplete ref
+                break; // Let logical operator parser handle И/ИЛИ
+            }
+
             // ERROR RECOVERY: Check if next token is comma or EOF
             // This prevents "Очередь.," from consuming the comma
             if p.at(TokenKind::Comma) || p.at_end() {

@@ -926,6 +926,7 @@ fn test_tabular_section_uuid_type_parsing() {
 #[test]
 fn test_incomplete_on_collects_all_tables() {
     // Test that HIR collects all tables even with incomplete ON conditions
+    // This simulates typing a query where user hasn't finished ON expressions yet
     let query = r#"ВЫБРАТЬ
     Т1.Поле1
 ИЗ
@@ -933,9 +934,28 @@ fn test_incomplete_on_collects_all_tables() {
         ВНУТРЕННЕЕ СОЕДИНЕНИЕ Таблица2 КАК Т2
             ВНУТРЕННЕЕ СОЕДИНЕНИЕ Таблица3 КАК Т3
             ПО Т2.Поле = Т3.
+            И Т3.Другое = &Параметр
         ПО Т1.Поле = Т2."#;
 
     let parse = parser::parse_sdbl(query);
+
+    // DEBUG: Print parse errors
+    println!("\n=== PARSE ERRORS ===");
+    println!("Error count: {}", parse.errors().len());
+    for (i, err) in parse.errors().iter().enumerate() {
+        println!("  Error {}: {:?}", i + 1, err);
+    }
+
+    // DEBUG: Print syntax tree structure
+    println!("\n=== SYNTAX TREE ===");
+    let root = parse.syntax_node();
+    let tree_str = format!("{:#?}", root);
+    // Print first 2000 chars of tree
+    if tree_str.len() > 2000 {
+        println!("{}...(truncated)", &tree_str[..2000]);
+    } else {
+        println!("{}", tree_str);
+    }
 
     use syntax::ast::AstNode;
     let package =
@@ -975,4 +995,66 @@ fn test_incomplete_on_collects_all_tables() {
 
     let t3_join = query_hir.joins.iter().find(|j| j.table.full_name == "Таблица3").unwrap();
     assert_eq!(t3_join.table.alias.as_ref().map(|s| s.as_str()), Some("Т3"));
+
+    // ВАЖНО: Проверяем, что source_map содержит токены для highlighting
+    println!("\nSource map token count: {}", hir_package.source_map.all_tokens().count());
+    assert!(
+        hir_package.source_map.all_tokens().count() > 0,
+        "Source map should have tokens for highlighting"
+    );
+}
+
+#[test]
+fn test_parse_continues_after_incomplete_field() {
+    // Test that parser continues after incomplete field and parses subsequent И clauses
+    let query = r#"ВЫБРАТЬ
+    Т1.Поле1
+ИЗ
+    Таблица1 КАК Т1
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Таблица2 КАК Т2
+        ПО Т1.Поле = Т2.
+        И Т2.Другое = &Параметр
+        И Т1.Еще = Т2.Финал"#;
+
+    println!("\n=== QUERY ===");
+    println!("{}", query);
+
+    let parse = parser::parse_sdbl(query);
+
+    println!("\n=== PARSE ERRORS ===");
+    println!("Error count: {}", parse.errors().len());
+    for (i, err) in parse.errors().iter().enumerate() {
+        println!("  Error {}: {:?}", i + 1, err);
+    }
+
+    let root = parse.syntax_node();
+
+    println!("\n=== SYNTAX TREE (first 3000 chars) ===");
+    let tree_str = format!("{:#?}", root);
+    if tree_str.len() > 3000 {
+        println!("{}...(truncated)", &tree_str[..3000]);
+    } else {
+        println!("{}", tree_str);
+    }
+
+    // Lower to HIR
+    let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    println!("\n=== HIR ===");
+    println!("HIR queries: {}", hir_package.queries.len());
+    println!("Source map tokens: {}", hir_package.source_map.all_tokens().count());
+
+    // Check if HIR found the query despite parse errors
+    assert_eq!(hir_package.queries.len(), 1, "Should have 1 query even with incomplete ON");
+
+    // Check if source_map has tokens for ALL parts of query (including after incomplete field)
+    let token_count = hir_package.source_map.all_tokens().count();
+    println!("Tokens for highlighting: {}", token_count);
+
+    // Should have many tokens (keywords, identifiers, etc.) - even with incomplete fields
+    assert!(
+        token_count > 10,
+        "Should have significant tokens for highlighting, got {}",
+        token_count
+    );
 }
