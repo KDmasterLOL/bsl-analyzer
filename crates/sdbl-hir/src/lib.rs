@@ -1125,6 +1125,34 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_context_incomplete_table_ref() {
+        // User's case: cursor after "Справочник."
+        let query = r#"ВЫБРАТЬ
+    Валюты.Наименование
+ИЗ
+    Справочник."#;
+
+        let offset = query.len() as u32; // cursor at end
+        let context = detect_context(query, offset.into());
+
+        println!("Query: {:?}", query);
+        println!("Offset: {}", offset);
+        println!("Context: {:?}", context);
+
+        match context {
+            SdblCompletionContext::InsideMdoType { mdo_type, prefix } => {
+                println!("✅ InsideMdoType detected!");
+                println!("  mdo_type: {:?}", mdo_type);
+                println!("  prefix: {:?}", prefix);
+                assert_eq!(prefix, "");
+            }
+            other => {
+                panic!("Expected InsideMdoType, got: {:?}", other);
+            }
+        }
+    }
+
+    #[test]
     fn test_detect_sdbl_inside_query() {
         let code = r#"Запрос = "ВЫБРАТЬ * ИЗ Справочник.Валюты";"#;
         let root = parse_bsl(code);

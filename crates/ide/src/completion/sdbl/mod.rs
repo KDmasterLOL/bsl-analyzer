@@ -45,7 +45,8 @@ pub(super) fn sdbl_completions(
     );
 
     // Create providers
-    let metadata_provider = DbMetadataProvider::new(db, file_id);
+    let metadata_provider =
+        DbMetadataProvider::with_workspace(db, file_id, position.workspace_root.as_deref());
     let scope_provider = DbScopeProvider::new(db);
 
     // Try to get Scope for the query at cursor position
