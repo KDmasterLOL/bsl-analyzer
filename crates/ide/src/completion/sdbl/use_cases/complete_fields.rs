@@ -171,4 +171,48 @@ mod tests {
         // Should return empty for unknown alias
         assert_eq!(items.len(), 0);
     }
+
+    #[test]
+    fn test_complete_fields_for_temp_table() {
+        use sdbl_hir::{FieldDef, ResolvedTable, Scope, SdblType, TableRef};
+        use smol_str::SmolStr;
+        use syntax::TextRange;
+
+        // Create scope with temporary table
+        let mut scope = Scope::new();
+
+        let temp_fields = vec![
+            FieldDef::new("Поле1", SdblType::string()),
+            FieldDef::new("Поле2", SdblType::number()),
+        ];
+
+        scope.add_temp_table("ТемпТаблица".to_string(), temp_fields.clone());
+
+        // Create TableRef pointing to temp table
+        let table = TableRef {
+            parts: vec![],
+            full_name: "ТемпТаблица".to_string(),
+            alias: Some(SmolStr::from("Т")),
+            metadata: Some(ResolvedTable::TempTable {
+                name: "ТемпТаблица".to_string(),
+                fields: temp_fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: vec![],
+            range: TextRange::default(),
+        };
+        scope.add_table(table);
+
+        // Test completion
+        let items = CompleteFieldsUseCase::execute(&scope, "Т", "");
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.label == "Поле1"));
+        assert!(items.iter().any(|i| i.label == "Поле2"));
+
+        // Check that types are preserved
+        let field1 = items.iter().find(|i| i.label == "Поле1").unwrap();
+        assert!(field1.detail.is_some());
+        assert!(field1.detail.as_ref().unwrap().contains("Строка"));
+    }
 }

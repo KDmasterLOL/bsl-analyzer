@@ -81,14 +81,48 @@ impl ScopeProvider for DbScopeProvider<'_> {
 
         // 6. Rebuild Scope from HIR
         let mut scope = Scope::new();
+
+        // НОВОЕ: Добавить временные таблицы из всех предыдущих queries в батче
+        // Это нужно для completion во втором+ запросе батча, который использует
+        // временную таблицу, созданную в предыдущем запросе.
+        for prev_query in sdbl_package.queries() {
+            // Остановиться на текущем query (не включать его INTO clause)
+            if prev_query.range == target_query.range {
+                break;
+            }
+
+            // Если предыдущий query создал временную таблицу (INTO clause)
+            if let Some(ref temp_name) = prev_query.hir.into_table {
+                // Извлечь поля из SELECT clause предыдущего query
+                let temp_fields: Vec<sdbl_hir::FieldDef> = prev_query
+                    .hir
+                    .select
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        f.alias_or_name()
+                            .map(|name| sdbl_hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                    })
+                    .collect();
+
+                tracing::debug!(
+                    temp_table = %temp_name,
+                    fields_count = temp_fields.len(),
+                    field_names = ?temp_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                    "adding temporary table from previous query in batch"
+                );
+
+                scope.add_temp_table(temp_name.to_string(), temp_fields);
+            }
+        }
+
+        // Добавить таблицы из текущего query (FROM + JOINs)
         let hir = &target_query.hir;
 
-        // Add tables from FROM clause
         for table in &hir.from {
             scope.add_table(table.clone());
         }
 
-        // Add tables from JOIN clauses
         for join in &hir.joins {
             scope.add_table(join.table.clone());
         }
@@ -96,7 +130,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
         tracing::info!(
             from_tables = hir.from.len(),
             join_tables = hir.joins.len(),
-            "built Scope from HIR"
+            "built Scope from HIR with temp tables from previous queries"
         );
 
         Some(scope)
