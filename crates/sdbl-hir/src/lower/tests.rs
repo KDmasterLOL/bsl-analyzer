@@ -922,3 +922,57 @@ fn test_tabular_section_uuid_type_parsing() {
     // Verify type is correctly parsed as UUID
     assert_eq!(field.ty, crate::SdblType::Uuid, "Should be UUID type");
 }
+
+#[test]
+fn test_incomplete_on_collects_all_tables() {
+    // Test that HIR collects all tables even with incomplete ON conditions
+    let query = r#"ВЫБРАТЬ
+    Т1.Поле1
+ИЗ
+    Таблица1 КАК Т1
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Таблица2 КАК Т2
+            ВНУТРЕННЕЕ СОЕДИНЕНИЕ Таблица3 КАК Т3
+            ПО Т2.Поле = Т3.
+        ПО Т1.Поле = Т2."#;
+
+    let parse = parser::parse_sdbl(query);
+
+    use syntax::ast::AstNode;
+    let package =
+        syntax::ast::SdblQueryPackage::cast(parse.syntax_node()).expect("Should parse package");
+    let queries: Vec<_> = package.queries().collect();
+
+    assert_eq!(queries.len(), 1, "Should have 1 query");
+
+    // Lower to HIR
+    let hir_package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(hir_package.queries.len(), 1, "HIR should have 1 query");
+
+    let query_hir = &hir_package.queries[0].hir;
+
+    // Check FROM clause
+    assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
+    assert_eq!(query_hir.from[0].full_name, "Таблица1");
+    assert_eq!(query_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("Т1"));
+
+    // Check JOINs - should have BOTH joins despite incomplete ON
+    println!("Number of JOINs in HIR: {}", query_hir.joins.len());
+    for (i, join) in query_hir.joins.iter().enumerate() {
+        println!("  JOIN {}: {} (alias: {:?})", i, join.table.full_name, join.table.alias);
+    }
+
+    assert_eq!(query_hir.joins.len(), 2, "Should collect both nested JOINs");
+
+    // Verify table names
+    let join_names: Vec<_> = query_hir.joins.iter().map(|j| j.table.full_name.as_str()).collect();
+    assert!(join_names.contains(&"Таблица2"), "Should have Таблица2");
+    assert!(join_names.contains(&"Таблица3"), "Should have Таблица3");
+
+    // Verify aliases
+    let t2_join = query_hir.joins.iter().find(|j| j.table.full_name == "Таблица2").unwrap();
+    assert_eq!(t2_join.table.alias.as_ref().map(|s| s.as_str()), Some("Т2"));
+
+    let t3_join = query_hir.joins.iter().find(|j| j.table.full_name == "Таблица3").unwrap();
+    assert_eq!(t3_join.table.alias.as_ref().map(|s| s.as_str()), Some("Т3"));
+}

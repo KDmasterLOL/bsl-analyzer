@@ -786,3 +786,53 @@ fn test_nested_join_with_parameters_highlighting() {
     assert_eq!(queries.len(), 2, "Expected 2 queries");
     assert!(!parse.has_errors(), "Should parse nested JOINs without errors: {:?}", parse.errors());
 }
+
+#[test]
+fn test_incomplete_on_condition_for_completion() {
+    // Test incomplete ON conditions - cursor at "ПроцессыДействий." with incomplete condition
+    let query = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ
+    ЗадачиЭлементовСхемы.ИмяЭлемента,
+    ЗадачиЭлементовСхемы.ЗадачаПроцесса
+ПОМЕСТИТЬ ВТ_ЗадачиСхемы
+ИЗ
+    &ЗадачиЭлементовСхемы КАК ЗадачиЭлементовСхемы
+;
+
+////////////////////////////////////////////////////////////////////////////////
+ВЫБРАТЬ
+    ВТ_ЗадачиСхемы.ИмяЭлемента
+ИЗ
+    ВТ_ЗадачиСхемы КАК ВТ_ЗадачиСхемы
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ДанныеБизнесПроцессов КАК ДанныеБизнесПроцессов
+            ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.ПроцессыДействий КАК ПроцессыДействий
+            ПО ДанныеБизнесПроцессов.БизнесПроцесс = ПроцессыДействий.
+            И ПроцессыДействий.Действие = &Действие
+        ПО ВТ_ЗадачиСхемы.ЗадачаПроцесса = ДанныеБизнесПроцессов."#;
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors (expected for incomplete syntax) ===");
+        for (i, error) in parse.errors().iter().enumerate() {
+            println!("Error {}: {:?}", i + 1, error);
+        }
+    }
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+
+    println!("\n=== Syntax tree (abbreviated) ===");
+    // Print only the structure, not full content
+    for child in root.children() {
+        println!("{:?} at {:?}", child.kind(), child.text_range());
+    }
+
+    let package = SdblQueryPackage::cast(root);
+    assert!(package.is_some(), "Should parse package even with incomplete ON conditions");
+
+    let queries: Vec<_> = package.unwrap().queries().collect();
+    println!("\n=== Found {} queries ===", queries.len());
+
+    // We should still get 2 queries
+    assert_eq!(queries.len(), 2, "Should parse both queries despite incomplete ON");
+}
