@@ -110,20 +110,125 @@ pub fn lower_sdbl_to_hir(
     tracing::debug!(query_count = all_queries.len(), "lower_sdbl_to_hir: found queries in package");
 
     // Lower ALL queries and track their ranges
+    // Each SdblSelectQuery may contain multiple queries (main + UNION)
     let mut sdbl_queries = Vec::new();
-    for (index, select_query) in all_queries.iter().enumerate() {
-        let query_hir = ctx.lower_select_query(select_query);
-        let range = select_query.syntax().text_range();
+    for (select_index, select_query) in all_queries.iter().enumerate() {
+        // Get subquery which contains main query + UNION queries
+        let Some(subquery) = select_query.subquery() else {
+            tracing::debug!(select_index, "No subquery in SdblSelectQuery");
+            continue;
+        };
 
-        tracing::debug!(
-            query_index = index,
-            from_tables = query_hir.from.len(),
-            join_tables = query_hir.joins.len(),
-            range = ?range,
-            "lowered query in package"
-        );
+        // Lower main query first
+        if let Some(main_query) = subquery.main_query() {
+            // Push scope frame for main query (clears FROM/JOIN scope, keeps temp tables)
+            ctx.scope.push_frame();
 
-        sdbl_queries.push(crate::hir::SdblQuery { hir: query_hir, range });
+            let query_hir = ctx.lower_query(&main_query);
+            let range = main_query.syntax().text_range();
+
+            tracing::debug!(
+                select_index,
+                query_index = 0,
+                from_tables = query_hir.from.len(),
+                join_tables = query_hir.joins.len(),
+                range = ?range,
+                "lowered main query"
+            );
+
+            // Pop scope frame (removes FROM/JOIN tables, keeps temp tables in parent)
+            ctx.scope.pop_frame();
+
+            // Register temporary table if this query creates one
+            if let Some(ref temp_name) = query_hir.into_table {
+                // Extract fields from SELECT clause
+                let temp_fields: Vec<crate::hir::FieldDef> = query_hir
+                    .select
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        f.alias_or_name()
+                            .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                    })
+                    .collect();
+
+                tracing::debug!(
+                    temp_table = %temp_name,
+                    fields_count = temp_fields.len(),
+                    "registering temporary table in scope for subsequent queries"
+                );
+
+                ctx.scope.add_temp_table(temp_name.to_string(), temp_fields);
+            }
+
+            sdbl_queries.push(crate::hir::SdblQuery { hir: query_hir, range });
+        }
+
+        // Then lower UNION queries with keyword recording
+        for (union_index, union_clause) in subquery.union_clauses().enumerate() {
+            // Record UNION keyword
+            ctx.record_keyword_by_text(
+                union_clause.syntax(),
+                "UNION",
+                "ОБЪЕДИНИТЬ",
+                crate::source_map::TokenCategory::Modifier,
+            );
+
+            // Record ALL keyword if present
+            if union_clause.has_all() {
+                ctx.record_keyword_by_text(
+                    union_clause.syntax(),
+                    "ALL",
+                    "ВСЕ",
+                    crate::source_map::TokenCategory::Modifier,
+                );
+            }
+
+            // Lower the UNION query
+            if let Some(union_query) = union_clause.query() {
+                // Push scope frame for UNION query (clears FROM/JOIN scope, keeps temp tables)
+                ctx.scope.push_frame();
+
+                let query_hir = ctx.lower_query(&union_query);
+                let range = union_query.syntax().text_range();
+
+                tracing::debug!(
+                    select_index,
+                    union_index,
+                    from_tables = query_hir.from.len(),
+                    join_tables = query_hir.joins.len(),
+                    range = ?range,
+                    "lowered UNION query"
+                );
+
+                // Pop scope frame
+                ctx.scope.pop_frame();
+
+                // Register temporary table if this query creates one
+                if let Some(ref temp_name) = query_hir.into_table {
+                    // Extract fields from SELECT clause
+                    let temp_fields: Vec<crate::hir::FieldDef> = query_hir
+                        .select
+                        .fields
+                        .iter()
+                        .filter_map(|f| {
+                            f.alias_or_name()
+                                .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                        })
+                        .collect();
+
+                    tracing::debug!(
+                        temp_table = %temp_name,
+                        fields_count = temp_fields.len(),
+                        "registering temporary table in scope for subsequent queries"
+                    );
+
+                    ctx.scope.add_temp_table(temp_name.to_string(), temp_fields);
+                }
+
+                sdbl_queries.push(crate::hir::SdblQuery { hir: query_hir, range });
+            }
+        }
     }
 
     // Finalize source map (sort token lists)
@@ -134,26 +239,26 @@ pub fn lower_sdbl_to_hir(
 }
 
 impl LoweringContext<'_> {
-    /// Lower a SELECT query.
-    pub(crate) fn lower_select_query(&mut self, query: &syntax::ast::SdblSelectQuery) -> SdblHir {
-        let Some(subquery) = query.subquery() else {
-            return SdblHir::empty();
-        };
-
-        let Some(main_query) = subquery.main_query() else {
-            return SdblHir::empty();
-        };
-
+    /// Lower a single SDBL query (main query or query from UNION).
+    ///
+    /// This method processes one query from a SELECT statement, which can be:
+    /// - The main query before UNION
+    /// - A query after UNION/UNION ALL
+    pub(crate) fn lower_query(&mut self, query: &syntax::ast::SdblQuery) -> SdblHir {
         // Record SELECT keyword
         self.record_keyword_by_text(
-            main_query.syntax(),
+            query.syntax(),
             "SELECT",
             "ВЫБРАТЬ",
             crate::source_map::TokenCategory::ClauseKeyword,
         );
 
+        // NOTE: Scope is managed by push_frame/pop_frame in the main loop.
+        // Each query in UNION gets a fresh scope frame for FROM/JOIN tables,
+        // but temporary tables from previous queries are preserved.
+
         // 1. Lower FROM clause first (establishes scope)
-        let from = self.lower_from_clause(main_query.from_clause());
+        let from = self.lower_from_clause(query.from_clause());
 
         // 2. Register tables in scope
         for table in &from {
@@ -161,62 +266,33 @@ impl LoweringContext<'_> {
         }
 
         // 3. Lower JOINs
-        let joins = self.lower_joins(&main_query);
+        let joins = self.lower_joins(query);
         for join in &joins {
             self.scope.add_table(join.table.clone());
         }
 
         // 4. Extract DISTINCT and TOP from limitations
-        let (distinct, top) = self.extract_limitations(main_query.syntax());
+        let (distinct, top) = self.extract_limitations(query.syntax());
 
         // 5. Lower SELECT clause (uses scope for name resolution)
-        let select = self.lower_field_list(main_query.field_list(), distinct, top);
+        let select = self.lower_field_list(query.field_list(), distinct, top);
 
         // 6. Lower WHERE clause
-        let where_clause = main_query.where_clause().map(|w| self.lower_where_clause(&w));
+        let where_clause = query.where_clause().map(|w| self.lower_where_clause(&w));
 
         // 7. Lower GROUP BY clause
-        let group_by = main_query.group_by_clause().map(|g| self.lower_group_by(&g));
+        let group_by = query.group_by_clause().map(|g| self.lower_group_by(&g));
 
         // 8. Lower ORDER BY clause
-        let order_by = main_query.order_by_clause().map(|o| self.lower_order_by(&o));
+        let order_by = query.order_by_clause().map(|o| self.lower_order_by(&o));
 
         // 9. Lower INTO clause (temporary table)
-        let into_table = self.lower_into_clause(main_query.syntax());
-
-        // 10. Register temporary table in scope (for use in UNION queries)
-        if let Some(ref temp_name) = into_table {
-            // Extract fields from SELECT clause
-            let temp_fields: Vec<_> = select
-                .fields
-                .iter()
-                .filter_map(|f| {
-                    f.alias_or_name()
-                        .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
-                })
-                .collect();
-
-            tracing::debug!(
-                temp_table = %temp_name.as_str(),
-                fields = temp_fields.len(),
-                "Registering temporary table in scope"
-            );
-
-            self.scope.add_temp_table(temp_name.to_string(), temp_fields);
-        }
-
-        // 11. Lower UNION queries (can now reference temporary table)
-        let unions = self.lower_union_clauses(&subquery);
-
-        // Collect diagnostics from UNION queries before moving them
-        let mut union_diagnostics = Vec::new();
-        for union_hir in &unions {
-            union_diagnostics.extend(union_hir.query.diagnostics.clone());
-        }
+        let into_table = self.lower_into_clause(query.syntax());
 
         let range = query.syntax().text_range();
 
-        // Build HIR
+        // Build HIR for this single query
+        // NOTE: UNION queries are processed separately in the main loop
         let mut hir = SdblHir {
             select,
             into_table,
@@ -226,13 +302,10 @@ impl LoweringContext<'_> {
             group_by,
             having: None,
             order_by,
-            unions,
+            unions: vec![], // UNION queries are now processed separately, not nested
             diagnostics: std::mem::take(&mut self.diagnostics),
             range,
         };
-
-        // 7. Merge diagnostics from UNION queries
-        hir.diagnostics.extend(union_diagnostics);
 
         // 8. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);

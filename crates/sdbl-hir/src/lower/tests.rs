@@ -616,15 +616,17 @@ fn test_temp_table_in_union() {
 
     let ast = parser::parse_sdbl(query);
     let result = lower_sdbl_to_hir(&ast, None);
-    let hir = single_query_hir(&result).clone();
+
+    // New flat list architecture: package contains 2 queries (main + UNION)
+    assert_eq!(result.queries().len(), 2, "Expected 2 queries in package (main + UNION)");
 
     // First query creates temporary table
-    assert_eq!(hir.into_table.as_ref().map(|n| n.as_str()), Some("ТаблицаДействий"));
-    assert_eq!(hir.select.fields.len(), 1); // Only one field in first query
+    let main_hir = &result.queries()[0].hir;
+    assert_eq!(main_hir.into_table.as_ref().map(|n| n.as_str()), Some("ТаблицаДействий"));
+    assert_eq!(main_hir.select.fields.len(), 1); // Only one field in first query
 
     // Second query (UNION) references temporary table
-    assert_eq!(hir.unions.len(), 1);
-    let union_hir = &hir.unions[0].query;
+    let union_hir = &result.queries()[1].hir;
     assert_eq!(union_hir.from.len(), 1);
 
     // Check that temporary table is resolved
