@@ -66,9 +66,10 @@ impl<'a> LoweringContext<'a> {
 
         tracing::info!(
             text = %text,
+            parts_count = parts.len(),
             table_alias = ?table_alias.as_ref().map(|n| n.as_str()),
             column_name = %column_name.as_str(),
-            "DIAGNOSTIC LOWERING: lower_column_ref called"
+            "lower_column_ref called"
         );
 
         // NEW: Extract IDENT ranges from AST for semantic highlighting
@@ -116,36 +117,35 @@ impl<'a> LoweringContext<'a> {
             });
         }
 
-        // NEW: Record identifiers in source_map for semantic highlighting
-        if let Some(ref alias) = table_alias {
-            // Record table alias (first IDENT in qualified reference)
-            if let Some(range) = ident_ranges.first() {
+        // NEW: Record ALL identifiers in source_map for semantic highlighting
+        // This handles nested field references like Table.Field1.Field2.Field3
+        for (idx, range) in ident_ranges.iter().enumerate() {
+            if idx == 0 && table_alias.is_some() {
+                // First identifier = table alias
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(
                         *range,
                         syntax::SyntaxKind::IDENT,
-                        alias.as_str(),
+                        parts[idx].trim(),
                     ),
                     crate::source_map::TokenCategory::TableAlias,
                 );
-            }
-        }
-
-        // Record field name (last IDENT, or only IDENT in unqualified reference)
-        if let Some(range) = ident_ranges.last() {
-            let category = if ty != SdblType::Unknown && ty != SdblType::Error {
-                crate::source_map::TokenCategory::FieldName
             } else {
-                crate::source_map::TokenCategory::UnresolvedFieldName
-            };
-            self.source_map.add_token(
-                crate::source_map::TokenInfo::new(
-                    *range,
-                    syntax::SyntaxKind::IDENT,
-                    column_name.as_str(),
-                ),
-                category,
-            );
+                // All other identifiers = field names (intermediate or final)
+                let category = if ty != SdblType::Unknown && ty != SdblType::Error {
+                    crate::source_map::TokenCategory::FieldName
+                } else {
+                    crate::source_map::TokenCategory::UnresolvedFieldName
+                };
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(
+                        *range,
+                        syntax::SyntaxKind::IDENT,
+                        parts[idx].trim(),
+                    ),
+                    category,
+                );
+            }
         }
 
         ExprHir::ColumnRef { table_alias, column: column_name, ty, range: node.text_range() }

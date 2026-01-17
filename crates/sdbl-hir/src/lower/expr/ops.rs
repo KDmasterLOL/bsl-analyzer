@@ -39,31 +39,25 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        let mut children = node.children();
-        let lhs_node = children.next();
-        let rhs_node = children.next();
+        // Collect ALL children (for chained operators like A И B И C)
+        let children: Vec<_> = node.children().collect();
 
         // IMPORTANT: If there's only one child (no operator), just return it unwrapped.
         // This happens when parser creates operator precedence nodes without actual operators.
         // For example: "Таблица.Поле" may be wrapped in LOGICAL_OR_EXPR → LOGICAL_AND_EXPR →
         // ADDITIVE_EXPR → MULTIPLICATIVE_EXPR → COLUMN_REF, even though there are no operators.
-        if rhs_node.is_none() {
-            if let Some(lhs) = lhs_node {
-                tracing::info!(
-                    node_text = %node.text(),
-                    "DIAGNOSTIC LOWERING: Binary expr with no operator - unwrapping child"
-                );
-                return self.lower_expr(&lhs);
-            }
+        if children.len() == 1 {
+            tracing::info!(
+                node_text = %node.text(),
+                "DIAGNOSTIC LOWERING: Binary expr with no operator - unwrapping child"
+            );
+            return self.lower_expr(&children[0]);
         }
 
-        let lhs = lhs_node
-            .map(|n| self.lower_expr(&n))
-            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
-
-        let rhs = rhs_node
-            .map(|n| self.lower_expr(&n))
-            .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
+        // Handle missing children (error case)
+        if children.is_empty() {
+            return ExprHir::Missing { range: node.text_range() };
+        }
 
         // Determine operator from node text
         let text = node.text().to_string();
@@ -106,13 +100,22 @@ impl<'a> LoweringContext<'a> {
             SdblType::Unknown
         };
 
-        ExprHir::BinaryOp {
-            lhs: Box::new(lhs),
-            op,
-            rhs: Box::new(rhs),
-            ty,
-            range: node.text_range(),
+        // Build left-associative binary tree for chained operators
+        // Example: A И B И C → BinaryOp { lhs: BinaryOp { lhs: A, op: And, rhs: B }, op: And, rhs: C }
+        let mut result = self.lower_expr(&children[0]);
+
+        for child in &children[1..] {
+            let rhs = self.lower_expr(child);
+            result = ExprHir::BinaryOp {
+                lhs: Box::new(result),
+                op,
+                rhs: Box::new(rhs),
+                ty: ty.clone(),
+                range: node.text_range(),
+            };
         }
+
+        result
     }
 
     /// Lower unary expression.

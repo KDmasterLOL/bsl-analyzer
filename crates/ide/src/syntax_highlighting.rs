@@ -1479,6 +1479,103 @@ EndFunction
     }
 
     #[test]
+    fn test_bonus_query_highlighting() {
+        let code = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+    |    НачислениеИСписаниеБонусныхБаллов.Ссылка КАК Ссылка
+    |ИЗ
+    |    Документ.НачислениеИСписаниеБонусныхБаллов КАК НачислениеИСписаниеБонусныхБаллов
+    |ГДЕ
+    |    НачислениеИСписаниеБонусныхБаллов.ПричинаНачисленияИСписанияБонусныхБаллов = ЗНАЧЕНИЕ(Справочник.ПричиныНачисленияИСписанияБонусныхБаллов.БонусЗаПодтверждениеЭлектроннойПочты)
+    |    И НачислениеИСписаниеБонусныхБаллов.Начисление.Партнер = &Партнер
+    |    И НачислениеИСписаниеБонусныхБаллов.Проведен
+    |    И НЕ НачислениеИСписаниеБонусныхБаллов.ПометкаУдаления";
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+
+        let highlights = highlight(&db, file_id);
+
+        eprintln!("\n=== Bonus Query Test ===");
+        eprintln!("Total highlights: {}", highlights.len());
+
+        // Print all highlights
+        eprintln!("\n=== All highlights ===");
+        for hl in &highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Check for important tokens
+        let tokens = ["ЗНАЧЕНИЕ", "Партнер", "Проведен", "ПометкаУдаления", "НЕ"];
+        for token in tokens {
+            let found = highlights.iter().any(|hl| {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text == token
+            });
+            eprintln!("{}: {}", token, if found { "✓" } else { "✗" });
+        }
+
+        // Find where highlighting stops
+        let last_keyword_pos =
+            highlights.iter().filter(|hl| hl.tag == HlTag::Keyword).map(|hl| hl.range.end()).max();
+
+        if let Some(pos) = last_keyword_pos {
+            let pos_usize: usize = pos.into();
+            eprintln!("\nLast keyword ends at: {}", pos_usize);
+            if pos_usize < code.len() {
+                let remaining = &code[pos_usize..];
+                eprintln!(
+                    "Remaining text (first 100 chars): {:?}",
+                    &remaining[..remaining.len().min(100)]
+                );
+            }
+        }
+
+        // Check SDBL parsing
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        let sdbl_queries = db.all_sdbl_in_file(file_id);
+        eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
+        eprintln!("SDBL queries: {}", sdbl_queries.len());
+
+        for ((_expr_id, sdbl_pkg), (_query_id, query_info)) in
+            sdbl_hirs.iter().zip(sdbl_queries.iter())
+        {
+            eprintln!("\n=== SDBL Query Text ===");
+            eprintln!("{}", query_info.query_text);
+
+            eprintln!("\n=== Source Map All Tokens ===");
+            let all_tokens: Vec<_> = sdbl_pkg.source_map.all_tokens().collect();
+            eprintln!("Total tokens in source map: {}", all_tokens.len());
+            for (token, category) in all_tokens.iter().take(50) {
+                eprintln!("  {:?} at {:?}: '{}'", category, token.range, token.text);
+            }
+            if all_tokens.len() > 50 {
+                eprintln!("  ... and {} more tokens", all_tokens.len() - 50);
+            }
+
+            eprintln!("\n=== Quote Corrections ===");
+            eprintln!("Total: {}", query_info.quote_corrections.len());
+            for (pos, chars) in &query_info.quote_corrections {
+                eprintln!("  At offset {}: +{} chars", pos, chars);
+            }
+
+            if let Some(ref ast) = query_info.query_ast {
+                if ast.has_errors() {
+                    eprintln!("\n=== SDBL Parser Errors ===");
+                    for err in ast.errors() {
+                        eprintln!("  - {:?}", err);
+                    }
+                } else {
+                    eprintln!("\n✓ SDBL parsed successfully, no errors");
+                }
+            } else {
+                eprintln!("\n✗ SDBL AST is None");
+            }
+        }
+    }
+
+    #[test]
     fn debug_estnull_source_map_detailed() {
         let code = r#"
 Процедура Тест()
