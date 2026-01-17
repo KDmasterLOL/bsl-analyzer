@@ -1036,17 +1036,21 @@ fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
     let potential_alias = parts[0];
     let field_prefix = parts[1];
 
+    // Strip leading non-alphabetic characters (e.g., '(', operators)
+    // This handles cases like "(ЧекККМ.Field" where alias is wrapped in parentheses
+    let clean_alias = potential_alias.trim_start_matches(|c: char| !c.is_alphabetic());
+
     // Check heuristics for table alias:
-    // 1. Not empty
+    // 1. Not empty after cleanup
     // 2. Starts with uppercase (Т, Т1, Т2, Очередь, Items, ДескрипторыДоступаРегистров, etc.)
     // 3. NOT an MDO type keyword (Справочник, Документ, etc.)
     //
     // Note: No length limit - if someone wants to use a very long alias name, that's their choice
-    if !potential_alias.is_empty()
-        && potential_alias.chars().next()?.is_uppercase()
-        && !is_mdo_type(potential_alias)
+    if !clean_alias.is_empty()
+        && clean_alias.chars().next()?.is_uppercase()
+        && !is_mdo_type(clean_alias)
     {
-        return Some((potential_alias.to_string(), field_prefix.to_string()));
+        return Some((clean_alias.to_string(), field_prefix.to_string()));
     }
 
     None
@@ -2584,6 +2588,53 @@ mod tests {
                 assert!(is_russian, "Expected Russian context for 'Справочник'");
             }
             _ => panic!("Expected InsideValueMdoObject, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_alias_with_parenthesis() {
+        // Real-world case: cursor after "(ЧекККМ." in WHERE condition
+        let query = r#"ВЫБРАТЬ
+    ЧекККМ.Ссылка КАК Ссылка
+ИЗ
+    Документ.ЧекККМ КАК ЧекККМ
+ГДЕ
+    (ЧекККМ.Партнер = &Партнер)
+    И (ЧекККМ.Проведен = ИСТИНА)
+    И (ЧекККМ.ПометкаУдаления = ЛОЖЬ)
+    И (ЧекККМ."#;
+
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "ЧекККМ", "Should extract alias without parenthesis");
+                assert_eq!(prefix, "", "Prefix should be empty after dot");
+            }
+            _ => panic!("Expected AfterTableAlias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_alias_with_parenthesis_and_prefix() {
+        // Cursor in the middle of field name: "(ЧекККМ.Парт"
+        let query = r#"ВЫБРАТЬ
+    ЧекККМ.Ссылка
+ИЗ
+    Документ.ЧекККМ КАК ЧекККМ
+ГДЕ
+    (ЧекККМ.Парт"#;
+
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "ЧекККМ", "Should extract alias without parenthesis");
+                assert_eq!(prefix, "Парт", "Should extract field prefix");
+            }
+            _ => panic!("Expected AfterTableAlias, got {:?}", context),
         }
     }
 }
