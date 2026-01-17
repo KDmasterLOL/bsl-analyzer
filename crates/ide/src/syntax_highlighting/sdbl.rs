@@ -73,8 +73,8 @@ pub(super) fn highlight_sdbl_in_literal<DB: RootDatabase>(
     let input = ctx.db.file_text_input(ctx.file_id);
     let bsl_source = input.text(ctx.db);
     let mapper = if let Some(ref line_starts) = ctx.line_index {
-        ide_diagnostics::sdbl_utils::SdblPositionMapper::new_from_range_with_line_index(
-            query_info.bsl_literal_range,
+        ide_diagnostics::sdbl_utils::SdblPositionMapper::from_query_info(
+            query_info,
             &bsl_source,
             line_starts,
         )
@@ -82,6 +82,7 @@ pub(super) fn highlight_sdbl_in_literal<DB: RootDatabase>(
         ide_diagnostics::sdbl_utils::SdblPositionMapper::new_from_range(
             query_info.bsl_literal_range,
             &bsl_source,
+            query_info.quote_corrections.clone(),
         )
     };
 

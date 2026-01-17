@@ -25,7 +25,7 @@ use rowan::GreenNode;
 
 pub use crate::{
     ast_utils::extract_leading_comments,
-    sdbl_query::SdblQueryInfo,
+    sdbl_query::{extract_sdbl_with_corrections, SdblQueryInfo},
     syntax_kind::SyntaxKind,
     syntax_node::{
         with_shared_node_cache, BslLanguage, SyntaxElement, SyntaxNode, SyntaxNodePtr, SyntaxToken,

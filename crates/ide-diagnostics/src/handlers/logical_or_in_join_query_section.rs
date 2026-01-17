@@ -78,11 +78,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
         sdbl_hirs.iter().zip(sdbl_queries.iter())
     {
-        let mapper = SdblPositionMapper::new_from_range_with_line_index(
-            query_info.bsl_literal_range,
-            &bsl_source,
-            &line_starts,
-        );
+        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
 
         // Emit diagnostics from HIR
         for hir_diag in sdbl_package.all_diagnostics() {

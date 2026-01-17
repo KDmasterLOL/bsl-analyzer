@@ -1386,4 +1386,164 @@ EndFunction
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_sdbl_estnull_in_multiline_string() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+        |ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, """"),
+        |ВыручкаИСебестоимостьПродаж.Период
+        |ИЗ Таблица";
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        eprintln!("\n=== Multiline ЕСТЬNULL test ===");
+        for hl in &highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Find ЕСТЬNULL
+        let estnull = highlights.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ЕСТЬNULL"
+        });
+
+        // Find ДокЗаказКлиента
+        let doc_orders = highlights.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ДокЗаказКлиента"
+        });
+
+        eprintln!("\nЕСТЬNULL found: {:?}", estnull.is_some());
+        eprintln!("ДокЗаказКлиента found: {:?}", doc_orders.is_some());
+
+        assert!(estnull.is_some(), "ЕСТЬNULL should be highlighted in multiline string");
+        assert!(doc_orders.is_some(), "ДокЗаказКлиента should be highlighted as complete token");
+    }
+
+    #[test]
+    fn test_exact_user_case_with_case_when() {
+        let code = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+        |ВыручкаИСебестоимостьПродаж.Регистратор,
+        |ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, """"),
+        |ВыручкаИСебестоимостьПродаж.Период,
+        |ВЫБОР
+        |    КОГДА ВыручкаИСебестоимостьПродаж.Регистратор ССЫЛКА Документ.ВозвратТоваровОтКлиента
+        |            И ДокЗаказКлиента.Ссылка ЕСТЬ NULL
+        |        ТОГДА ""Возврат""
+        |    КОГДА ВыручкаИСебестоимостьПродаж.Регистратор ССЫЛКА Документ.ВозвратТоваровОтКлиента
+        |            И ДокЗаказКлиента.Ссылка ЕСТЬ НЕ NULL
+        |        ТОГДА ""Возврат №"" + ПРЕДСТАВЛЕНИЕ(ДокЗаказКлиента.НомерПоДаннымКлиента)
+        |    КОГДА ДокЗаказКлиента.Ссылка ЕСТЬ NULL
+        |        ТОГДА ""Покупка в магазине""
+        |    ИНАЧЕ ""Заказ №"" + ПРЕДСТАВЛЕНИЕ(ДокЗаказКлиента.НомерПоДаннымКлиента)
+        |КОНЕЦ
+        |ИЗ Таблица";
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+
+        let highlights = highlight(&db, file_id);
+
+        // Find ПРЕДСТАВЛЕНИЕ tokens
+        let presentation_highlights: Vec<_> = highlights
+            .iter()
+            .filter(|hl| {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text.contains("ПРЕДСТАВЛЕНИЕ") || text.contains("ПРЕДСТАВЛЕНИ")
+            })
+            .collect();
+
+        eprintln!("\n=== ПРЕДСТАВЛЕНИЕ highlights: {} ===", presentation_highlights.len());
+        for hl in &presentation_highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Check both ПРЕДСТАВЛЕНИЕ occurrences
+        let presentation_count = highlights
+            .iter()
+            .filter(|hl| {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text == "ПРЕДСТАВЛЕНИЕ"
+            })
+            .count();
+
+        eprintln!("\nПРЕДСТАВЛЕНИЕ exact matches: {}", presentation_count);
+        assert_eq!(presentation_count, 2, "Should have exactly 2 ПРЕДСТАВЛЕНИЕ tokens");
+    }
+
+    #[test]
+    fn debug_estnull_source_map_detailed() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+        |ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, """"),
+        |ПРЕДСТАВЛЕНИЕ(ВыручкаИСебестоимостьПродаж.Период)
+        |ИЗ Таблица";
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(code);
+
+        // Get SDBL HIR
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        eprintln!("\n=== SDBL HIR entries: {} ===", sdbl_hirs.len());
+
+        for (_expr_id, sdbl_pkg) in sdbl_hirs.iter() {
+            eprintln!("\n=== ALL Source map tokens by category ===");
+
+            // Print all builtin functions
+            let builtin_funcs =
+                sdbl_pkg.source_map.tokens_by_category(sdbl_hir::TokenCategory::BuiltinFunction);
+            eprintln!("BuiltinFunction: {} tokens", builtin_funcs.len());
+            for token in builtin_funcs {
+                eprintln!("  - '{}' at SDBL range {:?}", token.text, token.range);
+            }
+
+            // Print all aggregate functions for comparison
+            let agg_funcs =
+                sdbl_pkg.source_map.tokens_by_category(sdbl_hir::TokenCategory::AggregateFunction);
+            eprintln!("AggregateFunction: {} tokens", agg_funcs.len());
+            for token in agg_funcs {
+                eprintln!("  - '{}' at SDBL range {:?}", token.text, token.range);
+            }
+        }
+
+        let highlights = highlight(&db, file_id);
+        eprintln!("\n=== BSL Highlights (Functions only) ===");
+        for hl in &highlights {
+            if hl.tag == HlTag::Function {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+            }
+        }
+
+        // Find both functions
+        let estnull = highlights.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ЕСТЬNULL"
+        });
+        let presentation = highlights.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ПРЕДСТАВЛЕНИЕ"
+        });
+
+        eprintln!("\nЕСТЬNULL highlighted: {}", estnull.is_some());
+        eprintln!("ПРЕДСТАВЛЕНИЕ highlighted: {}", presentation.is_some());
+
+        if let Some(hl) = estnull {
+            eprintln!("  ЕСТЬNULL: range={:?}, tag={:?}", hl.range, hl.tag);
+        }
+        if let Some(hl) = presentation {
+            eprintln!("  ПРЕДСТАВЛЕНИЕ: range={:?}, tag={:?}", hl.range, hl.tag);
+        }
+
+        assert!(estnull.is_some(), "ЕСТЬNULL must be highlighted");
+        assert!(presentation.is_some(), "ПРЕДСТАВЛЕНИЕ must be highlighted");
+    }
 }

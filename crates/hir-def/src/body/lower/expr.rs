@@ -132,13 +132,18 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
             // Check if this is SDBL query
             if looks_like_sdbl(&value) {
-                let sdbl_ast = parser::parse_sdbl_with_shared_cache(&value);
+                // Re-extract with quote corrections for accurate position mapping
+                let (sdbl_text, quote_corrections) = syntax::extract_sdbl_with_corrections(node)
+                    .unwrap_or_else(|| (value.clone(), vec![]));
+
+                let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
 
                 if !sdbl_ast.has_errors() {
                     let query_info = syntax::SdblQueryInfo::new(
                         node.text_range(),
-                        value.clone(),
+                        sdbl_text,
                         Some(sdbl_ast),
+                        quote_corrections,
                     );
 
                     ctx.pending_sdbl.push((node.text_range(), query_info));

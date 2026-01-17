@@ -9,10 +9,12 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 /// Maps SDBL positions back to BSL source positions.
 ///
-/// Handles multiline strings with `|` prefixes. When SDBL is extracted from BSL strings,
-/// the `|` prefixes and quotes are removed, so diagnostic positions in SDBL don't correspond
-/// to the original BSL source positions. This mapper tracks the BSL literal position and
-/// converts SDBL TextRange to BSL TextRange.
+/// Handles multiline strings with `|` prefixes and escaped quotes `""` → `"`.
+/// When SDBL is extracted from BSL strings:
+/// - `|` prefixes are removed
+/// - `""` is unescaped to `"` (SDBL canonical form)
+///
+/// This mapper tracks replacements and converts SDBL TextRange to BSL TextRange.
 ///
 /// ## Algorithm
 ///
@@ -20,7 +22,8 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 /// - Line mapping: `bsl_line = bsl_literal_line + sdbl_line`
 /// - Column mapping:
 ///   - First line: `bsl_col = bsl_literal_col + sdbl_col + 1` (+1 for opening quote)
-///   - Multiline: `bsl_col = sdbl_col` (already aligned after `|` removal)
+///   - Multiline: `bsl_col = pipe_pos + 1 + sdbl_col`
+///   - Quote escaping: `bsl_col += count_escaped_quotes_before(sdbl_col)`
 ///
 /// ## Performance
 ///
@@ -48,11 +51,20 @@ pub struct SdblPositionMapper<'a> {
     /// OPTIMIZATION: Build once, use for all map_range() calls
     /// line_starts[i] = byte offset where line i starts
     line_starts: Vec<usize>,
+
+    /// Quote escape corrections: (sdbl_offset, correction_bytes)
+    /// Each entry represents a `""` → `"` replacement in SDBL extraction.
+    /// When mapping SDBL position X to BSL, add sum of corrections for positions < X.
+    quote_corrections: Vec<(usize, usize)>,
 }
 
 impl<'a> SdblPositionMapper<'a> {
     /// Create a new position mapper from a LITERAL node.
-    pub fn new(bsl_literal_node: &SyntaxNode, bsl_source: &'a str) -> Self {
+    pub fn new(
+        bsl_literal_node: &SyntaxNode,
+        bsl_source: &'a str,
+        quote_corrections: Vec<(usize, usize)>,
+    ) -> Self {
         let bsl_literal_range = bsl_literal_node.text_range();
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
@@ -60,7 +72,14 @@ impl<'a> SdblPositionMapper<'a> {
         // Build line index for O(1) line lookups
         let line_starts = build_line_index(bsl_source);
 
-        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
+        Self {
+            bsl_literal_range,
+            bsl_source,
+            bsl_literal_line,
+            bsl_literal_col,
+            line_starts,
+            quote_corrections,
+        }
     }
 
     /// Create a new position mapper from a cached TextRange.
@@ -71,14 +90,25 @@ impl<'a> SdblPositionMapper<'a> {
     /// OPTIMIZATION: Uses `&str` reference instead of copying the entire source.
     /// OPTIMIZATION: Caches literal position to avoid recalculating for each diagnostic.
     /// OPTIMIZATION: Builds line index once for O(1) line lookup.
-    pub fn new_from_range(bsl_literal_range: TextRange, bsl_source: &'a str) -> Self {
+    pub fn new_from_range(
+        bsl_literal_range: TextRange,
+        bsl_source: &'a str,
+        quote_corrections: Vec<(usize, usize)>,
+    ) -> Self {
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
 
         // Build line index for O(1) line lookups
         let line_starts = build_line_index(bsl_source);
 
-        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
+        Self {
+            bsl_literal_range,
+            bsl_source,
+            bsl_literal_line,
+            bsl_literal_col,
+            line_starts,
+            quote_corrections,
+        }
     }
 
     /// Create a new position mapper with pre-built line index.
@@ -89,6 +119,7 @@ impl<'a> SdblPositionMapper<'a> {
         bsl_literal_range: TextRange,
         bsl_source: &'a str,
         line_starts: &'a [usize],
+        quote_corrections: Vec<(usize, usize)>,
     ) -> Self {
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
@@ -96,68 +127,112 @@ impl<'a> SdblPositionMapper<'a> {
         // Clone the line index (cheap - just Vec of usize)
         let line_starts = line_starts.to_vec();
 
-        Self { bsl_literal_range, bsl_source, bsl_literal_line, bsl_literal_col, line_starts }
+        Self {
+            bsl_literal_range,
+            bsl_source,
+            bsl_literal_line,
+            bsl_literal_col,
+            line_starts,
+            quote_corrections,
+        }
+    }
+
+    /// Create mapper from SdblQueryInfo (PREFERRED API).
+    ///
+    /// This is the canonical way to create a mapper - quote_corrections
+    /// are taken from the query info (single source of truth).
+    pub fn from_query_info(
+        query_info: &syntax::SdblQueryInfo,
+        bsl_source: &'a str,
+        line_starts: &'a [usize],
+    ) -> Self {
+        Self::new_from_range_with_line_index(
+            query_info.bsl_literal_range,
+            bsl_source,
+            line_starts,
+            query_info.quote_corrections.clone(),
+        )
     }
 
     /// Map SDBL TextRange to BSL TextRange.
     ///
     /// Takes a range within the extracted SDBL text and returns the corresponding
-    /// range in the original BSL source file.
+    /// range in the original BSL source file. Accounts for `""` → `"` quote escaping.
     pub fn map_range(&self, sdbl_range: TextRange, sdbl_text: &str) -> TextRange {
-        // 1. Convert SDBL byte offsets to line:column
+        // 1. Convert SDBL byte offsets to line:column (in SDBL coordinates WITHOUT corrections)
         let (sdbl_start_line, sdbl_start_col) =
             byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.start()));
         let (sdbl_end_line, sdbl_end_col) =
             byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.end()));
 
-        // 2. Use cached BSL literal starting position (computed in constructor)
+        // 2. Calculate quote escape corrections (PER-LINE!)
+        // Corrections only apply to characters on the SAME line in SDBL
+        let sdbl_start = u32::from(sdbl_range.start()) as usize;
+        let sdbl_end = u32::from(sdbl_range.end()) as usize;
+
+        // For start position: sum corrections on the same SDBL line, before start column
+        let start_correction: usize = self
+            .quote_corrections
+            .iter()
+            .filter(|(pos, _)| {
+                let (line, _col) = byte_offset_to_line_col(sdbl_text, *pos as u32);
+                line == sdbl_start_line && *pos < sdbl_start
+            })
+            .map(|(_, chars)| chars)
+            .sum();
+
+        // For end position: sum corrections on the same SDBL line, before end column
+        let end_correction: usize = self
+            .quote_corrections
+            .iter()
+            .filter(|(pos, _)| {
+                let (line, _col) = byte_offset_to_line_col(sdbl_text, *pos as u32);
+                line == sdbl_end_line && *pos < sdbl_end
+            })
+            .map(|(_, chars)| chars)
+            .sum();
+
+        // 3. Use cached BSL literal starting position (computed in constructor)
         let bsl_literal_line = self.bsl_literal_line;
         let bsl_literal_col = self.bsl_literal_col;
 
-        // 3. Map SDBL → BSL accounting for removed | prefix
+        // 4. Map SDBL → BSL accounting for removed | prefix AND quote corrections
         let bsl_start_line = bsl_literal_line + sdbl_start_line;
         let bsl_start_col = if sdbl_start_line == 0 {
             // First line of SDBL (same line as opening quote in BSL)
-            bsl_literal_col + sdbl_start_col + 1 // +1 for opening quote
+            bsl_literal_col + sdbl_start_col + 1 + (start_correction as u32) // +1 for opening quote + corrections
         } else {
             // Multiline: find where | is in BSL line
             // OPTIMIZATION: Use line index for O(1) line lookup instead of lines().nth() O(n)
             let bsl_line_text =
                 get_line_text(self.bsl_source, &self.line_starts, bsl_start_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
-                // Count whitespace after | that was kept in SDBL
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                // content_start_col points to first non-whitespace in BSL
-                // sdbl_start_col includes leading whitespace, so we need to subtract it
-                content_start_col + sdbl_start_col - (whitespace_count as u32)
+                // SDBL column is relative to content after |
+                // BSL column is: position of | + 1 (skip |) + SDBL column offset + quote corrections
+                (pipe_pos as u32) + 1 + sdbl_start_col + (start_correction as u32)
             } else {
-                sdbl_start_col // Fallback if no | found
+                sdbl_start_col + (start_correction as u32) // Fallback if no | found
             }
         };
 
         // Same mapping for end position
         let bsl_end_line = bsl_literal_line + sdbl_end_line;
         let bsl_end_col = if sdbl_end_line == 0 {
-            bsl_literal_col + sdbl_end_col + 1
+            bsl_literal_col + sdbl_end_col + 1 + (end_correction as u32)
         } else {
             // OPTIMIZATION: Use line index for O(1) line lookup instead of lines().nth() O(n)
             let bsl_line_text =
                 get_line_text(self.bsl_source, &self.line_starts, bsl_end_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
-                let after_pipe = &bsl_line_text[pipe_pos + 1..];
-                let whitespace_count =
-                    after_pipe.chars().take_while(|c| c.is_whitespace() && *c != '\n').count();
-                let content_start_col = (pipe_pos as u32) + 1 + (whitespace_count as u32);
-                content_start_col + sdbl_end_col - (whitespace_count as u32)
+                // SDBL column is relative to content after |
+                // BSL column is: position of | + 1 (skip |) + SDBL column offset + quote corrections
+                (pipe_pos as u32) + 1 + sdbl_end_col + (end_correction as u32)
             } else {
-                sdbl_end_col
+                sdbl_end_col + (end_correction as u32)
             }
         };
 
-        // 4. Convert back to TextRange (byte offsets in BSL)
+        // 5. Convert back to TextRange (byte offsets in BSL)
         // OPTIMIZATION: Use line index for O(col) conversion instead of O(total_text)
         let bsl_start_offset = line_col_to_byte_offset_fast(
             self.bsl_source,
@@ -328,6 +403,82 @@ pub fn has_string_concatenation(node: &SyntaxNode) -> bool {
     }
 
     false
+}
+
+/// Re-export from syntax crate for backward compatibility.
+pub use syntax::extract_sdbl_with_corrections;
+
+/// Extract SDBL query text from a LITERAL node without unescaping quotes.
+///
+/// This is specifically for SDBL to preserve exact positions for semantic highlighting.
+/// Unlike `extract_string_content()`, this does NOT unescape `""` → `"`.
+///
+/// Handles both simple strings and multiline strings:
+/// - Simple: `"text"` → one STRING token
+/// - Multiline: `"line1\n|line2"` → STRING_START + NEWLINE + STRING_PART + ... + STRING_TAIL
+pub fn extract_sdbl_query_text(node: &SyntaxNode) -> Option<String> {
+    let mut result = String::new();
+    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
+
+    // Check first token to determine string type
+    let first_token = tokens.next()?;
+
+    match first_token.kind() {
+        SyntaxKind::STRING => {
+            // Simple string: "text"
+            let text = first_token.text();
+            if text.len() < 2 {
+                return None;
+            }
+            // Remove outer quotes BUT keep doubled quotes as-is
+            let inner = &text[1..text.len() - 1];
+            result = inner.to_string();
+        }
+        SyntaxKind::STRING_START => {
+            // Multiline string: "line1\n|line2\n|line3"
+            // STRING_START contains: "line1
+            let text = first_token.text();
+            if text.is_empty() {
+                return None;
+            }
+            // Remove opening quote BUT keep doubled quotes as-is
+            result.push_str(&text[1..]);
+
+            // Process remaining tokens
+            for token in tokens {
+                match token.kind() {
+                    SyntaxKind::NEWLINE => {
+                        result.push('\n');
+                    }
+                    SyntaxKind::STRING_PART => {
+                        // STRING_PART contains: |line (with | prefix)
+                        let text = token.text();
+                        // Remove | prefix
+                        if let Some(content) = text.strip_prefix('|') {
+                            result.push_str(content);
+                        }
+                    }
+                    SyntaxKind::STRING_TAIL => {
+                        // STRING_TAIL contains: |line" (with | prefix and closing quote)
+                        let text = token.text();
+                        // Remove | prefix and closing quote
+                        if let Some(content) = text.strip_prefix('|') {
+                            if let Some(content) = content.strip_suffix('"') {
+                                result.push_str(content);
+                            }
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // DON'T unescape quotes - keep "" as-is for position mapping
+        }
+        _ => return None,
+    }
+
+    Some(result)
 }
 
 /// Extract string content from a LITERAL node containing STRING tokens.
