@@ -95,7 +95,7 @@ pub enum CompletionItemKind {
 /// # Returns
 ///
 /// List of completion items appropriate for the position.
-pub fn completions(db: &dyn RootDatabase, position: CompletionPosition) -> Vec<CompletionItem> {
+pub fn completions<DB: RootDatabase>(db: &DB, position: CompletionPosition) -> Vec<CompletionItem> {
     let _p = tracing::info_span!("completions", ?position).entered();
 
     // Try SDBL completion first (new Clean Architecture implementation)

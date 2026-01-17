@@ -3,7 +3,7 @@
 //! Provides completion for BSL code context:
 //! - Global platform functions (НачатьТранзакцию, Формат, Сообщить, etc.)
 //! - BSL keywords (Процедура, Функция, Если, etc.)
-//! - User-defined symbols (module functions, variables) - TODO
+//! - User-defined symbols (module functions, variables)
 
 use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
 use ide_db::RootDatabase;
@@ -15,8 +15,8 @@ use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 ///
 /// Returns Some(items) if this is a BSL completion context (not after DOT),
 /// otherwise returns None.
-pub(super) fn bsl_completions(
-    db: &dyn RootDatabase,
+pub(super) fn bsl_completions<DB: RootDatabase>(
+    db: &DB,
     position: CompletionPosition,
 ) -> Option<Vec<CompletionItem>> {
     let _span = tracing::info_span!("bsl_completions").entered();
@@ -113,6 +113,12 @@ pub(super) fn bsl_completions(
             completions.push(keyword_item);
         }
 
+        // Add user-defined symbols (module methods, variables)
+        completions.extend(complete_user_defined_symbols(db, position.file_id, prefix));
+
+        // Add MDO types and objects from metadata
+        completions.extend(complete_mdo_symbols(db, position.file_id, prefix));
+
         // Also add global functions that match the prefix
         completions.extend(complete_global_functions(prefix));
 
@@ -123,6 +129,243 @@ pub(super) fn bsl_completions(
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
     None
+}
+
+/// Helper: Get plural Russian form for MDO type.
+fn mdo_type_plural_ru(mdo_type: &bsl_metadata::MdoType) -> &'static str {
+    match mdo_type {
+        bsl_metadata::MdoType::Document => "Документы",
+        bsl_metadata::MdoType::Catalog => "Справочники",
+        bsl_metadata::MdoType::InformationRegister => "РегистрыСведений",
+        bsl_metadata::MdoType::AccumulationRegister => "РегистрыНакопления",
+        bsl_metadata::MdoType::AccountingRegister => "РегистрыБухгалтерии",
+        bsl_metadata::MdoType::CalculationRegister => "РегистрыРасчета",
+        bsl_metadata::MdoType::ChartOfCharacteristicTypes => "ПланыВидовХарактеристик",
+        bsl_metadata::MdoType::ChartOfAccounts => "ПланыСчетов",
+        bsl_metadata::MdoType::ChartOfCalculationTypes => "ПланыВидовРасчета",
+        bsl_metadata::MdoType::BusinessProcess => "БизнесПроцессы",
+        bsl_metadata::MdoType::Task => "Задачи",
+        bsl_metadata::MdoType::Enum => "Перечисления",
+        bsl_metadata::MdoType::ExchangePlan => "ПланыОбмена",
+        bsl_metadata::MdoType::ExternalDataSource => "ВнешниеИсточникиДанных",
+        bsl_metadata::MdoType::Cube => "Кубы",
+        bsl_metadata::MdoType::DimensionTable => "ТаблицыИзмерения",
+        bsl_metadata::MdoType::Constant => "Константы",
+        bsl_metadata::MdoType::DataProcessor => "Обработки",
+        bsl_metadata::MdoType::Report => "Отчеты",
+        bsl_metadata::MdoType::CommonModule => "ОбщиеМодули",
+    }
+}
+
+/// Helper: Get plural English form for MDO type.
+fn mdo_type_plural_en(mdo_type: &bsl_metadata::MdoType) -> &'static str {
+    match mdo_type {
+        bsl_metadata::MdoType::Document => "Documents",
+        bsl_metadata::MdoType::Catalog => "Catalogs",
+        bsl_metadata::MdoType::InformationRegister => "InformationRegisters",
+        bsl_metadata::MdoType::AccumulationRegister => "AccumulationRegisters",
+        bsl_metadata::MdoType::AccountingRegister => "AccountingRegisters",
+        bsl_metadata::MdoType::CalculationRegister => "CalculationRegisters",
+        bsl_metadata::MdoType::ChartOfCharacteristicTypes => "ChartsOfCharacteristicTypes",
+        bsl_metadata::MdoType::ChartOfAccounts => "ChartsOfAccounts",
+        bsl_metadata::MdoType::ChartOfCalculationTypes => "ChartsOfCalculationTypes",
+        bsl_metadata::MdoType::BusinessProcess => "BusinessProcesses",
+        bsl_metadata::MdoType::Task => "Tasks",
+        bsl_metadata::MdoType::Enum => "Enums",
+        bsl_metadata::MdoType::ExchangePlan => "ExchangePlans",
+        bsl_metadata::MdoType::ExternalDataSource => "ExternalDataSources",
+        bsl_metadata::MdoType::Cube => "Cubes",
+        bsl_metadata::MdoType::DimensionTable => "DimensionTables",
+        bsl_metadata::MdoType::Constant => "Constants",
+        bsl_metadata::MdoType::DataProcessor => "DataProcessors",
+        bsl_metadata::MdoType::Report => "Reports",
+        bsl_metadata::MdoType::CommonModule => "CommonModules",
+    }
+}
+
+/// Completes MDO (Metadata Objects) types and instances.
+///
+/// Returns completion items for:
+/// - MDO plural forms (Справочники, Документы, РегистрыСведений, etc.)
+/// - MDO instances from configuration (Валюты, ПКО, ОчередьЗапросовERP, etc.)
+///
+/// Symbols are filtered by prefix (case-insensitive).
+fn complete_mdo_symbols<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_mdo_symbols").entered();
+
+    let mut completions = Vec::new();
+    let prefix_lower = prefix.to_lowercase();
+
+    // 1. Add MDO plural forms (collection types)
+    for mdo_type in bsl_metadata::MdoType::all() {
+        let plural_ru = mdo_type_plural_ru(mdo_type);
+        let plural_en = mdo_type_plural_en(mdo_type);
+
+        // Check if matches prefix (case-insensitive)
+        if plural_ru.to_lowercase().starts_with(&prefix_lower)
+            || plural_en.to_lowercase().starts_with(&prefix_lower)
+        {
+            completions.push(CompletionItem {
+                label: plural_ru.to_string(),
+                detail: Some(format!("Коллекция метаданных ({})", mdo_type.russian_name())),
+                kind: CompletionItemKind::MdoType,
+                insert_text: plural_ru.to_string(),
+                documentation: Some(format!(
+                    "{} / {}\n\nКоллекция объектов метаданных типа {}.",
+                    plural_ru,
+                    plural_en,
+                    mdo_type.russian_name()
+                )),
+                sort_text: None,
+                filter_text: None,
+            });
+        }
+    }
+
+    // 2. Add MDO instances from configuration
+    if let Some(config) = db.get_configuration(file_id) {
+        for mdo in config.metadata_objects() {
+            let name = &mdo.name;
+
+            // Filter by prefix
+            if !name.to_lowercase().starts_with(&prefix_lower) {
+                continue;
+            }
+
+            let detail = mdo.mdo_type.russian_name().to_string();
+
+            completions.push(CompletionItem {
+                label: name.clone(),
+                detail: Some(detail),
+                kind: CompletionItemKind::MdoObject,
+                insert_text: name.clone(),
+                documentation: Some(format!(
+                    "{}\n\nОбъект метаданных типа {}.",
+                    name,
+                    mdo.mdo_type.russian_name()
+                )),
+                sort_text: None,
+                filter_text: None,
+            });
+        }
+    }
+
+    tracing::debug!(
+        count = completions.len(),
+        prefix = ?prefix,
+        "Completed MDO symbols"
+    );
+
+    completions
+}
+
+/// Completes user-defined symbols (module methods and variables).
+///
+/// Returns completion items for:
+/// - Module procedures and functions
+/// - Module variables
+///
+/// Symbols are filtered by prefix (case-insensitive).
+fn complete_user_defined_symbols<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_user_defined_symbols").entered();
+
+    let mut completions = Vec::new();
+    let prefix_lower = prefix.to_lowercase();
+
+    // Get module for this file via Semantics API
+    let sema = hir::Semantics::new(db);
+    let module = sema.module_from_file(file_id);
+
+    // Add procedures
+    for procedure in module.procedures() {
+        let name = procedure.name();
+        let name_str = name.as_str();
+
+        // Filter by prefix
+        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+
+        let is_export = procedure.is_export();
+        let detail =
+            if is_export { "Процедура Экспорт" } else { "Процедура" };
+
+        completions.push(CompletionItem {
+            label: name_str.to_string(),
+            detail: Some(detail.to_string()),
+            kind: CompletionItemKind::Function,
+            insert_text: format!("{}()$0", name_str),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+        });
+    }
+
+    // Add functions
+    for function in module.functions() {
+        let name = function.name();
+        let name_str = name.as_str();
+
+        // Filter by prefix
+        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+
+        let is_export = function.is_export();
+        let detail = if is_export { "Функция Экспорт" } else { "Функция" };
+
+        completions.push(CompletionItem {
+            label: name_str.to_string(),
+            detail: Some(detail.to_string()),
+            kind: CompletionItemKind::Function,
+            insert_text: format!("{}()$0", name_str),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+        });
+    }
+
+    // Add module variables
+    for variable in module.variables() {
+        let name = variable.name();
+        let name_str = name.as_str();
+
+        // Filter by prefix
+        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+
+        let is_export = variable.is_export();
+        let detail =
+            if is_export { "Переменная Экспорт" } else { "Переменная" };
+
+        completions.push(CompletionItem::simple(
+            name_str.to_string(),
+            CompletionItemKind::Field,
+            name_str.to_string(),
+        ));
+
+        // Set detail after creation
+        if let Some(item) = completions.last_mut() {
+            item.detail = Some(detail.to_string());
+        }
+    }
+
+    tracing::debug!(
+        count = completions.len(),
+        prefix = ?prefix,
+        "Completed user-defined symbols"
+    );
+
+    completions
 }
 
 /// Completes global platform functions with optional prefix filter.
@@ -530,5 +773,197 @@ mod tests {
 
         // Snippet should end with $0
         assert!(item.insert_text.ends_with("$0"));
+    }
+
+    #[test]
+    fn test_complete_user_defined_symbols() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Перем МояПеременная Экспорт;
+Перем ПриватнаяПеременная;
+
+Процедура МояПроцедура() Экспорт
+    // тело
+КонецПроцедуры
+
+Функция МояФункция()
+    Возврат 42;
+КонецФункции
+
+Процедура ДругаяПроцедура()
+    Моя
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Test completion with prefix "Моя"
+        let items = complete_user_defined_symbols(&db, file_id, "Моя");
+
+        println!("Found {} items for prefix 'Моя'", items.len());
+        for item in &items {
+            println!("  - {} ({:?})", item.label, item.kind);
+        }
+
+        // Should find 3 items: МояПеременная, МояПроцедура, МояФункция
+        assert_eq!(items.len(), 3, "Should find 3 items starting with 'Моя'");
+
+        // Check that МояПроцедура is present
+        let has_procedure = items.iter().any(|i| i.label == "МояПроцедура");
+        assert!(has_procedure, "Should contain МояПроцедура");
+
+        // Check that МояФункция is present
+        let has_function = items.iter().any(|i| i.label == "МояФункция");
+        assert!(has_function, "Should contain МояФункция");
+
+        // Check that МояПеременная is present
+        let has_variable = items.iter().any(|i| i.label == "МояПеременная");
+        assert!(has_variable, "Should contain МояПеременная");
+
+        // Check export flag for МояПроцедура
+        let procedure_item = items.iter().find(|i| i.label == "МояПроцедура").unwrap();
+        assert_eq!(
+            procedure_item.detail,
+            Some("Процедура Экспорт".to_string()),
+            "МояПроцедура should be marked as Export"
+        );
+
+        // Check non-export МояФункция
+        let function_item = items.iter().find(|i| i.label == "МояФункция").unwrap();
+        assert_eq!(
+            function_item.detail,
+            Some("Функция".to_string()),
+            "МояФункция should NOT be marked as Export"
+        );
+    }
+
+    #[test]
+    fn test_complete_user_defined_symbols_case_insensitive() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура ТестоваяПроцедура()
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Test with different cases
+        let items_lower = complete_user_defined_symbols(&db, file_id, "тест");
+        let items_upper = complete_user_defined_symbols(&db, file_id, "ТЕСТ");
+        let items_mixed = complete_user_defined_symbols(&db, file_id, "Тест");
+
+        // All should find the same procedure
+        assert_eq!(items_lower.len(), 1);
+        assert_eq!(items_upper.len(), 1);
+        assert_eq!(items_mixed.len(), 1);
+
+        assert_eq!(items_lower[0].label, "ТестоваяПроцедура");
+        assert_eq!(items_upper[0].label, "ТестоваяПроцедура");
+        assert_eq!(items_mixed[0].label, "ТестоваяПроцедура");
+    }
+
+    #[test]
+    fn test_complete_mdo_plural_forms() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест()
+    Справ
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Test completion with prefix "Справ"
+        let items = complete_mdo_symbols(&db, file_id, "Справ");
+
+        println!("Found {} MDO items for prefix 'Справ'", items.len());
+        for item in &items {
+            println!("  - {} ({:?})", item.label, item.kind);
+        }
+
+        // Should find Справочники
+        let has_catalogs = items.iter().any(|i| i.label == "Справочники");
+        assert!(has_catalogs, "Should contain Справочники plural form");
+
+        // Check kind
+        let catalogs_item = items.iter().find(|i| i.label == "Справочники").unwrap();
+        assert_eq!(catalogs_item.kind, CompletionItemKind::MdoType);
+    }
+
+    #[test]
+    fn test_complete_mdo_symbols_bilingual() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест()
+    Docu
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Test with English prefix "Docu"
+        let items = complete_mdo_symbols(&db, file_id, "Docu");
+
+        println!("Found {} MDO items for prefix 'Docu'", items.len());
+
+        // Should find Документы (Russian label, but matches English "Documents")
+        let has_documents = items.iter().any(|i| i.label == "Документы");
+        assert!(has_documents, "Should contain Документы (matched by English 'Documents')");
     }
 }
