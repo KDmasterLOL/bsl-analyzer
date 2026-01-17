@@ -519,8 +519,8 @@ impl<'a> LoweringContext<'a> {
 
         // 5. Add all tabular section attributes
         for attribute in tabular_section.attributes() {
-            // Parse type from type_str
-            let ty = self.parse_tabular_section_attribute_type(attribute.type_str());
+            // Use structured AttributeType directly (single source of truth)
+            let ty = SdblType::from_attribute_type(attribute.attr_type());
 
             fields.push(FieldDef::new_with_names(
                 attribute.name().to_string(),
@@ -540,62 +540,6 @@ impl<'a> LoweringContext<'a> {
     }
 
     /// Parse attribute type from type_str (simplified for MVP).
-    fn parse_tabular_section_attribute_type(&self, type_str: &str) -> SdblType {
-        // Simplified type parsing for common cases
-        // TODO: Enhance with full type parser later
-
-        let type_str = type_str.trim();
-
-        tracing::debug!(type_str = %type_str, "Parsing tabular section attribute type");
-
-        // Check for reference types in format "МдоТип.ИмяОбъекта"
-        // The type_str comes from Display format of AttributeType::Ref
-        if let Some(dot_pos) = type_str.find('.') {
-            let type_part = &type_str[..dot_pos];
-            let name_part = &type_str[dot_pos + 1..];
-
-            // Try to parse MDO type (expects singular form like "Задача", "Справочник")
-            if let Ok(mdo_type) = type_part.parse::<MdoType>() {
-                return SdblType::reference(mdo_type, name_part);
-            }
-        }
-
-        // Check for primitive and special types
-        match type_str.to_lowercase().as_str() {
-            s if s.starts_with("string") || s.starts_with("строка") => {
-                // Extract length if present: "String(100)" or "Строка(100)"
-                if let Some(start) = s.find('(') {
-                    if let Some(end) = s.find(')') {
-                        if let Ok(len) = s[start + 1..end].trim().parse::<u32>() {
-                            return SdblType::string_with_length(len);
-                        }
-                    }
-                }
-                SdblType::string()
-            }
-            s if s.starts_with("number") || s.starts_with("число") => {
-                // Extract precision/scale if present: "Number(10, 2)"
-                SdblType::number()
-            }
-            "boolean" | "булево" => SdblType::Boolean,
-            "date" | "дата" => SdblType::Date,
-            "datetime" | "датавремя" => SdblType::DateTime,
-            "уникальныйидентификатор" => SdblType::Uuid,
-            "хранилищезначения" => SdblType::ValueStorage,
-            "любаяссылка" => SdblType::AnyRef,
-            s if s.starts_with("определяемыйтип.") => {
-                // Extract defined type name after "ОпределяемыйТип."
-                let prefix_len = "ОпределяемыйТип.".len();
-                let name = type_str[prefix_len..].to_string();
-                SdblType::DefinedType { name, underlying_type: None }
-            }
-            _ => {
-                tracing::debug!(type_str = %type_str, "Unknown type, using SdblType::Unknown");
-                SdblType::Unknown
-            }
-        }
-    }
-
     /// Resolve AttributeType to SdblType, resolving DefinedType through metadata if needed.
     fn resolve_attribute_type(&self, attr_type: &bsl_metadata::AttributeType) -> SdblType {
         use bsl_metadata::AttributeType;

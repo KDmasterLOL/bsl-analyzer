@@ -181,12 +181,11 @@ fn parse_tabular_section(ts_xml: TabularSectionXml) -> Result<TabularSection> {
         .entered();
         let attr_uuid = parse_uuid(&attr_xml._uuid, "tabular section attribute")?;
         let attr_type = parse_type_xml(&attr_xml.properties.attr_type)?;
-        let type_str = format!("{}", attr_type);
 
         ts_attributes.push(TabularSectionAttribute::new(
             attr_uuid,
             attr_xml.properties.name,
-            type_str,
+            attr_type,
         ));
     }
 

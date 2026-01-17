@@ -103,6 +103,21 @@ pub enum SdblType {
         types: Vec<SdblType>,
     },
 
+    /// Tabular section reference (ссылка на табличную часть).
+    ///
+    /// Represents a reference to a tabular section of a metadata object.
+    /// When resolved through nested field access, provides access to tabular section attributes.
+    ///
+    /// Example: `Документ.Заказ.Товары` where Товары is a tabular section
+    TabularSectionRef {
+        /// Parent MDO type (Document, Catalog, etc.)
+        parent_mdo_type: bsl_metadata::MdoType,
+        /// Parent MDO name
+        parent_mdo_name: String,
+        /// Tabular section name
+        ts_name: String,
+    },
+
     /// Unknown type (inference failed or not attempted).
     #[default]
     Unknown,
@@ -299,6 +314,9 @@ impl std::fmt::Display for SdblType {
                     // Multiple types - show brief label
                     write!(f, "Составной тип:")
                 }
+            }
+            Self::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => {
+                write!(f, "{}.{}.{}", parent_mdo_type.russian_name(), parent_mdo_name, ts_name)
             }
             Self::Unknown => write!(f, "Неизвестно"),
             Self::Error => write!(f, "Ошибка"),

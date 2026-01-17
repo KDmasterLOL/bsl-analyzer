@@ -420,6 +420,35 @@ impl Scope {
                         }
                     }
                 }
+                SdblType::TabularSectionRef { parent_mdo_type, parent_mdo_name, ts_name } => {
+                    // Follow tabular section reference to its attributes
+                    tracing::info!(
+                        parent = %parent_mdo_name,
+                        ts_name = %ts_name,
+                        "following tabular section reference"
+                    );
+                    match self.resolve_tabular_section_fields(
+                        *parent_mdo_type,
+                        parent_mdo_name,
+                        ts_name,
+                    ) {
+                        Some(fields) => {
+                            tracing::info!(
+                                fields_count = fields.len(),
+                                "resolved tabular section fields"
+                            );
+                            current_fields = fields;
+                        }
+                        None => {
+                            tracing::warn!(
+                                parent = %parent_mdo_name,
+                                ts_name = %ts_name,
+                                "failed to resolve tabular section fields"
+                            );
+                            return SdblType::Unknown;
+                        }
+                    }
+                }
                 SdblType::AnyRef | SdblType::AnyObjectRef { .. } => {
                     // Cannot traverse AnyRef - unknown concrete type
                     tracing::debug!(
@@ -470,6 +499,53 @@ impl Scope {
                 attr.name_en.clone(),
                 SdblType::from_attribute_type(&attr.attr_type),
                 false, // is_standard
+            ));
+        }
+
+        // Add tabular sections as fields with TabularSectionRef type
+        for ts in &mdo_object.tabular_sections {
+            fields.push(FieldDef::new_with_names(
+                ts.name().to_string(),
+                ts.name_en().map(|s| s.to_string()),
+                SdblType::TabularSectionRef {
+                    parent_mdo_type: mdo_ref.mdo_type,
+                    parent_mdo_name: mdo_ref.name.clone(),
+                    ts_name: ts.name().to_string(),
+                },
+                false, // is_standard
+            ));
+        }
+
+        Some(fields)
+    }
+
+    /// Resolve fields from a tabular section.
+    ///
+    /// Returns attributes of the tabular section as fields.
+    /// This is the single source of truth for tabular section field resolution.
+    fn resolve_tabular_section_fields(
+        &self,
+        parent_mdo_type: bsl_metadata::MdoType,
+        parent_mdo_name: &str,
+        ts_name: &str,
+    ) -> Option<Vec<FieldDef>> {
+        let config = self.metadata.as_ref()?;
+
+        let mdo_object = config.find_metadata_object(parent_mdo_type, parent_mdo_name)?;
+
+        // Find tabular section by name (case-insensitive)
+        let ts = mdo_object.find_tabular_section(ts_name)?;
+
+        let mut fields = Vec::new();
+
+        // Add tabular section attributes as fields
+        // Single source of truth: use attr_type directly from metadata
+        for attr in ts.attributes() {
+            fields.push(FieldDef::new_with_names(
+                attr.name().to_string(),
+                attr.name_en().map(|s| s.to_string()),
+                SdblType::from_attribute_type(attr.attr_type()),
+                false, // not standard
             ));
         }
 

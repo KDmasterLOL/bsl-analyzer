@@ -7,6 +7,40 @@ fn single_query_hir(package: &SdblPackage) -> &SdblHir {
     &package.queries()[0].hir
 }
 
+/// Helper to create AttributeType from string for tests.
+/// Supports simplified type strings like "Boolean", "TaskRef.Задача", etc.
+fn parse_attr_type_for_test(type_str: &str) -> bsl_metadata::AttributeType {
+    use bsl_metadata::{AttributeType, MdoType};
+
+    match type_str {
+        "Boolean" => AttributeType::Boolean,
+        "String" => AttributeType::String { length: None },
+        "Number" => AttributeType::Number { precision: 10, scale: 2 },
+        "УникальныйИдентификатор" => AttributeType::Uuid,
+        s if s.starts_with("TaskRef.") => {
+            let name = &s["TaskRef.".len()..];
+            AttributeType::Ref { mdo_type: MdoType::Task, name: name.to_string() }
+        }
+        s if s.contains('.') => {
+            // Parse "Задача.ЗадачаИсполнителя" as Task.ЗадачаИсполнителя
+            let parts: Vec<_> = s.split('.').collect();
+            if parts.len() == 2 {
+                let mdo_type = match parts[0] {
+                    "Задача" => MdoType::Task,
+                    "Документ" => MdoType::Document,
+                    "Справочник" => MdoType::Catalog,
+                    "БизнесПроцесс" => MdoType::BusinessProcess,
+                    _ => MdoType::Document,
+                };
+                AttributeType::Ref { mdo_type, name: parts[1].to_string() }
+            } else {
+                AttributeType::String { length: None }
+            }
+        }
+        _ => AttributeType::String { length: None },
+    }
+}
+
 fn lower_query(sdbl: &str) -> SdblHir {
     let ast = parser::parse_sdbl(sdbl);
     let package = lower_sdbl_to_hir(&ast, None);
@@ -671,13 +705,25 @@ fn create_test_metadata_with_tabular_section() -> bsl_metadata::Configuration {
     ts.set_name_en(Some("CheckResults".to_string()));
 
     // Create attributes for tabular section
-    let mut attr1 = TabularSectionAttribute::new(uuid_nil, "ЗадачаИсполнителя", "TaskRef.Задача");
+    let mut attr1 = TabularSectionAttribute::new(
+        uuid_nil,
+        "ЗадачаИсполнителя",
+        parse_attr_type_for_test("TaskRef.Задача"),
+    );
     attr1.set_name_en(Some("ExecutorTask".to_string()));
 
-    let mut attr2 = TabularSectionAttribute::new(uuid_nil, "ЗадачаПроверяющего", "TaskRef.Задача");
+    let mut attr2 = TabularSectionAttribute::new(
+        uuid_nil,
+        "ЗадачаПроверяющего",
+        parse_attr_type_for_test("TaskRef.Задача"),
+    );
     attr2.set_name_en(Some("CheckerTask".to_string()));
 
-    let mut attr3 = TabularSectionAttribute::new(uuid_nil, "ОтправленоНаДоработку", "Boolean");
+    let mut attr3 = TabularSectionAttribute::new(
+        uuid_nil,
+        "ОтправленоНаДоработку",
+        parse_attr_type_for_test("Boolean"),
+    );
     attr3.set_name_en(Some("SentForRevision".to_string()));
 
     // Set attributes all at once
@@ -832,8 +878,11 @@ fn test_tabular_section_task_ref_type_parsing() {
     let mut ts = TabularSection::new(uuid_nil, "РезультатыПроверки");
 
     // Create attribute with Task reference type (Display format from AttributeType)
-    let mut attr =
-        TabularSectionAttribute::new(uuid_nil, "ЗадачаПроверяющего", "Задача.ЗадачаИсполнителя");
+    let mut attr = TabularSectionAttribute::new(
+        uuid_nil,
+        "ЗадачаПроверяющего",
+        parse_attr_type_for_test("Задача.ЗадачаИсполнителя"),
+    );
     attr.set_name_en(Some("CheckerTask".to_string()));
 
     ts.set_attributes(vec![attr]);
@@ -892,7 +941,7 @@ fn test_tabular_section_uuid_type_parsing() {
     let mut attr = TabularSectionAttribute::new(
         uuid_nil,
         "ИдентификаторИсполнителя",
-        "УникальныйИдентификатор",
+        parse_attr_type_for_test("УникальныйИдентификатор"),
     );
     attr.set_name_en(Some("ExecutorId".to_string()));
 

@@ -54,10 +54,8 @@ pub struct TabularSectionAttribute {
     #[serde(default)]
     name_en: Option<String>,
 
-    /// Type as string (simplified for now)
-    /// Example: "String(100)", "CatalogRef.Валюты"
-    #[serde(default)]
-    type_str: String,
+    /// Attribute type (structured)
+    attr_type: crate::AttributeType,
 }
 
 impl TabularSection {
@@ -126,8 +124,8 @@ impl TabularSection {
 
 impl TabularSectionAttribute {
     /// Create a new tabular section attribute.
-    pub fn new(uuid: Uuid, name: impl Into<String>, type_str: impl Into<String>) -> Self {
-        Self { uuid, name: name.into(), name_en: None, type_str: type_str.into() }
+    pub fn new(uuid: Uuid, name: impl Into<String>, attr_type: crate::AttributeType) -> Self {
+        Self { uuid, name: name.into(), name_en: None, attr_type }
     }
 
     /// Get the UUID of the attribute.
@@ -145,9 +143,9 @@ impl TabularSectionAttribute {
         self.name_en.as_deref()
     }
 
-    /// Get the type string of the attribute.
-    pub fn type_str(&self) -> &str {
-        &self.type_str
+    /// Get the attribute type.
+    pub fn attr_type(&self) -> &crate::AttributeType {
+        &self.attr_type
     }
 
     /// Set the English name.
@@ -179,13 +177,14 @@ mod tests {
         let mut ts = TabularSection::new(uuid, "Штрихкоды");
 
         let attr_uuid = Uuid::new_v4();
-        let attr = TabularSectionAttribute::new(attr_uuid, "Штрихкод", "String(13)");
+        let attr_type = crate::AttributeType::String { length: Some(13) };
+        let attr = TabularSectionAttribute::new(attr_uuid, "Штрихкод", attr_type.clone());
 
         ts.set_attributes(vec![attr]);
 
         assert_eq!(ts.attributes().len(), 1);
         assert_eq!(ts.attributes()[0].name(), "Штрихкод");
-        assert_eq!(ts.attributes()[0].type_str(), "String(13)");
+        assert_eq!(ts.attributes()[0].attr_type(), &attr_type);
     }
 
     #[test]
