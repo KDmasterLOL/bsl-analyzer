@@ -1678,3 +1678,180 @@ fn test_complex_join_with_tabular_and_nested_fields() {
     let second_field = &query_hir.select.fields[1];
     assert_eq!(second_field.alias.as_ref().map(|a| a.as_str()), Some("КлиентНаименование"));
 }
+
+#[test]
+fn test_nested_subquery_with_tabular_section_in_join() {
+    // Проверяем вложенный запрос с JOIN к табличной части внутри
+    let query = r#"ВЫБРАТЬ
+    Внешний.Товар КАК ТоварНаименование,
+    Внешний.Количество КАК Количество
+ИЗ (
+    ВЫБРАТЬ
+        ЧекККМТовары.Номенклатура.Наименование КАК Товар,
+        ЧекККМТовары.Количество КАК Количество,
+        ЧекККМ.Дата КАК ДатаДокумента
+    ИЗ Документ.ЧекККМ.Товары КАК ЧекККМТовары
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+        ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка
+            И ЧекККМ.Проведен = ИСТИНА
+            И НЕ ЧекККМ.ПометкаУдаления
+) КАК Внешний"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1, "Expected single outer query");
+
+    let outer_query = &package.queries()[0];
+
+    // Проверяем внешний SELECT
+    assert_eq!(outer_query.hir.select.fields.len(), 2, "Outer query should have 2 SELECT fields");
+
+    // Проверяем FROM: должна быть одна таблица (subquery)
+    assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
+
+    let subquery_table = &outer_query.hir.from[0];
+    assert_eq!(
+        subquery_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Внешний"),
+        "Subquery alias should be 'Внешний'"
+    );
+
+    // КРИТИЧНО: Проверяем, что subquery был спущен в HIR
+    assert_eq!(
+        subquery_table.subquery.len(),
+        1,
+        "Should have 1 subquery HIR (nested query with JOIN)"
+    );
+
+    // Проверяем содержимое вложенного запроса
+    let nested_hir = &subquery_table.subquery[0];
+
+    // Внутренний SELECT должен иметь 3 поля
+    assert_eq!(nested_hir.select.fields.len(), 3, "Nested query should have 3 SELECT fields");
+
+    // Проверяем алиасы полей вложенного SELECT
+    let nested_field_aliases: Vec<_> = nested_hir
+        .select
+        .fields
+        .iter()
+        .filter_map(|f| f.alias.as_ref().map(|a| a.as_str()))
+        .collect();
+
+    assert!(nested_field_aliases.contains(&"Товар"), "Nested SELECT should have field 'Товар'");
+    assert!(
+        nested_field_aliases.contains(&"Количество"),
+        "Nested SELECT should have field 'Количество'"
+    );
+    assert!(
+        nested_field_aliases.contains(&"ДатаДокумента"),
+        "Nested SELECT should have field 'ДатаДокумента'"
+    );
+
+    // Проверяем FROM вложенного запроса: табличная часть
+    assert_eq!(nested_hir.from.len(), 1, "Nested query should have 1 FROM table");
+
+    let nested_tabular_table = &nested_hir.from[0];
+    assert_eq!(
+        nested_tabular_table.full_name, "Документ.ЧекККМ.Товары",
+        "Nested FROM should be tabular section"
+    );
+    assert_eq!(
+        nested_tabular_table.alias.as_ref().map(|s| s.as_str()),
+        Some("ЧекККМТовары"),
+        "Nested tabular section alias mismatch"
+    );
+    assert_eq!(nested_tabular_table.parts.len(), 3, "Nested tabular section should have 3 parts");
+
+    // Проверяем JOIN вложенного запроса: основной документ
+    assert_eq!(nested_hir.joins.len(), 1, "Nested query should have 1 JOIN");
+
+    let nested_join = &nested_hir.joins[0];
+    assert_eq!(nested_join.join_type, crate::hir::JoinType::Inner, "Nested JOIN should be INNER");
+
+    let nested_document_table = &nested_join.table;
+    assert_eq!(
+        nested_document_table.full_name, "Документ.ЧекККМ",
+        "Nested JOIN should be with document"
+    );
+    assert_eq!(
+        nested_document_table.alias.as_ref().map(|s| s.as_str()),
+        Some("ЧекККМ"),
+        "Nested document alias mismatch"
+    );
+    assert_eq!(nested_document_table.parts.len(), 2, "Nested document should have 2 parts");
+}
+
+#[test]
+fn test_nested_subquery_with_tabular_and_union() {
+    // Комбинированный тест: вложенный запрос с UNION, где обе ветки используют табличные части
+    let query = r#"ВЫБРАТЬ
+    Данные.Товар,
+    Данные.Количество,
+    Данные.ТипОперации
+ИЗ (
+    ВЫБРАТЬ
+        Товары.Номенклатура.Наименование КАК Товар,
+        Товары.Количество КАК Количество,
+        "Продажа" КАК ТипОперации
+    ИЗ Документ.ЧекККМ.Товары КАК Товары
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК Чек
+        ПО Товары.Ссылка = Чек.Ссылка
+
+    ОБЪЕДИНИТЬ ВСЕ
+
+    ВЫБРАТЬ
+        ВозвратТовары.Номенклатура.Наименование,
+        -ВозвратТовары.Количество,
+        "Возврат"
+    ИЗ Документ.ЧекККМВозврат.Товары КАК ВозвратТовары
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМВозврат КАК Возврат
+        ПО ВозвратТовары.Ссылка = Возврат.Ссылка
+) КАК Данные"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1);
+
+    let outer_query = &package.queries()[0];
+    assert_eq!(outer_query.hir.from.len(), 1);
+
+    let subquery_table = &outer_query.hir.from[0];
+    assert_eq!(subquery_table.alias.as_ref().map(|s| s.as_str()), Some("Данные"));
+
+    // КРИТИЧНО: Должно быть 2 HIR (UNION)
+    assert_eq!(
+        subquery_table.subquery.len(),
+        2,
+        "Should have 2 subquery HIRs (UNION with 2 branches)"
+    );
+
+    // Проверяем первую ветку UNION (Продажа)
+    let first_union_hir = &subquery_table.subquery[0];
+    assert_eq!(first_union_hir.select.fields.len(), 3, "First UNION branch should have 3 fields");
+
+    // FROM: табличная часть ЧекККМ.Товары
+    assert_eq!(first_union_hir.from.len(), 1);
+    assert_eq!(first_union_hir.from[0].full_name, "Документ.ЧекККМ.Товары");
+    assert_eq!(first_union_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("Товары"));
+
+    // JOIN: документ ЧекККМ
+    assert_eq!(first_union_hir.joins.len(), 1);
+    assert_eq!(first_union_hir.joins[0].table.full_name, "Документ.ЧекККМ");
+    assert_eq!(first_union_hir.joins[0].table.alias.as_ref().map(|s| s.as_str()), Some("Чек"));
+
+    // Проверяем вторую ветку UNION (Возврат)
+    let second_union_hir = &subquery_table.subquery[1];
+    assert_eq!(second_union_hir.select.fields.len(), 3, "Second UNION branch should have 3 fields");
+
+    // FROM: табличная часть ЧекККМВозврат.Товары
+    assert_eq!(second_union_hir.from.len(), 1);
+    assert_eq!(second_union_hir.from[0].full_name, "Документ.ЧекККМВозврат.Товары");
+    assert_eq!(second_union_hir.from[0].alias.as_ref().map(|s| s.as_str()), Some("ВозвратТовары"));
+
+    // JOIN: документ ЧекККМВозврат
+    assert_eq!(second_union_hir.joins.len(), 1);
+    assert_eq!(second_union_hir.joins[0].table.full_name, "Документ.ЧекККМВозврат");
+    assert_eq!(second_union_hir.joins[0].table.alias.as_ref().map(|s| s.as_str()), Some("Возврат"));
+}
