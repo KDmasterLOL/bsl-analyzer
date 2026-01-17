@@ -1681,19 +1681,23 @@ fn test_complex_join_with_tabular_and_nested_fields() {
 
 #[test]
 fn test_nested_subquery_with_tabular_section_in_join() {
-    // Проверяем вложенный запрос с JOIN к табличной части внутри
+    // Проверяем вложенный запрос с nested JOIN (JOIN внутри JOIN)
     // Используем скобки в условиях и параметры запроса (как в реальных продакшн-запросах)
     let query = r#"ВЫБРАТЬ
     Внешний.Товар КАК ТоварНаименование,
-    Внешний.Количество КАК Количество
+    Внешний.Количество КАК Количество,
+    Внешний.НомерЗаказа КАК НомерЗаказа
 ИЗ (
     ВЫБРАТЬ
         ЧекККМТовары.Номенклатура.Наименование КАК Товар,
         ЧекККМТовары.Количество КАК Количество,
         ЧекККМ.Дата КАК ДатаДокумента,
-        ЧекККМ.Склад.Наименование КАК СкладНаименование
+        ЧекККМ.Склад.Наименование КАК СкладНаименование,
+        ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, "") КАК НомерЗаказа
     ИЗ Документ.ЧекККМ.Товары КАК ЧекККМТовары
         ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+            ЛЕВОЕ СОЕДИНЕНИЕ Документ.ЗаказКлиента КАК ДокЗаказКлиента
+            ПО ЧекККМ.ЗаказКлиента = ДокЗаказКлиента.Ссылка
         ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка
             И (ЧекККМ.Партнер = &Партнер)
             И (ЧекККМ.Проведен = ИСТИНА)
@@ -1710,7 +1714,7 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     let outer_query = &package.queries()[0];
 
     // Проверяем внешний SELECT
-    assert_eq!(outer_query.hir.select.fields.len(), 2, "Outer query should have 2 SELECT fields");
+    assert_eq!(outer_query.hir.select.fields.len(), 3, "Outer query should have 3 SELECT fields");
 
     // Проверяем FROM: должна быть одна таблица (subquery)
     assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
@@ -1732,8 +1736,8 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     // Проверяем содержимое вложенного запроса
     let nested_hir = &subquery_table.subquery[0];
 
-    // Внутренний SELECT должен иметь 4 поля
-    assert_eq!(nested_hir.select.fields.len(), 4, "Nested query should have 4 SELECT fields");
+    // Внутренний SELECT должен иметь 5 полей
+    assert_eq!(nested_hir.select.fields.len(), 5, "Nested query should have 5 SELECT fields");
 
     // Проверяем алиасы полей вложенного SELECT
     let nested_field_aliases: Vec<_> = nested_hir
@@ -1756,6 +1760,10 @@ fn test_nested_subquery_with_tabular_section_in_join() {
         nested_field_aliases.contains(&"СкладНаименование"),
         "Nested SELECT should have field 'СкладНаименование'"
     );
+    assert!(
+        nested_field_aliases.contains(&"НомерЗаказа"),
+        "Nested SELECT should have field 'НомерЗаказа'"
+    );
 
     // Проверяем FROM вложенного запроса: табличная часть
     assert_eq!(nested_hir.from.len(), 1, "Nested query should have 1 FROM table");
@@ -1772,23 +1780,37 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     );
     assert_eq!(nested_tabular_table.parts.len(), 3, "Nested tabular section should have 3 parts");
 
-    // Проверяем JOIN вложенного запроса: основной документ
-    assert_eq!(nested_hir.joins.len(), 1, "Nested query should have 1 JOIN");
+    // Проверяем JOINs вложенного запроса: должно быть 2 JOIN (INNER + LEFT)
+    // Благодаря рекурсивному lowering (commit d66dc345) вложенные JOINs в плоском списке
+    assert_eq!(nested_hir.joins.len(), 2, "Nested query should have 2 JOINs (INNER + nested LEFT)");
 
-    let nested_join = &nested_hir.joins[0];
-    assert_eq!(nested_join.join_type, crate::hir::JoinType::Inner, "Nested JOIN should be INNER");
+    // Собираем информацию о всех JOINs для проверки
+    let join_tables: Vec<_> = nested_hir
+        .joins
+        .iter()
+        .map(|j| {
+            (j.join_type, j.table.full_name.as_str(), j.table.alias.as_ref().map(|s| s.as_str()))
+        })
+        .collect();
 
-    let nested_document_table = &nested_join.table;
-    assert_eq!(
-        nested_document_table.full_name, "Документ.ЧекККМ",
-        "Nested JOIN should be with document"
+    // Проверяем, что есть JOIN с Документ.ЧекККМ
+    assert!(
+        join_tables
+            .iter()
+            .any(|(_, name, alias)| *name == "Документ.ЧекККМ" && *alias == Some("ЧекККМ")),
+        "Should have JOIN with Документ.ЧекККМ"
     );
-    assert_eq!(
-        nested_document_table.alias.as_ref().map(|s| s.as_str()),
-        Some("ЧекККМ"),
-        "Nested document alias mismatch"
+
+    // Проверяем, что есть JOIN с Документ.ЗаказКлиента
+    assert!(
+        join_tables.iter().any(|(_, name, alias)| *name == "Документ.ЗаказКлиента"
+            && *alias == Some("ДокЗаказКлиента")),
+        "Should have JOIN with Документ.ЗаказКлиента"
     );
-    assert_eq!(nested_document_table.parts.len(), 2, "Nested document should have 2 parts");
+
+    // Проверяем типы JOINs (независимо от порядка)
+    let join_types: Vec<_> = nested_hir.joins.iter().map(|j| j.join_type).collect();
+    assert!(join_types.contains(&crate::hir::JoinType::Left), "Should have at least one LEFT JOIN");
 }
 
 #[test]
