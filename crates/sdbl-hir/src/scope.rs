@@ -661,7 +661,7 @@ mod tests {
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            subquery: None,
+            subquery: Vec::new(),
             range: TextRange::empty(0.into()),
         }
     }

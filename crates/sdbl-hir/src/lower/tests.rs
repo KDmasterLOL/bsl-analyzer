@@ -1275,3 +1275,95 @@ fn test_incomplete_table_reference_in_from() {
     // Verify parser didn't break on incomplete table ref
     assert!(token_count > 20, "Should have significant tokens despite incomplete table ref");
 }
+
+#[test]
+fn test_parse_simple_nested_subquery() {
+    let query = r#"ВЫБРАТЬ
+    Т.Поле КАК Поле
+ИЗ (
+    ВЫБРАТЬ
+        Т1.Поле КАК Поле
+    ИЗ Таблица1 КАК Т1
+) КАК Т"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    // Verify simple nested subquery works
+    assert_eq!(package.queries().len(), 1);
+    let query_hir = &package.queries()[0].hir;
+    assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
+    assert_eq!(query_hir.select.fields.len(), 1, "Should have 1 SELECT field");
+
+    // Verify subquery was lowered to HIR
+    let subquery_table = &query_hir.from[0];
+    assert_eq!(subquery_table.subquery.len(), 1, "Should have 1 subquery HIR");
+}
+
+#[test]
+fn test_union_in_nested_subquery_lowers_all_queries() {
+    let query = r#"ВЫБРАТЬ
+    Внешний.Контрагент КАК Клиент
+ИЗ (
+    ВЫБРАТЬ
+        Т1.Контрагент КАК Контрагент
+    ИЗ Документ.ЧекККМ.Товары КАК Т1
+
+    ОБЪЕДИНИТЬ ВСЕ
+
+    ВЫБРАТЬ
+        Т2.Контрагент КАК Контрагент
+    ИЗ Документ.ЧекККМВозврат.Товары КАК Т2
+) КАК Внешний"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    // Должен быть один query в пакете
+    assert_eq!(package.queries().len(), 1, "Expected single outer query");
+
+    let outer_query = &package.queries()[0];
+
+    // В FROM должна быть одна таблица (nested subquery)
+    assert_eq!(outer_query.hir.from.len(), 1, "Expected single table in FROM");
+
+    let subquery_table = &outer_query.hir.from[0];
+    assert_eq!(
+        subquery_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Внешний"),
+        "Expected alias 'Внешний'"
+    );
+
+    // КРИТИЧНО: subquery должен содержать 2 HIR (main + UNION)
+    assert_eq!(
+        subquery_table.subquery.len(),
+        2,
+        "Subquery должен содержать 2 HIR: main query + UNION query"
+    );
+
+    // Проверяем первый query (main)
+    let first_query_hir = &subquery_table.subquery[0];
+    assert_eq!(first_query_hir.from.len(), 1, "First query should have 1 FROM table");
+    assert_eq!(
+        first_query_hir.from[0].full_name, "Документ.ЧекККМ.Товары",
+        "First query FROM table name mismatch"
+    );
+    assert_eq!(
+        first_query_hir.from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т1"),
+        "First query alias mismatch"
+    );
+
+    // Проверяем второй query (UNION)
+    let second_query_hir = &subquery_table.subquery[1];
+    assert_eq!(second_query_hir.from.len(), 1, "Second query should have 1 FROM table");
+    assert_eq!(
+        second_query_hir.from[0].full_name, "Документ.ЧекККМВозврат.Товары",
+        "Second query FROM table name mismatch"
+    );
+    assert_eq!(
+        second_query_hir.from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т2"),
+        "Second query alias mismatch"
+    );
+}

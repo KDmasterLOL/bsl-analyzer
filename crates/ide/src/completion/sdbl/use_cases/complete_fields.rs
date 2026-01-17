@@ -92,7 +92,7 @@ mod tests {
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
             range: TextRange::empty(0.into()),
-            subquery: None,
+            subquery: Vec::new(),
         };
 
         scope.add_table(table);
@@ -201,7 +201,7 @@ mod tests {
             is_virtual_table: false,
             virtual_table_params: vec![],
             range: TextRange::default(),
-            subquery: None,
+            subquery: Vec::new(),
         };
         scope.add_table(table);
 

@@ -158,7 +158,8 @@ pub struct TableRef {
 
     /// Subquery HIR (if this is a derived table from subquery in FROM clause).
     /// Example: FROM (SELECT ... FROM ...) AS Alias
-    pub subquery: Option<Box<SdblHir>>,
+    /// Can contain multiple HIRs for UNION queries.
+    pub subquery: Vec<Box<SdblHir>>,
 
     /// Source range.
     pub range: TextRange,
@@ -174,7 +175,7 @@ impl TableRef {
             metadata: None,
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            subquery: None,
+            subquery: Vec::new(),
             range,
         }
     }

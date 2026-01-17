@@ -53,9 +53,11 @@ impl<'a> LoweringContext<'a> {
             // NOTE: Diagnostic for "JOIN with subquery" is handled in join_clause.rs:114-117
             // to avoid duplication. We only check for JOINs INSIDE the subquery here.
 
-            // Process first query in subquery (usually only one query, UNION is rare in subqueries)
-            let inner_query = subquery.queries().next();
-            if let Some(query) = inner_query {
+            // Process ALL queries in subquery (main query + UNION queries)
+            let mut all_hirs = Vec::new();
+            let mut all_fields = Vec::new();
+
+            for query in subquery.queries() {
                 // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
                 // which calls lower_from_clause() -> lower_data_source_in_from()
                 // No need to check here to avoid duplication
@@ -72,38 +74,44 @@ impl<'a> LoweringContext<'a> {
                 // Collect diagnostics from nested query
                 self.diagnostics.extend(nested_hir.diagnostics.clone());
 
-                // Extract fields from SELECT for metadata
-                let fields: Vec<crate::hir::FieldDef> = nested_hir
-                    .select
-                    .fields
-                    .iter()
-                    .filter_map(|f| {
-                        f.alias_or_name()
-                            .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
-                    })
-                    .collect();
+                // Extract fields from SELECT for metadata (only from first query)
+                if all_fields.is_empty() {
+                    all_fields = nested_hir
+                        .select
+                        .fields
+                        .iter()
+                        .filter_map(|f| {
+                            f.alias_or_name()
+                                .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                        })
+                        .collect();
+                }
 
-                // Get alias
-                let alias_name = ds.alias().and_then(|a| a.name().map(|n| Name::from(n.as_str())));
-
-                // Create TableRef with subquery HIR
-                return TableRef {
-                    parts: Vec::new(),
-                    full_name: alias_name.as_ref().map(|a| a.to_string()).unwrap_or_default(),
-                    alias: alias_name.clone(),
-                    metadata: Some(crate::hir::ResolvedTable::TempTable {
-                        name: alias_name.map(|a| a.to_string()).unwrap_or_default(),
-                        fields,
-                    }),
-                    is_virtual_table: false,
-                    virtual_table_params: Vec::new(),
-                    subquery: Some(Box::new(nested_hir)),
-                    range: ds.syntax().text_range(),
-                };
+                all_hirs.push(Box::new(nested_hir));
             }
 
-            // Fallback if no queries in subquery (should not happen in valid SDBL)
-            return TableRef::missing(ds.syntax().text_range());
+            if all_hirs.is_empty() {
+                // Fallback if no queries in subquery (should not happen in valid SDBL)
+                return TableRef::missing(ds.syntax().text_range());
+            }
+
+            // Get alias
+            let alias_name = ds.alias().and_then(|a| a.name().map(|n| Name::from(n.as_str())));
+
+            // Create TableRef with all subquery HIRs
+            return TableRef {
+                parts: Vec::new(),
+                full_name: alias_name.as_ref().map(|a| a.to_string()).unwrap_or_default(),
+                alias: alias_name.clone(),
+                metadata: Some(crate::hir::ResolvedTable::TempTable {
+                    name: alias_name.map(|a| a.to_string()).unwrap_or_default(),
+                    fields: all_fields,
+                }),
+                is_virtual_table: false,
+                virtual_table_params: Vec::new(),
+                subquery: all_hirs,
+                range: ds.syntax().text_range(),
+            };
         }
 
         let Some(table_ref) = ds.table_ref() else {
@@ -195,7 +203,7 @@ impl<'a> LoweringContext<'a> {
             metadata: resolved,
             is_virtual_table: is_virtual,
             virtual_table_params: Vec::new(),
-            subquery: None,
+            subquery: Vec::new(),
             range: table_ref.syntax().text_range(),
         }
     }

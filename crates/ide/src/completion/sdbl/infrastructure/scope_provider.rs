@@ -211,7 +211,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     }),
                     is_virtual_table: false,
                     virtual_table_params: Vec::new(),
-                    subquery: None,
+                    subquery: Vec::new(),
                     range: syntax::TextRange::default(),
                 };
                 scope.add_table(temp_table_ref);
@@ -227,7 +227,8 @@ impl ScopeProvider for DbScopeProvider<'_> {
                 has_alias = table.alias.is_some(),
                 alias = ?table.alias.as_ref().map(|a| a.as_str()),
                 has_metadata = table.metadata.is_some(),
-                has_subquery = table.subquery.is_some(),
+                has_subquery = !table.subquery.is_empty(),
+                subquery_count = table.subquery.len(),
                 is_temp_table = matches!(&table.metadata, Some(sdbl_hir::ResolvedTable::TempTable { .. })),
                 metadata_fields_count = table.metadata.as_ref().map(|m| m.fields().len()).unwrap_or(0),
                 "DIAGNOSTIC: adding table from FROM clause"
@@ -236,29 +237,40 @@ impl ScopeProvider for DbScopeProvider<'_> {
             scope.add_table(table.clone());
 
             // If table is a subquery, add its FROM/JOIN tables to scope
-            if let Some(ref subquery_hir) = table.subquery {
+            // Process ALL queries in subquery (main + UNION queries)
+            if !table.subquery.is_empty() {
                 tracing::info!(
-                    subquery_from_count = subquery_hir.from.len(),
-                    subquery_joins_count = subquery_hir.joins.len(),
-                    "DIAGNOSTIC: adding tables from subquery"
+                    subquery_count = table.subquery.len(),
+                    "DIAGNOSTIC: processing subquery with {} queries",
+                    table.subquery.len()
                 );
 
-                for sub_table in &subquery_hir.from {
+                for (idx, subquery_hir) in table.subquery.iter().enumerate() {
                     tracing::info!(
-                        sub_table_name = %sub_table.full_name,
-                        sub_table_alias = ?sub_table.alias.as_ref().map(|a| a.as_str()),
-                        "DIAGNOSTIC: adding table from subquery FROM"
+                        subquery_idx = idx,
+                        subquery_from_count = subquery_hir.from.len(),
+                        subquery_joins_count = subquery_hir.joins.len(),
+                        "DIAGNOSTIC: adding tables from subquery #{}",
+                        idx
                     );
-                    scope.add_table(sub_table.clone());
-                }
 
-                for sub_join in &subquery_hir.joins {
-                    tracing::info!(
-                        sub_join_table_name = %sub_join.table.full_name,
-                        sub_join_table_alias = ?sub_join.table.alias.as_ref().map(|a| a.as_str()),
-                        "DIAGNOSTIC: adding table from subquery JOIN"
-                    );
-                    scope.add_table(sub_join.table.clone());
+                    for sub_table in &subquery_hir.from {
+                        tracing::info!(
+                            sub_table_name = %sub_table.full_name,
+                            sub_table_alias = ?sub_table.alias.as_ref().map(|a| a.as_str()),
+                            "DIAGNOSTIC: adding table from subquery FROM"
+                        );
+                        scope.add_table(sub_table.clone());
+                    }
+
+                    for sub_join in &subquery_hir.joins {
+                        tracing::info!(
+                            sub_join_table_name = %sub_join.table.full_name,
+                            sub_join_table_alias = ?sub_join.table.alias.as_ref().map(|a| a.as_str()),
+                            "DIAGNOSTIC: adding table from subquery JOIN"
+                        );
+                        scope.add_table(sub_join.table.clone());
+                    }
                 }
             }
         }
