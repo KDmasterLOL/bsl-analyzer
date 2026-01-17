@@ -97,6 +97,14 @@ impl ExprScopes {
     pub fn scope_entries(&self, scope: ScopeId) -> &[ScopeEntry] {
         &self.scopes[scope].entries
     }
+
+    /// Get all entries in a scope with their names and definitions.
+    ///
+    /// Returns a vector of (Name, ScopeDef) tuples for all symbols in the scope.
+    /// Does NOT walk up parent chain - only returns entries from this specific scope.
+    pub fn all_entries_in_scope(&self, scope: ScopeId) -> Vec<(&Name, ScopeDef)> {
+        self.scopes[scope].entries.iter().map(|entry| (&entry.name, entry.def)).collect()
+    }
 }
 
 impl Default for ExprScopes {

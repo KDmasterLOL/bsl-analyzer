@@ -4,10 +4,12 @@
 //! - Global platform functions (НачатьТранзакцию, Формат, Сообщить, etc.)
 //! - BSL keywords (Процедура, Функция, Если, etc.)
 //! - User-defined symbols (module functions, variables)
+//! - Local symbols (parameters, local variables)
 
 use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
-use ide_db::RootDatabase;
-use syntax::SyntaxKind;
+use either::Either;
+use ide_db::{hir_def::scope::ExprScopes, RootDatabase, TextRange};
+use syntax::{ast::AstNode, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -113,6 +115,9 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
             completions.push(keyword_item);
         }
 
+        // Add local symbols (parameters, local variables) FIRST - they shadow everything
+        completions.extend(complete_local_symbols(db, position.file_id, position.offset, prefix));
+
         // Add user-defined symbols (module methods, variables)
         completions.extend(complete_user_defined_symbols(db, position.file_id, prefix));
 
@@ -128,6 +133,105 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
 
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
+    None
+}
+
+/// Completes local symbols (parameters and local variables).
+///
+/// Returns completion items for symbols in the current method scope:
+/// - Parameters (procedure/function parameters)
+/// - Local variables (declared with Перем)
+///
+/// Symbols are filtered by prefix (case-insensitive).
+fn complete_local_symbols<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    offset: syntax::TextSize,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    let _span = tracing::debug_span!("complete_local_symbols").entered();
+
+    let mut completions = Vec::new();
+    let prefix_lower = prefix.to_lowercase();
+
+    // Parse file and find token at offset
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let token = match root.token_at_offset(offset).right_biased() {
+        Some(t) => t,
+        None => return completions,
+    };
+
+    // Find containing method
+    let (method_def, method_range) = match find_method_for_token(&token) {
+        Some((def, range)) => (def, range),
+        None => return completions, // Not inside a method
+    };
+
+    // Build ExprScopes for this method
+    let scopes = match method_def {
+        Either::Left(proc) => ExprScopes::from_procedure(&proc),
+        Either::Right(func) => ExprScopes::from_function(&func),
+    };
+
+    let root_scope = scopes.root_scope();
+
+    // Get all entries from root scope (parameters + local variables)
+    for (name, scope_def) in scopes.all_entries_in_scope(root_scope) {
+        let name_str = name.as_str();
+
+        // Filter by prefix
+        if !name_str.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+
+        let (kind, detail) = match scope_def {
+            ide_db::hir_def::scope::ScopeDef::Parameter => (CompletionItemKind::Field, "Параметр"),
+            ide_db::hir_def::scope::ScopeDef::LocalVariable => {
+                (CompletionItemKind::Field, "Локальная переменная")
+            }
+        };
+
+        completions.push(CompletionItem {
+            label: name_str.to_string(),
+            detail: Some(detail.to_string()),
+            kind,
+            insert_text: name_str.to_string(),
+            documentation: None,
+            sort_text: None,
+            filter_text: None,
+        });
+    }
+
+    tracing::debug!(
+        count = completions.len(),
+        prefix = ?prefix,
+        method_range = ?method_range,
+        "Completed local symbols"
+    );
+
+    completions
+}
+
+/// Find containing method for a token.
+///
+/// Returns the method AST node and its text range.
+fn find_method_for_token(
+    token: &syntax::SyntaxToken,
+) -> Option<(Either<syntax::ast::ProcedureDef, syntax::ast::FunctionDef>, TextRange)> {
+    use syntax::ast;
+
+    // Walk up ancestors to find containing method
+    for ancestor in token.parent()?.ancestors() {
+        if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
+            let method_range = proc.syntax().text_range();
+            return Some((Either::Left(proc), method_range));
+        }
+        if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
+            let method_range = func.syntax().text_range();
+            return Some((Either::Right(func), method_range));
+        }
+    }
     None
 }
 
@@ -965,5 +1069,152 @@ mod tests {
         // Should find Документы (Russian label, but matches English "Documents")
         let has_documents = items.iter().any(|i| i.label == "Документы");
         assert!(has_documents, "Should contain Документы (matched by English 'Documents')");
+    }
+
+    #[test]
+    fn test_complete_local_symbols() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест(Первый, Второй)
+    Перем МояПеременная;
+    Перем ДругаяПеременная;
+
+    // Курсор здесь - вводим "Мо"
+    Мо
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Find offset of "Мо" in source
+        let offset = source.find("Мо").expect("Should find 'Мо' in source");
+        let offset = syntax::TextSize::from(offset as u32);
+
+        // Test completion with prefix "Мо"
+        let items = complete_local_symbols(&db, file_id, offset, "Мо");
+
+        println!("Found {} local items for prefix 'Мо'", items.len());
+        for item in &items {
+            println!("  - {} ({:?}, {:?})", item.label, item.kind, item.detail);
+        }
+
+        // Should find МояПеременная
+        assert_eq!(items.len(), 1, "Should find 1 local variable starting with 'Мо'");
+        assert_eq!(items[0].label, "МояПеременная");
+        assert_eq!(items[0].detail, Some("Локальная переменная".to_string()));
+    }
+
+    #[test]
+    fn test_complete_local_symbols_parameters() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Функция Тест(ПервыйПараметр, ВторойПараметр)
+    Перем ЛокальнаяПеременная;
+
+    // Курсор здесь - вводим "Перв"
+    Перв
+КонецФункции
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Find offset of "Перв" in source
+        let offset = source.find("Перв").expect("Should find 'Перв' in source");
+        let offset = syntax::TextSize::from(offset as u32);
+
+        // Test completion with prefix "Перв"
+        let items = complete_local_symbols(&db, file_id, offset, "Перв");
+
+        println!("Found {} local items for prefix 'Перв'", items.len());
+        for item in &items {
+            println!("  - {} ({:?}, {:?})", item.label, item.kind, item.detail);
+        }
+
+        // Should find ПервыйПараметр
+        assert_eq!(items.len(), 1, "Should find 1 parameter starting with 'Перв'");
+        assert_eq!(items[0].label, "ПервыйПараметр");
+        assert_eq!(items[0].detail, Some("Параметр".to_string()));
+    }
+
+    #[test]
+    fn test_complete_local_symbols_all() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест(Параметр1, Параметр2)
+    Перем Переменная1;
+    Перем Переменная2;
+
+    // Empty prefix - should return all
+
+КонецПроцедуры
+"#;
+
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+
+        // Set up source root
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        // Set file text
+        db.set_file_text(file_id, source);
+
+        // Find offset after "// Empty prefix"
+        let offset = source.find("// Empty prefix").expect("Should find comment") + 20;
+        let offset = syntax::TextSize::from(offset as u32);
+
+        // Test completion with empty prefix
+        let items = complete_local_symbols(&db, file_id, offset, "");
+
+        println!("Found {} total local items", items.len());
+        for item in &items {
+            println!("  - {} ({:?}, {:?})", item.label, item.kind, item.detail);
+        }
+
+        // Should find all 4 symbols (2 parameters + 2 variables)
+        assert_eq!(items.len(), 4, "Should find all local symbols");
+
+        // Check we have both parameters
+        let param_count = items.iter().filter(|i| i.detail == Some("Параметр".to_string())).count();
+        assert_eq!(param_count, 2, "Should have 2 parameters");
+
+        // Check we have both variables
+        let var_count =
+            items.iter().filter(|i| i.detail == Some("Локальная переменная".to_string())).count();
+        assert_eq!(var_count, 2, "Should have 2 local variables");
     }
 }
