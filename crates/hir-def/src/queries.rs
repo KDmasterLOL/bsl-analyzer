@@ -39,6 +39,7 @@ pub use crate::conditional_tree::conditional_tree_query;
 pub use crate::item_tree::item_tree_query;
 pub use crate::region_tree::region_tree_query;
 pub use crate::symbol_tree::symbol_tree_query;
+pub use crate::workspace_index::workspace_index_query;
 
 /// Get module data (derived from ItemTree).
 ///

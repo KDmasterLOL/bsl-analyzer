@@ -579,6 +579,15 @@ impl DefDatabase for RootDatabaseImpl {
         hir_def::workspace_symbols_query(self, source_root_input)
     }
 
+    fn workspace_index(
+        &self,
+        source_root_id: base_db::SourceRootId,
+    ) -> Arc<hir_def::WorkspaceIndex> {
+        // Call Salsa-tracked workspace_index_query from hir-def
+        let source_root_input = self.source_root_input(source_root_id);
+        hir_def::workspace_index_query(self, source_root_input)
+    }
+
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir_def::ExternalRef>> {
         // Call Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
