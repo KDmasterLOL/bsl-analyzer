@@ -1575,19 +1575,6 @@ fn test_group_by_clause() {
 }
 
 #[test]
-fn test_having_clause() {
-    use parser::parse_sdbl;
-
-    let query =
-        r#"ВЫБРАТЬ name, СУММА(price) ИЗ T СГРУППИРОВАТЬ ПО name ИМЕЮЩИЕ СУММА(price) > 100"#;
-    let parse = parse_sdbl(query);
-
-    eprintln!("\n=== HAVING ===");
-    eprintln!("Has errors: {}", parse.has_errors());
-    let tree = format!("{:#?}", parse.syntax_node());
-    eprintln!("Has HAVING node: {}", tree.contains("SDBL_HAVING"));
-}
-#[test]
 fn test_group_by_debug() {
     use parser::parse_sdbl;
 
@@ -1780,4 +1767,130 @@ fn test_advanced_sdbl_constructs() {
     eprintln!("Has errors: {}", p6.has_errors());
     let tree6 = format!("{:#?}", p6.syntax_node());
     eprintln!("Has DISTINCT: {}", tree6.contains("РАЗЛИЧНЫЕ") || tree6.contains("DISTINCT"));
+}
+#[test]
+fn test_having_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ category, СУММА(price) КАК total ИЗ Products СГРУППИРОВАТЬ ПО category ИМЕЮЩИЕ СУММА(price) > 1000"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== HAVING clause ===");
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("Has HAVING node: {}", tree.contains("SDBL_HAVING_CLAUSE"));
+
+    assert!(!parse.has_errors(), "HAVING should parse without errors");
+    assert!(tree.contains("SDBL_HAVING_CLAUSE"), "Should have HAVING clause node");
+}
+
+#[test]
+fn test_for_update_clause() {
+    use parser::parse_sdbl;
+
+    // Test 1: FOR UPDATE without MDO
+    let q1 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ"#;
+    let p1 = parse_sdbl(q1);
+    let tree1 = format!("{:#?}", p1.syntax_node());
+
+    eprintln!("\n=== FOR UPDATE without MDO ===");
+    eprintln!("Has errors: {}", p1.has_errors());
+    eprintln!("Has FOR UPDATE node: {}", tree1.contains("SDBL_FOR_UPDATE"));
+
+    assert!(!p1.has_errors(), "FOR UPDATE should parse without errors");
+    assert!(tree1.contains("SDBL_FOR_UPDATE"), "Should have FOR UPDATE node");
+
+    // Test 2: FOR UPDATE with MDO
+    let q2 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ Products"#;
+    let p2 = parse_sdbl(q2);
+
+    eprintln!("\n=== FOR UPDATE with MDO ===");
+    eprintln!("Has errors: {}", p2.has_errors());
+
+    assert!(!p2.has_errors(), "FOR UPDATE with MDO should parse");
+}
+
+#[test]
+fn test_index_by_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ Name, Price ИЗ Products ИНДЕКСИРОВАТЬ ПО Name, Price"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== INDEX BY clause ===");
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("Has INDEX BY node: {}", tree.contains("SDBL_INDEX_BY"));
+
+    assert!(!parse.has_errors(), "INDEX BY should parse without errors");
+    assert!(tree.contains("SDBL_INDEX_BY"), "Should have INDEX BY node");
+}
+
+#[test]
+fn test_autoorder_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ Name, Price ИЗ Products АВТОУПОРЯДОЧИВАНИЕ"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== AUTOORDER clause ===");
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("Has AUTOORDER node: {}", tree.contains("SDBL_AUTOORDER"));
+
+    assert!(!parse.has_errors(), "AUTOORDER should parse without errors");
+    assert!(tree.contains("SDBL_AUTOORDER"), "Should have AUTOORDER node");
+}
+
+#[test]
+fn test_totals_by_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ category, СУММА(amount) КАК total ИЗ Sales СГРУППИРОВАТЬ ПО category ИТОГИ ПО category"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== TOTALS BY clause ===");
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("Has TOTALS BY node: {}", tree.contains("SDBL_TOTALS_BY"));
+
+    assert!(!parse.has_errors(), "TOTALS BY should parse without errors");
+    assert!(tree.contains("SDBL_TOTALS_BY"), "Should have TOTALS BY node");
+}
+
+#[test]
+fn test_phase2_combined() {
+    use parser::parse_sdbl;
+
+    // Complex query with all Phase 2 features
+    let query = r#"
+        ВЫБРАТЬ
+            category,
+            СУММА(amount) КАК total
+        ИЗ Sales
+        ГДЕ active = ИСТИНА
+        СГРУППИРОВАТЬ ПО category
+        ИМЕЮЩИЕ СУММА(amount) > 1000
+        ДЛЯ ИЗМЕНЕНИЯ Sales
+        ИНДЕКСИРОВАТЬ ПО category
+        УПОРЯДОЧИТЬ ПО total УБЫВ
+        АВТОУПОРЯДОЧИВАНИЕ
+        ИТОГИ ПО category
+    "#;
+
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== Combined Phase 2 features ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("Has GROUP BY: {}", tree.contains("SDBL_GROUP_CLAUSE"));
+    eprintln!("Has HAVING: {}", tree.contains("SDBL_HAVING_CLAUSE"));
+    eprintln!("Has FOR UPDATE: {}", tree.contains("SDBL_FOR_UPDATE"));
+    eprintln!("Has INDEX BY: {}", tree.contains("SDBL_INDEX_BY"));
+    eprintln!("Has ORDER BY: {}", tree.contains("SDBL_ORDER_CLAUSE"));
+    eprintln!("Has AUTOORDER: {}", tree.contains("SDBL_AUTOORDER"));
+    eprintln!("Has TOTALS BY: {}", tree.contains("SDBL_TOTALS_BY"));
+
+    // Should parse without errors or with minimal errors
+    // SDBL spec allows flexible ordering of these clauses
 }

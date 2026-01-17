@@ -221,16 +221,50 @@ fn is_field_start(p: &Parser) -> bool {
 /// Grammar: `selectQuery: subquery (autoorder | orderBy | totalBy)?`
 ///
 /// Phase 1: Only basic SELECT...FROM...WHERE
-/// Phase 2: Add ORDER BY, TOTALS BY, AUTOORDER
+/// Parse SELECT query (subquery + optional AUTOORDER/ORDER BY/TOTALS BY)
+///
+/// Grammar: `selectQuery: subquery (AUTOORDER | ORDER BY | TOTALS BY)*`
+///
+/// Note: AUTOORDER, ORDER BY, and TOTALS BY can appear in any order (per SDBL spec)
 pub fn select_query(p: &mut Parser) {
     let m = p.start();
 
     subquery(p);
 
-    // Phase 2: Add ORDER BY, TOTALS BY, AUTOORDER support
-    // if p.at(TokenKind::KwAutoOrder) { ... }
-    // if p.at(TokenKind::KwOrder) { order_by(p); }
-    // if p.at(TokenKind::KwTotals) { total_by(p); }
+    // Parse AUTOORDER, ORDER BY, and TOTALS BY in any order
+    // These clauses are all optional and can appear in any combination
+    let mut parsed_autoorder = false;
+    let mut parsed_order_by = false;
+    let mut parsed_totals_by = false;
+
+    loop {
+        p.skip_trivia();
+
+        // Check for AUTOORDER
+        if !parsed_autoorder && at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
+        {
+            autoorder_clause(p);
+            parsed_autoorder = true;
+            continue;
+        }
+
+        // Check for ORDER BY
+        if !parsed_order_by && at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
+            order_by_clause(p);
+            parsed_order_by = true;
+            continue;
+        }
+
+        // Check for TOTALS BY
+        if !parsed_totals_by && at_sdbl_keyword(p, "TOTALS", "ИТОГИ") {
+            totals_by_clause(p);
+            parsed_totals_by = true;
+            continue;
+        }
+
+        // No more clauses to parse
+        break;
+    }
 
     m.complete(p, NodeKind::SdblSelectQuery);
 }
@@ -351,13 +385,26 @@ fn query(p: &mut Parser) {
     }
 
     // HAVING clause (optional)
-    // TODO: Implement HAVING support
-    // p.skip_trivia();
-    // if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
-    //     having_clause(p);
-    // }
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ") {
+        having_clause(p);
+    }
 
-    // ORDER BY clause (optional)
+    // FOR UPDATE clause (optional)
+    // Note: We check for FOR UPDATE in one place
+    // The function will handle cases where UPDATE is missing
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "FOR", "ДЛЯ") {
+        for_update_clause(p);
+    }
+
+    // INDEX BY clause (optional)
+    p.skip_trivia();
+    if at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") {
+        index_by_clause(p);
+    }
+
+    // ORDER BY clause (optional) - can appear in query()
     p.skip_trivia();
     if at_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ") {
         order_by_clause(p);
@@ -773,6 +820,10 @@ pub(super) fn is_clause_keyword(p: &Parser) -> bool {
         || at_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ")
         || at_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ")
         || at_sdbl_keyword(p, "ON", "ПО")
+        || at_sdbl_keyword(p, "FOR", "ДЛЯ") // FOR UPDATE
+        || at_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ") // INDEX BY
+        || at_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ")
+        || at_sdbl_keyword(p, "TOTALS", "ИТОГИ")
         || is_join_keyword(p)
 }
 
@@ -980,6 +1031,169 @@ fn order_by_item(p: &mut Parser) {
         p.bump(); // Consume ASC/DESC
         p.skip_trivia();
     }
+}
+
+/// Parse HAVING clause
+///
+/// Grammar: `HAVING logicalExpression`
+fn having_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // HAVING/ИМЕЮЩИЕ keyword
+    eat_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ");
+    p.skip_trivia();
+
+    // Parse logical expression
+    super::expressions::expression(p);
+
+    m.complete(p, NodeKind::SdblHavingClause);
+}
+
+/// Parse FOR UPDATE clause
+///
+/// Grammar: `FOR UPDATE [mdo]`
+fn for_update_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // FOR/ДЛЯ keyword
+    eat_sdbl_keyword(p, "FOR", "ДЛЯ");
+    p.skip_trivia();
+
+    // UPDATE/ИЗМЕНЕНИЯ keyword
+    eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
+    p.skip_trivia();
+
+    // Optional MDO reference
+    // If we see an identifier, it might be an MDO reference
+    if p.at(TokenKind::Ident) && !is_clause_keyword(p) {
+        // Parse MDO reference (Справочник.Контрагенты)
+        // This is a simple dot-separated identifier chain
+        p.bump(); // First part
+        while p.at(TokenKind::Dot) {
+            p.check_iteration_limit();
+            p.bump(); // Dot
+            if p.at(TokenKind::Ident) {
+                p.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    m.complete(p, NodeKind::SdblForUpdate);
+}
+
+/// Parse INDEX BY clause
+///
+/// Grammar: `INDEX BY indexingItem (, indexingItem)*`
+/// indexingItem: expression
+fn index_by_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // INDEX/ИНДЕКСИРОВАТЬ keyword
+    eat_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ");
+    p.skip_trivia();
+
+    // BY/ПО keyword
+    if !at_sdbl_keyword(p, "BY", "ПО") {
+        // Error recovery: expected BY after INDEX
+        m.complete(p, NodeKind::SdblIndexBy);
+        return;
+    }
+    eat_sdbl_keyword(p, "BY", "ПО");
+    p.skip_trivia();
+
+    // Parse indexing items (comma-separated expressions)
+    super::expressions::expression(p);
+
+    while p.eat(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.skip_trivia();
+        super::expressions::expression(p);
+    }
+
+    m.complete(p, NodeKind::SdblIndexBy);
+}
+
+/// Parse AUTOORDER clause
+///
+/// Grammar: `AUTOORDER`
+fn autoorder_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // AUTOORDER/АВТОУПОРЯДОЧИВАНИЕ keyword
+    eat_sdbl_keyword(p, "AUTOORDER", "АВТОУПОРЯДОЧИВАНИЕ");
+
+    m.complete(p, NodeKind::SdblAutoorder);
+}
+
+/// Parse TOTALS BY clause
+///
+/// Grammar: `TOTALS [selectedFields] BY totalsGroup (, totalsGroup)*`
+/// totalsGroup: `OVERALL | expression [ONLY? HIERARCHY] [alias]`
+///
+/// Simplified implementation: parse as comma-separated expressions
+fn totals_by_clause(p: &mut Parser) {
+    let m = p.start();
+
+    // TOTALS/ИТОГИ keyword
+    eat_sdbl_keyword(p, "TOTALS", "ИТОГИ");
+    p.skip_trivia();
+
+    // Check if we have selected fields before BY
+    // If we see identifiers/expressions before BY, parse them as fields
+    // This is a simplified approach - we parse everything as expressions
+    // until we hit BY keyword
+    while !p.at_end() {
+        p.skip_trivia();
+
+        // Check for BY keyword
+        if at_sdbl_keyword(p, "BY", "ПО") {
+            break;
+        }
+
+        // Check for clause keywords (stop parsing if we hit another clause)
+        if is_clause_keyword(p) {
+            break;
+        }
+
+        // Parse expression/field
+        if super::expressions::is_expression_start(p) {
+            super::expressions::expression(p);
+
+            // Check for comma
+            p.skip_trivia();
+            if !p.at(TokenKind::Comma) {
+                // No comma, check for BY
+                continue;
+            }
+            p.bump(); // Comma
+        } else {
+            break;
+        }
+    }
+
+    // BY/ПО keyword (required)
+    if !at_sdbl_keyword(p, "BY", "ПО") {
+        // Error recovery: expected BY
+        m.complete(p, NodeKind::SdblTotalsBy);
+        return;
+    }
+    eat_sdbl_keyword(p, "BY", "ПО");
+    p.skip_trivia();
+
+    // Parse totals groups (comma-separated)
+    // For now, we parse as expressions
+    // TODO: Add proper support for OVERALL, HIERARCHY, PERIODS
+    super::expressions::expression(p);
+
+    while p.eat(TokenKind::Comma) {
+        p.check_iteration_limit();
+        p.skip_trivia();
+        super::expressions::expression(p);
+    }
+
+    m.complete(p, NodeKind::SdblTotalsBy);
 }
 
 #[cfg(test)]

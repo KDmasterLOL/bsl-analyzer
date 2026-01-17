@@ -265,9 +265,14 @@ pub enum SyntaxKind {
     SDBL_PARAMETER,     // Parameter reference (&Parameter)
 
     // Future (Phase 2+)
-    SDBL_JOIN_CLAUSE,  // JOIN clause
-    SDBL_GROUP_CLAUSE, // GROUP BY clause
-    SDBL_ORDER_CLAUSE, // ORDER BY clause
+    SDBL_JOIN_CLAUSE,   // JOIN clause
+    SDBL_GROUP_CLAUSE,  // GROUP BY clause
+    SDBL_ORDER_CLAUSE,  // ORDER BY clause
+    SDBL_HAVING_CLAUSE, // HAVING clause
+    SDBL_FOR_UPDATE,    // FOR UPDATE clause
+    SDBL_INDEX_BY,      // INDEX BY clause
+    SDBL_AUTOORDER,     // AUTOORDER clause
+    SDBL_TOTALS_BY,     // TOTALS BY clause
 
     // Error recovery
     SDBL_ERROR, // Error node for SDBL
