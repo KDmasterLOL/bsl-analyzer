@@ -1613,3 +1613,171 @@ fn test_order_by_debug() {
     eprintln!("\nSearching for: SDBL_ORDER_CLAUSE");
     eprintln!("Found: {}", tree.contains("SDBL_ORDER_CLAUSE"));
 }
+#[test]
+fn debug_complex_query() {
+    use parser::parse_sdbl;
+
+    let q5 = r#"
+        ВЫБРАТЬ
+            category,
+            name + ВЫБОР КОГДА discount > 0 ТОГДА " (скидка)" ИНАЧЕ "" КОНЕЦ КАК display_name
+        ИЗ Products
+    "#;
+    let p5 = parse_sdbl(q5);
+
+    eprintln!("\n{:#?}", p5.syntax_node());
+
+    let tree5 = format!("{:#?}", p5.syntax_node());
+    eprintln!("\nHas CASE: {}", tree5.contains("SDBL_CASE_EXPR"));
+    eprintln!("Has errors: {}", p5.has_errors());
+}
+#[test]
+fn demo_all_features_fixed() {
+    use parser::parse_sdbl;
+
+    // ✅ CASE expressions in arithmetic context
+    let q1 = r#"ВЫБРАТЬ name + ВЫБОР КОГДА size <> "" ТОГДА " (" + size + ")" ИНАЧЕ "" КОНЕЦ КАК display_name ИЗ T"#;
+    let p1 = parse_sdbl(q1);
+    assert!(!p1.has_errors(), "CASE expression should work");
+
+    // ✅ String concatenation
+    let q2 = r#"ВЫБРАТЬ "Префикс: " + field + " (суффикс)" КАК result ИЗ T"#;
+    let p2 = parse_sdbl(q2);
+    assert!(!p2.has_errors(), "String concatenation should work");
+
+    // ✅ GROUP BY with Russian keywords
+    let q3 = r#"ВЫБРАТЬ category, СУММА(amount) ИЗ T СГРУППИРОВАТЬ ПО category"#;
+    let p3 = parse_sdbl(q3);
+    let tree3 = format!("{:#?}", p3.syntax_node());
+    assert!(tree3.contains("SDBL_GROUP_CLAUSE"), "GROUP BY should work");
+
+    // ✅ ORDER BY with Russian keywords
+    let q4 = r#"ВЫБРАТЬ name, price ИЗ T УПОРЯДОЧИТЬ ПО price УБЫВ, name"#;
+    let p4 = parse_sdbl(q4);
+    let tree4 = format!("{:#?}", p4.syntax_node());
+    assert!(tree4.contains("SDBL_ORDER_CLAUSE"), "ORDER BY should work");
+
+    // ✅ Complex query with everything
+    let q5 = r#"ВЫБРАТЬ category, name + ВЫБОР КОГДА discount > 0 ТОГДА " (скидка)" ИНАЧЕ "" КОНЕЦ КАК display_name, СУММА(amount) КАК total ИЗ Products ГДЕ active = ИСТИНА СГРУППИРОВАТЬ ПО category, name, discount УПОРЯДОЧИТЬ ПО category, total УБЫВ"#;
+    let p5 = parse_sdbl(q5);
+    let tree5 = format!("{:#?}", p5.syntax_node());
+    assert!(!p5.has_errors(), "Complex query should parse without errors");
+    assert!(tree5.contains("SDBL_CASE_EXPR"), "Should have CASE");
+    assert!(tree5.contains("SDBL_GROUP_CLAUSE"), "Should have GROUP BY");
+    assert!(tree5.contains("SDBL_ORDER_CLAUSE"), "Should have ORDER BY");
+
+    eprintln!("\n✅ All new features work correctly!");
+    eprintln!("  ✅ CASE expressions");
+    eprintln!("  ✅ String concatenation");
+    eprintln!("  ✅ GROUP BY (СГРУППИРОВАТЬ ПО)");
+    eprintln!("  ✅ ORDER BY (УПОРЯДОЧИТЬ ПО)");
+}
+#[test]
+fn test_view_presentation() {
+    use parser::parse_sdbl;
+
+    // Test 1: Simple VIEW reference
+    let q1 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ"#;
+    let p1 = parse_sdbl(q1);
+
+    eprintln!("\n=== Test 1: Simple VIEW ===");
+    eprintln!("{:#?}", p1.syntax_node());
+    eprintln!("Has errors: {}", p1.has_errors());
+
+    // Test 2: VIEW with alias
+    let q2 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ КАК View1"#;
+    let p2 = parse_sdbl(q2);
+
+    eprintln!("\n=== Test 2: VIEW with alias ===");
+    eprintln!("Has errors: {}", p2.has_errors());
+
+    // Test 3: Multiple VIEWs with JOIN
+    let q3 = r#"ВЫБРАТЬ * ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ КАК V1 ЛЕВОЕ СОЕДИНЕНИЕ Документ.ПриходнаяНакладная.ПРЕДСТАВЛЕНИЕ КАК V2 ПО V1.Ссылка = V2.Контрагент"#;
+    let p3 = parse_sdbl(q3);
+
+    eprintln!("\n=== Test 3: Multiple VIEWs with JOIN ===");
+    eprintln!("Has errors: {}", p3.has_errors());
+}
+#[test]
+fn test_view_presentation_detailed() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ Name, Code ИЗ Справочник.Контрагенты.ПРЕДСТАВЛЕНИЕ КАК V1"#;
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("\nFull tree:\n{}", tree);
+
+    // Check if ПРЕДСТАВЛЕНИЕ is recognized as part of table reference
+    assert!(!parse.has_errors(), "Should parse VIEW without errors");
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should have FROM clause");
+    assert!(tree.contains("SDBL_TABLE_REF"), "Should have table reference");
+}
+#[test]
+fn test_virtual_table_debug() {
+    use parser::parse_sdbl;
+
+    let query =
+        r#"ВЫБРАТЬ * ИЗ РегистрНакопления.ТоварыНаСкладах.Обороты(&Начало, &Конец, День, )"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+    eprintln!("\nHas errors: {}", parse.has_errors());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("\nSearching for nodes...");
+    eprintln!("Has SDBL_VIRTUAL_TABLE: {}", tree.contains("SDBL_VIRTUAL_TABLE"));
+    eprintln!("Has SDBL_TABLE_REF: {}", tree.contains("SDBL_TABLE_REF"));
+    eprintln!("Has SDBL_FUNCTION_CALL: {}", tree.contains("SDBL_FUNCTION_CALL"));
+}
+#[test]
+fn test_advanced_sdbl_constructs() {
+    use parser::parse_sdbl;
+
+    // Test 1: AUTOORDER
+    let q1 = r#"ВЫБРАТЬ Name, Price ИЗ Products АВТОУПОРЯДОЧИВАНИЕ"#;
+    let p1 = parse_sdbl(q1);
+    eprintln!("\n=== AUTOORDER ===");
+    eprintln!("Has errors: {}", p1.has_errors());
+    let tree1 = format!("{:#?}", p1.syntax_node());
+    eprintln!(
+        "Has AUTOORDER node: {}",
+        tree1.contains("AUTOORDER") || tree1.contains("АВТОУПОРЯДОЧИВАНИЕ")
+    );
+
+    // Test 2: TOTALS BY
+    let q2 = r#"ВЫБРАТЬ Category, СУММА(Price) КАК Total ИЗ Products СГРУППИРОВАТЬ ПО Category ИТОГИ ПО Category"#;
+    let p2 = parse_sdbl(q2);
+    eprintln!("\n=== TOTALS BY ===");
+    eprintln!("Has errors: {}", p2.has_errors());
+    let tree2 = format!("{:#?}", p2.syntax_node());
+    eprintln!("Has TOTALS node: {}", tree2.contains("TOTALS") || tree2.contains("ИТОГИ"));
+
+    // Test 3: FOR UPDATE OF
+    let q3 = r#"ВЫБРАТЬ Name ИЗ Products ДЛЯ ИЗМЕНЕНИЯ Products"#;
+    let p3 = parse_sdbl(q3);
+    eprintln!("\n=== FOR UPDATE OF ===");
+    eprintln!("Has errors: {}", p3.has_errors());
+
+    // Test 4: INDEX BY
+    let q4 = r#"ВЫБРАТЬ Name ИЗ Products ИНДЕКСИРОВАТЬ ПО Name"#;
+    let p4 = parse_sdbl(q4);
+    eprintln!("\n=== INDEX BY ===");
+    eprintln!("Has errors: {}", p4.has_errors());
+
+    // Test 5: ALLOWED / РАЗРЕШЕННЫЕ
+    let q5 = r#"ВЫБРАТЬ РАЗРЕШЕННЫЕ Name ИЗ Products"#;
+    let p5 = parse_sdbl(q5);
+    eprintln!("\n=== ALLOWED ===");
+    eprintln!("Has errors: {}", p5.has_errors());
+    let tree5 = format!("{:#?}", p5.syntax_node());
+    eprintln!("Has ALLOWED: {}", tree5.contains("РАЗРЕШЕННЫЕ") || tree5.contains("ALLOWED"));
+
+    // Test 6: DISTINCT / РАЗЛИЧНЫЕ
+    let q6 = r#"ВЫБРАТЬ РАЗЛИЧНЫЕ Category ИЗ Products"#;
+    let p6 = parse_sdbl(q6);
+    eprintln!("\n=== DISTINCT ===");
+    eprintln!("Has errors: {}", p6.has_errors());
+    let tree6 = format!("{:#?}", p6.syntax_node());
+    eprintln!("Has DISTINCT: {}", tree6.contains("РАЗЛИЧНЫЕ") || tree6.contains("DISTINCT"));
+}
