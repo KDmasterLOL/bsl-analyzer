@@ -217,4 +217,136 @@ mod tests {
         assert!(field1.detail.is_some());
         assert!(field1.detail.as_ref().unwrap().contains("Строка"));
     }
+
+    #[test]
+    fn test_complete_fields_for_tabular_section_in_join() {
+        use bsl_metadata::MdoType;
+
+        // Создаём scope с табличной частью и основным документом
+        let mut scope = Scope::new();
+
+        // Поля табличной части: Документ.ЧекККМ.Товары
+        // (Ссылка - стандартное поле + атрибуты табличной части)
+        let tabular_fields = vec![
+            FieldDef::standard("Ссылка", "Ref", SdblType::reference(MdoType::Document, "ЧекККМ")),
+            FieldDef::new("Номенклатура", SdblType::reference(MdoType::Catalog, "Номенклатура")),
+            FieldDef::new("Количество", SdblType::number()),
+            FieldDef::new("Сумма", SdblType::number()),
+        ];
+
+        // Добавляем табличную часть как таблицу в scope
+        // Используем Metadata вариант (как это делает текущий код)
+        let tabular_table = TableRef {
+            parts: vec![
+                SmolStr::from("Документ"),
+                SmolStr::from("ЧекККМ"),
+                SmolStr::from("Товары"),
+            ],
+            full_name: "Документ.ЧекККМ.Товары".to_string(),
+            alias: Some(SmolStr::from("ЧекККМТовары")),
+            metadata: Some(ResolvedTable::Metadata {
+                mdo_type: MdoType::Document,
+                name: "Товары".to_string(), // Имя табличной части
+                fields: tabular_fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: Vec::new(),
+            range: TextRange::default(),
+            subquery: Vec::new(),
+        };
+
+        scope.add_table(tabular_table);
+
+        // Основной документ: Документ.ЧекККМ
+        let document_fields = vec![
+            FieldDef::standard("Ссылка", "Ref", SdblType::reference(MdoType::Document, "ЧекККМ")),
+            FieldDef::standard("Номер", "Number", SdblType::string()),
+            FieldDef::standard("Дата", "Date", SdblType::Date),
+            FieldDef::new("Партнер", SdblType::reference(MdoType::Catalog, "Контрагенты")),
+            FieldDef::new("Склад", SdblType::reference(MdoType::Catalog, "Склады")),
+            FieldDef::new("Проведен", SdblType::Boolean),
+        ];
+
+        let document_table = TableRef {
+            parts: vec![SmolStr::from("Документ"), SmolStr::from("ЧекККМ")],
+            full_name: "Документ.ЧекККМ".to_string(),
+            alias: Some(SmolStr::from("ЧекККМ")),
+            metadata: Some(ResolvedTable::Metadata {
+                mdo_type: MdoType::Document,
+                name: "ЧекККМ".to_string(),
+                fields: document_fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: Vec::new(),
+            range: TextRange::default(),
+            subquery: Vec::new(),
+        };
+
+        scope.add_table(document_table);
+
+        // Проверяем автодополнение для табличной части (ЧекККМТовары.↓)
+        let tabular_items = CompleteFieldsUseCase::execute(&scope, "ЧекККМТовары", "");
+        assert!(tabular_items.len() >= 4, "Tabular section should have at least 4 fields");
+
+        // Проверяем наличие полей табличной части
+        assert!(
+            tabular_items.iter().any(|i| i.label == "Ссылка"),
+            "Tabular section should have Ссылка field"
+        );
+        assert!(
+            tabular_items.iter().any(|i| i.label == "Номенклатура"),
+            "Tabular section should have Номенклатура field"
+        );
+        assert!(
+            tabular_items.iter().any(|i| i.label == "Количество"),
+            "Tabular section should have Количество field"
+        );
+        assert!(
+            tabular_items.iter().any(|i| i.label == "Сумма"),
+            "Tabular section should have Сумма field"
+        );
+
+        // Проверяем автодополнение для основного документа (ЧекККМ.↓)
+        let document_items = CompleteFieldsUseCase::execute(&scope, "ЧекККМ", "");
+        assert!(document_items.len() >= 6, "Document should have at least 6 fields");
+
+        // Проверяем наличие полей документа
+        assert!(
+            document_items.iter().any(|i| i.label == "Ссылка"),
+            "Document should have Ссылка field"
+        );
+        assert!(
+            document_items.iter().any(|i| i.label == "Номер"),
+            "Document should have Номер field"
+        );
+        assert!(
+            document_items.iter().any(|i| i.label == "Дата"),
+            "Document should have Дата field"
+        );
+        assert!(
+            document_items.iter().any(|i| i.label == "Партнер"),
+            "Document should have Партнер field"
+        );
+        assert!(
+            document_items.iter().any(|i| i.label == "Проведен"),
+            "Document should have Проведен field"
+        );
+
+        // Проверяем фильтрацию с префиксом (как в ON clause: ЧекККМТовары.Ном↓)
+        let filtered_items = CompleteFieldsUseCase::execute(&scope, "ЧекККМТовары", "Ном");
+        assert_eq!(filtered_items.len(), 1, "Should find only 'Номенклатура' with prefix 'Ном'");
+        assert_eq!(filtered_items[0].label, "Номенклатура");
+
+        // Проверяем, что типы корректно отображаются
+        let nomenclature_field = tabular_items.iter().find(|i| i.label == "Номенклатура").unwrap();
+        assert!(nomenclature_field.detail.is_some(), "Nomenclature field should have detail");
+
+        // Проверяем, что detail содержит информацию о типе
+        let detail = nomenclature_field.detail.as_ref().unwrap();
+        assert!(
+            detail.contains("Catalog") || detail.contains("Справочник") || detail.contains("Ref"),
+            "Nomenclature field should show reference type, got: {}",
+            detail
+        );
+    }
 }

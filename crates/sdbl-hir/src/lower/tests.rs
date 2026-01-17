@@ -1555,3 +1555,126 @@ fn test_union_at_multiple_levels() {
         Some("Т4")
     );
 }
+
+#[test]
+fn test_tabular_section_in_join_condition() {
+    // Проверяем, что табличная часть корректно обрабатывается в JOIN условиях
+    let query = r#"ВЫБРАТЬ
+    ЧекККМТовары.Номенклатура КАК Товар,
+    ЧекККМ.Номер КАК НомерДокумента,
+    ЧекККМ.Дата КАК ДатаДокумента
+ИЗ Документ.ЧекККМ.Товары КАК ЧекККМТовары
+    ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+    ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка
+        И ЧекККМ.Проведен = ИСТИНА
+        И НЕ ЧекККМ.ПометкаУдаления"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1, "Expected single query");
+
+    let query_hir = &package.queries()[0].hir;
+
+    // Проверяем FROM clause: должна быть табличная часть
+    assert_eq!(query_hir.from.len(), 1, "Should have 1 FROM table");
+
+    let tabular_table = &query_hir.from[0];
+    assert_eq!(
+        tabular_table.full_name, "Документ.ЧекККМ.Товары",
+        "FROM table should be tabular section"
+    );
+    assert_eq!(
+        tabular_table.alias.as_ref().map(|s| s.as_str()),
+        Some("ЧекККМТовары"),
+        "Tabular section alias mismatch"
+    );
+    assert_eq!(
+        tabular_table.parts.len(),
+        3,
+        "Tabular section should have 3 parts (Документ.ЧекККМ.Товары)"
+    );
+
+    // Проверяем JOIN clause: должен быть основной документ
+    assert_eq!(query_hir.joins.len(), 1, "Should have 1 JOIN");
+
+    let join = &query_hir.joins[0];
+    assert_eq!(join.join_type, crate::hir::JoinType::Inner, "Should be INNER JOIN");
+
+    let document_table = &join.table;
+    assert_eq!(document_table.full_name, "Документ.ЧекККМ", "JOIN table should be document");
+    assert_eq!(
+        document_table.alias.as_ref().map(|s| s.as_str()),
+        Some("ЧекККМ"),
+        "Document alias mismatch"
+    );
+    assert_eq!(document_table.parts.len(), 2, "Document should have 2 parts (Документ.ЧекККМ)");
+
+    // Проверяем SELECT clause: должны быть поля из обеих таблиц
+    assert_eq!(query_hir.select.fields.len(), 3, "Should have 3 SELECT fields");
+
+    // Проверяем алиасы полей
+    let field_aliases: Vec<_> = query_hir
+        .select
+        .fields
+        .iter()
+        .filter_map(|f| f.alias.as_ref().map(|a| a.as_str()))
+        .collect();
+
+    assert_eq!(field_aliases.len(), 3);
+    assert!(field_aliases.contains(&"Товар"));
+    assert!(field_aliases.contains(&"НомерДокумента"));
+    assert!(field_aliases.contains(&"ДатаДокумента"));
+}
+
+#[test]
+fn test_complex_join_with_tabular_and_nested_fields() {
+    // Проверяем сложный случай: JOIN с табличной частью и вложенными полями в условии
+    let query = r#"ВЫБРАТЬ
+    Товары.Номенклатура.Наименование КАК ТоварНаименование,
+    Чек.Партнер.Наименование КАК КлиентНаименование
+ИЗ Документ.ЧекККМ.Товары КАК Товары
+    ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК Чек
+    ПО Товары.Ссылка = Чек.Ссылка
+    ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Контрагенты КАК Контрагенты
+    ПО Чек.Партнер = Контрагенты.Ссылка"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1);
+
+    let query_hir = &package.queries()[0].hir;
+
+    // Проверяем FROM: табличная часть
+    assert_eq!(query_hir.from.len(), 1);
+    assert_eq!(query_hir.from[0].full_name, "Документ.ЧекККМ.Товары");
+
+    // Проверяем JOINs: парсер обрабатывает последовательные JOINs как плоский список
+    // Благодаря рекурсивному lowering (commit d66dc345) все JOINs должны быть в одном списке
+    assert!(
+        !query_hir.joins.is_empty(),
+        "Should have at least 1 JOIN, got {}",
+        query_hir.joins.len()
+    );
+
+    // Проверяем, что все необходимые таблицы присутствуют в JOINs
+    let join_tables: Vec<_> = query_hir.joins.iter().map(|j| j.table.full_name.as_str()).collect();
+
+    assert!(join_tables.contains(&"Документ.ЧекККМ"), "Should have Document.ЧекККМ in JOINs");
+    assert!(
+        join_tables.contains(&"Справочник.Контрагенты"),
+        "Should have Catalog.Контрагенты in JOINs"
+    );
+
+    // Проверяем SELECT: должны быть вложенные поля
+    assert_eq!(query_hir.select.fields.len(), 2);
+
+    // Проверяем первое поле: Товары.Номенклатура.Наименование
+    let first_field = &query_hir.select.fields[0];
+    assert_eq!(first_field.alias.as_ref().map(|a| a.as_str()), Some("ТоварНаименование"));
+
+    // Проверяем второе поле: Чек.Партнер.Наименование
+    let second_field = &query_hir.select.fields[1];
+    assert_eq!(second_field.alias.as_ref().map(|a| a.as_str()), Some("КлиентНаименование"));
+}
