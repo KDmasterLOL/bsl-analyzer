@@ -211,6 +211,7 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     }),
                     is_virtual_table: false,
                     virtual_table_params: Vec::new(),
+                    subquery: None,
                     range: syntax::TextRange::default(),
                 };
                 scope.add_table(temp_table_ref);
@@ -226,12 +227,40 @@ impl ScopeProvider for DbScopeProvider<'_> {
                 has_alias = table.alias.is_some(),
                 alias = ?table.alias.as_ref().map(|a| a.as_str()),
                 has_metadata = table.metadata.is_some(),
+                has_subquery = table.subquery.is_some(),
                 is_temp_table = matches!(&table.metadata, Some(sdbl_hir::ResolvedTable::TempTable { .. })),
                 metadata_fields_count = table.metadata.as_ref().map(|m| m.fields().len()).unwrap_or(0),
                 "DIAGNOSTIC: adding table from FROM clause"
             );
 
             scope.add_table(table.clone());
+
+            // If table is a subquery, add its FROM/JOIN tables to scope
+            if let Some(ref subquery_hir) = table.subquery {
+                tracing::info!(
+                    subquery_from_count = subquery_hir.from.len(),
+                    subquery_joins_count = subquery_hir.joins.len(),
+                    "DIAGNOSTIC: adding tables from subquery"
+                );
+
+                for sub_table in &subquery_hir.from {
+                    tracing::info!(
+                        sub_table_name = %sub_table.full_name,
+                        sub_table_alias = ?sub_table.alias.as_ref().map(|a| a.as_str()),
+                        "DIAGNOSTIC: adding table from subquery FROM"
+                    );
+                    scope.add_table(sub_table.clone());
+                }
+
+                for sub_join in &subquery_hir.joins {
+                    tracing::info!(
+                        sub_join_table_name = %sub_join.table.full_name,
+                        sub_join_table_alias = ?sub_join.table.alias.as_ref().map(|a| a.as_str()),
+                        "DIAGNOSTIC: adding table from subquery JOIN"
+                    );
+                    scope.add_table(sub_join.table.clone());
+                }
+            }
         }
 
         // Add tables from JOINs (now includes nested JOINs thanks to recursive lowering)

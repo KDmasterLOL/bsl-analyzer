@@ -174,6 +174,7 @@ mod tests {
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
             range: TextRange::empty(0.into()),
+            subquery: None,
         };
 
         scope.add_table(table);

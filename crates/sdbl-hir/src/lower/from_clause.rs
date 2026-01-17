@@ -28,57 +28,81 @@ impl<'a> LoweringContext<'a> {
             crate::source_map::TokenCategory::ClauseKeyword,
         );
 
-        from.data_sources().map(|ds| self.lower_data_source(&ds)).collect()
+        from.data_sources().map(|ds| self.lower_data_source_in_from(&ds)).collect()
+    }
+
+    /// Lower a data source in FROM clause (checks for subquery with JOINs).
+    fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
+        // Check if this FROM data source has JOINs after subquery
+        // Example: FROM (SELECT ...) AS Sub LEFT JOIN T2 ...
+        if let Some(subquery) = ds.subquery() {
+            if ds.join_clauses().next().is_some() {
+                self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
+                    range: subquery.syntax().text_range(),
+                });
+            }
+        }
+
+        self.lower_data_source(ds)
     }
 
     /// Lower a data source (table or subquery).
     pub(super) fn lower_data_source(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
         // Check for subquery
         if let Some(subquery) = ds.subquery() {
-            // Check if this data source has JOINs (context: subquery with JOINs)
-            // This matches Java: visitDataSources() checks !joinPart().isEmpty() && subquery() != null
-            if ds.join_clauses().next().is_some() {
-                self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
-                    range: subquery.syntax().text_range(),
-                });
-            }
+            // NOTE: Diagnostic for "JOIN with subquery" is handled in join_clause.rs:114-117
+            // to avoid duplication. We only check for JOINs INSIDE the subquery here.
 
-            // Recursively process nested queries in the subquery
-            for inner_query in subquery.queries() {
+            // Process first query in subquery (usually only one query, UNION is rare in subqueries)
+            let inner_query = subquery.queries().next();
+            if let Some(query) = inner_query {
+                // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
+                // which calls lower_from_clause() -> lower_data_source_in_from()
+                // No need to check here to avoid duplication
+
                 // Push scope frame for nested query (isolate FROM/JOIN tables)
                 self.scope.push_frame();
 
-                // Process FROM clause data sources and add to scope
-                if let Some(from_clause) = inner_query.from_clause() {
-                    for inner_ds in from_clause.data_sources() {
-                        let table = self.lower_data_source(&inner_ds);
-                        self.scope.add_table(table);
-                    }
-                }
+                // Lower the nested query to HIR
+                let nested_hir = self.lower_query(&query);
 
-                // Process JOIN clauses and add to scope
-                let joins = self.lower_joins(&inner_query);
-                for join in joins {
-                    self.scope.add_table(join.table);
-                }
-
-                // Process WHERE clause (needs scope with FROM/JOIN tables)
-                if let Some(where_clause) = inner_query.where_clause() {
-                    let _ = self.lower_where_clause(&where_clause);
-                }
-
-                // Process SELECT fields in nested subquery (for diagnostics and resolution)
-                if let Some(field_list) = inner_query.field_list() {
-                    for field in field_list.fields() {
-                        let _ = self.lower_selected_field(&field);
-                    }
-                }
-
-                // Pop scope frame (remove nested query tables from scope)
+                // Pop scope frame
                 self.scope.pop_frame();
+
+                // Collect diagnostics from nested query
+                self.diagnostics.extend(nested_hir.diagnostics.clone());
+
+                // Extract fields from SELECT for metadata
+                let fields: Vec<crate::hir::FieldDef> = nested_hir
+                    .select
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        f.alias_or_name()
+                            .map(|name| crate::hir::FieldDef::new(name.as_str(), f.ty.clone()))
+                    })
+                    .collect();
+
+                // Get alias
+                let alias_name = ds.alias().and_then(|a| a.name().map(|n| Name::from(n.as_str())));
+
+                // Create TableRef with subquery HIR
+                return TableRef {
+                    parts: Vec::new(),
+                    full_name: alias_name.as_ref().map(|a| a.to_string()).unwrap_or_default(),
+                    alias: alias_name.clone(),
+                    metadata: Some(crate::hir::ResolvedTable::TempTable {
+                        name: alias_name.map(|a| a.to_string()).unwrap_or_default(),
+                        fields,
+                    }),
+                    is_virtual_table: false,
+                    virtual_table_params: Vec::new(),
+                    subquery: Some(Box::new(nested_hir)),
+                    range: ds.syntax().text_range(),
+                };
             }
 
-            // TODO: Handle subqueries properly
+            // Fallback if no queries in subquery (should not happen in valid SDBL)
             return TableRef::missing(ds.syntax().text_range());
         }
 
@@ -171,6 +195,7 @@ impl<'a> LoweringContext<'a> {
             metadata: resolved,
             is_virtual_table: is_virtual,
             virtual_table_params: Vec::new(),
+            subquery: None,
             range: table_ref.syntax().text_range(),
         }
     }

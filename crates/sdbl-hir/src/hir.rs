@@ -156,6 +156,10 @@ pub struct TableRef {
     /// Virtual table parameters (if virtual).
     pub virtual_table_params: Vec<ExprHir>,
 
+    /// Subquery HIR (if this is a derived table from subquery in FROM clause).
+    /// Example: FROM (SELECT ... FROM ...) AS Alias
+    pub subquery: Option<Box<SdblHir>>,
+
     /// Source range.
     pub range: TextRange,
 }
@@ -170,6 +174,7 @@ impl TableRef {
             metadata: None,
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
+            subquery: None,
             range,
         }
     }
