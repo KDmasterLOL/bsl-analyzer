@@ -515,13 +515,20 @@ fn column_or_function(p: &mut Parser) {
         p.skip_trivia();
 
         // Parse arguments (comma-separated expressions)
+        // Support empty parameters like in BSL: Method(, , value)
         if !p.at(TokenKind::RParen) {
-            expression(p);
+            // First argument (might be empty)
+            if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                expression(p);
+            }
 
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                expression(p);
+                // Each subsequent argument (might be empty)
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    expression(p);
+                }
             }
         }
 

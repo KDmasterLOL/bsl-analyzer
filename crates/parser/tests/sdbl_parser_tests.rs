@@ -836,3 +836,66 @@ fn test_incomplete_on_condition_for_completion() {
     // We should still get 2 queries
     assert_eq!(queries.len(), 2, "Should parse both queries despite incomplete ON");
 }
+
+// Test for empty parameters in function calls (accumulator register methods)
+#[test]
+fn test_function_with_empty_parameters() {
+    // Test empty parameters in .Обороты() method call
+    let query = r#"ВЫБРАТЬ
+    Обороты.СуммаВыручкиОборот
+ИЗ
+    РегистрНакопления.ВыручкаИСебестоимостьПродаж.Обороты(
+        ,
+        ,
+        Авто,
+        ) КАК Обороты"#;
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors ===");
+        for error in parse.errors() {
+            println!("  - {:?}", error);
+        }
+    }
+
+    assert!(!parse.has_errors(), "Should parse function with empty parameters without errors");
+}
+
+#[test]
+fn test_function_with_mixed_empty_and_filled_parameters() {
+    // Test mix of empty and filled parameters like in the user's real query
+    let query = r#"ВЫБРАТЬ
+    Обороты.СуммаВыручкиОборот,
+    Обороты.КоличествоУчетноеОборот
+ИЗ
+    РегистрНакопления.ВыручкаИСебестоимость.Обороты(
+        ,
+        ,
+        Авто,
+        АналитикаУчетаПоПартнерам.Партнер В
+            (ВЫБРАТЬ
+                ИК.Партнер
+            ИЗ
+                ИнформацияКлиент КАК ИК)) КАК Обороты"#;
+
+    let parse = parse_sdbl(query);
+    assert!(
+        !parse.has_errors(),
+        "Should parse complex function call with empty parameters and subquery"
+    );
+}
+
+#[test]
+fn test_multiple_functions_with_empty_parameters() {
+    // Test multiple function calls with empty parameters in same query
+    let query = r#"ВЫБРАТЬ
+    Обороты1.Сумма,
+    Обороты2.Количество
+ИЗ
+    РегистрНакопления.Продажи.Обороты(, , Авто, ) КАК Обороты1,
+    РегистрНакопления.Закупки.Обороты(, , , Партнер = &Партнер) КАК Обороты2"#;
+
+    let parse = parse_sdbl(query);
+    assert!(!parse.has_errors(), "Should parse multiple functions with empty parameters");
+}
