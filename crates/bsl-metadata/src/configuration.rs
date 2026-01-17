@@ -256,9 +256,27 @@ impl Configuration {
     /// Returns true if object exists
     pub fn has_metadata_object(&self, mdo_type: MdoType, name: &str) -> bool {
         let name_lower = name.to_lowercase();
-        self.metadata_objects
-            .iter()
-            .any(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
+
+        // Check if this is a register type - registers are stored separately
+        let result = match mdo_type {
+            MdoType::InformationRegister
+            | MdoType::AccumulationRegister
+            | MdoType::AccountingRegister
+            | MdoType::CalculationRegister => {
+                // Search in registers
+                self.registers.iter().any(|reg| {
+                    reg.mdo_type() == mdo_type && reg.name().to_lowercase() == name_lower
+                })
+            }
+            _ => {
+                // Search in metadata_objects
+                self.metadata_objects
+                    .iter()
+                    .any(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower)
+            }
+        };
+
+        result
     }
 
     /// Find metadata object by type and name

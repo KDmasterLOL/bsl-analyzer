@@ -19,7 +19,7 @@ mod sdbl;
 
 use either::Either;
 use ide_db::{
-    hir_def::{resolver::Resolver, scope::ExprScopes, MethodId, ModuleId, Name},
+    hir_def::{scope::ExprScopes, MethodId, ModuleId, Name},
     RootDatabase, TextRange,
 };
 use rustc_hash::FxHashMap;
@@ -160,11 +160,10 @@ pub struct HlRange {
 /// - Cached ExprScopes for each method (avoids rebuilding for every token)
 /// - Database and file context
 /// - SDBL context (line index, tracked literals)
-pub(crate) struct HighlightContext<'db> {
-    pub(crate) db: &'db dyn RootDatabase,
-    pub(crate) module_id: ModuleId,
+pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
+    pub(crate) db: &'db DB,
     pub(crate) file_id: FileId,
-    /// Cache: method source_range -> (MethodId, ExprScopes, root ScopeId)
+    /// Cache: method source_range -> (MethodId, ExprScopes)
     pub(crate) expr_scopes_cache: FxHashMap<TextRange, (MethodId, Arc<ExprScopes>)>,
 
     /// Line index for SDBL position mapping optimization (built once for entire file)
@@ -176,11 +175,10 @@ pub(crate) struct HighlightContext<'db> {
     pub(crate) sdbl_literal_ranges: rustc_hash::FxHashSet<TextRange>,
 }
 
-impl<'db> HighlightContext<'db> {
-    fn new(db: &'db dyn RootDatabase, file_id: FileId, line_index: Option<Vec<usize>>) -> Self {
+impl<'db, DB: RootDatabase> HighlightContext<'db, DB> {
+    fn new(db: &'db DB, file_id: FileId, line_index: Option<Vec<usize>>) -> Self {
         Self {
             db,
-            module_id: ModuleId::new(file_id),
             file_id,
             expr_scopes_cache: FxHashMap::default(),
             line_index,
@@ -189,14 +187,6 @@ impl<'db> HighlightContext<'db> {
     }
 
     /// Get or build ExprScopes for a method.
-    ///
-    /// # Arguments
-    /// - `method_range` - source_range of the method definition
-    /// - `method_def` - AST node (ProcedureDef or FunctionDef)
-    /// - `method_id` - HIR MethodId
-    ///
-    /// # Returns
-    /// Cached or newly built ExprScopes for the method
     fn get_expr_scopes(
         &mut self,
         method_range: TextRange,
@@ -221,28 +211,22 @@ impl<'db> HighlightContext<'db> {
     }
 }
 
-/// Find the method (procedure or function) containing this token.
-///
-/// # Algorithm
-/// 1. Walk up AST ancestors from token's parent
-/// 2. Find first ProcedureDef or FunctionDef node
-/// 3. Match its source_range in ItemTree to get MethodId
-///
-/// # Returns
-/// Some((MethodId, Either<ProcedureDef, FunctionDef>)) if token is inside a method
-fn find_method_for_token(
-    db: &dyn RootDatabase,
+/// Find the method containing a token and get its MethodId and AST node.
+fn find_method_for_token<DB: RootDatabase>(
+    db: &DB,
     file_id: FileId,
     token: &SyntaxToken,
 ) -> Option<(MethodId, Either<ast::ProcedureDef, ast::FunctionDef>)> {
     // Walk up ancestors to find containing method
     for ancestor in token.parent()?.ancestors() {
         if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
-            let method_id = find_method_id_by_range(db, file_id, proc.syntax().text_range())?;
+            let method_range = proc.syntax().text_range();
+            let method_id = find_method_id_by_range(db, file_id, method_range)?;
             return Some((method_id, Either::Left(proc)));
         }
         if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
-            let method_id = find_method_id_by_range(db, file_id, func.syntax().text_range())?;
+            let method_range = func.syntax().text_range();
+            let method_id = find_method_id_by_range(db, file_id, method_range)?;
             return Some((method_id, Either::Right(func)));
         }
     }
@@ -250,17 +234,8 @@ fn find_method_for_token(
 }
 
 /// Find MethodId by matching source_range in ItemTree.
-///
-/// # Algorithm
-/// 1. Get ItemTree for file
-/// 2. Iterate through top_level_items
-/// 3. Match source_range of each Procedure/Function with given range
-/// 4. Return MethodId with matched index
-///
-/// # Note
-/// This is O(M) where M = number of methods, typically 10-50 per file.
-fn find_method_id_by_range(
-    db: &dyn RootDatabase,
+fn find_method_id_by_range<DB: RootDatabase>(
+    db: &DB,
     file_id: FileId,
     range: TextRange,
 ) -> Option<MethodId> {
@@ -287,18 +262,12 @@ fn find_method_id_by_range(
     None
 }
 
-/// Highlight a local symbol (parameter or local variable) using ExprScopes.
+/// Try to highlight a local symbol (parameter or local variable) using ExprScopes.
 ///
-/// # Algorithm
-/// 1. Find the containing method for this token
-/// 2. Get or build ExprScopes for that method (cached in context)
-/// 3. Resolve the name in the root scope
-/// 4. Map ScopeDef to HlTag (Parameter or Variable)
-///
-/// # Returns
-/// Some(HlRange) if the identifier resolves to a local symbol
-fn highlight_local_symbol(
-    ctx: &mut HighlightContext,
+/// This is called BEFORE Semantics API to handle local variables which aren't
+/// yet supported by Semantics::resolve_name_to_definition().
+fn try_highlight_local_symbol<DB: RootDatabase>(
+    ctx: &mut HighlightContext<DB>,
     token: &SyntaxToken,
     name: &Name,
 ) -> Option<HlRange> {
@@ -327,7 +296,7 @@ fn highlight_local_symbol(
 }
 
 /// Generates semantic highlighting for a file.
-pub fn highlight(db: &dyn RootDatabase, file_id: FileId) -> Vec<HlRange> {
+pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<HlRange> {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
@@ -344,7 +313,11 @@ pub fn highlight(db: &dyn RootDatabase, file_id: FileId) -> Vec<HlRange> {
 }
 
 /// Recursively traverse AST and collect highlights.
-fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut Vec<HlRange>) {
+fn traverse_node<DB: RootDatabase>(
+    ctx: &mut HighlightContext<DB>,
+    node: &SyntaxNode,
+    highlights: &mut Vec<HlRange>,
+) {
     // Highlight tokens based on their type
     for token in node.children_with_tokens() {
         match token {
@@ -383,249 +356,96 @@ fn traverse_node(ctx: &mut HighlightContext, node: &SyntaxNode, highlights: &mut
     }
 }
 
-/// Check if token is a metadata object name or method after MDO plural form.
+/// Highlight an IDENT token using semantic analysis (Definition API + ExprScopes).
 ///
-/// Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()
-///                          ^^^^^^^^^^^^^^^^^ <- highlight as Type (if in config)
-///                                           ^^^^^^^^^^^^^^^^ <- highlight as Function (method)
-///
-/// Handles two cases:
-/// 1. Metadata object name: `РегистрыСведений.ОчередьЗапросовERP` → Type
-/// 2. Manager method: `РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь` → Function
-fn highlight_metadata_object_name(ctx: &HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
-    let range = token.text_range();
-    let name_text = token.text();
-
-    tracing::debug!("highlight_metadata_object_name: ENTRY for token={}", name_text);
-
-    // Check if parent is FieldExpr (dot access)
-    let parent = token.parent()?;
-    tracing::debug!("highlight_metadata_object_name: parent exists for token={}", name_text);
-
-    let field_expr = ast::FieldExpr::cast(parent.clone())?;
-    tracing::debug!("highlight_metadata_object_name: parent is FieldExpr for token={}", name_text);
-
-    // Get base expression (first child of FieldExpr)
-    let base_node = field_expr.syntax().children().next()?;
-
-    // Try to extract leftmost identifier (MDO plural form or metadata object name)
-    let base_ident = extract_leftmost_ident(&base_node)?;
-    let base_text = base_ident.text();
-
-    // DEBUG: Log what we're processing
-    tracing::debug!(
-        "highlight_metadata_object_name: token={}, base={}, base_kind={:?}",
-        name_text,
-        base_text,
-        base_node.kind()
-    );
-
-    // Case 1: Base is MDO plural form (Документы, Справочники, etc.)
-    // Token is metadata object name: Документы.ПКО
-    if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(base_text) {
-        tracing::debug!(
-            "highlight_metadata_object_name: Case 1 - base={} is MDO plural form, type={:?}",
-            base_text,
-            mdo_type
-        );
-
-        // Get configuration (required for highlighting)
-        let config = ctx.db.get_configuration(ctx.file_id);
-
-        tracing::debug!(
-            "highlight_metadata_object_name: mdo_type={:?}, config_loaded={}, file_id={:?}",
-            mdo_type,
-            config.is_some(),
-            ctx.file_id
-        );
-
-        if let Some(config) = config {
-            // Check if this FIELD_EXPR is part of a method call
-            let is_method = is_method_call(&parent);
-
-            tracing::debug!(
-                "highlight_metadata_object_name: is_method={}, has_object={}",
-                is_method,
-                config.has_metadata_object(mdo_type, name_text)
-            );
-
-            // If this is a method call, highlight as Function (manager method)
-            if is_method {
-                return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
-            }
-
-            // Otherwise, highlight as Type if object exists in configuration
-            if config.has_metadata_object(mdo_type, name_text) {
-                return Some(HlRange { range, tag: HlTag::Type, modifiers: HlMod::new() });
-            }
-        }
-    }
-
-    // Case 2: Base is a FieldExpr with MDO plural form inside
-    // Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь
-    //          Token is "ДобавитьВОчередь", base is FIELD_EXPR for "ОчередьЗапросовERP"
-    if base_node.kind() == SyntaxKind::FIELD_EXPR {
-        // Check if grandparent base is MDO plural form
-        let grandbase_ident = extract_leftmost_ident(&base_node)?;
-
-        tracing::debug!(
-            "highlight_metadata_object_name: case2 token={}, grandbase={}",
-            name_text,
-            grandbase_ident.text()
-        );
-
-        if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(grandbase_ident.text()) {
-            // Get configuration (required for highlighting)
-            let config = ctx.db.get_configuration(ctx.file_id)?;
-
-            // Verify that the intermediate token (metadata object name) exists in configuration
-            // This ensures we only highlight methods for valid metadata objects
-            let intermediate_token = base_node
-                .children_with_tokens()
-                .filter_map(|it| it.into_token())
-                .find(|it| it.kind() == SyntaxKind::IDENT)?;
-
-            tracing::debug!(
-                "highlight_metadata_object_name: case2 intermediate={}, has_object={}",
-                intermediate_token.text(),
-                config.has_metadata_object(mdo_type, intermediate_token.text())
-            );
-
-            if config.has_metadata_object(mdo_type, intermediate_token.text()) {
-                // This is a valid manager method call, highlight as Function
-                return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
-            }
-        }
-    }
-
-    None
-}
-
-/// Extract leftmost IDENT token from a node (recursively descends into FIELD_EXPR/EXPR).
-fn extract_leftmost_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
-    match node.kind() {
-        SyntaxKind::IDENT => node.first_token(),
-        SyntaxKind::EXPR => {
-            // EXPR wrapping something, descend into it
-            let child = node.children().next().or_else(|| {
-                node.children_with_tokens()
-                    .filter_map(|it| it.into_token())
-                    .find(|it| it.kind() == SyntaxKind::IDENT)
-                    .map(|tok| tok.parent().unwrap())
-            })?;
-            extract_leftmost_ident(&child).or_else(|| {
-                node.children_with_tokens()
-                    .filter_map(|it| it.into_token())
-                    .find(|it| it.kind() == SyntaxKind::IDENT)
-            })
-        }
-        SyntaxKind::FIELD_EXPR => {
-            // FIELD_EXPR, get its first child (base)
-            let child = node.children().next()?;
-            extract_leftmost_ident(&child)
-        }
-        _ => None,
-    }
-}
-
-/// Check if the parent node represents a method call (next sibling is L_PAREN).
-///
-/// Checks if the FIELD_EXPR is followed by L_PAREN, indicating a method call.
-/// Also checks parent FIELD_EXPR in case of nested field access.
-fn is_method_call(node: &SyntaxNode) -> bool {
-    // Check direct next sibling
-    let mut next = node.next_sibling_or_token();
-    while let Some(next_token) = next {
-        if next_token.kind() == SyntaxKind::WHITESPACE {
-            next = next_token.next_sibling_or_token();
-            continue;
-        }
-
-        // First non-whitespace token should be L_PAREN for method call
-        if next_token.kind() == SyntaxKind::L_PAREN {
-            return true;
-        }
-        break;
-    }
-
-    // Check if parent is also a FIELD_EXPR and has L_PAREN
-    if let Some(parent) = node.parent() {
-        if parent.kind() == SyntaxKind::FIELD_EXPR {
-            return is_method_call(&parent);
-        }
-    }
-
-    false
-}
-
-/// Highlight an IDENT token using semantic analysis (name resolution).
-///
-/// This function resolves the identifier to determine if it's a:
-/// - Parameter reference (via ExprScopes)
-/// - Local variable reference (via ExprScopes)
-/// - Built-in platform function (НачатьТранзакцию, Формат, etc.)
-/// - Function/procedure call (via module-level Resolver)
-/// - Module variable reference (via module-level Resolver)
-///
-/// Resolution priority: Local -> Builtin -> Module
-fn highlight_ident_semantic(ctx: &mut HighlightContext, token: &SyntaxToken) -> Option<HlRange> {
+/// Resolution order (properly handles shadowing):
+/// 1. Builtin functions (always highlighted even if shadowed - important for user awareness)
+/// 2. Local symbols via ExprScopes (parameters and local variables - shadow everything else)
+/// 3. Other symbols via Semantics API (module methods, variables, MDO types, etc.)
+/// 4. MDO plural forms as fallback (if not resolved by Semantics API)
+fn highlight_ident_semantic<DB: RootDatabase>(
+    ctx: &mut HighlightContext<DB>,
+    token: &SyntaxToken,
+) -> Option<HlRange> {
     let range = token.text_range();
     let name_text = token.text();
     let name = Name::new(name_text);
 
-    // DEBUG: Log every IDENT token we process
     tracing::debug!("highlight_ident_semantic: processing token={}", name_text);
 
-    // Try local resolution FIRST (parameters and local variables)
-    if let Some(hl) = highlight_local_symbol(ctx, token, &name) {
+    // 1. Check if it's a built-in platform function (BEFORE local resolution)
+    // This ensures builtins are highlighted even if shadowed by local variables
+    if let Some(_func) = bsl_platform::PlatformDataInner::instance().get_global_function(name_text)
+    {
+        tracing::debug!("highlight_ident_semantic: {} is builtin function", name_text);
+        return Some(HlRange {
+            range,
+            tag: HlTag::BuiltinFunction,
+            modifiers: HlMod::new().with(HlMod::EXPORT),
+        });
+    }
+
+    // 2. Check local symbols (parameters and local variables) via ExprScopes
+    // These have higher priority than MDO types and module-level symbols
+    if let Some(hl) = try_highlight_local_symbol(ctx, token, &name) {
         tracing::debug!("highlight_ident_semantic: {} resolved as local symbol", name_text);
         return Some(hl);
     }
 
-    // Check if it's a built-in platform function (global context)
-    if let Some(_func) = bsl_platform::PlatformDataInner::instance().get_global_function(name_text)
-    {
-        return Some(HlRange {
-            range,
-            tag: HlTag::BuiltinFunction,
-            modifiers: HlMod::new().with(HlMod::EXPORT), // EXPORT modifier → "defaultLibrary" in LSP
-        });
+    // 3. Use unified Semantics API for other resolution
+    let sema = hir::Semantics::new(ctx.db);
+    if let Some(definition) = sema.resolve_name_to_definition(ctx.file_id, token) {
+        tracing::debug!("highlight_ident_semantic: {} resolved to {:?}", name_text, definition);
+
+        // Convert Definition to HlTag + HlModifiers
+        let tag = match &definition {
+            hir::Definition::Method(_) => HlTag::Function,
+            hir::Definition::Variable(_) => HlTag::Variable,
+            hir::Definition::Parameter { .. } => HlTag::Parameter,
+            hir::Definition::Local { .. } => HlTag::Variable,
+            hir::Definition::BuiltinFunction(_) => HlTag::BuiltinFunction,
+            hir::Definition::BuiltinMethod { .. } => HlTag::Function,
+            hir::Definition::MdoCollectionType(_) => HlTag::Class,
+            hir::Definition::MdoObject { .. } => HlTag::Type,
+            hir::Definition::MdoManagerModule { .. } => HlTag::Namespace,
+            hir::Definition::Module(_) => HlTag::Namespace,
+            hir::Definition::VirtualTableField { .. } => HlTag::Property,
+            hir::Definition::Unresolved => return None,
+        };
+
+        let mut modifiers = HlMod::new();
+
+        // Add EXPORT modifier for exported symbols
+        if definition.is_export(ctx.db) {
+            modifiers = modifiers.with(HlMod::EXPORT);
+        }
+
+        // Add EXPORT modifier for builtin functions
+        if matches!(
+            definition,
+            hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethod { .. }
+        ) {
+            modifiers = modifiers.with(HlMod::EXPORT);
+        }
+
+        return Some(HlRange { range, tag, modifiers });
     }
 
-    // Check if this is an MDO plural form BEFORE module-level resolution
-    // This ensures Документы/Справочники are highlighted as Class even if
-    // there's no local variable/method with that name
+    // 4. MDO plural forms as fallback (if Semantics API didn't resolve)
+    // This is AFTER local resolution, so local variables properly shadow MDO types
     if bsl_metadata::MdoType::is_plural_form(name_text) {
-        tracing::debug!("highlight_ident_semantic: {} is MDO plural form", name_text);
+        tracing::debug!("highlight_ident_semantic: {} is MDO plural form (fallback)", name_text);
         return Some(HlRange { range, tag: HlTag::Class, modifiers: HlMod::new() });
-    }
-
-    // Check if this is a metadata object name after MDO plural form
-    // Example: РегистрыСведений.ОчередьЗапросовERP
-    //                          ^^^^^^^^^^^^^^^^^ <- highlight as Type if exists in metadata
-    tracing::debug!("highlight_ident_semantic: checking if {} is metadata object name", name_text);
-    if let Some(hl) = highlight_metadata_object_name(ctx, token) {
-        tracing::debug!("highlight_ident_semantic: {} is metadata object name", name_text);
-        return Some(hl);
-    }
-    tracing::debug!("highlight_ident_semantic: {} is NOT metadata object name", name_text);
-
-    // Fall back to module-level resolution (methods and module variables)
-    let resolver = Resolver::for_module(ctx.module_id);
-
-    if let Some(_method_id) = resolver.resolve_module_method(ctx.db, &name) {
-        return Some(HlRange { range, tag: HlTag::Function, modifiers: HlMod::new() });
-    }
-
-    if let Some(_var_id) = resolver.resolve_module_variable(ctx.db, &name) {
-        return Some(HlRange { range, tag: HlTag::Variable, modifiers: HlMod::new() });
     }
 
     None
 }
 
 /// Highlight a single token based on its syntax kind.
-fn highlight_token(token: &SyntaxToken, ctx: &HighlightContext) -> Option<HlRange> {
+fn highlight_token<DB: RootDatabase>(
+    token: &SyntaxToken,
+    ctx: &HighlightContext<DB>,
+) -> Option<HlRange> {
     let kind = token.kind();
     let range = token.text_range();
 
@@ -1414,7 +1234,7 @@ mod tests {
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        // "Документы" should be highlighted as Class
+        // "Документы" should be highlighted as Class (MDO plural form)
         let documents_highlight = highlights.iter().find(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
@@ -1470,7 +1290,7 @@ EndFunction
         assert_eq!(
             documents_highlights.len(),
             3,
-            "Expected 3 'Документы' highlights (case-insensitive)"
+            "Expected 3 'Документы' highlights as Class (case-insensitive)"
         );
     }
 
@@ -1507,7 +1327,7 @@ EndFunction
                     && code[hl.range.start().into()..hl.range.end().into()] == *expected
             });
 
-            assert!(found, "{} should be highlighted as Class", expected);
+            assert!(found, "{} should be highlighted as Class (MDO plural)", expected);
         }
     }
 
@@ -1524,7 +1344,7 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         // All occurrences of "Документы" should be Variable, not Class
-        // because local variable shadows the global MDO class name
+        // because local variable shadows the global MDO plural form
         let documents_as_variable = highlights
             .iter()
             .filter(|hl| {
@@ -1537,7 +1357,7 @@ EndFunction
 
         assert!(
             documents_as_variable >= 3,
-            "Local variable 'Документы' should shadow global MDO class (expected >=3 Variable highlights)"
+            "Local variable 'Документы' should shadow global MDO plural (expected >=3 Variable highlights)"
         );
 
         // Ensure NO Class highlights for "Документы"
@@ -1592,5 +1412,48 @@ EndFunction
         });
 
         assert!(plural_highlight, "Документы should still be highlighted as Class");
+    }
+
+    #[test]
+    #[ignore = "Requires workspace scope and manager module infrastructure"]
+    fn test_highlight_manager_module_method() {
+        // This test verifies that manager module methods are properly highlighted
+        // Example: РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь()
+        //          ^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^
+        //          Class            Type              Function (manager method)
+        //
+        // NOTE: This currently requires:
+        // 1. Workspace scope in Semantics::resolve_name_to_definition()
+        // 2. Manager module file registered in workspace
+        // 3. resolve_three_level() implementation in resolver
+        //
+        // When these are implemented, this test should pass and demonstrate that
+        // the Definition API correctly resolves manager module methods.
+        let code = r#"
+Процедура Тест()
+    РегистрыСведений.ОчередьЗапросовERP.ДобавитьВОчередь();
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // РегистрыСведений → Class ✅
+        let plural_highlight = highlights.iter().any(|hl| {
+            hl.tag == HlTag::Class
+                && code[hl.range.start().into()..hl.range.end().into()] == *"РегистрыСведений"
+        });
+        assert!(plural_highlight, "РегистрыСведений should be highlighted as Class");
+
+        // ОчередьЗапросовERP → Type (would require configuration)
+        // ДобавитьВОчередь → Function (manager method - requires workspace scope)
+        let method_highlight = highlights.iter().any(|hl| {
+            hl.tag == HlTag::Function
+                && code[hl.range.start().into()..hl.range.end().into()] == *"ДобавитьВОчередь"
+        });
+        assert!(
+            method_highlight,
+            "ДобавитьВОчередь should be highlighted as Function (manager method)"
+        );
     }
 }

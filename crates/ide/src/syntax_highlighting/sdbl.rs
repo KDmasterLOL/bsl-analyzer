@@ -24,7 +24,7 @@
 //! | Modifier | Keyword | DISTINCT, TOP, UNION |
 //! | AggregateFunction | Function | SUM, AVG, COUNT, MIN, MAX |
 
-use ide_db::hir_def;
+use ide_db::{hir_def, RootDatabase};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 use crate::syntax_highlighting::{HighlightContext, HlMod, HlRange, HlTag};
@@ -33,8 +33,8 @@ use crate::syntax_highlighting::{HighlightContext, HlMod, HlRange, HlTag};
 ///
 /// Returns `Some(Vec<HlRange>)` if the literal contains SDBL and highlighting succeeded,
 /// `None` otherwise (not SDBL, or concatenated string, or other issues).
-pub(super) fn highlight_sdbl_in_literal(
-    ctx: &HighlightContext,
+pub(super) fn highlight_sdbl_in_literal<DB: RootDatabase>(
+    ctx: &HighlightContext<DB>,
     literal_node: &SyntaxNode,
 ) -> Option<Vec<HlRange>> {
     // 1. Extract string content

@@ -2,8 +2,10 @@
 //!
 //! This module implements "Go to Definition" functionality, which allows
 //! navigating from a symbol usage to its definition.
+//!
+//! Uses the unified Definition enum for resolution.
 
-use hir::{Method, Semantics, Symbol, Variable};
+use hir::{Definition, Semantics};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -15,8 +17,10 @@ use crate::{NavigationTarget, SymbolKind};
 /// Returns a navigation target pointing to the symbol's definition,
 /// or None if no symbol is found at the position.
 ///
-/// For Iteration 8, this only works within the same file.
-/// Cross-file navigation requires module graph (Iteration 9.5+).
+/// Supports:
+/// - Same-file navigation (methods, variables, parameters)
+/// - Cross-file navigation (qualified names like Module.Method)
+/// - Builtin functions and MDO types (no navigation, returns None)
 pub fn goto_definition<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
@@ -25,48 +29,157 @@ pub fn goto_definition<DB: RootDatabase>(
     let _span =
         tracing::info_span!("goto_definition", ?file_id, offset = u32::from(offset)).entered();
 
-    let sema = Semantics::new(db);
+    // Parse the file and find the token at cursor position
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let token = root.token_at_offset(offset).right_biased()?;
 
-    // Get the symbol at the cursor position
-    let symbol = {
-        let _span = tracing::debug_span!("symbol_at_position").entered();
-        sema.symbol_at_position(file_id, offset)?
+    // Check if it's an identifier
+    if token.kind() != syntax::SyntaxKind::IDENT {
+        return None;
+    }
+
+    // Use unified Semantics API for resolution
+    let sema = Semantics::new(db);
+    let definition = {
+        let _span = tracing::debug_span!("resolve_name_to_definition").entered();
+        sema.resolve_name_to_definition(file_id, &token)?
     };
 
-    // Convert the symbol to a navigation target
-    match symbol {
-        Symbol::Method(method) => method_to_navigation_target(method),
-        Symbol::Variable(variable) => variable_to_navigation_target(variable),
-        Symbol::Parameter(_name) => {
-            // Parameters don't have a separate definition location in Iteration 8
-            // They're defined inline in the parameter list
+    // Convert Definition to NavigationTarget
+    definition_to_navigation_target(db, &definition)
+}
+
+/// Convert a Definition to a NavigationTarget.
+///
+/// This is the unified conversion function for all definition types.
+/// Returns None for builtins, MDO types, and unresolved symbols.
+fn definition_to_navigation_target<DB: RootDatabase>(
+    db: &DB,
+    definition: &Definition,
+) -> Option<NavigationTarget> {
+    match definition {
+        Definition::Method(method_id) => {
+            let file_id = method_id.module.file_id;
+            let tree = db.item_tree(file_id);
+
+            for (idx, item) in tree.top_level_items().iter().enumerate() {
+                if idx == method_id.local_id as usize {
+                    match item {
+                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                            let proc = tree.procedure(*proc_idx);
+                            let range = proc.source_range;
+                            let name = proc.name.as_str().to_string();
+                            return Some(NavigationTarget {
+                                file_id,
+                                range,
+                                name,
+                                kind: SymbolKind::Procedure,
+                            });
+                        }
+                        hir_def::item_tree::ModItem::Function(func_idx) => {
+                            let func = tree.function(*func_idx);
+                            let range = func.source_range;
+                            let name = func.name.as_str().to_string();
+                            return Some(NavigationTarget {
+                                file_id,
+                                range,
+                                name,
+                                kind: SymbolKind::Function,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
             None
         }
+        Definition::Variable(var_id) => {
+            let file_id = var_id.module.file_id;
+            let tree = db.item_tree(file_id);
+
+            for (idx, item) in tree.top_level_items().iter().enumerate() {
+                if idx == var_id.local_id as usize {
+                    if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
+                        let var = tree.variable(*var_idx);
+                        let range = var.source_range;
+                        let name = var.name.as_str().to_string();
+                        return Some(NavigationTarget {
+                            file_id,
+                            range,
+                            name,
+                            kind: SymbolKind::Variable,
+                        });
+                    }
+                }
+            }
+            None
+        }
+        Definition::Parameter { method_id, param_name, .. } => {
+            // Navigate to the parameter in the method signature
+            let file_id = method_id.module.file_id;
+            let tree = db.item_tree(file_id);
+
+            for (idx, item) in tree.top_level_items().iter().enumerate() {
+                if idx == method_id.local_id as usize {
+                    let range = match item {
+                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                            tree.procedure(*proc_idx).source_range
+                        }
+                        hir_def::item_tree::ModItem::Function(func_idx) => {
+                            tree.function(*func_idx).source_range
+                        }
+                        _ => continue,
+                    };
+
+                    return Some(NavigationTarget {
+                        file_id,
+                        range, // For now, navigate to the whole method (TODO: narrow to param)
+                        name: param_name.as_str().to_string(),
+                        kind: SymbolKind::Variable, // Parameters are variables in BSL
+                    });
+                }
+            }
+            None
+        }
+        Definition::Local { method_id, var_name } => {
+            // Navigate to the local variable declaration
+            // For now, navigate to the containing method (TODO: find exact declaration)
+            let file_id = method_id.module.file_id;
+            let tree = db.item_tree(file_id);
+
+            for (idx, item) in tree.top_level_items().iter().enumerate() {
+                if idx == method_id.local_id as usize {
+                    let range = match item {
+                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                            tree.procedure(*proc_idx).source_range
+                        }
+                        hir_def::item_tree::ModItem::Function(func_idx) => {
+                            tree.function(*func_idx).source_range
+                        }
+                        _ => continue,
+                    };
+
+                    return Some(NavigationTarget {
+                        file_id,
+                        range,
+                        name: var_name.as_str().to_string(),
+                        kind: SymbolKind::Variable,
+                    });
+                }
+            }
+            None
+        }
+        // Builtins, MDO types, modules, etc. - no navigation target
+        Definition::BuiltinFunction(_)
+        | Definition::BuiltinMethod { .. }
+        | Definition::MdoCollectionType(_)
+        | Definition::MdoObject { .. }
+        | Definition::MdoManagerModule { .. }
+        | Definition::Module(_)
+        | Definition::VirtualTableField { .. }
+        | Definition::Unresolved => None,
     }
-}
-
-/// Convert a Method to a NavigationTarget.
-fn method_to_navigation_target<DB: RootDatabase>(
-    method: Method<'_, DB>,
-) -> Option<NavigationTarget> {
-    let file_id = method.id().module.file_id;
-    let range = method.source_range()?;
-    let name = method.name().as_str().to_string();
-
-    let kind = if method.is_function() { SymbolKind::Function } else { SymbolKind::Procedure };
-
-    Some(NavigationTarget { file_id, range, name, kind })
-}
-
-/// Convert a Variable to a NavigationTarget.
-fn variable_to_navigation_target<DB: RootDatabase>(
-    variable: Variable<'_, DB>,
-) -> Option<NavigationTarget> {
-    let file_id = variable.id().module.file_id;
-    let range = variable.source_range()?;
-    let name = variable.name().as_str().to_string();
-
-    Some(NavigationTarget { file_id, range, name, kind: SymbolKind::Variable })
 }
 
 #[cfg(test)]

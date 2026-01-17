@@ -3,7 +3,7 @@
 //! This module provides hover information for BSL code, including:
 //! - Platform types (Строка, Число, Массив, etc.)
 //! - Platform methods with signatures and documentation
-//! - User-defined symbols (future)
+//! - User-defined symbols (methods, variables, parameters)
 
 use bsl_platform::{
     global_function_query, platform_method_query, platform_type_query, type_methods_query,
@@ -17,8 +17,8 @@ use vfs::FileId;
 use crate::HoverResult;
 
 /// Returns hover information at the specified position.
-pub(crate) fn hover(
-    db: &dyn RootDatabase,
+pub(crate) fn hover<DB: RootDatabase>(
+    db: &DB,
     file_id: FileId,
     offset: TextSize,
 ) -> Option<HoverResult> {
@@ -33,6 +33,12 @@ pub(crate) fn hover(
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Hover token");
 
+    // Try user-defined symbols (via Definition API) FIRST
+    // This has higher priority than platform symbols (local shadowing)
+    if let Some(result) = hover_user_defined(db, file_id, &token) {
+        return Some(result);
+    }
+
     // Try platform type/method hover
     if let Some(result) = hover_platform(db, &token) {
         return Some(result);
@@ -43,14 +49,185 @@ pub(crate) fn hover(
         return Some(result);
     }
 
-    // TODO: Add hover for user-defined symbols
     // TODO: Add hover for literals
 
     None
 }
 
+/// Attempts to provide hover information for user-defined symbols (via Definition API).
+///
+/// This includes:
+/// - Methods (procedures and functions)
+/// - Variables (module-level and local)
+/// - Parameters
+///
+/// Returns `None` for symbols that aren't user-defined or can't be resolved.
+fn hover_user_defined<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    token: &SyntaxToken,
+) -> Option<HoverResult> {
+    // Only process identifiers
+    if token.kind() != SyntaxKind::IDENT {
+        return None;
+    }
+
+    // Use unified Semantics API
+    let sema = hir::Semantics::new(db);
+    let definition = sema.resolve_name_to_definition(file_id, token)?;
+
+    // Convert Definition to HoverResult
+    definition_to_hover(db, &definition, token.text_range())
+}
+
+/// Converts a Definition to HoverResult.
+fn definition_to_hover<DB: RootDatabase>(
+    db: &DB,
+    definition: &hir::Definition,
+    range: TextRange,
+) -> Option<HoverResult> {
+    let mut markup = String::new();
+
+    match definition {
+        hir::Definition::Method(_method_id) => {
+            // Get method signature
+            let label = definition.label(db);
+            markup.push_str(&format!("**{}**\n\n", label));
+
+            // Add export info if present
+            if definition.is_export(db) {
+                markup.push_str("*Экспортная*\n\n");
+            }
+
+            // Add documentation if available
+            if let Some(docs) = definition.docs(db) {
+                // Purpose
+                if let Some(ref purpose) = docs.purpose {
+                    if !purpose.is_empty() {
+                        markup.push_str("**Назначение:**\n");
+                        markup.push_str(purpose);
+                        markup.push_str("\n\n");
+                    }
+                }
+
+                // Parameters
+                if !docs.parameters.is_empty() {
+                    markup.push_str("**Параметры:**\n");
+                    for param in &docs.parameters {
+                        markup.push_str(&format!("- **{}**", param.name));
+
+                        // Format types
+                        if !param.types.is_empty() {
+                            let type_names: Vec<_> =
+                                param.types.iter().map(|t| t.name.as_str()).collect();
+                            markup.push_str(&format!(": {}", type_names.join(", ")));
+                        }
+
+                        // Add description from first type if available
+                        if let Some(first_type) = param.types.first() {
+                            if let Some(ref desc) = first_type.description {
+                                if !desc.is_empty() {
+                                    markup.push_str(&format!(" - {}", desc));
+                                }
+                            }
+                        }
+
+                        markup.push('\n');
+                    }
+                    markup.push('\n');
+                }
+
+                // Return value
+                if !docs.returned_value.is_empty() {
+                    markup.push_str("**Возвращаемое значение:**\n");
+                    let type_names: Vec<_> =
+                        docs.returned_value.iter().map(|t| t.name.as_str()).collect();
+                    markup.push_str(&format!("Тип: {}\n", type_names.join(", ")));
+
+                    // Add description from first type if available
+                    if let Some(first_type) = docs.returned_value.first() {
+                        if let Some(ref desc) = first_type.description {
+                            if !desc.is_empty() {
+                                markup.push_str(&format!("{}\n", desc));
+                            }
+                        }
+                    }
+                    markup.push('\n');
+                }
+
+                // Examples
+                if !docs.examples.is_empty() {
+                    markup.push_str("**Примеры:**\n");
+                    for (idx, example) in docs.examples.iter().enumerate() {
+                        markup.push_str(&format!("{}. {}\n\n", idx + 1, example));
+                    }
+                }
+            }
+        }
+
+        hir::Definition::Variable(_) => {
+            if let Some(name) = definition.name(db) {
+                markup.push_str(&format!("**Перем {}**\n\n", name.as_str()));
+
+                if definition.is_export(db) {
+                    markup.push_str("*Экспортная*\n\n");
+                }
+            } else {
+                markup.push_str("**Переменная**\n\n");
+            }
+
+            // TODO: Add variable type info when available
+        }
+
+        hir::Definition::Parameter { param_name, .. } => {
+            markup.push_str(&format!("**Параметр {}**\n\n", param_name.as_str()));
+            // TODO: Add parameter type info when available
+        }
+
+        hir::Definition::Local { var_name, .. } => {
+            markup.push_str(&format!("**Локальная переменная {}**\n\n", var_name.as_str()));
+            // TODO: Add local variable type info when available
+        }
+
+        hir::Definition::Module(_module_id) => {
+            markup.push_str("**Модуль**\n\n");
+        }
+
+        hir::Definition::MdoCollectionType(mdo_type) => {
+            markup.push_str(&format!("**Тип метаданных:** {}\n\n", mdo_type.russian_name()));
+            markup.push_str("*Коллекция объектов метаданных*");
+        }
+
+        hir::Definition::MdoObject { mdo_type, object_name } => {
+            markup.push_str(&format!(
+                "**{}.{}**\n\n",
+                mdo_type.russian_name(),
+                object_name.as_str()
+            ));
+            markup.push_str("*Объект метаданных*");
+        }
+
+        hir::Definition::MdoManagerModule { mdo_type, object_name, .. } => {
+            markup.push_str(&format!(
+                "**Менеджер модуль: {}.{}**\n\n",
+                mdo_type.russian_name(),
+                object_name.as_str()
+            ));
+            markup.push_str("*Модуль менеджера объекта метаданных*");
+        }
+
+        // Don't show hover for builtins (they're handled by hover_platform)
+        hir::Definition::BuiltinFunction(_)
+        | hir::Definition::BuiltinMethod { .. }
+        | hir::Definition::VirtualTableField { .. }
+        | hir::Definition::Unresolved => return None,
+    }
+
+    Some(HoverResult { markup, range: Some(range) })
+}
+
 /// Attempts to provide hover information for platform types and methods.
-fn hover_platform(db: &dyn RootDatabase, token: &SyntaxToken) -> Option<HoverResult> {
+fn hover_platform<DB: RootDatabase>(db: &DB, token: &SyntaxToken) -> Option<HoverResult> {
     let token_text = token.text();
 
     // Check if this is an identifier
@@ -146,8 +323,8 @@ fn try_extract_method_call(token: &SyntaxToken) -> Option<(String, String)> {
 /// - Длина() / Length() -> Число
 /// ...
 /// ```
-fn hover_for_platform_type(
-    db: &dyn RootDatabase,
+fn hover_for_platform_type<DB: RootDatabase>(
+    db: &DB,
     type_name: &str,
     range: TextRange,
 ) -> Option<HoverResult> {
@@ -208,8 +385,8 @@ fn hover_for_platform_type(
 ///
 /// **Доступность:** Все контексты
 /// ```
-fn hover_for_platform_method(
-    db: &dyn RootDatabase,
+fn hover_for_platform_method<DB: RootDatabase>(
+    db: &DB,
     type_name: &str,
     method_name: &str,
     range: TextRange,
@@ -250,8 +427,8 @@ fn hover_for_platform_method(
 ///
 /// **Доступность:** Сервер, Толстый клиент, Внешнее соединение
 /// ```
-fn hover_for_global_function(
-    db: &dyn RootDatabase,
+fn hover_for_global_function<DB: RootDatabase>(
+    db: &DB,
     function_name: &str,
     range: TextRange,
 ) -> Option<HoverResult> {
