@@ -677,6 +677,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
+ "bsl-platform",
  "expect-test",
  "hir-def",
  "ide-db",

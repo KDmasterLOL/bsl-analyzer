@@ -17,13 +17,7 @@
 
 mod sdbl;
 
-use either::Either;
-use ide_db::{
-    hir_def::{scope::ExprScopes, MethodId, ModuleId, Name},
-    RootDatabase, TextRange,
-};
-use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use ide_db::{RootDatabase, TextRange};
 use syntax::{
     ast::{self, AstNode},
     SyntaxKind, SyntaxNode, SyntaxToken,
@@ -163,8 +157,6 @@ pub struct HlRange {
 pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
     pub(crate) db: &'db DB,
     pub(crate) file_id: FileId,
-    /// Cache: method source_range -> (MethodId, ExprScopes)
-    pub(crate) expr_scopes_cache: FxHashMap<TextRange, (MethodId, Arc<ExprScopes>)>,
 
     /// Line index for SDBL position mapping optimization (built once for entire file)
     /// Eliminates 100× rebuilds for files with many SDBL queries
@@ -177,124 +169,9 @@ pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
 
 impl<'db, DB: RootDatabase> HighlightContext<'db, DB> {
     fn new(db: &'db DB, file_id: FileId, line_index: Option<Vec<usize>>) -> Self {
-        Self {
-            db,
-            file_id,
-            expr_scopes_cache: FxHashMap::default(),
-            line_index,
-            sdbl_literal_ranges: rustc_hash::FxHashSet::default(),
-        }
-    }
-
-    /// Get or build ExprScopes for a method.
-    fn get_expr_scopes(
-        &mut self,
-        method_range: TextRange,
-        method_def: Either<ast::ProcedureDef, ast::FunctionDef>,
-        method_id: MethodId,
-    ) -> Arc<ExprScopes> {
-        // Check cache
-        if let Some((_, scopes)) = self.expr_scopes_cache.get(&method_range) {
-            return scopes.clone();
-        }
-
-        // Build ExprScopes from AST
-        let scopes = match method_def {
-            Either::Left(proc) => ExprScopes::from_procedure(&proc),
-            Either::Right(func) => ExprScopes::from_function(&func),
-        };
-        let scopes = Arc::new(scopes);
-
-        // Cache for future tokens in the same method
-        self.expr_scopes_cache.insert(method_range, (method_id, scopes.clone()));
-        scopes
+        Self { db, file_id, line_index, sdbl_literal_ranges: rustc_hash::FxHashSet::default() }
     }
 }
-
-/// Find the method containing a token and get its MethodId and AST node.
-fn find_method_for_token<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    token: &SyntaxToken,
-) -> Option<(MethodId, Either<ast::ProcedureDef, ast::FunctionDef>)> {
-    // Walk up ancestors to find containing method
-    for ancestor in token.parent()?.ancestors() {
-        if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
-            let method_range = proc.syntax().text_range();
-            let method_id = find_method_id_by_range(db, file_id, method_range)?;
-            return Some((method_id, Either::Left(proc)));
-        }
-        if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
-            let method_range = func.syntax().text_range();
-            let method_id = find_method_id_by_range(db, file_id, method_range)?;
-            return Some((method_id, Either::Right(func)));
-        }
-    }
-    None
-}
-
-/// Find MethodId by matching source_range in ItemTree.
-fn find_method_id_by_range<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
-    range: TextRange,
-) -> Option<MethodId> {
-    let item_tree = db.item_tree(file_id);
-    let module_id = ModuleId::new(file_id);
-
-    for (idx, item) in item_tree.top_level_items().iter().enumerate() {
-        match item {
-            ide_db::hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                let proc = item_tree.procedure(*proc_idx);
-                if proc.source_range == range {
-                    return Some(MethodId { module: module_id, local_id: idx as u32 });
-                }
-            }
-            ide_db::hir_def::item_tree::ModItem::Function(func_idx) => {
-                let func = item_tree.function(*func_idx);
-                if func.source_range == range {
-                    return Some(MethodId { module: module_id, local_id: idx as u32 });
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Try to highlight a local symbol (parameter or local variable) using ExprScopes.
-///
-/// This is called BEFORE Semantics API to handle local variables which aren't
-/// yet supported by Semantics::resolve_name_to_definition().
-fn try_highlight_local_symbol<DB: RootDatabase>(
-    ctx: &mut HighlightContext<DB>,
-    token: &SyntaxToken,
-    name: &Name,
-) -> Option<HlRange> {
-    // Find containing method
-    let (method_id, method_def) = find_method_for_token(ctx.db, ctx.file_id, token)?;
-    let method_range = match &method_def {
-        Either::Left(proc) => proc.syntax().text_range(),
-        Either::Right(func) => func.syntax().text_range(),
-    };
-
-    // Get or build ExprScopes (cached)
-    let scopes = ctx.get_expr_scopes(method_range, method_def, method_id);
-    let root_scope = scopes.root_scope();
-
-    // Resolve name in ExprScopes
-    let def = scopes.resolve_name(root_scope, name)?;
-
-    // Map ScopeDef to HlTag
-    let range = token.text_range();
-    let tag = match def {
-        ide_db::hir_def::scope::ScopeDef::Parameter => HlTag::Parameter,
-        ide_db::hir_def::scope::ScopeDef::LocalVariable => HlTag::Variable,
-    };
-
-    Some(HlRange { range, tag, modifiers: HlMod::new() })
-}
-
 /// Generates semantic highlighting for a file.
 pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<HlRange> {
     let parse = db.parse(file_id);
@@ -368,77 +245,53 @@ fn highlight_ident_semantic<DB: RootDatabase>(
     token: &SyntaxToken,
 ) -> Option<HlRange> {
     let range = token.text_range();
-    let name_text = token.text();
-    let name = Name::new(name_text);
 
-    tracing::debug!("highlight_ident_semantic: processing token={}", name_text);
+    tracing::debug!("highlight_ident_semantic: processing token={}", token.text());
 
-    // 1. Check if it's a built-in platform function (BEFORE local resolution)
-    // This ensures builtins are highlighted even if shadowed by local variables
-    if let Some(_func) = bsl_platform::PlatformDataInner::instance().get_global_function(name_text)
-    {
-        tracing::debug!("highlight_ident_semantic: {} is builtin function", name_text);
-        return Some(HlRange {
-            range,
-            tag: HlTag::BuiltinFunction,
-            modifiers: HlMod::new().with(HlMod::EXPORT),
-        });
-    }
-
-    // 2. Check local symbols (parameters and local variables) via ExprScopes
-    // These have higher priority than MDO types and module-level symbols
-    if let Some(hl) = try_highlight_local_symbol(ctx, token, &name) {
-        tracing::debug!("highlight_ident_semantic: {} resolved as local symbol", name_text);
-        return Some(hl);
-    }
-
-    // 3. Use unified Semantics API for other resolution
+    // Use unified Semantics API for ALL resolution
+    // It handles the correct priority order:
+    // 1. Qualified names (X.Y.Z)
+    // 2. Local symbols (parameters, local variables)
+    // 3. Builtin platform functions
+    // 4. MDO plural forms
+    // 5. Module-level symbols (methods, variables)
     let sema = hir::Semantics::new(ctx.db);
-    if let Some(definition) = sema.resolve_name_to_definition(ctx.file_id, token) {
-        tracing::debug!("highlight_ident_semantic: {} resolved to {:?}", name_text, definition);
+    let definition = sema.resolve_name_to_definition(ctx.file_id, token)?;
 
-        // Convert Definition to HlTag + HlModifiers
-        let tag = match &definition {
-            hir::Definition::Method(_) => HlTag::Function,
-            hir::Definition::Variable(_) => HlTag::Variable,
-            hir::Definition::Parameter { .. } => HlTag::Parameter,
-            hir::Definition::Local { .. } => HlTag::Variable,
-            hir::Definition::BuiltinFunction(_) => HlTag::BuiltinFunction,
-            hir::Definition::BuiltinMethod { .. } => HlTag::Function,
-            hir::Definition::MdoCollectionType(_) => HlTag::Class,
-            hir::Definition::MdoObject { .. } => HlTag::Type,
-            hir::Definition::MdoManagerModule { .. } => HlTag::Namespace,
-            hir::Definition::Module(_) => HlTag::Namespace,
-            hir::Definition::VirtualTableField { .. } => HlTag::Property,
-            hir::Definition::Unresolved => return None,
-        };
+    tracing::debug!("highlight_ident_semantic: {} resolved to {:?}", token.text(), definition);
 
-        let mut modifiers = HlMod::new();
+    // Convert Definition to HlTag + HlModifiers
+    let tag = match &definition {
+        hir::Definition::Method(_) => HlTag::Function,
+        hir::Definition::Variable(_) => HlTag::Variable,
+        hir::Definition::Parameter { .. } => HlTag::Parameter,
+        hir::Definition::Local { .. } => HlTag::Variable,
+        hir::Definition::BuiltinFunction(_) => HlTag::BuiltinFunction,
+        hir::Definition::BuiltinMethod { .. } => HlTag::Function,
+        hir::Definition::MdoCollectionType(_) => HlTag::Class,
+        hir::Definition::MdoObject { .. } => HlTag::Type,
+        hir::Definition::MdoManagerModule { .. } => HlTag::Namespace,
+        hir::Definition::Module(_) => HlTag::Namespace,
+        hir::Definition::VirtualTableField { .. } => HlTag::Property,
+        hir::Definition::Unresolved => return None,
+    };
 
-        // Add EXPORT modifier for exported symbols
-        if definition.is_export(ctx.db) {
-            modifiers = modifiers.with(HlMod::EXPORT);
-        }
+    let mut modifiers = HlMod::new();
 
-        // Add EXPORT modifier for builtin functions
-        if matches!(
-            definition,
-            hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethod { .. }
-        ) {
-            modifiers = modifiers.with(HlMod::EXPORT);
-        }
-
-        return Some(HlRange { range, tag, modifiers });
+    // Add EXPORT modifier for exported symbols
+    if definition.is_export(ctx.db) {
+        modifiers = modifiers.with(HlMod::EXPORT);
     }
 
-    // 4. MDO plural forms as fallback (if Semantics API didn't resolve)
-    // This is AFTER local resolution, so local variables properly shadow MDO types
-    if bsl_metadata::MdoType::is_plural_form(name_text) {
-        tracing::debug!("highlight_ident_semantic: {} is MDO plural form (fallback)", name_text);
-        return Some(HlRange { range, tag: HlTag::Class, modifiers: HlMod::new() });
+    // Add EXPORT modifier for builtin functions
+    if matches!(
+        definition,
+        hir::Definition::BuiltinFunction(_) | hir::Definition::BuiltinMethod { .. }
+    ) {
+        modifiers = modifiers.with(HlMod::EXPORT);
     }
 
-    None
+    Some(HlRange { range, tag, modifiers })
 }
 
 /// Highlight a single token based on its syntax kind.
@@ -1149,6 +1002,16 @@ mod tests {
 "#;
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
+
+        // Debug: print all highlights
+        eprintln!("\n=== All highlights ===");
+        for hl in highlights.iter() {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            if !text.trim().is_empty() && text.chars().all(|c| c.is_alphabetic() || c == '_') {
+                eprintln!("{:?}: {:?} {:?}", text, hl.tag, hl.modifiers);
+            }
+        }
+        eprintln!("======================\n");
 
         // Check НачатьТранзакцию - should be highlighted as BuiltinFunction with EXPORT modifier
         let begin_trans = highlights.iter().find(|hl| {

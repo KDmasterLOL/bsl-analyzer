@@ -390,15 +390,18 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
             return Some(def);
         }
 
-        // 2. Local symbols (parameters, local variables) — shadowing all others
-        if let Some(def) = self.resolve_local_to_definition(file_id, token) {
-            tracing::debug!(?def, "resolved as local symbol");
+        // 2. Builtin platform functions
+        // IMPORTANT: Builtins are NOT shadowed by local variables in BSL!
+        // НачатьТранзакцию() is always a builtin even if there's a local var with that name
+        if let Some(def) = self.try_resolve_builtin(token_text) {
+            tracing::debug!(?def, "resolved as builtin");
             return Some(def);
         }
 
-        // 3. Builtin platform functions
-        if let Some(def) = self.try_resolve_builtin(token_text) {
-            tracing::debug!(?def, "resolved as builtin");
+        // 3. Local symbols (parameters, local variables)
+        // These shadow MDO types and module-level symbols, but NOT builtins
+        if let Some(def) = self.resolve_local_to_definition(file_id, token) {
+            tracing::debug!(?def, "resolved as local symbol");
             return Some(def);
         }
 
@@ -484,123 +487,82 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         file_id: FileId,
         token: &syntax::SyntaxToken,
     ) -> Option<crate::definition::Definition> {
+        use crate::definition::Definition;
+        use hir_def::scope::{ExprScopes, ScopeDef};
+
         let _span = tracing::debug_span!("resolve_local_to_definition").entered();
 
         let name = Name::new(token.text());
+        let module_id = ModuleId::new(file_id);
 
         // Find the enclosing method
         let mut node = token.parent()?;
         loop {
             if let Some(proc_def) = syntax::ast::ProcedureDef::cast(node.clone()) {
-                // Found procedure
-                return self.resolve_local_in_method(file_id, proc_def.syntax(), &name);
+                // Build ExprScopes from procedure
+                let scopes = ExprScopes::from_procedure(&proc_def);
+                let root_scope = scopes.root_scope();
+
+                // Resolve name in scopes
+                if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
+                    // Find method index in module
+                    let tree = self.db.item_tree(file_id);
+                    for (idx, item) in tree.top_level_items().iter().enumerate() {
+                        if let hir_def::item_tree::ModItem::Procedure(_) = item {
+                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
+                            return Some(match scope_def {
+                                ScopeDef::Parameter => Definition::Parameter {
+                                    method_id,
+                                    param_name: name.clone(),
+                                    param_index: 0, // TODO: get actual index
+                                },
+                                ScopeDef::LocalVariable => {
+                                    Definition::Local { method_id, var_name: name.clone() }
+                                }
+                            });
+                        }
+                    }
+                }
+                return None;
             }
             if let Some(func_def) = syntax::ast::FunctionDef::cast(node.clone()) {
-                // Found function
-                return self.resolve_local_in_method(file_id, func_def.syntax(), &name);
+                // Build ExprScopes from function
+                let scopes = ExprScopes::from_function(&func_def);
+                let root_scope = scopes.root_scope();
+
+                // Resolve name in scopes
+                if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
+                    // Find method index in module
+                    let tree = self.db.item_tree(file_id);
+                    for (idx, item) in tree.top_level_items().iter().enumerate() {
+                        if let hir_def::item_tree::ModItem::Function(_) = item {
+                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
+                            return Some(match scope_def {
+                                ScopeDef::Parameter => Definition::Parameter {
+                                    method_id,
+                                    param_name: name.clone(),
+                                    param_index: 0, // TODO: get actual index
+                                },
+                                ScopeDef::LocalVariable => {
+                                    Definition::Local { method_id, var_name: name.clone() }
+                                }
+                            });
+                        }
+                    }
+                }
+                return None;
             }
 
             node = node.parent()?;
         }
     }
 
-    /// Resolve a name in a method's scope (parameters and local variables).
-    fn resolve_local_in_method(
-        &self,
-        file_id: FileId,
-        _method_node: &syntax::SyntaxNode,
-        name: &Name,
-    ) -> Option<crate::definition::Definition> {
-        use crate::definition::Definition;
-
-        // Find the method ID for this method node
-        let module_id = ModuleId::new(file_id);
-        let tree = self.db.item_tree(file_id);
-
-        // Try to find which method this node belongs to
-        // For now, we'll use a simplified approach:
-        // 1. Check parameters via ItemTree
-        // 2. Check local variables via Body (TODO: when we have ExprScopes support)
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            match item {
-                hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                    let proc = tree.procedure(*proc_idx);
-                    // Check if this is our method by comparing source ranges
-                    // (This is a simplification - in reality we'd need better node matching)
-
-                    // Check parameters
-                    for (param_index, param) in proc.params.iter().enumerate() {
-                        if param.name.eq_ignore_case(name) {
-                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                            return Some(Definition::Parameter {
-                                method_id,
-                                param_name: param.name.clone(),
-                                param_index: param_index as u32,
-                            });
-                        }
-                    }
-                }
-                hir_def::item_tree::ModItem::Function(func_idx) => {
-                    let func = tree.function(*func_idx);
-
-                    // Check parameters
-                    for (param_index, param) in func.params.iter().enumerate() {
-                        if param.name.eq_ignore_case(name) {
-                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                            return Some(Definition::Parameter {
-                                method_id,
-                                param_name: param.name.clone(),
-                                param_index: param_index as u32,
-                            });
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // TODO: Check local variables via Body/ExprScopes
-        // For now, we don't support local variable resolution
-
-        None
-    }
-
     /// Try to resolve a builtin platform function or method.
     ///
     /// Checks bsl_platform data for builtin functions like НачатьТранзакцию, Формат, etc.
     fn try_resolve_builtin(&self, name: &str) -> Option<crate::definition::Definition> {
-        // Check if it's a builtin function
-        // TODO: Integrate with bsl_platform crate when available
-        // For now, we'll check a basic list of common builtins
-
-        let name_lower = name.to_lowercase();
-        let builtins = [
-            "сообщить",
-            "формат",
-            "тип",
-            "типзнч",
-            "строка",
-            "число",
-            "дата",
-            "булево",
-            "началотранзакции",
-            "завершитьтранзакцию",
-            "отменитьтранзакцию",
-            "message",
-            "format",
-            "type",
-            "typeof",
-            "string",
-            "number",
-            "date",
-            "boolean",
-            "begintransaction",
-            "committransaction",
-            "rollbacktransaction",
-        ];
-
-        if builtins.contains(&name_lower.as_str()) {
+        // Check if it's a builtin platform function using bsl_platform
+        if bsl_platform::PlatformDataInner::instance().get_global_function(name).is_some() {
             return Some(Definition::BuiltinFunction(Name::new(name)));
         }
 
