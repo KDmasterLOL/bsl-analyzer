@@ -1643,4 +1643,187 @@ EndFunction
         assert!(estnull.is_some(), "ЕСТЬNULL must be highlighted");
         assert!(presentation.is_some(), "ПРЕДСТАВЛЕНИЕ must be highlighted");
     }
+
+    #[test]
+    fn test_join_with_tabular_section() {
+        let code = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ *
+    |ИЗ
+    |    Документ.ЧекККМ.Товары КАК ЧекККМТовары
+    |        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+    |        ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка";
+КонецПроцедуры"#;
+
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        eprintln!("\n=== JOIN with Tabular Section Test ===");
+        eprintln!("Total highlights: {}", highlights.len());
+
+        // Print all SDBL highlights
+        let sdbl_highlights: Vec<_> = highlights
+            .iter()
+            .filter(|h| {
+                let start: usize = h.range.start().into();
+                // Filter for SDBL content (inside string literal)
+                start > code.find('"').unwrap_or(0)
+            })
+            .collect();
+
+        eprintln!("\n=== SDBL highlights ===");
+        for hl in &sdbl_highlights {
+            let start: usize = hl.range.start().into();
+            let end: usize = hl.range.end().into();
+            let text = &code[start..end];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Check SDBL HIR and source map
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
+
+        for ((_expr_id, sdbl_pkg), (_query_id, query_info)) in
+            sdbl_hirs.iter().zip(db.all_sdbl_in_file(file_id).iter())
+        {
+            eprintln!("\n=== SDBL Query ===");
+            eprintln!("{}", query_info.query_text);
+
+            eprintln!("\n=== Source Map Tokens ===");
+            let all_tokens: Vec<_> = sdbl_pkg.source_map.all_tokens().collect();
+            eprintln!("Total: {}", all_tokens.len());
+            for (token, category) in all_tokens.iter() {
+                eprintln!("  {:?} at {:?}: '{}'", category, token.range, token.text);
+            }
+
+            eprintln!("\n=== HIR FROM clause ===");
+            eprintln!("Tables: {}", sdbl_pkg.queries()[0].hir.from.len());
+            for table in &sdbl_pkg.queries()[0].hir.from {
+                eprintln!("  Table: {}, alias: {:?}", table.full_name, table.alias);
+            }
+
+            eprintln!("\n=== HIR JOINs ===");
+            eprintln!("Joins: {}", sdbl_pkg.queries()[0].hir.joins.len());
+            for join in &sdbl_pkg.queries()[0].hir.joins {
+                eprintln!(
+                    "  Join table: {}, alias: {:?}, type: {:?}",
+                    join.table.full_name, join.table.alias, join.join_type
+                );
+            }
+        }
+
+        // Check that JOIN table is highlighted
+        let join_highlights = sdbl_highlights.iter().any(|h| {
+            let start: usize = h.range.start().into();
+            let end: usize = h.range.end().into();
+            let text = &code[start..end];
+            text == "ЧекККМ" && h.tag == HlTag::Type
+        });
+
+        assert!(join_highlights, "JOIN table ЧекККМ should be highlighted");
+    }
+
+    #[test]
+    fn test_complex_nested_join_with_tabular() {
+        let code = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+    |    ДвиженияПоКлиенту.Документ КАК Документ,
+    |    ДвиженияПоКлиенту.order_number КАК order_number
+    |ПОМЕСТИТЬ ДвиженияПоКлиенту
+    |ИЗ
+    |    (ВЫБРАТЬ
+    |        ЧекККМ.Ссылка КАК Документ,
+    |        ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, """") КАК order_number,
+    |        ЧекККМ.Дата КАК Дата,
+    |        ЧекККМТовары.Номенклатура.Артикул КАК article,
+    |        ЧекККМТовары.Номенклатура.Наименование КАК name
+    |    ИЗ
+    |        Документ.ЧекККМ.Товары КАК ЧекККМТовары
+    |            ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+    |                ЛЕВОЕ СОЕДИНЕНИЕ Документ.ЗаказКлиента КАК ДокЗаказКлиента
+    |                ПО ЧекККМ.ЗаказКлиента = ДокЗаказКлиента.Ссылка
+    |            ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка
+    |                И (ЧекККМ.Партнер = &Партнер)
+    |                И (ЧекККМ.Проведен = ИСТИНА)
+    |                И (ЧекККМ.ПометкаУдаления = ЛОЖЬ)) КАК ДвиженияПоКлиенту";
+КонецПроцедуры"#;
+
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        eprintln!("\n=== Complex Nested JOIN Test ===");
+        eprintln!("Total highlights: {}", highlights.len());
+
+        // Print SDBL highlights
+        let sdbl_highlights: Vec<_> = highlights
+            .iter()
+            .filter(|h| {
+                let start: usize = h.range.start().into();
+                start > code.find('"').unwrap_or(0)
+            })
+            .collect();
+
+        eprintln!("\n=== SDBL highlights ===");
+        for hl in &sdbl_highlights {
+            let start: usize = hl.range.start().into();
+            let end: usize = hl.range.end().into();
+            let text = &code[start..end];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Check SDBL HIR
+        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
+        eprintln!("\nSDBL HIR entries: {}", sdbl_hirs.len());
+
+        for ((_expr_id, sdbl_pkg), (_query_id, query_info)) in
+            sdbl_hirs.iter().zip(db.all_sdbl_in_file(file_id).iter())
+        {
+            eprintln!("\n=== SDBL Query ===");
+            eprintln!("{}", query_info.query_text);
+
+            eprintln!("\n=== Source Map Tokens ===");
+            let all_tokens: Vec<_> = sdbl_pkg.source_map.all_tokens().collect();
+            eprintln!("Total: {}", all_tokens.len());
+            for (token, category) in all_tokens.iter() {
+                eprintln!("  {:?} at {:?}: '{}'", category, token.range, token.text);
+            }
+
+            eprintln!("\n=== HIR Structure ===");
+            eprintln!("Number of parsed queries: {}", sdbl_pkg.queries().len());
+            for (i, query) in sdbl_pkg.queries().iter().enumerate() {
+                eprintln!("\nQuery #{}", i);
+                eprintln!("  FROM tables: {}", query.hir.from.len());
+                for table in &query.hir.from {
+                    eprintln!("    - {}, alias: {:?}", table.full_name, table.alias);
+                }
+                eprintln!("  JOINs: {}", query.hir.joins.len());
+                for join in &query.hir.joins {
+                    eprintln!(
+                        "    - {} ({:?}), alias: {:?}",
+                        join.table.full_name, join.join_type, join.table.alias
+                    );
+                }
+            }
+        }
+
+        // Check that JOIN tables are highlighted
+        let inner_join_highlighted = sdbl_highlights.iter().any(|h| {
+            let start: usize = h.range.start().into();
+            let end: usize = h.range.end().into();
+            let text = &code[start..end];
+            text == "ЧекККМ" && h.tag == HlTag::Type && start > 400
+        });
+
+        let left_join_highlighted = sdbl_highlights.iter().any(|h| {
+            let start: usize = h.range.start().into();
+            let end: usize = h.range.end().into();
+            let text = &code[start..end];
+            text == "ЗаказКлиента" && h.tag == HlTag::Type
+        });
+
+        eprintln!("\nInner JOIN ЧекККМ highlighted: {}", inner_join_highlighted);
+        eprintln!("Left JOIN ЗаказКлиента highlighted: {}", left_join_highlighted);
+
+        assert!(inner_join_highlighted, "INNER JOIN table ЧекККМ should be highlighted");
+        assert!(left_join_highlighted, "LEFT JOIN table ЗаказКлиента should be highlighted");
+    }
 }

@@ -58,6 +58,9 @@ impl<'a> LoweringContext<'a> {
                         let _ = self.lower_data_source(&inner_ds);
                     }
                 }
+
+                // Process JOIN clauses in nested subquery
+                let _ = self.lower_joins(&inner_query);
             }
 
             // TODO: Handle subqueries properly
