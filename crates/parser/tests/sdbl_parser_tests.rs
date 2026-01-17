@@ -1477,3 +1477,139 @@ fn test_simple_two_queries_with_semicolon() {
     eprintln!("Query count: {}", count);
     assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
 }
+#[test]
+fn test_unsupported_features() {
+    use parser::parse_sdbl;
+
+    // Test 1: CASE expression - should work now
+    let query1 = r#"ВЫБРАТЬ ВЫБОР КОГДА x ТОГДА 1 КОНЕЦ КАК result ИЗ T"#;
+    let parse1 = parse_sdbl(query1);
+    eprintln!("\n=== CASE expression ===");
+    eprintln!("Has errors: {}", parse1.has_errors());
+
+    // Test 2: String concatenation - should work now
+    let query2 = r#"ВЫБРАТЬ "a" + "b" КАК result ИЗ T"#;
+    let parse2 = parse_sdbl(query2);
+    eprintln!("\n=== String concatenation ===");
+    eprintln!("Has errors: {}", parse2.has_errors());
+
+    // Test 3: Type cast - NOT supported yet
+    let query3 = r#"ВЫБРАТЬ ВЫРАЗИТЬ(field КАК СТРОКА(200)) КАК result ИЗ T"#;
+    let parse3 = parse_sdbl(query3);
+    eprintln!("\n=== Type cast ВЫРАЗИТЬ ===");
+    eprintln!("Has errors: {}", parse3.has_errors());
+    let tree3 = format!("{:#?}", parse3.syntax_node());
+    eprintln!("Has ERROR: {}", tree3.contains("ERROR"));
+
+    // Test 4: НАЧАЛОПЕРИОДА function
+    let query4 = r#"ВЫБРАТЬ НАЧАЛОПЕРИОДА(date, ДЕНЬ) КАК result ИЗ T"#;
+    let parse4 = parse_sdbl(query4);
+    eprintln!("\n=== НАЧАЛОПЕРИОДА function ===");
+    eprintln!("Has errors: {}", parse4.has_errors());
+}
+#[test]
+fn test_like_predicate() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ * ИЗ T ГДЕ name ПОДОБНО "%test%""#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+    eprintln!("\nHas errors: {}", parse.has_errors());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
+}
+
+#[test]
+fn test_between_predicate() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ * ИЗ T ГДЕ price МЕЖДУ 100 И 200"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+    eprintln!("\nHas errors: {}", parse.has_errors());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
+}
+
+#[test]
+fn test_is_null_predicate() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ * ИЗ T ГДЕ field ЕСТЬ NULL"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+    eprintln!("\nHas errors: {}", parse.has_errors());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "Should parse WHERE clause");
+}
+#[test]
+fn test_order_by_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ name, price ИЗ T УПОРЯДОЧИТЬ ПО price УБЫВ, name"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== ORDER BY ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has ORDER BY node: {}", tree.contains("SDBL_ORDER_BY"));
+}
+
+#[test]
+fn test_group_by_clause() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ name, СУММА(price) ИЗ T СГРУППИРОВАТЬ ПО name"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== GROUP BY ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has GROUP BY node: {}", tree.contains("SDBL_GROUP_BY"));
+}
+
+#[test]
+fn test_having_clause() {
+    use parser::parse_sdbl;
+
+    let query =
+        r#"ВЫБРАТЬ name, СУММА(price) ИЗ T СГРУППИРОВАТЬ ПО name ИМЕЮЩИЕ СУММА(price) > 100"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n=== HAVING ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("Has HAVING node: {}", tree.contains("SDBL_HAVING"));
+}
+#[test]
+fn test_group_by_debug() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ name, СУММА(price) ИЗ T СГРУППИРОВАТЬ ПО name"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("\nSearching for: SDBL_GROUP_CLAUSE");
+    eprintln!("Found: {}", tree.contains("SDBL_GROUP_CLAUSE"));
+}
+#[test]
+fn test_order_by_debug() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ name, price ИЗ T УПОРЯДОЧИТЬ ПО price УБЫВ, name"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    eprintln!("\nSearching for: SDBL_ORDER_CLAUSE");
+    eprintln!("Found: {}", tree.contains("SDBL_ORDER_CLAUSE"));
+}
