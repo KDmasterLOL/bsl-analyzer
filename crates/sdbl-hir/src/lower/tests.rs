@@ -1689,12 +1689,14 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     ВЫБРАТЬ
         ЧекККМТовары.Номенклатура.Наименование КАК Товар,
         ЧекККМТовары.Количество КАК Количество,
-        ЧекККМ.Дата КАК ДатаДокумента
+        ЧекККМ.Дата КАК ДатаДокумента,
+        ЧекККМ.Склад.Наименование КАК СкладНаименование
     ИЗ Документ.ЧекККМ.Товары КАК ЧекККМТовары
         ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
         ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка
             И ЧекККМ.Проведен = ИСТИНА
             И НЕ ЧекККМ.ПометкаУдаления
+            И НЕ ЧекККМ.Архивный
 ) КАК Внешний"#;
 
     let parse = parser::parse_sdbl(query);
@@ -1727,8 +1729,8 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     // Проверяем содержимое вложенного запроса
     let nested_hir = &subquery_table.subquery[0];
 
-    // Внутренний SELECT должен иметь 3 поля
-    assert_eq!(nested_hir.select.fields.len(), 3, "Nested query should have 3 SELECT fields");
+    // Внутренний SELECT должен иметь 4 поля
+    assert_eq!(nested_hir.select.fields.len(), 4, "Nested query should have 4 SELECT fields");
 
     // Проверяем алиасы полей вложенного SELECT
     let nested_field_aliases: Vec<_> = nested_hir
@@ -1746,6 +1748,10 @@ fn test_nested_subquery_with_tabular_section_in_join() {
     assert!(
         nested_field_aliases.contains(&"ДатаДокумента"),
         "Nested SELECT should have field 'ДатаДокумента'"
+    );
+    assert!(
+        nested_field_aliases.contains(&"СкладНаименование"),
+        "Nested SELECT should have field 'СкладНаименование'"
     );
 
     // Проверяем FROM вложенного запроса: табличная часть
@@ -1797,6 +1803,9 @@ fn test_nested_subquery_with_tabular_and_union() {
     ИЗ Документ.ЧекККМ.Товары КАК Товары
         ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК Чек
         ПО Товары.Ссылка = Чек.Ссылка
+            И Чек.Проведен = ИСТИНА
+            И НЕ Чек.ПометкаУдаления
+            И НЕ Чек.Архивный
 
     ОБЪЕДИНИТЬ ВСЕ
 
@@ -1807,6 +1816,9 @@ fn test_nested_subquery_with_tabular_and_union() {
     ИЗ Документ.ЧекККМВозврат.Товары КАК ВозвратТовары
         ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМВозврат КАК Возврат
         ПО ВозвратТовары.Ссылка = Возврат.Ссылка
+            И Возврат.Проведен = ИСТИНА
+            И НЕ Возврат.ПометкаУдаления
+            И НЕ Возврат.Архивный
 ) КАК Данные"#;
 
     let parse = parser::parse_sdbl(query);
