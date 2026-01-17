@@ -62,6 +62,9 @@ pub struct SdblSourceMap {
     /// Stored separately because they need different highlighting than regular functions.
     pub(crate) aggregate_functions: Vec<TokenInfo>,
 
+    /// Built-in SDBL functions (ISNULL, CAST, PRESENTATION, VALUE, etc)
+    pub(crate) builtin_functions: Vec<TokenInfo>,
+
     // Identifiers
     /// MDO type names (Справочник, Документ, Перечисление).
     pub(crate) mdo_types: Vec<TokenInfo>,
@@ -105,6 +108,8 @@ impl SdblSourceMap {
         let modifier_iter = self.modifiers.iter().map(|t| (t, TokenCategory::Modifier));
         let agg_iter =
             self.aggregate_functions.iter().map(|t| (t, TokenCategory::AggregateFunction));
+        let builtin_iter =
+            self.builtin_functions.iter().map(|t| (t, TokenCategory::BuiltinFunction));
 
         // Identifiers
         let table_name_iter = self.table_names.iter().map(|t| (t, TokenCategory::TableName));
@@ -122,6 +127,7 @@ impl SdblSourceMap {
             .chain(join_iter)
             .chain(modifier_iter)
             .chain(agg_iter)
+            .chain(builtin_iter)
             .chain(table_name_iter)
             .chain(unresolved_table_iter)
             .chain(table_alias_iter)
@@ -155,6 +161,7 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => &self.join_keywords,
             TokenCategory::Modifier => &self.modifiers,
             TokenCategory::AggregateFunction => &self.aggregate_functions,
+            TokenCategory::BuiltinFunction => &self.builtin_functions,
             TokenCategory::MdoType => &self.mdo_types,
             TokenCategory::TableName => &self.table_names,
             TokenCategory::UnresolvedTableName => &self.unresolved_table_names,
@@ -176,6 +183,7 @@ impl SdblSourceMap {
             TokenCategory::JoinKeyword => self.join_keywords.push(info),
             TokenCategory::Modifier => self.modifiers.push(info),
             TokenCategory::AggregateFunction => self.aggregate_functions.push(info),
+            TokenCategory::BuiltinFunction => self.builtin_functions.push(info),
             TokenCategory::MdoType => self.mdo_types.push(info),
             TokenCategory::TableName => self.table_names.push(info),
             TokenCategory::UnresolvedTableName => self.unresolved_table_names.push(info),
@@ -194,6 +202,7 @@ impl SdblSourceMap {
         self.join_keywords.sort_by_key(|t| t.range.start());
         self.modifiers.sort_by_key(|t| t.range.start());
         self.aggregate_functions.sort_by_key(|t| t.range.start());
+        self.builtin_functions.sort_by_key(|t| t.range.start());
         self.table_names.sort_by_key(|t| t.range.start());
         self.unresolved_table_names.sort_by_key(|t| t.range.start());
         self.table_aliases.sort_by_key(|t| t.range.start());
@@ -239,6 +248,8 @@ pub enum TokenCategory {
     Modifier,
     /// Aggregate functions (SUM, AVG, COUNT, MIN, MAX).
     AggregateFunction,
+    /// Built-in SDBL functions (ISNULL, CAST, PRESENTATION, VALUE, etc).
+    BuiltinFunction,
 
     // Identifiers
     /// MDO type name (first part: Справочник, Документ, Перечисление).

@@ -270,16 +270,44 @@ impl<'a> LoweringContext<'a> {
                 }
                 FunctionKind::Count
             }
-            "ПОДСТРОКА" | "SUBSTRING" => FunctionKind::Substring,
-            "ВРЕГ" | "UPPER" => FunctionKind::Upper,
-            "НРЕГ" | "LOWER" => FunctionKind::Lower,
-            "ГОД" | "YEAR" => FunctionKind::Year,
-            "МЕСЯЦ" | "MONTH" => FunctionKind::Month,
-            "ДЕНЬ" | "DAY" => FunctionKind::Day,
-            "ЕСТЬNULL" | "ISNULL" => FunctionKind::Isnull,
-            "ВЫРАЗИТЬ" | "CAST" => FunctionKind::Cast,
-            "ПРЕДСТАВЛЕНИЕ" | "PRESENTATION" => FunctionKind::Presentation,
-            "ЗНАЧЕНИЕ" | "VALUE" => FunctionKind::Value,
+            "ПОДСТРОКА"
+            | "SUBSTRING"
+            | "ВРЕГ"
+            | "UPPER"
+            | "НРЕГ"
+            | "LOWER"
+            | "ГОД"
+            | "YEAR"
+            | "МЕСЯЦ"
+            | "MONTH"
+            | "ДЕНЬ"
+            | "DAY"
+            | "ЕСТЬNULL"
+            | "ISNULL"
+            | "ВЫРАЗИТЬ"
+            | "CAST"
+            | "ПРЕДСТАВЛЕНИЕ"
+            | "PRESENTATION"
+            | "ЗНАЧЕНИЕ"
+            | "VALUE" => {
+                // Record built-in SDBL function token for semantic highlighting
+                if let Some(token) = func_name_token.as_ref() {
+                    self.record_token(token, crate::source_map::TokenCategory::BuiltinFunction);
+                }
+                match func_name.to_uppercase().as_str() {
+                    "ПОДСТРОКА" | "SUBSTRING" => FunctionKind::Substring,
+                    "ВРЕГ" | "UPPER" => FunctionKind::Upper,
+                    "НРЕГ" | "LOWER" => FunctionKind::Lower,
+                    "ГОД" | "YEAR" => FunctionKind::Year,
+                    "МЕСЯЦ" | "MONTH" => FunctionKind::Month,
+                    "ДЕНЬ" | "DAY" => FunctionKind::Day,
+                    "ЕСТЬNULL" | "ISNULL" => FunctionKind::Isnull,
+                    "ВЫРАЗИТЬ" | "CAST" => FunctionKind::Cast,
+                    "ПРЕДСТАВЛЕНИЕ" | "PRESENTATION" => FunctionKind::Presentation,
+                    "ЗНАЧЕНИЕ" | "VALUE" => FunctionKind::Value,
+                    _ => unreachable!(),
+                }
+            }
             _ => FunctionKind::Unknown(func_name.clone()),
         };
 

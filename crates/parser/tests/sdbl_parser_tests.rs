@@ -1894,3 +1894,181 @@ fn test_phase2_combined() {
     // Should parse without errors or with minimal errors
     // SDBL spec allows flexible ordering of these clauses
 }
+#[test]
+fn test_simple_is_null() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ * ИЗ T ГДЕ Field ЕСТЬ NULL"#;
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== Simple IS NULL test ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("\n{}", tree);
+}
+#[test]
+fn test_dotted_is_null() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ * ИЗ T ГДЕ ДокЗаказКлиента.Ссылка ЕСТЬ NULL"#;
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== Dotted IS NULL test ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+    eprintln!("\n{}", tree);
+
+    // Check if ЕСТЬ is parsed as part of column ref or as IS NULL
+    if tree.contains("SDBL_IS_NULL_EXPR") {
+        eprintln!("✓ ЕСТЬ correctly parsed as IS NULL predicate");
+    } else {
+        eprintln!("✗ ЕСТЬ incorrectly parsed (not IS NULL)");
+    }
+}
+#[test]
+fn test_case_with_is_null_no_newline() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ ВЫБОР КОГДА ДокЗаказКлиента.Ссылка ЕСТЬ NULL ТОГДА "Покупка" КОГДА ДокЗаказКлиента.Ссылка ЕСТЬ НЕ NULL ТОГДА "Заказ" КОНЕЦ ИЗ T"#;
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== CASE with IS NULL (no newline) test ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    // Count IS NULL expressions
+    let is_null_count = tree.matches("SDBL_IS_NULL_EXPR").count();
+    eprintln!("IS NULL expressions found: {}", is_null_count);
+
+    if is_null_count >= 2 {
+        eprintln!("✓ Both IS NULL predicates parsed correctly");
+    } else {
+        eprintln!("✗ Missing IS NULL predicates (expected 2, got {})", is_null_count);
+        eprintln!("\nTree snippet:");
+        // Print tree but limit output
+        let lines: Vec<&str> = tree.lines().collect();
+        for line in lines.iter().take(100) {
+            eprintln!("{}", line);
+        }
+    }
+}
+#[test]
+fn test_full_user_query() {
+    use parser::parse_sdbl;
+
+    let query = r#"ВЫБРАТЬ
+        ВыручкаИСебестоимостьПродаж.Регистратор,
+        ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, ""),
+        ВыручкаИСебестоимостьПродаж.Период,
+        ВЫБОР
+            КОГДА ВыручкаИСебестоимостьПродаж.Регистратор ССЫЛКА Документ.ВозвратТоваровОтКлиента
+                    И ДокЗаказКлиента.Ссылка ЕСТЬ NULL
+                ТОГДА "Возврат"
+            КОГДА ВыручкаИСебестоимостьПродаж.Регистратор ССЫЛКА Документ.ВозвратТоваровОтКлиента
+                    И ДокЗаказКлиента.Ссылка ЕСТЬ НЕ NULL 
+                ТОГДА "Возврат №" + ПРЕДСТАВЛЕНИЕ(ДокЗаказКлиента.НомерПоДаннымКлиента)
+            КОГДА ДокЗаказКлиента.Ссылка ЕСТЬ NULL
+                ТОГДА "Покупка в магазине"
+            ИНАЧЕ "Заказ №" + ПРЕДСТАВЛЕНИЕ(ДокЗаказКлиента.НомерПоДаннымКлиента)
+        КОНЕЦ
+    ИЗ T"#;
+
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== Full user query test ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    // Count IS NULL expressions
+    let is_null_count = tree.matches("SDBL_IS_NULL_EXPR").count();
+    eprintln!("IS NULL expressions found: {}", is_null_count);
+
+    // Count REFS expressions (ССЫЛКА)
+    let refs_count = tree.matches("SDBL_REFS_EXPR").count();
+    eprintln!("REFS expressions found: {}", refs_count);
+
+    if parse.has_errors() {
+        eprintln!("\n✗ Query has errors");
+        // Show first 150 lines of tree
+        for line in tree.lines().take(150) {
+            eprintln!("{}", line);
+        }
+    } else {
+        eprintln!("✓ Query parsed successfully");
+    }
+}
+#[test]
+fn test_estnull_function_vs_predicate() {
+    use parser::parse_sdbl;
+
+    // Test 1: ЕСТЬNULL function (should be parsed as function call)
+    let q1 = r#"ВЫБРАТЬ ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, "") ИЗ T"#;
+    let p1 = parse_sdbl(q1);
+    let tree1 = format!("{:#?}", p1.syntax_node());
+
+    eprintln!("\n=== Test 1: ЕСТЬNULL function ===");
+    eprintln!("Has errors: {}", p1.has_errors());
+    let func_count = tree1.matches("SDBL_FUNCTION_CALL").count();
+    eprintln!("Function calls: {}", func_count);
+
+    // Test 2: ЕСТЬ NULL predicate (should be parsed as IS NULL)
+    let q2 = r#"ВЫБРАТЬ * ИЗ T ГДЕ ДокЗаказКлиента.Ссылка ЕСТЬ NULL"#;
+    let p2 = parse_sdbl(q2);
+    let tree2 = format!("{:#?}", p2.syntax_node());
+
+    eprintln!("\n=== Test 2: ЕСТЬ NULL predicate ===");
+    eprintln!("Has errors: {}", p2.has_errors());
+    let is_null_count = tree2.matches("SDBL_IS_NULL_EXPR").count();
+    eprintln!("IS NULL predicates: {}", is_null_count);
+
+    if func_count > 0 && is_null_count > 0 {
+        eprintln!("\n✓ Both ЕСТЬNULL() function and ЕСТЬ NULL predicate work correctly");
+    } else {
+        eprintln!("\n✗ Problem detected:");
+        if func_count == 0 {
+            eprintln!("  - ЕСТЬNULL() not recognized as function");
+            eprintln!("Tree 1:\n{}", tree1.lines().take(50).collect::<Vec<_>>().join("\n"));
+        }
+        if is_null_count == 0 {
+            eprintln!("  - ЕСТЬ NULL not recognized as predicate");
+            eprintln!("Tree 2:\n{}", tree2.lines().take(50).collect::<Vec<_>>().join("\n"));
+        }
+    }
+}
+#[test]
+fn test_estnull_no_space_issue() {
+    use parser::parse_sdbl;
+
+    // User's exact case: ЕСТЬNULL without space
+    let query = r#"ВЫБРАТЬ ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, "") ИЗ T"#;
+    let parse = parse_sdbl(query);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    eprintln!("\n=== ЕСТЬNULL token analysis ===");
+    eprintln!("Has errors: {}", parse.has_errors());
+
+    // Look for how ЕСТЬNULL is tokenized
+    let lines: Vec<&str> = tree.lines().collect();
+    for (i, line) in lines.iter().enumerate().take(50) {
+        if line.contains("ЕСТЬNULL") || line.contains("ДокЗаказКлиента") {
+            // Print context
+            if i > 0 {
+                eprintln!("{}", lines[i - 1]);
+            }
+            eprintln!(">>> {}", line);
+            if i < lines.len() - 1 {
+                eprintln!("{}", lines[i + 1]);
+            }
+            if i < lines.len() - 2 {
+                eprintln!("{}", lines[i + 2]);
+            }
+        }
+    }
+
+    // Check if it's parsed as function call
+    if tree.contains("SDBL_FUNCTION_CALL") {
+        eprintln!("\n✓ ЕСТЬNULL correctly parsed as function call");
+    } else {
+        eprintln!("\n✗ ЕСТЬNULL not recognized as function");
+    }
+}

@@ -103,6 +103,7 @@ fn sdbl_category_to_tag(category: sdbl_hir::TokenCategory) -> HlTag {
         TokenCategory::JoinKeyword => HlTag::Keyword,
         TokenCategory::Modifier => HlTag::Keyword,
         TokenCategory::AggregateFunction => HlTag::Function,
+        TokenCategory::BuiltinFunction => HlTag::Function,
         // Identifiers
         TokenCategory::MdoType => HlTag::Class, // MDO types (Справочник, Документ)
         TokenCategory::TableName => HlTag::Type, // Object names (Валюты, Продажи)

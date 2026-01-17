@@ -1319,4 +1319,71 @@ EndFunction
             "ДобавитьВОчередь should be highlighted as Function (manager method)"
         );
     }
+
+    #[test]
+    fn test_sdbl_estnull_and_column_after_paren() {
+        let code = r#"
+Функция Тест()
+    Запрос = "ВЫБРАТЬ ЕСТЬNULL(ДокЗаказКлиента.НомерПоДаннымКлиента, """") ИЗ Т";
+    Возврат Запрос;
+КонецФункции
+"#;
+        // Print code with byte positions
+        eprintln!("\n=== Source code with positions ===");
+        for (i, line) in code.lines().enumerate() {
+            let line_start = code.lines().take(i).map(|l| l.len() + 1).sum::<usize>();
+            eprintln!("Line {}, offset {}: {}", i, line_start, line);
+        }
+
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // Debug: print all highlights with their ranges and text
+        eprintln!("\n=== All highlights ===");
+        for hl in &highlights {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
+        }
+
+        // Find ЕСТЬNULL - should be highlighted (as function or identifier)
+        let estnull = highlights.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ЕСТЬNULL"
+        });
+
+        // Find ДокЗаказКлиента - should be highlighted as one complete token
+        let doc_orders = highlights
+            .iter()
+            .filter(|hl| {
+                let text = &code[hl.range.start().into()..hl.range.end().into()];
+                text.contains("ДокЗаказКлиента")
+            })
+            .collect::<Vec<_>>();
+
+        eprintln!("\n=== ЕСТЬNULL found: {:?} ===", estnull.is_some());
+        eprintln!("=== ДокЗаказКлиента highlights: {} ===", doc_orders.len());
+        for hl in &doc_orders {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            eprintln!("  Text: '{}', Tag: {:?}", text, hl.tag);
+        }
+
+        // ЕСТЬNULL should be found
+        assert!(estnull.is_some(), "ЕСТЬNULL should be highlighted");
+
+        // ДокЗаказКлиента should be highlighted as one complete token
+        // (not broken like "Е(ДокЗаказКлиен")
+        let complete_token = doc_orders.iter().find(|hl| {
+            let text = &code[hl.range.start().into()..hl.range.end().into()];
+            text == "ДокЗаказКлиента"
+        });
+
+        assert!(
+            complete_token.is_some(),
+            "ДокЗаказКлиента should be highlighted as complete token, found: {:?}",
+            doc_orders
+                .iter()
+                .map(|hl| &code[hl.range.start().into()..hl.range.end().into()])
+                .collect::<Vec<_>>()
+        );
+    }
 }
