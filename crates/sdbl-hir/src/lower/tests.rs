@@ -1367,3 +1367,191 @@ fn test_union_in_nested_subquery_lowers_all_queries() {
         "Second query alias mismatch"
     );
 }
+
+#[test]
+fn test_deeply_nested_subquery_with_union() {
+    // Проверяем рекурсивную обработку: внутри вложенного запроса ещё один вложенный с UNION
+    let query = r#"ВЫБРАТЬ
+    Внешний.Контрагент КАК Клиент
+ИЗ (
+    ВЫБРАТЬ
+        Средний.Контрагент КАК Контрагент
+    ИЗ (
+        ВЫБРАТЬ
+            Т1.Контрагент КАК Контрагент
+        ИЗ Документ.ЧекККМ.Товары КАК Т1
+
+        ОБЪЕДИНИТЬ ВСЕ
+
+        ВЫБРАТЬ
+            Т2.Контрагент КАК Контрагент
+        ИЗ Документ.ЧекККМВозврат.Товары КАК Т2
+    ) КАК Средний
+) КАК Внешний"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1, "Expected single outer query");
+
+    let outer_query = &package.queries()[0];
+    assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
+
+    // Уровень 1: Внешний subquery (содержит один SELECT)
+    let level1_table = &outer_query.hir.from[0];
+    assert_eq!(
+        level1_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Внешний"),
+        "Level 1 alias mismatch"
+    );
+    assert_eq!(
+        level1_table.subquery.len(),
+        1,
+        "Level 1 should have 1 subquery HIR (no UNION at this level)"
+    );
+
+    // Уровень 2: Средний subquery (содержит UNION - 2 запроса)
+    let level1_hir = &level1_table.subquery[0];
+    assert_eq!(level1_hir.from.len(), 1, "Level 1 HIR should have 1 FROM table");
+
+    let level2_table = &level1_hir.from[0];
+    assert_eq!(
+        level2_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Средний"),
+        "Level 2 alias mismatch"
+    );
+    assert_eq!(
+        level2_table.subquery.len(),
+        2,
+        "Level 2 should have 2 subquery HIRs (UNION at this level)"
+    );
+
+    // Уровень 3: Первый запрос UNION (Т1)
+    let level3_first_hir = &level2_table.subquery[0];
+    assert_eq!(level3_first_hir.from.len(), 1, "Level 3 first query should have 1 FROM table");
+    assert_eq!(
+        level3_first_hir.from[0].full_name, "Документ.ЧекККМ.Товары",
+        "Level 3 first query table name mismatch"
+    );
+    assert_eq!(
+        level3_first_hir.from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т1"),
+        "Level 3 first query alias mismatch"
+    );
+
+    // Уровень 3: Второй запрос UNION (Т2)
+    let level3_second_hir = &level2_table.subquery[1];
+    assert_eq!(level3_second_hir.from.len(), 1, "Level 3 second query should have 1 FROM table");
+    assert_eq!(
+        level3_second_hir.from[0].full_name, "Документ.ЧекККМВозврат.Товары",
+        "Level 3 second query table name mismatch"
+    );
+    assert_eq!(
+        level3_second_hir.from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т2"),
+        "Level 3 second query alias mismatch"
+    );
+}
+
+#[test]
+fn test_union_at_multiple_levels() {
+    // Проверяем UNION на разных уровнях вложенности одновременно
+    let query = r#"ВЫБРАТЬ
+    Внешний.Поле
+ИЗ (
+    ВЫБРАТЬ
+        Средний.Поле
+    ИЗ (
+        ВЫБРАТЬ Т1.Поле ИЗ Таблица1 КАК Т1
+        ОБЪЕДИНИТЬ ВСЕ
+        ВЫБРАТЬ Т2.Поле ИЗ Таблица2 КАК Т2
+    ) КАК Средний
+
+    ОБЪЕДИНИТЬ ВСЕ
+
+    ВЫБРАТЬ
+        Средний2.Поле
+    ИЗ (
+        ВЫБРАТЬ Т3.Поле ИЗ Таблица3 КАК Т3
+        ОБЪЕДИНИТЬ ВСЕ
+        ВЫБРАТЬ Т4.Поле ИЗ Таблица4 КАК Т4
+    ) КАК Средний2
+) КАК Внешний"#;
+
+    let parse = parser::parse_sdbl(query);
+    let package = crate::lower::lower_sdbl_to_hir(&parse, None);
+
+    assert_eq!(package.queries().len(), 1, "Expected single outer query");
+
+    let outer_query = &package.queries()[0];
+    assert_eq!(outer_query.hir.from.len(), 1, "Outer query should have 1 FROM table");
+
+    // Уровень 1: Внешний subquery (содержит UNION - 2 запроса)
+    let level1_table = &outer_query.hir.from[0];
+    assert_eq!(
+        level1_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Внешний"),
+        "Level 1 alias mismatch"
+    );
+    assert_eq!(
+        level1_table.subquery.len(),
+        2,
+        "Level 1 should have 2 subquery HIRs (UNION at this level)"
+    );
+
+    // Первая ветка UNION на уровне 1
+    let level1_first_hir = &level1_table.subquery[0];
+    assert_eq!(level1_first_hir.from.len(), 1, "Level 1 first HIR should have 1 FROM table");
+
+    let level2_first_table = &level1_first_hir.from[0];
+    assert_eq!(
+        level2_first_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Средний"),
+        "Level 2 first table alias mismatch"
+    );
+    assert_eq!(
+        level2_first_table.subquery.len(),
+        2,
+        "Level 2 first table should have 2 subquery HIRs (Т1, Т2)"
+    );
+
+    // Проверяем Т1 и Т2
+    assert_eq!(level2_first_table.subquery[0].from[0].full_name, "Таблица1");
+    assert_eq!(
+        level2_first_table.subquery[0].from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т1")
+    );
+    assert_eq!(level2_first_table.subquery[1].from[0].full_name, "Таблица2");
+    assert_eq!(
+        level2_first_table.subquery[1].from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т2")
+    );
+
+    // Вторая ветка UNION на уровне 1
+    let level1_second_hir = &level1_table.subquery[1];
+    assert_eq!(level1_second_hir.from.len(), 1, "Level 1 second HIR should have 1 FROM table");
+
+    let level2_second_table = &level1_second_hir.from[0];
+    assert_eq!(
+        level2_second_table.alias.as_ref().map(|s| s.as_str()),
+        Some("Средний2"),
+        "Level 2 second table alias mismatch"
+    );
+    assert_eq!(
+        level2_second_table.subquery.len(),
+        2,
+        "Level 2 second table should have 2 subquery HIRs (Т3, Т4)"
+    );
+
+    // Проверяем Т3 и Т4
+    assert_eq!(level2_second_table.subquery[0].from[0].full_name, "Таблица3");
+    assert_eq!(
+        level2_second_table.subquery[0].from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т3")
+    );
+    assert_eq!(level2_second_table.subquery[1].from[0].full_name, "Таблица4");
+    assert_eq!(
+        level2_second_table.subquery[1].from[0].alias.as_ref().map(|s| s.as_str()),
+        Some("Т4")
+    );
+}
