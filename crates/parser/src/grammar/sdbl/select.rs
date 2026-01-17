@@ -23,6 +23,199 @@ fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
     p.eat_keyword(en) || p.eat_keyword(ru)
 }
 
+/// Check if current token can start a data source.
+///
+/// Used for error recovery in FROM clause list parsing.
+///
+/// # Returns
+///
+/// `true` if current token can start a data source:
+/// - `(` - subquery in parentheses
+/// - Identifier - table name
+///
+/// `false` otherwise (including clause keywords)
+fn is_data_source_start(p: &Parser) -> bool {
+    match p.current() {
+        Some(TokenKind::LParen) => true,                 // Subquery
+        Some(TokenKind::Ident) => !is_clause_keyword(p), // Table name (but not clause keyword)
+        _ => false,
+    }
+}
+
+/// Recover from unexpected tokens in selected field to alias or delimiter.
+///
+/// Called when expression parsing stopped early (e.g., didn't understand CASE in arithmetic).
+/// Consumes all tokens until we find:
+/// - AS/КАК keyword (alias start)
+/// - Comma (next field)
+/// - Clause keyword (FROM, WHERE, etc.)
+///
+/// **Important:** Handles nested constructs like CASE...END by tracking keywords.
+/// Only creates ERROR node if actually consumed at least one token.
+///
+/// # Example
+///
+/// ```ignore
+/// // After parsing "name" in: name + ВЫБОР КОГДА x ТОГДА y КОНЕЦ КАК alias
+/// // Current position: +
+/// recover_field_to_alias_or_delimiter(p);  // Consumes: + ВЫБОР ... КОНЕЦ
+/// // Current position: КАК (alias start)
+/// ```
+fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
+    let err = p.start();
+    let mut case_depth = 0i32; // Track nested CASE expressions
+    let mut paren_depth = 0i32; // Track nested parentheses
+    let mut consumed_any = false; // Track if we consumed at least one token
+
+    loop {
+        p.check_iteration_limit(); // Prevent infinite loops
+
+        // Track CASE/ВЫБОР nesting (CASE can contain commas)
+        if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
+            case_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if (p.at_keyword("END") || p.at_keyword("КОНЕЦ")) && case_depth > 0 {
+            case_depth -= 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        // Track parenthesis nesting
+        if p.at(TokenKind::LParen) {
+            paren_depth += 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        if p.at(TokenKind::RParen) && paren_depth > 0 {
+            paren_depth -= 1;
+            p.bump();
+            consumed_any = true;
+            continue;
+        }
+
+        // Only check delimiters when not inside nested constructs
+        if case_depth == 0 && paren_depth == 0 {
+            // Stop at alias keyword
+            if at_sdbl_keyword(p, "AS", "КАК") {
+                break;
+            }
+
+            // Stop at field delimiter (comma)
+            if p.at(TokenKind::Comma) {
+                break;
+            }
+
+            // Stop at semicolon (end of query)
+            if p.at(TokenKind::Semicolon) {
+                break;
+            }
+
+            // Stop at clause keywords
+            if is_clause_keyword(p) {
+                break;
+            }
+
+            // Stop at EOF
+            if p.at_end() {
+                break;
+            }
+        }
+
+        // Consume one token
+        p.bump();
+        consumed_any = true;
+    }
+
+    // Only create ERROR node if we actually consumed tokens
+    if consumed_any {
+        err.complete(p, NodeKind::Error);
+    } else {
+        err.abandon(p);
+    }
+}
+
+/// Recover to next delimiter by consuming unexpected tokens in virtual table arguments.
+///
+/// Similar to expressions::recover_to_delimiter but for virtual table method args context.
+/// Tracks parenthesis balance to handle nested calls.
+fn recover_to_delimiter_vt(p: &mut Parser) {
+    let err = p.start();
+    let mut paren_depth = 0i32; // Track nested parentheses
+
+    loop {
+        p.check_iteration_limit(); // Prevent infinite loops
+
+        // Track parenthesis nesting
+        if p.at(TokenKind::LParen) {
+            paren_depth += 1;
+            p.bump();
+            continue;
+        }
+
+        if p.at(TokenKind::RParen) {
+            if paren_depth > 0 {
+                // This is a closing paren for a nested call - consume it
+                paren_depth -= 1;
+                p.bump();
+                continue;
+            } else {
+                // This is the closing paren for our function - stop here
+                break;
+            }
+        }
+
+        // Stop at top-level delimiters (when not inside nested parens)
+        if paren_depth == 0 {
+            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
+                break;
+            }
+
+            // Stop at clause keywords (FROM, WHERE, etc.)
+            if is_clause_keyword(p) {
+                break;
+            }
+        }
+
+        // Stop at EOF
+        if p.at_end() {
+            break;
+        }
+
+        // Consume one token
+        p.bump();
+    }
+
+    err.complete(p, NodeKind::Error);
+}
+
+/// Check if current token can start a selected field.
+///
+/// Used for error recovery in SELECT field list parsing.
+///
+/// # Returns
+///
+/// `true` if current token can start a field:
+/// - Expression start tokens (see is_expression_start)
+/// - `*` - asterisk field
+///
+/// `false` otherwise (including clause keywords)
+fn is_field_start(p: &Parser) -> bool {
+    // Asterisk field (*, Table.*)
+    if is_asterisk_start(p) {
+        return true;
+    }
+
+    // Expression (column, function, literal, etc.)
+    super::expressions::is_expression_start(p)
+}
+
 /// Parse a SELECT query
 ///
 /// Grammar: `selectQuery: subquery (autoorder | orderBy | totalBy)?`
@@ -177,32 +370,23 @@ fn query(p: &mut Parser) {
 ///
 /// Grammar: `selectedFields: fields+=selectedField (COMMA fields+=selectedField)*`
 ///
-/// Error recovery: If we encounter a clause keyword (FROM, WHERE, etc.) while parsing fields,
-/// we stop immediately and let the clause parser handle it. This allows completion to work
-/// even when field list is incomplete (e.g., "SELECT Table.| FROM ...").
+/// Error recovery: Uses parse_delimited_list to handle:
+/// - Incomplete fields (e.g., "SELECT Table.| FROM ...")
+/// - Empty fields (e.g., "SELECT a, , b")
+/// - Invalid tokens between commas
+///
+/// Recovery stops at clause keywords (FROM, WHERE, etc.) to allow rest of query to parse.
 fn selected_fields(p: &mut Parser) {
     let m = p.start();
 
-    // Parse first field (mandatory)
-    selected_field(p);
-
-    // Parse additional fields (COMMA field)*
-    loop {
-        p.skip_trivia(); // CRITICAL: Skip trivia before checking for comma
-
-        // ERROR RECOVERY: Check if we hit a clause keyword
-        // This allows incomplete field lists like "SELECT Table.|" to not block FROM parsing
-        if is_clause_keyword(p) {
-            break; // Let FROM/WHERE/etc. parser handle this token
-        }
-
-        if !p.eat(TokenKind::Comma) {
-            break; // No more fields
-        }
-
-        p.skip_trivia();
-        selected_field(p);
-    }
+    // Parse fields (comma-separated) with error recovery
+    super::expressions::parse_delimited_list(
+        p,
+        TokenKind::Comma,
+        &super::LIST_RECOVERY,
+        is_field_start,
+        selected_field,
+    );
 
     m.complete(p, NodeKind::SdblFieldList);
 }
@@ -214,6 +398,10 @@ fn selected_fields(p: &mut Parser) {
 /// CRITICAL for AssignAliasFieldsInQuery diagnostic:
 /// - Must distinguish asterisk fields (no alias needed)
 /// - Must capture alias with/without AS keyword
+///
+/// ERROR RECOVERY: After parsing expression, if there are unexpected tokens before
+/// comma/clause keyword (e.g., unsupported SDBL constructs like CASE in arithmetic),
+/// consume them into ERROR node and continue parsing next field.
 fn selected_field(p: &mut Parser) {
     let m = p.start();
 
@@ -223,6 +411,28 @@ fn selected_field(p: &mut Parser) {
     } else {
         // Parse expression (column reference, function call, etc.)
         expressions::expression(p);
+
+        // ERROR RECOVERY: After expression, check if we're in a clean state
+        // If we see unexpected tokens (not alias, not comma, not clause keyword),
+        // it means expression parsing stopped early (unsupported construct)
+        // Example: "name + ВЫБОР...КОНЕЦ КАК alias" - after "name", parser stops,
+        // we need to consume "+ ВЫБОР...КОНЕЦ" as ERROR
+        p.skip_trivia();
+
+        // Check if we're in expected position (alias or end of field)
+        let at_expected_position = at_sdbl_keyword(p, "AS", "КАК")
+            || (is_identifier_token(p) && !is_clause_keyword(p))
+            || p.at(TokenKind::Comma)
+            || p.at(TokenKind::Semicolon) // End of query
+            || is_clause_keyword(p)
+            || p.at_end();
+
+        if !at_expected_position {
+            // Unexpected tokens after expression - consume them as ERROR
+            // This handles: CASE expressions, type operators, unknown constructs, etc.
+            recover_field_to_alias_or_delimiter(p);
+            p.skip_trivia();
+        }
     }
 
     // Optional alias
@@ -328,13 +538,14 @@ fn from_clause(p: &mut Parser) {
     eat_sdbl_keyword(p, "FROM", "ИЗ");
     p.skip_trivia();
 
-    // Parse data sources (comma-separated)
-    data_source(p);
-
-    while p.eat(TokenKind::Comma) {
-        p.skip_trivia();
-        data_source(p);
-    }
+    // Parse data sources (comma-separated) with error recovery
+    super::expressions::parse_delimited_list(
+        p,
+        TokenKind::Comma,
+        &super::LIST_RECOVERY,
+        is_data_source_start,
+        data_source,
+    );
 
     m.complete(p, NodeKind::SdblFromClause);
 }
@@ -437,6 +648,7 @@ fn table_ref(p: &mut Parser) {
 
     // Parse additional segments (DOT identifier)*
     while p.eat(TokenKind::Dot) {
+        p.check_iteration_limit(); // Prevent infinite loops
         p.skip_trivia();
 
         // ERROR RECOVERY: After DOT, only Ident is valid for table/MDO name
@@ -472,16 +684,49 @@ fn table_ref(p: &mut Parser) {
         // Support empty parameters like: .Обороты(, , Авто, ...)
         if !p.at(TokenKind::RParen) {
             // First argument (might be empty)
-            if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+            if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
                 super::expressions::expression(p);
+
+                // ERROR RECOVERY: After expression, consume unexpected tokens
+                p.skip_trivia();
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    recover_to_delimiter_vt(p);
+                }
+            } else if p.at(TokenKind::Comma) {
+                // Empty first argument: .Обороты(, value) - create ERROR node
+                let err = p.start();
+                err.complete(p, NodeKind::Error);
             }
 
+            // Parse remaining arguments with error recovery
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                // Each subsequent argument (might be empty)
+
+                // ERROR RECOVERY: Empty element or invalid token
+                // Examples: .Обороты(1, , 3) or .Обороты(1, 2,)
+                if p.at(TokenKind::Comma)
+                    || p.at(TokenKind::RParen)
+                    || !super::expressions::is_expression_start(p)
+                {
+                    // Create ERROR node for missing/invalid argument
+                    let err = p.start();
+                    err.complete(p, NodeKind::Error);
+
+                    // If next token is comma, continue to next argument
+                    // Otherwise (RParen or invalid), break
+                    if !p.at(TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+
+                super::expressions::expression(p);
+
+                // ERROR RECOVERY: After each argument expression, check for unexpected tokens
+                p.skip_trivia();
                 if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-                    super::expressions::expression(p);
+                    recover_to_delimiter_vt(p);
                 }
             }
         }

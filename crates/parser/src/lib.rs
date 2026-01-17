@@ -14,6 +14,7 @@ mod parser;
 mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
+pub mod token_set;
 
 use lexer::tokenize;
 

@@ -15,6 +15,250 @@ use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
 
+// ============================================================================
+// Helper Functions for Error Recovery
+// ============================================================================
+
+/// Check if current token can start an expression.
+///
+/// Used for error recovery in list parsing - allows detecting empty elements
+/// and clause keywords that shouldn't be consumed as expressions.
+///
+/// # Returns
+///
+/// `true` if current token can start an expression:
+/// - Literals: numbers, strings, booleans, null
+/// - Identifiers (columns, functions)
+/// - Operators: `+`, `-`, `NOT` (unary), `*` (for COUNT(*))
+/// - Parentheses: `(` (parenthesized expression or subquery)
+/// - Parameters: `&Parameter`
+/// - Keywords: `CASE`
+///
+/// `false` otherwise (including clause keywords like FROM, WHERE, etc.)
+pub(super) fn is_expression_start(p: &Parser) -> bool {
+    // Check for tokens that can start an expression
+    match p.current() {
+        // Literals
+        Some(TokenKind::Decimal)
+        | Some(TokenKind::Float)
+        | Some(TokenKind::String)
+        | Some(TokenKind::KwTrue)
+        | Some(TokenKind::KwFalse)
+        | Some(TokenKind::KwNull)
+        | Some(TokenKind::KwUndefined) => true,
+
+        // Identifiers (column references, function calls)
+        Some(TokenKind::Ident) => {
+            // Exclude clause keywords - they're not expressions
+            !super::select::is_clause_keyword(p)
+        }
+
+        // Unary operators and Star (for COUNT(*) special syntax)
+        Some(TokenKind::Plus)
+        | Some(TokenKind::Minus)
+        | Some(TokenKind::KwNot)
+        | Some(TokenKind::Star) => true,
+
+        // Parenthesized expressions or subqueries
+        Some(TokenKind::LParen) => true,
+
+        // Parameters (&Parameter)
+        Some(TokenKind::Ampersand) => true,
+
+        // CASE expression - check via keyword since it's IDENT token
+        _ => p.at_keyword("CASE") || p.at_keyword("ВЫБОР"),
+    }
+}
+
+/// Check if current position is a recovery point for list parsing.
+///
+/// Recovery points are tokens where we should stop parsing the current element
+/// and either continue to the next element or exit the list entirely.
+///
+/// # Parameters
+///
+/// - `recovery_set`: TokenSet of delimiter tokens (Comma, RParen, Semicolon, etc.)
+///
+/// # Returns
+///
+/// `true` if at a recovery point (stop current element), `false` otherwise
+fn is_recovery_point(p: &Parser, recovery_set: &crate::token_set::TokenSet) -> bool {
+    // Check if current token is in the recovery set
+    if let Some(kind) = p.current() {
+        if recovery_set.contains(kind) {
+            return true;
+        }
+    }
+
+    // Check for clause keywords (FROM, WHERE, etc.)
+    // These are always recovery points regardless of recovery_set
+    if super::select::is_clause_keyword(p) {
+        return true;
+    }
+
+    // EOF is also a recovery point
+    p.at_end()
+}
+
+/// Recover to next delimiter by consuming unexpected tokens.
+///
+/// Used when we encounter tokens that shouldn't be there (e.g., КАК inside function arguments).
+/// Consumes all tokens until we hit a delimiter (comma, rparen, semicolon) or clause keyword.
+///
+/// **Important:** Tracks parenthesis balance to handle nested function calls like:
+/// `ВЫРАЗИТЬ(поле КАК СТРОКА(200))` - must consume until outer `)`, not inner one.
+///
+/// # Example
+///
+/// ```ignore
+/// // After parsing "поле" in ВЫРАЗИТЬ(поле КАК СТРОКА(200))
+/// // Current position: КАК
+/// recover_to_delimiter(p);  // Consumes: КАК СТРОКА(200)
+/// // Current position: ) (outer rparen)
+/// ```
+fn recover_to_delimiter(p: &mut Parser) {
+    let err = p.start();
+    let mut paren_depth = 0i32; // Track nested parentheses
+
+    loop {
+        p.check_iteration_limit(); // Prevent infinite loops
+
+        // Track parenthesis nesting
+        if p.at(TokenKind::LParen) {
+            paren_depth += 1;
+            p.bump();
+            continue;
+        }
+
+        if p.at(TokenKind::RParen) {
+            if paren_depth > 0 {
+                // This is a closing paren for a nested call - consume it
+                paren_depth -= 1;
+                p.bump();
+                continue;
+            } else {
+                // This is the closing paren for our function - stop here
+                break;
+            }
+        }
+
+        // Stop at top-level delimiters (when not inside nested parens)
+        if paren_depth == 0 {
+            if p.at(TokenKind::Comma) || p.at(TokenKind::Semicolon) {
+                break;
+            }
+
+            // Stop at clause keywords (FROM, WHERE, etc.)
+            if super::select::is_clause_keyword(p) {
+                break;
+            }
+        }
+
+        // Stop at EOF
+        if p.at_end() {
+            break;
+        }
+
+        // Consume one token
+        p.bump();
+    }
+
+    err.complete(p, NodeKind::Error);
+}
+
+/// Parse a delimited list of elements with error recovery.
+///
+/// Generic list parser that handles:
+/// - Empty elements (e.g., `a, , b` or `, b`)
+/// - Missing elements after delimiter
+/// - Recovery at clause keywords and other delimiters
+///
+/// # Parameters
+///
+/// - `p`: Parser instance
+/// - `delimiter`: Token that separates list elements (e.g., `Comma`)
+/// - `recovery_set`: Tokens where parsing should stop (e.g., `RParen`, `Semicolon`)
+/// - `is_item_start`: Function to check if current position can start an item
+/// - `parse_item`: Closure to parse a single list item
+///
+/// # Behavior
+///
+/// 1. Parses first element (mandatory)
+/// 2. Loop:
+///    - Check for recovery points → break
+///    - If no delimiter → break (end of list)
+///    - Consume delimiter
+///    - Check for empty element (delimiter followed by delimiter or recovery point)
+///      → Create ERROR node and continue
+///    - Parse next element
+///    - Check iteration limit to prevent infinite loops
+///
+/// # Example
+///
+/// ```ignore
+/// // Parse function arguments: func(a, , c)
+/// parse_delimited_list(
+///     p,
+///     TokenKind::Comma,
+///     &EXPR_RECOVERY,
+///     is_expression_start,
+///     |p| expression(p),
+/// );
+/// ```
+pub(super) fn parse_delimited_list<F>(
+    p: &mut Parser,
+    delimiter: TokenKind,
+    recovery_set: &crate::token_set::TokenSet,
+    is_item_start: fn(&Parser) -> bool,
+    mut parse_item: F,
+) where
+    F: FnMut(&mut Parser),
+{
+    // Parse first element (mandatory - caller ensures at least one element)
+    parse_item(p);
+
+    loop {
+        p.skip_trivia();
+
+        // ERROR RECOVERY: Check if we're at a recovery point
+        // (clause keyword, closing delimiter, etc.)
+        if is_recovery_point(p, recovery_set) {
+            break; // Stop parsing list
+        }
+
+        // Check for delimiter (comma, etc.)
+        if !p.eat(delimiter) {
+            break; // No more elements
+        }
+
+        p.check_iteration_limit(); // Prevent infinite loops
+        p.skip_trivia();
+
+        // ERROR RECOVERY: Empty element after delimiter
+        // Examples: "a, , b" or "func(1, , 3)" or trailing delimiter "a, b,"
+        //
+        // Check if next token is:
+        // 1. Another delimiter (e.g., `,,`)
+        // 2. A recovery point (e.g., `)` in `func(1, 2,)`)
+        // 3. NOT a valid item start
+        if p.at(delimiter) || is_recovery_point(p, recovery_set) || !is_item_start(p) {
+            // Create ERROR node for missing element
+            let err = p.start();
+            err.complete(p, NodeKind::Error);
+
+            // If it was just another delimiter, continue to next iteration
+            // Otherwise (recovery point or invalid token), break
+            if !p.at(delimiter) {
+                break;
+            }
+            continue;
+        }
+
+        // Parse next element
+        parse_item(p);
+    }
+}
+
 /// Entry point for logical expressions (used in WHERE, HAVING clauses)
 ///
 /// Grammar: `logicalExpression: predicate ((AND | OR) predicate)*`
@@ -168,11 +412,14 @@ fn predicate_expr(p: &mut Parser) {
                 super::select::subquery(p);
             } else {
                 // Parse value list: expr, expr, ...
-                expression(p);
-                while p.eat(TokenKind::Comma) {
-                    p.skip_trivia();
-                    expression(p);
-                }
+                // Use parse_delimited_list for error recovery (handles empty elements like: IN (1, , 3))
+                parse_delimited_list(
+                    p,
+                    TokenKind::Comma,
+                    &super::EXPR_RECOVERY,
+                    is_expression_start,
+                    expression,
+                );
             }
 
             p.skip_trivia();
@@ -255,6 +502,7 @@ fn predicate_expr(p: &mut Parser) {
 
             // Parse remaining parts (e.g., .ПолныеРоли)
             while p.eat(TokenKind::Dot) {
+                p.check_iteration_limit(); // Prevent infinite loops
                 p.skip_trivia();
                 if p.at(TokenKind::Ident) {
                     p.bump(); // Next identifier
@@ -294,7 +542,11 @@ fn additive_expr(p: &mut Parser) {
 
     multiplicative_expr(p);
 
-    while matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+    loop {
+        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
+        if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+            break;
+        }
         p.check_iteration_limit();
         p.bump(); // + or -
         p.skip_trivia();
@@ -312,10 +564,14 @@ fn multiplicative_expr(p: &mut Parser) {
 
     unary_expr(p);
 
-    while matches!(
-        p.current(),
-        Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
-    ) {
+    loop {
+        p.skip_trivia(); // CRITICAL: Skip trivia BEFORE checking for operator!
+        if !matches!(
+            p.current(),
+            Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
+        ) {
+            break;
+        }
         p.check_iteration_limit();
         p.bump(); // *, /, %
         p.skip_trivia();
@@ -345,7 +601,13 @@ fn unary_expr(p: &mut Parser) {
 
 /// Parse primary expression (literals, columns, functions, parenthesized expressions, CASE)
 ///
-/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression`
+/// Grammar: `primaryExpression: literal | column | functionCall | parameter | LPAREN expression RPAREN | caseExpression | STAR`
+///
+/// NOTE: `STAR` is included for special syntax like `COUNT(*)` in SDBL.
+///
+/// TODO: Add support for type cast syntax: `ВЫРАЗИТЬ(expr КАК type(size))`
+/// Currently КАК inside expressions creates ERROR node which breaks parsing.
+/// See: https://github.com/1c-syntax/bsl-parser SDBL grammar for CAST syntax
 fn primary_expr(p: &mut Parser) {
     // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
     if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {
@@ -361,6 +623,15 @@ fn primary_expr(p: &mut Parser) {
         Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => literal_expr(p),
         Some(TokenKind::KwNull) | Some(TokenKind::KwUndefined) => literal_expr(p),
         Some(TokenKind::Ampersand) => parameter_expr(p),
+
+        // Special case: Star token for COUNT(*) syntax
+        // In SDBL, asterisk can appear as a standalone argument in aggregate functions
+        Some(TokenKind::Star) => {
+            let m = p.start();
+            p.bump(); // Consume Star
+            m.complete(p, NodeKind::SdblLiteral);
+        }
+
         _ => {
             // Error recovery: unexpected token
             let m = p.start();
@@ -518,16 +789,47 @@ fn column_or_function(p: &mut Parser) {
         // Support empty parameters like in BSL: Method(, , value)
         if !p.at(TokenKind::RParen) {
             // First argument (might be empty)
-            if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+            if is_expression_start(p) && !p.at(TokenKind::Comma) {
                 expression(p);
+
+                // ERROR RECOVERY: After expression, consume unexpected tokens
+                // Example: ВЫРАЗИТЬ(поле КАК СТРОКА(200)) - after "поле", consume "КАК СТРОКА(200)"
+                p.skip_trivia();
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    recover_to_delimiter(p);
+                }
+            } else if p.at(TokenKind::Comma) {
+                // Empty first argument: func(, value) - create ERROR node
+                let err = p.start();
+                err.complete(p, NodeKind::Error);
             }
 
+            // Parse remaining arguments with error recovery
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
                 p.skip_trivia();
-                // Each subsequent argument (might be empty)
+
+                // ERROR RECOVERY: Empty element or invalid token
+                // Examples: func(1, , 3) or func(1, 2,) or func(1, FROM ...)
+                if p.at(TokenKind::Comma) || p.at(TokenKind::RParen) || !is_expression_start(p) {
+                    // Create ERROR node for missing/invalid argument
+                    let err = p.start();
+                    err.complete(p, NodeKind::Error);
+
+                    // If next token is comma, continue to next argument
+                    // Otherwise (RParen or invalid), break
+                    if !p.at(TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+
+                expression(p);
+
+                // ERROR RECOVERY: After each argument expression, check for unexpected tokens
+                p.skip_trivia();
                 if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-                    expression(p);
+                    recover_to_delimiter(p);
                 }
             }
         }

@@ -672,4 +672,24 @@ mod tests {
         assert_eq!(tokens[2].kind, TokenKind::Ident);
         assert_eq!(tokens[2].text.as_str(), "ОпределитьСтавкуНДС");
     }
+
+    #[test]
+    fn test_string_with_paren_sdbl() {
+        // Test that " (" is lexed as ONE String token, not three
+        let input = r#"" (" + y"#;
+        let tokens = tokenize(input);
+
+        eprintln!("Tokens for {:?}:", input);
+        for (i, tok) in tokens.iter().enumerate() {
+            eprintln!("  [{}] {:?}: {:?}", i, tok.kind, tok.text);
+        }
+
+        // Should have: String(" ("), Whitespace, Plus, Whitespace, Ident(y)
+        assert_eq!(tokens[0].kind, TokenKind::String, "First token should be String");
+        assert_eq!(
+            tokens[0].text.as_str(),
+            r#"" (""#,
+            "First string should be entire ' (' with quotes"
+        );
+    }
 }

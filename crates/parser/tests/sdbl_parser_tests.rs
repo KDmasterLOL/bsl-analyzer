@@ -1014,3 +1014,466 @@ fn test_debug_in_expression_parsing() {
 
     assert!(!parse.has_errors(), "Should parse IN inside function parameter");
 }
+
+// ============================================================================
+// Phase 2: Error Recovery Tests
+// ============================================================================
+//
+// Tests for error recovery improvements (Phase 2 of SDBL error recovery plan):
+// 1. IN predicate with empty values
+// 2. REFS identifier chain
+// 3. Function arguments with empty parameters
+
+#[test]
+fn test_error_recovery_in_empty_value() {
+    // IN predicate with empty value: IN (1, , 3)
+    let input = "SELECT * FROM T WHERE Field IN (1, , 3)";
+    let parse = parse_sdbl(input);
+
+    // Should have ERROR node for empty value
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("ERROR"),
+        "Expected ERROR node for empty value in IN list.\nTree: {}",
+        tree
+    );
+
+    // But WHERE clause should still be parsed!
+    assert!(
+        tree.contains("SDBL_WHERE_CLAUSE"),
+        "WHERE clause should be parsed despite empty IN value.\nTree: {}",
+        tree
+    );
+
+    // And the IN expression should be present
+    assert!(tree.contains("SDBL_IN_EXPR"), "IN expression should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_in_leading_empty() {
+    // IN predicate with leading empty value: IN (, 2, 3)
+    let input = "SELECT * FROM T WHERE Field IN (, 2, 3)";
+    let parse = parse_sdbl(input);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("ERROR"), "Expected ERROR node for leading empty value.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_in_trailing_empty() {
+    // IN predicate with trailing empty value: IN (1, 2,)
+    let input = "SELECT * FROM T WHERE Field IN (1, 2,)";
+    let parse = parse_sdbl(input);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("ERROR"),
+        "Expected ERROR node for trailing empty value.\nTree: {}",
+        tree
+    );
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_function_empty_args() {
+    // Function with empty arguments: func(, , value)
+    let input = "SELECT func(, , 123) FROM T";
+    let parse = parse_sdbl(input);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have ERROR nodes for empty arguments
+    let error_count = tree.matches("ERROR").count();
+    assert!(
+        error_count >= 2,
+        "Expected at least 2 ERROR nodes for empty arguments. Got: {}.\nTree: {}",
+        error_count,
+        tree
+    );
+
+    // But function call should still be parsed
+    assert!(
+        tree.contains("SDBL_FUNCTION_CALL"),
+        "Function call should be parsed despite empty args.\nTree: {}",
+        tree
+    );
+
+    // And SELECT should be complete
+    assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_function_leading_empty() {
+    // Function with leading empty argument: func(, value)
+    let input = "SELECT func(, 456) FROM T";
+    let parse = parse_sdbl(input);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("ERROR"), "Expected ERROR node for leading empty arg.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_function_trailing_empty() {
+    // Function with trailing empty argument: func(value,)
+    let input = "SELECT func(789,) FROM T";
+    let parse = parse_sdbl(input);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("ERROR"), "Expected ERROR node for trailing empty arg.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_FUNCTION_CALL"), "Function call should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_refs_predicate() {
+    // REFS predicate with MDO reference: Field REFS Catalog.Products
+    let input = "SELECT * FROM T WHERE Field REFS Catalog.Products";
+    let parse = parse_sdbl(input);
+
+    // Should parse without errors (valid REFS syntax)
+    assert!(!parse.has_errors(), "REFS with qualified name should parse without errors");
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(tree.contains("SDBL_REFS_EXPR"), "REFS expression should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_error_recovery_comprehensive() {
+    // Comprehensive test: multiple error recovery points in one query
+    let input = "ВЫБРАТЬ Поле., Поле2, , Поле3 ИЗ Таблица1 ГДЕ Поле В (1, , 3) И func(, 456) > 0";
+
+    let parse = parse_sdbl(input);
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have multiple ERROR nodes:
+    // - Incomplete field (Поле.)
+    // - Empty field (, , Поле3)
+    // - Empty IN value (1, , 3)
+    // - Empty function arg (, 456)
+    let error_count = tree.matches("ERROR").count();
+    assert!(
+        error_count >= 3,
+        "Expected at least 3 ERROR nodes. Got: {}.\nTree: {}",
+        error_count,
+        tree
+    );
+
+    // But main clauses should still be parsed!
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_FIELD_LIST"), "Field list should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_no_infinite_loop_deeply_nested_dots() {
+    // Regression test: ensure parser doesn't loop infinitely on deeply nested dots
+    // This would previously cause infinite loop without check_iteration_limit()
+    let input = "SELECT T.a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z FROM T";
+    let parse = parse_sdbl(input);
+
+    // Should complete (not hang)
+    let tree = format!("{:#?}", parse.syntax_node());
+    assert!(
+        tree.contains("SDBL_COLUMN_REF"),
+        "Deeply nested column ref should be parsed.\nTree: {}",
+        tree
+    );
+}
+
+#[test]
+fn test_type_cast_with_recovery() {
+    // Test that parser recovers after type cast error and continues parsing
+    let query = r#"ВЫБРАТЬ
+    Поле1 КАК alias1,
+    ВЫРАЗИТЬ(Поле2 КАК СТРОКА(200)) КАК alias2,
+    Поле3 КАК alias3
+ИЗ Таблица
+ГДЕ Условие = 1"#;
+
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have ERROR node for type cast
+    assert!(tree.contains("ERROR"), "Expected ERROR node for type cast syntax.\nTree: {}", tree);
+
+    // But parsing should continue!
+    assert!(
+        tree.contains("SDBL_FROM_CLAUSE"),
+        "FROM clause should be parsed despite error in field.\nTree: {}",
+        tree
+    );
+
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+
+    // Should parse all 3 fields
+    let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
+    assert!(field_count >= 3, "Should parse all 3 fields. Got: {}.\nTree: {}", field_count, tree);
+}
+
+#[test]
+fn test_real_query_with_type_cast() {
+    // Real-world query from user
+    // NOTE: This query has TWO unsupported features:
+    // 1. Type cast: ВЫРАЗИТЬ(поле КАК СТРОКА(200))
+    // 2. CASE expression in additive expression: name + ВЫБОР...КОНЕЦ
+    //
+    // Expected behavior: parser recovers from type cast error,
+    // but CASE in arithmetic context is a separate issue.
+    let query = r#"ВЫБРАТЬ
+    ДвиженияПоКлиенту.Документ КАК Документ,
+    ДвиженияПоКлиенту.order_number КАК order_number,
+    ДвиженияПоКлиенту.shop КАК shop,
+    НАЧАЛОПЕРИОДА(ДвиженияПоКлиенту.Дата, ДЕНЬ) КАК date,
+    ВЫРАЗИТЬ(ДвиженияПоКлиенту.description КАК СТРОКА(200)) КАК description,
+    ДвиженияПоКлиенту.article КАК article,
+    ДвиженияПоКлиенту.name +
+        ВЫБОР
+            КОГДА ДвиженияПоКлиенту.size <> ""
+                ТОГДА " (" + ДвиженияПоКлиенту.size + ")"
+            ИНАЧЕ ""
+        КОНЕЦ КАК name,
+    ДвиженияПоКлиенту.quantity КАК quantity,
+    ДвиженияПоКлиенту.quantity_accounting КАК quantity_accounting,
+    ДвиженияПоКлиенту.price КАК price
+ИЗ Таблица
+ГДЕ Условие = 1"#;
+
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have ERROR nodes for type cast and CASE issues
+    assert!(tree.contains("ERROR"), "Expected ERROR nodes.\nTree: {}", tree);
+
+    // Parser should recover and parse at least first 7 fields before hitting CASE issue
+    let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
+    assert!(
+        field_count >= 7,
+        "Should parse at least 7 fields (recovers from type cast, stops at CASE). Got: {}.\nTree: {}",
+        field_count,
+        tree
+    );
+
+    // Type cast recovery works - field after type cast is parsed
+    assert!(
+        tree.contains("article"),
+        "Field after type cast should be parsed (recovery works).\nTree: {}",
+        tree
+    );
+}
+
+#[test]
+fn test_type_cast_without_case() {
+    // Simplified version without CASE expression
+    let query = r#"ВЫБРАТЬ
+    ДвиженияПоКлиенту.Документ КАК Документ,
+    ДвиженияПоКлиенту.order_number КАК order_number,
+    ДвиженияПоКлиенту.shop КАК shop,
+    НАЧАЛОПЕРИОДА(ДвиженияПоКлиенту.Дата, ДЕНЬ) КАК date,
+    ВЫРАЗИТЬ(ДвиженияПоКлиенту.description КАК СТРОКА(200)) КАК description,
+    ДвиженияПоКлиенту.article КАК article,
+    ДвиженияПоКлиенту.name КАК name,
+    ДвиженияПоКлиенту.quantity КАК quantity,
+    ДвиженияПоКлиенту.price КАК price
+ИЗ Таблица
+ГДЕ Условие = 1"#;
+
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have ERROR node for type cast
+    assert!(tree.contains("ERROR"), "Expected ERROR node for type cast.\nTree: {}", tree);
+
+    // FROM and WHERE should parse!
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
+
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+
+    // Should parse all 9 fields
+    let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
+    assert!(
+        field_count >= 9,
+        "Should parse at least 9 fields. Got: {}.\nTree: {}",
+        field_count,
+        tree
+    );
+}
+
+#[test]
+fn test_case_in_arithmetic_with_recovery() {
+    // CASE expression in arithmetic context - NOW SUPPORTED!
+    // Parser should handle CASE correctly and continue parsing
+    let query = r#"ВЫБРАТЬ
+    Поле1 КАК alias1,
+    Поле2 + ВЫБОР КОГДА x ТОГДА 1 ИНАЧЕ 2 КОНЕЦ КАК alias2,
+    Поле3 КАК alias3
+ИЗ Таблица
+ГДЕ Условие = 1"#;
+
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // CASE expressions are now supported - should parse without errors!
+    assert!(!parse.has_errors(), "CASE in arithmetic should parse correctly.\nTree: {}", tree);
+
+    // Verify CASE expression is parsed
+    assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression node.\nTree: {}", tree);
+
+    // Verify other clauses are parsed
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
+
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+
+    // Should parse all 3 fields
+    let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
+    assert!(field_count >= 3, "Should parse all 3 fields. Got: {}.\nTree: {}", field_count, tree);
+
+    // All fields should be parsed correctly
+    assert!(tree.contains("alias1"), "First field should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("alias2"), "Field with CASE should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("alias3"), "Field after CASE should be parsed.\nTree: {}", tree);
+}
+
+#[test]
+fn test_full_user_query_with_all_features() {
+    // Real user query with multiple unsupported features
+    let query = r#"ВЫБРАТЬ
+    ДвиженияПоКлиенту.Документ КАК Документ,
+    ДвиженияПоКлиенту.order_number КАК order_number,
+    ДвиженияПоКлиенту.shop КАК shop,
+    НАЧАЛОПЕРИОДА(ДвиженияПоКлиенту.Дата, ДЕНЬ) КАК date,
+    ВЫРАЗИТЬ(ДвиженияПоКлиенту.description КАК СТРОКА(200)) КАК description,
+    ДвиженияПоКлиенту.article КАК article,
+    ДвиженияПоКлиенту.name + 
+        ВЫБОР
+            КОГДА ДвиженияПоКлиенту.size <> ""
+                ТОГДА " (" + ДвиженияПоКлиенту.size + ")"
+            ИНАЧЕ ""
+        КОНЕЦ КАК name,
+    ДвиженияПоКлиенту.quantity КАК quantity,
+    ДвиженияПоКлиенту.quantity_accounting КАК quantity_accounting,
+    ДвиженияПоКлиенту.price КАК price,
+    ДвиженияПоКлиенту.price_eur КАК price_eur,
+    ДвиженияПоКлиенту.discount КАК discount,
+    ДвиженияПоКлиенту.bonus_accrued КАК bonus_accrued,
+    ДвиженияПоКлиенту.bonus_deducted КАК bonus_deducted
+ИЗ РегистрНакопления.ДвиженияПоКлиенту
+ГДЕ ДвиженияПоКлиенту.Клиент = &Клиент"#;
+
+    let parse = parse_sdbl(query);
+
+    let tree = format!("{:#?}", parse.syntax_node());
+
+    // Should have ERROR nodes for unsupported features (type cast, CASE)
+    assert!(tree.contains("ERROR"), "Expected ERROR nodes.\nTree: {}", tree);
+
+    // But FROM and WHERE should parse!
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
+
+    assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
+
+    // Should parse all 14 fields (with ERROR nodes for unsupported features)
+    let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
+    assert!(field_count >= 14, "Should parse all 14 fields. Got: {}.\nTree: {}", field_count, tree);
+
+    // Fields after unsupported features should be parsed
+    assert!(tree.contains("quantity"), "Fields after CASE should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("price_eur"), "Last fields should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("bonus_deducted"), "Last field should be parsed.\nTree: {}", tree);
+}
+#[test]
+fn test_simple_plus_case() {
+    use parser::parse_sdbl;
+    let query = "ВЫБРАТЬ Поле2 + ВЫБОР КОГДА x ТОГДА 1 КОНЕЦ КАК alias2 ИЗ T";
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    // CASE expressions are now supported - should parse without errors!
+    assert!(!parse.has_errors(), "CASE in arithmetic context should parse correctly");
+    assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression node.\nTree: {}", tree);
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
+}
+#[test]
+fn test_empty_string_literal() {
+    use parser::parse_sdbl;
+    let query = r#"ВЫБРАТЬ x <> "" КАК result ИЗ T"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    assert!(!parse.has_errors(), "Should parse empty string");
+}
+
+#[test]
+fn test_case_with_string_concat_in_then() {
+    use parser::parse_sdbl;
+    let query = r#"ВЫБРАТЬ
+    ВЫБОР
+        КОГДА x <> ""
+            ТОГДА " (" + y + ")"
+        ИНАЧЕ ""
+    КОНЕЦ КАК result
+ИЗ T"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    if parse.has_errors() {
+        eprintln!("\nErrors: {:?}", parse.errors());
+    }
+
+    assert!(!parse.has_errors(), "Should parse CASE with string concatenation in THEN clause");
+    assert!(tree.contains("SDBL_CASE_EXPR"), "Should have CASE expression");
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "Should parse FROM clause");
+}
+
+#[test]
+fn test_single_string_literal() {
+    use parser::parse_sdbl;
+    let query = r#"ВЫБРАТЬ " (" КАК result ИЗ T"#;
+    let parse = parse_sdbl(query);
+
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let tree = format!("{:#?}", parse.syntax_node());
+    if parse.has_errors() {
+        eprintln!("\nErrors: {:?}", parse.errors());
+    }
+
+    // Should parse without errors
+    assert!(!parse.has_errors(), "Single string should parse correctly");
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should parse");
+
+    // String should be either SDBL_LITERAL or SDBL_MULTI_STRING
+    assert!(
+        tree.contains("SDBL_LITERAL") || tree.contains("SDBL_MULTI_STRING"),
+        "Should have string literal node.\nTree: {}",
+        tree
+    );
+}
+
+#[test]
+fn test_simple_two_queries_with_semicolon() {
+    use parser::parse_sdbl;
+    use syntax::ast::{AstNode, SdblQueryPackage};
+
+    let query = r#"ВЫБРАТЬ x;
+ВЫБРАТЬ y"#;
+
+    let parse = parse_sdbl(query);
+    eprintln!("\n{:#?}", parse.syntax_node());
+
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    let count = package.queries().count();
+
+    eprintln!("Query count: {}", count);
+    assert_eq!(count, 2, "Expected 2 queries separated by semicolon");
+}
