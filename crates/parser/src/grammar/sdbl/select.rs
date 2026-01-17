@@ -461,6 +461,35 @@ fn table_ref(p: &mut Parser) {
         p.bump(); // Ident
     }
 
+    // Check for virtual table method call (e.g., .Обороты(...), .Остатки(...))
+    // If next token is '(', parse it as function call with arguments
+    p.skip_trivia();
+    if p.at(TokenKind::LParen) {
+        p.bump(); // (
+        p.skip_trivia();
+
+        // Parse arguments (comma-separated expressions)
+        // Support empty parameters like: .Обороты(, , Авто, ...)
+        if !p.at(TokenKind::RParen) {
+            // First argument (might be empty)
+            if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                super::expressions::expression(p);
+            }
+
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+                // Each subsequent argument (might be empty)
+                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                    super::expressions::expression(p);
+                }
+            }
+        }
+
+        p.skip_trivia();
+        p.expect(TokenKind::RParen);
+    }
+
     m.complete(p, NodeKind::SdblTableRef);
 }
 

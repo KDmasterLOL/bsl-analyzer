@@ -899,3 +899,118 @@ fn test_multiple_functions_with_empty_parameters() {
     let parse = parse_sdbl(query);
     assert!(!parse.has_errors(), "Should parse multiple functions with empty parameters");
 }
+
+#[test]
+fn test_function_with_in_subquery_parameter() {
+    // Test from user's real query: .Обороты() with IN (subquery) as parameter
+    let query = r#"ВЫБРАТЬ
+    ВыручкаИСебестоимость.СуммаВыручкиОборот
+ИЗ
+    РегистрНакопления.ВыручкаИСебестоимостьПродаж.Обороты(
+        ,
+        ,
+        Авто,
+        АналитикаУчетаПоПартнерам.Партнер В
+            (ВЫБРАТЬ
+                ИК.Партнер
+            ИЗ
+                ИнформацияКлиент КАК ИК)) КАК ВыручкаИСебестоимость"#;
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors ===");
+        for error in parse.errors() {
+            println!("  - {:?}", error);
+        }
+        println!("\n=== Syntax tree ===");
+        println!("{:#?}", parse.syntax_node());
+    }
+
+    assert!(!parse.has_errors(), "Should parse function with IN (subquery) as parameter");
+}
+
+#[test]
+fn test_user_full_query_with_empty_params_and_in_subquery() {
+    // Full query from user's original message with highlighting issue
+    let query = r#"ВЫБРАТЬ
+    АналитикаПоПартнерам.Партнер КАК Партнер,
+    ВыручкаИСебестоимость.СуммаВыручкиОборот КАК Выручка,
+    ВыручкаИСебестоимость.КоличествоУчетноеОборот КАК КоличествоУчетноеОборот,
+    ВыручкаИСебестоимость.СуммаРучнойСкидкиРеглОборот + ВыручкаИСебестоимость.СуммаАвтоматическойСкидкиРеглОборот КАК ИтоговаяСкидка
+ИЗ
+    РегистрНакопления.ВыручкаИСебестоимостьПродаж.Обороты(
+        ,
+        ,
+        Авто,
+        АналитикаУчетаПоПартнерам.Партнер В
+            (ВЫБРАТЬ
+                ИК.Партнер
+            ИЗ
+                ИнформацияКлиент КАК ИК)) КАК ВыручкаИСебестоимость
+    ВНУТРЕННЕЕ СОЕДИНЕНИЕ РегистрСведений.АналитикаУчетаПоПартнерам КАК АналитикаПоПартнерам
+    ПО ВыручкаИСебестоимость.АналитикаУчетаПоПартнерам = АналитикаПоПартнерам.КлючАналитики"#;
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors ===");
+        for error in parse.errors() {
+            println!("  - {:?}", error);
+        }
+    }
+
+    assert!(
+        !parse.has_errors(),
+        "Should parse full query with empty params, IN subquery, and JOIN without errors"
+    );
+}
+
+#[test]
+fn test_complete_user_query_from_fixture() {
+    // Complete query from user (first message) - saved as fixture
+    let query = include_str!("fixtures/user_query_with_highlighting_issue.sdbl");
+
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Parse errors ===");
+        for (i, error) in parse.errors().iter().enumerate() {
+            println!("Error {}: {:?}", i + 1, error);
+        }
+        println!("\n=== Query length: {} chars ===", query.len());
+    }
+
+    assert!(
+        !parse.has_errors(),
+        "Should parse complete user query with ПОМЕСТИТЬ, ОБЪЕДИНИТЬ, empty params, and IN subqueries: found {} errors",
+        parse.errors().len()
+    );
+}
+
+#[test]
+fn test_debug_in_expression_parsing() {
+    // Simplified test to debug IN expression parsing
+    let query = "ВЫБРАТЬ X ИЗ Т ГДЕ Поле В (1, 2, 3)";
+    let parse = parse_sdbl(query);
+    assert!(!parse.has_errors(), "Should parse simple IN with value list");
+
+    let query = "ВЫБРАТЬ X ИЗ Т ГДЕ Поле В (ВЫБРАТЬ Y ИЗ Т2)";
+    let parse = parse_sdbl(query);
+    assert!(!parse.has_errors(), "Should parse simple IN with subquery");
+
+    // Now test IN inside function parameter
+    let query = "ВЫБРАТЬ X ИЗ Рег.Метод(Поле В (ВЫБРАТЬ Y ИЗ Т2))";
+    let parse = parse_sdbl(query);
+
+    if parse.has_errors() {
+        println!("\n=== Errors for IN inside function parameter ===");
+        for error in parse.errors() {
+            println!("  - {:?}", error);
+        }
+        println!("\n=== Syntax tree ===");
+        println!("{:#?}", parse.syntax_node());
+    }
+
+    assert!(!parse.has_errors(), "Should parse IN inside function parameter");
+}
