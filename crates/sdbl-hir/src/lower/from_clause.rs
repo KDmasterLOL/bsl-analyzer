@@ -45,22 +45,37 @@ impl<'a> LoweringContext<'a> {
 
             // Recursively process nested queries in the subquery
             for inner_query in subquery.queries() {
-                // Process SELECT fields in nested subquery (for diagnostics)
+                // Push scope frame for nested query (isolate FROM/JOIN tables)
+                self.scope.push_frame();
+
+                // Process FROM clause data sources and add to scope
+                if let Some(from_clause) = inner_query.from_clause() {
+                    for inner_ds in from_clause.data_sources() {
+                        let table = self.lower_data_source(&inner_ds);
+                        self.scope.add_table(table);
+                    }
+                }
+
+                // Process JOIN clauses and add to scope
+                let joins = self.lower_joins(&inner_query);
+                for join in joins {
+                    self.scope.add_table(join.table);
+                }
+
+                // Process WHERE clause (needs scope with FROM/JOIN tables)
+                if let Some(where_clause) = inner_query.where_clause() {
+                    let _ = self.lower_where_clause(&where_clause);
+                }
+
+                // Process SELECT fields in nested subquery (for diagnostics and resolution)
                 if let Some(field_list) = inner_query.field_list() {
                     for field in field_list.fields() {
                         let _ = self.lower_selected_field(&field);
                     }
                 }
 
-                // Process FROM clause data sources
-                if let Some(from_clause) = inner_query.from_clause() {
-                    for inner_ds in from_clause.data_sources() {
-                        let _ = self.lower_data_source(&inner_ds);
-                    }
-                }
-
-                // Process JOIN clauses in nested subquery
-                let _ = self.lower_joins(&inner_query);
+                // Pop scope frame (remove nested query tables from scope)
+                self.scope.pop_frame();
             }
 
             // TODO: Handle subqueries properly
