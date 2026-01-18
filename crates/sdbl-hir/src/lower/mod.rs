@@ -125,7 +125,9 @@ pub fn lower_sdbl_to_hir(
             ctx.scope.push_frame();
 
             let query_hir = ctx.lower_query(&main_query);
-            let range = main_query.syntax().text_range();
+            // IMPORTANT: Use select_query.text_range() to include outer SELECT clause
+            // when query has INTO clause (e.g., SELECT ... ПОМЕСТИТЬ ... ИЗ (subquery))
+            let range = select_query.syntax().text_range();
 
             tracing::debug!(
                 select_index,

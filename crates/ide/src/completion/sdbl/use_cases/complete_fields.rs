@@ -349,4 +349,169 @@ mod tests {
             detail
         );
     }
+
+    #[test]
+    fn test_complete_fields_for_temp_table_from_nested_union() {
+        use bsl_metadata::MdoType;
+        use sdbl_hir::{FieldDef, ResolvedTable, Scope, SdblType, TableRef};
+        use smol_str::SmolStr;
+        use syntax::TextRange;
+
+        // Сценарий: Вложенный запрос с UNION создает временную таблицу,
+        // второй запрос использует эту временную таблицу для автокомплита.
+        //
+        // Запрос 1 (создает временную таблицу):
+        // ВЫБРАТЬ * ПОМЕСТИТЬ ВТ_Данные
+        // ИЗ (
+        //     ВЫБРАТЬ Наименование, Контрагент ИЗ Таблица1
+        //     ОБЪЕДИНИТЬ
+        //     ВЫБРАТЬ Наименование, Контрагент ИЗ Таблица2
+        // ) КАК Вложенный
+        //
+        // Запрос 2 (использует временную таблицу):
+        // ВЫБРАТЬ ВТ.↓ ИЗ ВТ_Данные КАК ВТ
+
+        // Создаем scope для второго запроса
+        let mut scope = Scope::new();
+
+        // Поля временной таблицы (результат UNION):
+        // - Наименование: String
+        // - Контрагент: СправочникСсылка.Контрагенты
+        let temp_fields = vec![
+            FieldDef::new("Наименование", SdblType::string()),
+            FieldDef::new("Контрагент", SdblType::reference(MdoType::Catalog, "Контрагенты")),
+        ];
+
+        // Добавляем временную таблицу в scope
+        scope.add_temp_table("ВТ_Данные".to_string(), temp_fields.clone());
+
+        // Создаем TableRef для временной таблицы (как это делает DbScopeProvider)
+        let temp_table = TableRef {
+            parts: vec![],
+            full_name: "ВТ_Данные".to_string(),
+            alias: Some(SmolStr::from("ВТ")),
+            metadata: Some(ResolvedTable::TempTable {
+                name: "ВТ_Данные".to_string(),
+                fields: temp_fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: vec![],
+            range: TextRange::default(),
+            subquery: Vec::new(),
+        };
+        scope.add_table(temp_table);
+
+        // Тест автокомплита: ВТ.↓
+        let items = CompleteFieldsUseCase::execute(&scope, "ВТ", "");
+
+        // Проверяем количество полей
+        assert_eq!(items.len(), 2, "Should have 2 fields from temp table");
+
+        // Проверяем наличие полей
+        assert!(
+            items.iter().any(|i| i.label == "Наименование"),
+            "Should have field 'Наименование'"
+        );
+        assert!(items.iter().any(|i| i.label == "Контрагент"), "Should have field 'Контрагент'");
+
+        // Проверяем типы полей
+
+        // 1. Поле "Наименование" - String
+        let name_field = items.iter().find(|i| i.label == "Наименование").unwrap();
+        assert!(name_field.detail.is_some(), "Наименование should have detail");
+        assert!(
+            name_field.detail.as_ref().unwrap().contains("Строка"),
+            "Наименование should show String type, got: {:?}",
+            name_field.detail
+        );
+
+        // 2. Поле "Контрагент" - СправочникСсылка.Контрагенты
+        let contractor_field = items.iter().find(|i| i.label == "Контрагент").unwrap();
+        assert!(contractor_field.detail.is_some(), "Контрагент should have detail");
+
+        let detail = contractor_field.detail.as_ref().unwrap();
+        // Проверяем что detail содержит информацию о reference типе
+        assert!(
+            detail.contains("Справочник") || detail.contains("Catalog") || detail.contains("Ref"),
+            "Контрагент should show Reference type, got: {}",
+            detail
+        );
+        assert!(
+            detail.contains("Контрагенты"),
+            "Контрагент detail should contain 'Контрагенты', got: {}",
+            detail
+        );
+
+        // Проверяем documentation
+        assert!(contractor_field.documentation.is_some(), "Контрагент should have documentation");
+
+        let doc = contractor_field.documentation.as_ref().unwrap();
+        assert!(
+            doc.contains("Таблица: ВТ_Данные"),
+            "Documentation should show temp table name, got: {}",
+            doc
+        );
+    }
+
+    #[test]
+    fn test_complete_fields_for_temp_table_with_prefix_filter() {
+        use bsl_metadata::MdoType;
+        use sdbl_hir::{FieldDef, ResolvedTable, Scope, SdblType, TableRef};
+        use smol_str::SmolStr;
+        use syntax::TextRange;
+
+        // Тест фильтрации по префиксу для полей временной таблицы
+        let mut scope = Scope::new();
+
+        let temp_fields = vec![
+            FieldDef::new("Наименование", SdblType::string()),
+            FieldDef::new("НаименованиеПолное", SdblType::string()),
+            FieldDef::new("Контрагент", SdblType::reference(MdoType::Catalog, "Контрагенты")),
+            FieldDef::new("Код", SdblType::string()),
+        ];
+
+        scope.add_temp_table("ВТ_Данные".to_string(), temp_fields.clone());
+
+        let temp_table = TableRef {
+            parts: vec![],
+            full_name: "ВТ_Данные".to_string(),
+            alias: Some(SmolStr::from("ВТ")),
+            metadata: Some(ResolvedTable::TempTable {
+                name: "ВТ_Данные".to_string(),
+                fields: temp_fields,
+            }),
+            is_virtual_table: false,
+            virtual_table_params: vec![],
+            range: TextRange::default(),
+            subquery: Vec::new(),
+        };
+        scope.add_table(temp_table);
+
+        // Тест с префиксом "Наим" - должно вернуть 2 поля
+        let items = CompleteFieldsUseCase::execute(&scope, "ВТ", "Наим");
+
+        assert_eq!(items.len(), 2, "Should find 2 fields starting with 'Наим'");
+        assert!(items.iter().any(|i| i.label == "Наименование"));
+        assert!(items.iter().any(|i| i.label == "НаименованиеПолное"));
+        assert!(!items.iter().any(|i| i.label == "Контрагент"));
+        assert!(!items.iter().any(|i| i.label == "Код"));
+
+        // Тест с префиксом "Ко" - должно вернуть 2 поля (Контрагент, Код)
+        let items_ko = CompleteFieldsUseCase::execute(&scope, "ВТ", "Ко");
+
+        assert_eq!(items_ko.len(), 2, "Should find 2 fields starting with 'Ко'");
+        assert!(items_ko.iter().any(|i| i.label == "Контрагент"));
+        assert!(items_ko.iter().any(|i| i.label == "Код"));
+
+        // Тест case-insensitive фильтрации
+        let items_upper = CompleteFieldsUseCase::execute(&scope, "ВТ", "КОД");
+        let items_lower = CompleteFieldsUseCase::execute(&scope, "ВТ", "код");
+
+        assert_eq!(items_upper.len(), 1, "Should find 'Код' with uppercase prefix");
+        assert_eq!(items_lower.len(), 1, "Should find 'Код' with lowercase prefix");
+        assert_eq!(
+            items_upper[0].label, items_lower[0].label,
+            "Should return same field regardless of case"
+        );
+    }
 }
