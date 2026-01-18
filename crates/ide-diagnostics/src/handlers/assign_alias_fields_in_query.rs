@@ -117,7 +117,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let total_time = start.elapsed();
-    tracing::warn!(
+    tracing::debug!(
         total_ms = total_time.as_millis(),
         hir_ms = hir_time.as_millis(),
         source_ms = source_time.as_millis(),

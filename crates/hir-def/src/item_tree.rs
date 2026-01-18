@@ -140,6 +140,9 @@ pub struct Procedure {
     pub source_range: TextRange,
     /// Source location of the procedure name (for diagnostics).
     pub name_range: TextRange,
+    /// Source location of the parameter list content (without parentheses).
+    /// None if there are no parameters.
+    pub param_list_range: Option<TextRange>,
 }
 
 /// Function definition.
@@ -156,6 +159,9 @@ pub struct Function {
     pub source_range: TextRange,
     /// Source location of the function name (for diagnostics).
     pub name_range: TextRange,
+    /// Source location of the parameter list content (without parentheses).
+    /// None if there are no parameters.
+    pub param_list_range: Option<TextRange>,
 }
 
 /// Module-level variable.
@@ -256,6 +262,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
+            param_list_range: None,
         };
 
         assert_eq!(proc.name.as_str(), "ТестоваяПроцедура");
@@ -275,6 +282,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
+            param_list_range: Some(TextRange::new(0.into(), 10.into())),
         };
 
         assert_eq!(func.params.len(), 2);
@@ -303,6 +311,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),
             name_range: TextRange::new(0.into(), 10.into()),
+            param_list_range: None,
         });
 
         tree.top_level.push(ModItem::Procedure(proc_idx));

@@ -355,6 +355,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -366,6 +367,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(20, 30),
             name_range: make_text_range(20, 30),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Function(func_idx));
 
@@ -414,6 +416,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -445,6 +448,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc1_idx));
 
@@ -456,6 +460,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(20, 30),
             name_range: make_text_range(20, 30),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc2_idx));
 
@@ -486,6 +491,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: Some(make_text_range(0, 10)),
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -516,6 +522,7 @@ mod tests {
             }]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
@@ -619,6 +626,7 @@ mod tests {
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),
+            param_list_range: None,
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 

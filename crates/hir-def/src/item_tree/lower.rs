@@ -93,6 +93,7 @@ impl Ctx {
 
         let is_export = proc.export_keyword().is_some();
         let params = self.lower_params(proc.param_list());
+        let param_list_range = proc.param_list().and_then(|pl| calculate_params_content_range(&pl));
         let annotations = self.lower_annotations(proc.annotations());
         let source_range = proc.syntax().text_range();
 
@@ -105,6 +106,7 @@ impl Ctx {
             annotations,
             source_range,
             name_range,
+            param_list_range,
         });
 
         self.tree.top_level.push(ModItem::Procedure(idx));
@@ -121,6 +123,7 @@ impl Ctx {
 
         let is_export = func.export_keyword().is_some();
         let params = self.lower_params(func.param_list());
+        let param_list_range = func.param_list().and_then(|pl| calculate_params_content_range(&pl));
         let annotations = self.lower_annotations(func.annotations());
         let source_range = func.syntax().text_range();
 
@@ -133,6 +136,7 @@ impl Ctx {
             annotations,
             source_range,
             name_range,
+            param_list_range,
         });
 
         self.tree.top_level.push(ModItem::Function(idx));
@@ -215,6 +219,21 @@ impl Ctx {
             })
             .collect()
     }
+}
+
+/// Calculate the text range covering all parameters (without parentheses).
+///
+/// Returns None if there are no parameters.
+fn calculate_params_content_range(param_list: &ast::ParamList) -> Option<text_size::TextRange> {
+    use syntax::ast::AstNode;
+
+    let params: Vec<_> = param_list.params().collect();
+    if params.is_empty() {
+        return None;
+    }
+    let first = params.first()?.syntax().text_range();
+    let last = params.last()?.syntax().text_range();
+    Some(text_size::TextRange::new(first.start(), last.end()))
 }
 
 /// Lower module items into an ItemTree (pure function, no Salsa).
