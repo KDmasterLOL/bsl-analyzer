@@ -8,8 +8,10 @@
 //! - complete_nested_fields: Nested field references (chains)
 //! - complete_join_types: JOIN type keywords
 //! - complete_nested_elements: Tabular sections and virtual tables
+//! - complete_cast_fields: Fields for CAST expression target types
 
 pub mod complete_aliases;
+pub mod complete_cast_fields;
 pub mod complete_fields;
 pub mod complete_join_types;
 pub mod complete_keywords;
@@ -19,6 +21,7 @@ pub mod complete_nested_fields;
 pub mod complete_value_elements;
 
 pub use complete_aliases::CompleteAliasesUseCase;
+pub use complete_cast_fields::CompleteCastFieldsUseCase;
 pub use complete_fields::CompleteFieldsUseCase;
 pub use complete_join_types::CompleteJoinTypesUseCase;
 pub use complete_keywords::CompleteKeywordsUseCase;

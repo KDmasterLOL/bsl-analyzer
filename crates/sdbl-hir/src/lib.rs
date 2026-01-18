@@ -58,6 +58,7 @@ pub use scope::Scope;
 pub use source_map::{SdblSourceMap, TokenCategory, TokenInfo};
 pub use types::{MdoRef, SdblType};
 
+use std::str::FromStr;
 use syntax::SyntaxNode;
 use text_size::TextSize;
 
@@ -151,6 +152,20 @@ pub enum SdblCompletionContext {
         /// Chain of field names already traversed (e.g., ["Владелец", "Родитель"])
         field_chain: Vec<String>,
         /// Prefix for filtering final field list
+        prefix: String,
+    },
+
+    /// Cursor after CAST/ВЫРАЗИТЬ expression closing paren with field access
+    /// Example: "ВЫРАЗИТЬ(Т.Регистратор КАК Документ.Продажа).$0" -> suggest fields of Документ.Продажа
+    /// Example: "ВЫРАЗИТЬ(...).Контрагент.$0" -> suggest nested fields
+    AfterCastExpression {
+        /// MDO type from CAST (e.g., MdoType::Document)
+        mdo_type: bsl_metadata::MdoType,
+        /// MDO object name (e.g., "Продажа", "НачислениеИСписаниеБонусныхБаллов")
+        object_name: String,
+        /// Chain of field names after the cast (may be empty for direct access)
+        field_chain: Vec<String>,
+        /// Prefix for filtering
         prefix: String,
     },
 
@@ -1214,6 +1229,112 @@ fn extract_last_identifier(s: &str) -> String {
     }
 }
 
+/// Parse CAST expression type from text ending with `).field` or `).<cursor>`
+/// Returns (MdoType, object_name, field_chain, prefix) if found
+///
+/// Example inputs:
+/// - "ВЫРАЗИТЬ(X КАК Документ.Продажа)." -> (Document, "Продажа", [], "")
+/// - "ВЫРАЗИТЬ(X КАК Документ.Продажа).Контрагент." -> (Document, "Продажа", ["Контрагент"], "")
+/// - "ВЫРАЗИТЬ(X КАК Справочник.Номенклатура).Вид" -> (Catalog, "Номенклатура", [], "Вид")
+fn parse_cast_field_access(
+    text_before: &str,
+) -> Option<(bsl_metadata::MdoType, String, Vec<String>, String)> {
+    // Find the last `)` - this closes the CAST expression
+    let last_rparen = text_before.rfind(')')?;
+
+    // Text after `)` should contain `.field.field...`
+    let after_paren = &text_before[last_rparen + 1..];
+
+    // Must start with `.` for field access
+    if !after_paren.starts_with('.') {
+        return None;
+    }
+
+    // Parse field chain and prefix from text after `).`
+    let field_access = &after_paren[1..]; // skip the first dot
+    let parts: Vec<&str> = field_access.split('.').collect();
+
+    // Last part is prefix, rest are field chain
+    let (field_chain, prefix) = if parts.is_empty() {
+        (vec![], String::new())
+    } else if parts.len() == 1 {
+        (vec![], parts[0].to_string())
+    } else {
+        let chain: Vec<String> = parts[..parts.len() - 1].iter().map(|s| s.to_string()).collect();
+        (chain, parts[parts.len() - 1].to_string())
+    };
+
+    // Now find the CAST type by looking backwards from `)`
+    // We need to find "КАК MDOType.ObjectName" pattern
+    let before_paren = &text_before[..last_rparen];
+
+    // Find "КАК" or "AS" keyword
+    let as_keyword_pos = find_last_as_keyword(before_paren)?;
+    let after_as = before_paren[as_keyword_pos..].trim_start();
+
+    // Skip "КАК " or "AS " - must use byte lengths correctly for UTF-8
+    // "КАК" is 6 bytes in UTF-8 (2 bytes per Cyrillic char), "AS" is 2 bytes
+    let type_start = if after_as.to_uppercase().starts_with("КАК") {
+        "КАК".len() // 6 bytes
+    } else if after_as.to_uppercase().starts_with("AS") {
+        "AS".len() // 2 bytes
+    } else {
+        return None;
+    };
+
+    let type_text = after_as[type_start..].trim_start();
+
+    // Parse MDO type: "Документ.Продажа" or "Document.Sale"
+    let type_parts: Vec<&str> = type_text.split('.').collect();
+    if type_parts.len() < 2 {
+        return None;
+    }
+
+    let mdo_type_str = type_parts[0].trim();
+    let object_name = type_parts[1].trim().to_string();
+
+    // Parse MDO type
+    let mdo_type = bsl_metadata::MdoType::from_str(mdo_type_str).ok()?;
+
+    Some((mdo_type, object_name, field_chain, prefix))
+}
+
+/// Find position of last AS/КАК keyword (case-insensitive)
+fn find_last_as_keyword(text: &str) -> Option<usize> {
+    let upper = text.to_uppercase();
+
+    // Find last occurrence of КАК or AS (as whole words)
+    let mut last_pos = None;
+
+    // Check for КАК
+    for (i, _) in upper.match_indices("КАК") {
+        // Verify it's a whole word (not part of another word)
+        let before_ok = i == 0 || !text[..i].chars().last().is_some_and(|c| c.is_alphanumeric());
+        let after_ok = i + 6 >= text.len() // КАК is 6 bytes in UTF-8
+            || !text[i + 6..].chars().next().is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            last_pos = Some(i);
+        }
+    }
+
+    // Check for AS (English)
+    for (i, _) in upper.match_indices("AS") {
+        // Handle the case where "AS" appears in the original (not uppercased) text
+        let original_at_i = &text[i..];
+        if original_at_i.to_uppercase().starts_with("AS") {
+            let before_ok =
+                i == 0 || !text[..i].chars().last().is_some_and(|c| c.is_alphanumeric());
+            let after_ok = i + 2 >= text.len()
+                || !text[i + 2..].chars().next().is_some_and(|c| c.is_alphanumeric());
+            if before_ok && after_ok && (last_pos.is_none() || i > last_pos.unwrap()) {
+                last_pos = Some(i);
+            }
+        }
+    }
+
+    last_pos
+}
+
 pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionContext {
     let offset_usize: usize = offset.into();
 
@@ -1294,6 +1415,26 @@ pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionConte
                 tracing::info!("detected None (too many parts in VALUE path)");
                 SdblCompletionContext::None
             }
+        };
+    }
+
+    // Check for CAST expression field access pattern: ВЫРАЗИТЬ(...).field
+    // IMPORTANT: Check this BEFORE nested field chain to detect CAST-specific patterns
+    if let Some((mdo_type, object_name, field_chain, prefix)) =
+        parse_cast_field_access(text_before_cursor)
+    {
+        tracing::info!(
+            ?mdo_type,
+            object_name = %object_name,
+            field_chain_len = field_chain.len(),
+            prefix = %prefix,
+            "detected AfterCastExpression"
+        );
+        return SdblCompletionContext::AfterCastExpression {
+            mdo_type,
+            object_name,
+            field_chain,
+            prefix,
         };
     }
 
@@ -2826,6 +2967,144 @@ mod tests {
                 assert_eq!(prefix, "Парт", "Should extract field prefix");
             }
             _ => panic!("Expected AfterTableAlias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_empty_prefix() {
+        // ВЫРАЗИТЬ(...КАК Документ.Продажа).
+        let query = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Регистратор КАК Документ.Продажа).";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(object_name, "Продажа");
+                assert!(field_chain.is_empty());
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_with_prefix() {
+        // ВЫРАЗИТЬ(...КАК Документ.Продажа).Конт
+        let query = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Регистратор КАК Документ.Продажа).Конт";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(object_name, "Продажа");
+                assert!(field_chain.is_empty());
+                assert_eq!(prefix, "Конт");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_nested_field() {
+        // ВЫРАЗИТЬ(...КАК Документ.Продажа).Контрагент.
+        let query = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Регистратор КАК Документ.Продажа).Контрагент.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(object_name, "Продажа");
+                assert_eq!(field_chain, vec!["Контрагент"]);
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_catalog() {
+        // ВЫРАЗИТЬ(...КАК Справочник.Номенклатура).
+        let query = "ВЫБРАТЬ ВЫРАЗИТЬ(Поле КАК Справочник.Номенклатура).";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Catalog);
+                assert_eq!(object_name, "Номенклатура");
+                assert!(field_chain.is_empty());
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_english() {
+        // CAST(... AS Document.Sale).
+        let query = "SELECT CAST(T.Recorder AS Document.Sale).";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(object_name, "Sale");
+                assert!(field_chain.is_empty());
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_cast_expression_real_world() {
+        // Real-world example from user request
+        let query = "ЕСТЬNULL(ВЫРАЗИТЬ(БонусныеБаллы.Регистратор КАК Документ.НачислениеИСписаниеБонусныхБаллов).ПричинаНачисленияИСписанияБонусныхБаллов.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            } => {
+                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(object_name, "НачислениеИСписаниеБонусныхБаллов");
+                assert_eq!(field_chain, vec!["ПричинаНачисленияИСписанияБонусныхБаллов"]);
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterCastExpression, got {:?}", context),
         }
     }
 }

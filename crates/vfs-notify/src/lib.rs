@@ -303,6 +303,11 @@ impl NotifyActor {
                 let mut res = Vec::new();
 
                 for root in &dirs.include {
+                    // Watch root directory with Recursive mode (handles all subdirs)
+                    if do_watch {
+                        watch(root.as_ref());
+                    }
+
                     send_message(root.clone());
                     let walkdir =
                         WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
@@ -331,9 +336,7 @@ impl NotifyActor {
                         if depth < 2 && is_dir {
                             send_message(abs_path.clone());
                         }
-                        if is_dir && do_watch {
-                            watch(abs_path.as_ref());
-                        }
+                        // Note: No per-subdirectory watch - root is watched with Recursive mode
                         if !is_file {
                             return None;
                         }
@@ -410,7 +413,9 @@ impl NotifyActor {
 
     fn watch(&mut self, path: &Path) {
         if let Some((watcher, _)) = &mut self.watcher {
-            log_notify_error(watcher.watch(path, RecursiveMode::NonRecursive));
+            // Use Recursive mode - FSEvents handles this efficiently on macOS
+            // This avoids creating thousands of watchers for each subdirectory
+            log_notify_error(watcher.watch(path, RecursiveMode::Recursive));
         }
     }
 

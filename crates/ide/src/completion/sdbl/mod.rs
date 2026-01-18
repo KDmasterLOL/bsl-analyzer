@@ -16,9 +16,9 @@ use ide_db::RootDatabase;
 use infrastructure::{DbMetadataProvider, DbScopeProvider};
 use sdbl_hir::{detect_context, detect_sdbl_at_position, SdblCompletionContext};
 use use_cases::{
-    CompleteAliasesUseCase, CompleteFieldsUseCase, CompleteJoinTypesUseCase,
-    CompleteKeywordsUseCase, CompleteMdoUseCase, CompleteNestedElementsUseCase,
-    CompleteNestedFieldsUseCase, CompleteValueElementsUseCase,
+    CompleteAliasesUseCase, CompleteCastFieldsUseCase, CompleteFieldsUseCase,
+    CompleteJoinTypesUseCase, CompleteKeywordsUseCase, CompleteMdoUseCase,
+    CompleteNestedElementsUseCase, CompleteNestedFieldsUseCase, CompleteValueElementsUseCase,
 };
 
 /// Main SDBL completion entry point (Facade).
@@ -210,6 +210,34 @@ pub(super) fn sdbl_completions(
                 &object_name,
                 &prefix,
                 is_russian,
+            )
+        }
+
+        // AfterCastExpression - suggest fields from CAST target type
+        (
+            SdblCompletionContext::AfterCastExpression {
+                mdo_type,
+                object_name,
+                field_chain,
+                prefix,
+            },
+            scope_opt,
+        ) => {
+            tracing::info!(
+                ?mdo_type,
+                object_name = %object_name,
+                field_chain_len = field_chain.len(),
+                prefix = %prefix,
+                has_scope = scope_opt.is_some(),
+                "completion context: AfterCastExpression"
+            );
+            CompleteCastFieldsUseCase::execute(
+                scope_opt,
+                &metadata_provider,
+                mdo_type,
+                &object_name,
+                &field_chain,
+                &prefix,
             )
         }
 
