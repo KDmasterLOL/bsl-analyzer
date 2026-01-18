@@ -1359,6 +1359,8 @@ dependencies = [
  "lexer",
  "stdx",
  "syntax",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -9,6 +9,8 @@ rust-version.workspace = true
 lexer.workspace = true
 syntax.workspace = true
 stdx.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+tracing-subscriber.workspace = true

@@ -41,6 +41,12 @@ impl<'a> Parser<'a> {
         self.nth(0)
     }
 
+    /// Returns the current token text for debugging.
+    #[allow(dead_code)]
+    pub(crate) fn current_text(&self) -> Option<&str> {
+        self.tokens.get(self.pos).map(|t| t.text.as_str())
+    }
+
     /// Returns the nth token kind (0-indexed).
     pub fn nth(&self, n: usize) -> Option<TokenKind> {
         self.tokens.get(self.pos + n).map(|t| t.kind)

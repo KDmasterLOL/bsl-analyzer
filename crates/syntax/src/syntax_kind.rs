@@ -263,6 +263,7 @@ pub enum SyntaxKind {
     SDBL_LITERAL,       // Literal value (number, string, boolean, null)
     SDBL_MULTI_STRING,  // Multiple string tokens or string with newlines (multiString: STR+)
     SDBL_PARAMETER,     // Parameter reference (&Parameter)
+    SDBL_TYPE,          // Type specification in CAST (СТРОКА, ЧИСЛО, etc.)
 
     // Future (Phase 2+)
     SDBL_JOIN_CLAUSE,   // JOIN clause

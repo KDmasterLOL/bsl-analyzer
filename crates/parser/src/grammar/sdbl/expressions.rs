@@ -744,8 +744,78 @@ fn paren_or_subquery_expr(p: &mut Parser) {
 /// column: identifier (DOT identifier)*
 /// functionCall: identifier LPAREN arguments? RPAREN
 /// ```
+/// Check if identifier is CAST/ВЫРАЗИТЬ function
+fn is_cast_function(p: &Parser) -> bool {
+    p.at_keyword("CAST") || p.at_keyword("ВЫРАЗИТЬ")
+}
+
+/// Parse CAST type specification: СТРОКА(length), ЧИСЛО(precision, scale), etc.
+///
+/// Grammar: `type: STRING (LPAREN DECIMAL RPAREN)? | NUMBER (LPAREN DECIMAL (COMMA DECIMAL)? RPAREN)? | DATE | BOOLEAN | mdo`
+///
+/// MDO types: `Справочник.Склады`, `Документ.РеализацияТоваровУслуг`, etc.
+fn parse_cast_type(p: &mut Parser) {
+    let m = p.start();
+
+    // Type can be Ident (for STRING, NUMBER, DATE, BOOLEAN) or MDO reference (Справочник.Склады)
+    if p.at(TokenKind::Ident) {
+        // Check if type is NUMBER/ЧИСЛО (needs special handling for 2 parameters)
+        let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
+
+        p.bump(); // Type name (or first part of MDO type)
+        p.skip_trivia();
+
+        // Parse MDO type: Справочник.Склады, Документ.РеализацияТоваровУслуг
+        // Keep consuming DOT Ident pairs until we hit something else
+        while p.at(TokenKind::Dot) {
+            p.check_iteration_limit();
+            p.bump(); // DOT
+            p.skip_trivia();
+
+            if p.at(TokenKind::Ident) {
+                p.bump(); // Next part of MDO type
+                p.skip_trivia();
+            } else {
+                // Incomplete MDO type (e.g., "Справочник." without object name)
+                let err = p.start();
+                err.complete(p, NodeKind::Error);
+                break;
+            }
+        }
+
+        // Check for type parameters: СТРОКА(200), ЧИСЛО(15, 2)
+        // Note: MDO types don't have parameters, this is only for primitive types
+        if p.at(TokenKind::LParen) {
+            p.bump(); // (
+            p.skip_trivia();
+
+            // First parameter (length or precision)
+            if p.at(TokenKind::Decimal) {
+                p.bump();
+                p.skip_trivia();
+
+                // Second parameter for NUMBER (scale)
+                if is_number_type && p.eat(TokenKind::Comma) {
+                    p.skip_trivia();
+                    if p.at(TokenKind::Decimal) {
+                        p.bump();
+                        p.skip_trivia();
+                    }
+                }
+            }
+
+            p.expect(TokenKind::RParen);
+        }
+    }
+
+    m.complete(p, NodeKind::SdblType);
+}
+
 fn column_or_function(p: &mut Parser) {
     let m = p.start();
+
+    // Check if this is CAST/ВЫРАЗИТЬ function before consuming
+    let is_cast = is_cast_function(p);
 
     // First identifier (mandatory)
     p.bump(); // Ident
@@ -792,11 +862,20 @@ fn column_or_function(p: &mut Parser) {
             if is_expression_start(p) && !p.at(TokenKind::Comma) {
                 expression(p);
 
-                // ERROR RECOVERY: After expression, consume unexpected tokens
-                // Example: ВЫРАЗИТЬ(поле КАК СТРОКА(200)) - after "поле", consume "КАК СТРОКА(200)"
-                p.skip_trivia();
-                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
-                    recover_to_delimiter(p);
+                // Special handling for CAST/ВЫРАЗИТЬ: parse КАК type syntax
+                if is_cast && (p.at_keyword("AS") || p.at_keyword("КАК")) {
+                    p.skip_trivia();
+                    p.bump(); // AS/КАК
+                    p.skip_trivia();
+                    parse_cast_type(p);
+                    p.skip_trivia();
+                } else {
+                    // ERROR RECOVERY: After expression, consume unexpected tokens
+                    // Example: func(value AND ...) - after "value", consume "AND"
+                    p.skip_trivia();
+                    if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                        recover_to_delimiter(p);
+                    }
                 }
             } else if p.at(TokenKind::Comma) {
                 // Empty first argument: func(, value) - create ERROR node
@@ -836,6 +915,34 @@ fn column_or_function(p: &mut Parser) {
 
         p.skip_trivia();
         p.expect(TokenKind::RParen);
+
+        // After closing paren, check for member access on function result
+        // Example: ВЫРАЗИТЬ(field КАК Справочник.Склады).Родитель.Наименование
+        // This is common in SDBL when accessing fields of CAST result
+        p.skip_trivia();
+        while p.at(TokenKind::Dot) {
+            p.check_iteration_limit();
+            p.bump(); // DOT
+            p.skip_trivia();
+
+            if p.at(TokenKind::Ident) {
+                // Check if this is actually a clause keyword (shouldn't be consumed as field)
+                if super::select::is_clause_keyword(p) {
+                    // Incomplete: "CAST(...).\nFROM" - don't consume FROM
+                    let err = p.start();
+                    err.complete(p, NodeKind::Error);
+                    break;
+                }
+
+                p.bump(); // Field name
+                p.skip_trivia();
+            } else {
+                // Incomplete: "CAST(...)." without field name
+                let err = p.start();
+                err.complete(p, NodeKind::Error);
+                break;
+            }
+        }
 
         m.complete(p, NodeKind::SdblFunctionCall);
     } else {

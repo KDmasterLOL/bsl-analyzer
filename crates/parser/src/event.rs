@@ -134,6 +134,7 @@ pub enum NodeKind {
     SdblLiteral,
     SdblMultiString,
     SdblParameter,
+    SdblType,
     SdblError,
 
     // Other

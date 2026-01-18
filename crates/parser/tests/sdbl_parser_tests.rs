@@ -1183,7 +1183,7 @@ fn test_no_infinite_loop_deeply_nested_dots() {
 
 #[test]
 fn test_type_cast_with_recovery() {
-    // Test that parser recovers after type cast error and continues parsing
+    // Test that CAST (ВЫРАЗИТЬ) is properly parsed
     let query = r#"ВЫБРАТЬ
     Поле1 КАК alias1,
     ВЫРАЗИТЬ(Поле2 КАК СТРОКА(200)) КАК alias2,
@@ -1195,15 +1195,11 @@ fn test_type_cast_with_recovery() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have ERROR node for type cast
-    assert!(tree.contains("ERROR"), "Expected ERROR node for type cast syntax.\nTree: {}", tree);
+    // CAST is now properly parsed - should have SDBL_TYPE node
+    assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // But parsing should continue!
-    assert!(
-        tree.contains("SDBL_FROM_CLAUSE"),
-        "FROM clause should be parsed despite error in field.\nTree: {}",
-        tree
-    );
+    // All clauses should parse
+    assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
@@ -1215,12 +1211,7 @@ fn test_type_cast_with_recovery() {
 #[test]
 fn test_real_query_with_type_cast() {
     // Real-world query from user
-    // NOTE: This query has TWO unsupported features:
-    // 1. Type cast: ВЫРАЗИТЬ(поле КАК СТРОКА(200))
-    // 2. CASE expression in additive expression: name + ВЫБОР...КОНЕЦ
-    //
-    // Expected behavior: parser recovers from type cast error,
-    // but CASE in arithmetic context is a separate issue.
+    // Features: CAST (ВЫРАЗИТЬ) and CASE expression in arithmetic context
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1244,29 +1235,21 @@ fn test_real_query_with_type_cast() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have ERROR nodes for type cast and CASE issues
-    assert!(tree.contains("ERROR"), "Expected ERROR nodes.\nTree: {}", tree);
+    // CAST is now properly parsed - should have SDBL_TYPE node
+    assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // Parser should recover and parse at least first 7 fields before hitting CASE issue
+    // Parser should parse all 10 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
-    assert!(
-        field_count >= 7,
-        "Should parse at least 7 fields (recovers from type cast, stops at CASE). Got: {}.\nTree: {}",
-        field_count,
-        tree
-    );
+    assert!(field_count >= 10, "Should parse all 10 fields. Got: {}.\nTree: {}", field_count, tree);
 
-    // Type cast recovery works - field after type cast is parsed
-    assert!(
-        tree.contains("article"),
-        "Field after type cast should be parsed (recovery works).\nTree: {}",
-        tree
-    );
+    // Type cast followed by field - both should be parsed
+    assert!(tree.contains("article"), "Field after type cast should be parsed.\nTree: {}", tree);
 }
 
 #[test]
 fn test_type_cast_without_case() {
     // Simplified version without CASE expression
+    // CAST (ВЫРАЗИТЬ) is now fully supported
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1284,10 +1267,10 @@ fn test_type_cast_without_case() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have ERROR node for type cast
-    assert!(tree.contains("ERROR"), "Expected ERROR node for type cast.\nTree: {}", tree);
+    // CAST is now properly parsed - should have SDBL_TYPE node
+    assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // FROM and WHERE should parse!
+    // FROM and WHERE should parse
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
@@ -1340,7 +1323,7 @@ fn test_case_in_arithmetic_with_recovery() {
 
 #[test]
 fn test_full_user_query_with_all_features() {
-    // Real user query with multiple unsupported features
+    // Real user query with CAST and CASE - both now supported
     let query = r#"ВЫБРАТЬ
     ДвиженияПоКлиенту.Документ КАК Документ,
     ДвиженияПоКлиенту.order_number КАК order_number,
@@ -1348,7 +1331,7 @@ fn test_full_user_query_with_all_features() {
     НАЧАЛОПЕРИОДА(ДвиженияПоКлиенту.Дата, ДЕНЬ) КАК date,
     ВЫРАЗИТЬ(ДвиженияПоКлиенту.description КАК СТРОКА(200)) КАК description,
     ДвиженияПоКлиенту.article КАК article,
-    ДвиженияПоКлиенту.name + 
+    ДвиженияПоКлиенту.name +
         ВЫБОР
             КОГДА ДвиженияПоКлиенту.size <> ""
                 ТОГДА " (" + ДвиженияПоКлиенту.size + ")"
@@ -1368,22 +1351,26 @@ fn test_full_user_query_with_all_features() {
 
     let tree = format!("{:#?}", parse.syntax_node());
 
-    // Should have ERROR nodes for unsupported features (type cast, CASE)
-    assert!(tree.contains("ERROR"), "Expected ERROR nodes.\nTree: {}", tree);
+    // CAST is now properly parsed - should have SDBL_TYPE node
+    assert!(tree.contains("SDBL_TYPE"), "Expected SDBL_TYPE node for CAST type.\nTree: {}", tree);
 
-    // But FROM and WHERE should parse!
+    // FROM and WHERE should parse
     assert!(tree.contains("SDBL_FROM_CLAUSE"), "FROM clause should be parsed.\nTree: {}", tree);
 
     assert!(tree.contains("SDBL_WHERE_CLAUSE"), "WHERE clause should be parsed.\nTree: {}", tree);
 
-    // Should parse all 14 fields (with ERROR nodes for unsupported features)
+    // Should parse all 14 fields
     let field_count = tree.matches("SDBL_SELECTED_FIELD").count();
     assert!(field_count >= 14, "Should parse all 14 fields. Got: {}.\nTree: {}", field_count, tree);
 
-    // Fields after unsupported features should be parsed
-    assert!(tree.contains("quantity"), "Fields after CASE should be parsed.\nTree: {}", tree);
-    assert!(tree.contains("price_eur"), "Last fields should be parsed.\nTree: {}", tree);
-    assert!(tree.contains("bonus_deducted"), "Last field should be parsed.\nTree: {}", tree);
+    // All fields should be parsed
+    assert!(tree.contains("quantity"), "Quantity field should be parsed.\nTree: {}", tree);
+    assert!(tree.contains("price_eur"), "price_eur field should be parsed.\nTree: {}", tree);
+    assert!(
+        tree.contains("bonus_deducted"),
+        "bonus_deducted field should be parsed.\nTree: {}",
+        tree
+    );
 }
 #[test]
 fn test_simple_plus_case() {

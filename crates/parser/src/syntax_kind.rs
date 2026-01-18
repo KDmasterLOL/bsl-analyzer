@@ -126,6 +126,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblLiteral => SK::SDBL_LITERAL,
         NodeKind::SdblMultiString => SK::SDBL_MULTI_STRING,
         NodeKind::SdblParameter => SK::SDBL_PARAMETER,
+        NodeKind::SdblType => SK::SDBL_TYPE,
         NodeKind::SdblError => SK::SDBL_ERROR,
 
         // Other

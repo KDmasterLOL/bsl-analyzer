@@ -117,6 +117,11 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
                 break;
             }
 
+            // Stop at closing parenthesis (end of subquery in FROM)
+            if p.at(TokenKind::RParen) {
+                break;
+            }
+
             // Stop at clause keywords
             if is_clause_keyword(p) {
                 break;
