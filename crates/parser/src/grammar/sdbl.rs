@@ -76,6 +76,9 @@ pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[
 pub fn query_package(p: &mut Parser) {
     let m = p.start();
 
+    // Skip leading trivia (whitespace, newlines) before first query
+    p.skip_trivia();
+
     // Parse first query (mandatory)
     if !p.at_end() {
         queries(p);

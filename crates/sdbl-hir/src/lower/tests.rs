@@ -1897,3 +1897,88 @@ fn test_nested_subquery_with_tabular_and_union() {
     assert_eq!(second_union_hir.joins[0].table.full_name, "Документ.ЧекККМВозврат");
     assert_eq!(second_union_hir.joins[0].table.alias.as_ref().map(|s| s.as_str()), Some("Возврат"));
 }
+
+#[test]
+fn test_query_range_includes_all_select_fields_with_case() {
+    // Воспроизводит проблему: второй SELECT с вложенным ВЫРАЗИТЬ(ВЫБОР...)
+    // должен иметь TextRange который включает ВСЕ поля SELECT.
+    //
+    // BUG: cursor на поле "description" не попадает в query range потому что
+    // parser/lowering неправильно определяет границы запроса.
+
+    let query = r#"
+ВЫБРАТЬ
+    Поле1,
+    Поле2
+ПОМЕСТИТЬ ВТ
+ИЗ
+    (ВЫБРАТЬ 1 КАК Поле1, 2 КАК Поле2) КАК Вложенный
+;
+
+ВЫБРАТЬ
+    ВТ.Документ КАК Документ,
+    ВТ.date КАК date,
+    ВТ.description КАК description,
+    ВЫРАЗИТЬ(ВЫБОР
+        КОГДА ВТ.Флаг
+            ТОГДА ВТ.Значение1
+        ИНАЧЕ ВТ.Значение2
+    КОНЕЦ КАК ЧИСЛО(15, 2)) КАК Результат
+ИЗ
+    ВТ КАК ВТ
+"#;
+
+    let parsed = parser::parse_sdbl(query);
+
+    // DEBUG: посмотрим что парсер увидел
+    println!("=== PARSE TREE ===");
+    println!("{:#?}", parsed.syntax_node());
+    println!("\n=== PARSE ERRORS ===");
+    for error in parsed.errors() {
+        println!("{:?}", error);
+    }
+
+    let package = lower_sdbl_to_hir(&parsed, None);
+
+    println!("\n=== LOWERED QUERIES ===");
+    println!("Total queries: {}", package.queries.len());
+    for (i, q) in package.queries.iter().enumerate() {
+        println!("Query {}: range={:?}", i, q.range);
+    }
+
+    // Должно быть 2 запроса
+    assert_eq!(package.queries.len(), 2, "Should have 2 queries");
+
+    let query1_range = package.queries[1].range;
+
+    // Cursor на строке "date" - должен попадать в range
+    let date_offset = query.find("date").expect("Should find 'date'");
+    assert!(
+        query1_range.contains(date_offset.try_into().unwrap()),
+        "Date offset {} should be within query 1 range {:?}",
+        date_offset,
+        query1_range
+    );
+
+    // Cursor на строке "description" - тоже должен попадать в range
+    let description_offset = query.find("description").expect("Should find 'description'");
+    assert!(
+        query1_range.contains(description_offset.try_into().unwrap()),
+        "Description offset {} should be within query 1 range {:?}. Query text:\n{}",
+        description_offset,
+        query1_range,
+        query
+    );
+}
+
+#[test]
+fn test_leading_whitespace_in_sdbl() {
+    // Regression test: SDBL parser should handle leading whitespace/newlines
+    let query = "\nВЫБРАТЬ 1 ИЗ Т";
+    let parsed = parser::parse_sdbl(query);
+    assert!(!parsed.has_errors(), "Should parse query with leading newline");
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let pkg = SdblQueryPackage::cast(parsed.syntax_node()).expect("Should have query package");
+    assert_eq!(pkg.queries().count(), 1, "Should have 1 query");
+}

@@ -823,12 +823,13 @@ Query = "ВЫБРАТЬ
 
     /// Test from Java: AssignAliasFieldsInQueryDiagnosticTest.java
     ///
-    /// Expected 5 diagnostics:
+    /// Expected 6 diagnostics:
     /// - Line 3, columns 3-16 (Валюты.Ссылка without alias)
     /// - Line 5, columns 3-17 (Валюты.Код Код - implicit alias)
     /// - Line 21, columns 3-16 (Валюты.Ссылка without alias - second query)
     /// - Line 23, columns 3-17 (Валюты.Код Код - implicit alias - second query)
     /// - Line 42, columns 4-17 (Валюты.Ссылка without alias - in subquery)
+    /// - Line 61, columns 3-20 (ВТ_ТЧ.НомерСтроки without alias - query with leading newline)
     #[test]
     fn test_java_diagnostic_compatibility() {
         // Load exact copy of Java test fixture
@@ -906,7 +907,7 @@ Query = "ВЫБРАТЬ
             );
         }
 
-        assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics to match Java implementation");
+        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 
         // Verify exact positions match Java test expectations
         assert_diagnostic_range(&file_content, &diagnostics[0], 3, 3, 16); // Валюты.Ссылка
@@ -914,5 +915,6 @@ Query = "ВЫБРАТЬ
         assert_diagnostic_range(&file_content, &diagnostics[2], 21, 3, 16); // Second query
         assert_diagnostic_range(&file_content, &diagnostics[3], 23, 3, 17); // Second query
         assert_diagnostic_range(&file_content, &diagnostics[4], 42, 4, 17); // Nested subquery
+        assert_diagnostic_range(&file_content, &diagnostics[5], 61, 3, 20); // Query with leading newline
     }
 }
