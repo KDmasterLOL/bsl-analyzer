@@ -1162,9 +1162,14 @@ fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
     let potential_alias = parts[0];
     let field_prefix = parts[1];
 
-    // Strip leading non-alphabetic characters (e.g., '(', operators)
-    // This handles cases like "(ЧекККМ.Field" where alias is wrapped in parentheses
-    let clean_alias = potential_alias.trim_start_matches(|c: char| !c.is_alphabetic());
+    // Extract the LAST identifier from potential_alias
+    // This handles cases like:
+    // - "(ЧекККМ" -> "ЧекККМ" (parentheses)
+    // - "ЕСТЬNULL(КурсыВалют" -> "КурсыВалют" (function call)
+    // - "+Таблица" -> "Таблица" (operator)
+    //
+    // Walk backwards from the end to find the last contiguous identifier
+    let clean_alias = extract_last_identifier(potential_alias);
 
     // Check heuristics for table alias:
     // 1. Not empty after cleanup
@@ -1174,12 +1179,39 @@ fn parse_table_alias_field(text_before: &str) -> Option<(String, String)> {
     // Note: No length limit - if someone wants to use a very long alias name, that's their choice
     if !clean_alias.is_empty()
         && clean_alias.chars().next()?.is_uppercase()
-        && !is_mdo_type(clean_alias)
+        && !is_mdo_type(&clean_alias)
     {
-        return Some((clean_alias.to_string(), field_prefix.to_string()));
+        return Some((clean_alias, field_prefix.to_string()));
     }
 
     None
+}
+
+/// Extract the last identifier from a string that may contain operators/parentheses.
+/// For example: "ЕСТЬNULL(КурсыВалют" -> "КурсыВалют"
+fn extract_last_identifier(s: &str) -> String {
+    // Walk backwards to find the start of the last identifier
+    let chars: Vec<char> = s.chars().collect();
+    let end = chars.len();
+    let mut start = end;
+
+    // Find where the last identifier ends (should be at the end of the string)
+    // and where it starts (first non-identifier char going backwards)
+    for i in (0..chars.len()).rev() {
+        let c = chars[i];
+        if c.is_alphanumeric() || c == '_' {
+            start = i;
+        } else {
+            // Hit a non-identifier character, stop
+            break;
+        }
+    }
+
+    if start < end {
+        chars[start..end].iter().collect()
+    } else {
+        String::new()
+    }
 }
 
 pub fn detect_context(query_text: &str, offset: TextSize) -> SdblCompletionContext {
@@ -2140,6 +2172,39 @@ mod tests {
                 assert_eq!(prefix, "Ссылка");
             }
             _ => panic!("Expected AfterTableAlias for extremely long alias, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_alias_inside_function_call() {
+        // Test for alias inside function call: ЕСТЬNULL(КурсыВалют.
+        // Should extract "КурсыВалют" as alias, not "ЕСТЬNULL(КурсыВалют"
+        let query = "ВЫБРАТЬ ЕСТЬNULL(КурсыВалют.";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "КурсыВалют");
+                assert_eq!(prefix, "");
+            }
+            _ => panic!("Expected AfterTableAlias for alias inside function, got {:?}", context),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_alias_after_operator() {
+        // Test for alias after operator: price / КурсыВалют.Курс
+        let query = "ВЫБРАТЬ price / КурсыВалют.Курс";
+        let offset = TextSize::from(query.len() as u32);
+        let context = detect_context(query, offset);
+
+        match context {
+            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
+                assert_eq!(alias, "КурсыВалют");
+                assert_eq!(prefix, "Курс");
+            }
+            _ => panic!("Expected AfterTableAlias for alias after operator, got {:?}", context),
         }
     }
 
