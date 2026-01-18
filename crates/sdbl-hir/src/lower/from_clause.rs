@@ -65,8 +65,8 @@ impl<'a> LoweringContext<'a> {
                 // Push scope frame for nested query (isolate FROM/JOIN tables)
                 self.scope.push_frame();
 
-                // Lower the nested query to HIR
-                let nested_hir = self.lower_query(&query);
+                // Lower the nested query to HIR (nested queries are not UNION queries)
+                let nested_hir = self.lower_query(&query, false);
 
                 // Pop scope frame
                 self.scope.pop_frame();
@@ -270,7 +270,7 @@ impl<'a> LoweringContext<'a> {
                 | MdoType::AccountingRegister
                 | MdoType::CalculationRegister => {
                     let found = metadata.find_register_by_type_and_name(mdo_type, object_name);
-                    tracing::info!(
+                    tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
                         found = found.is_some(),
@@ -282,7 +282,7 @@ impl<'a> LoweringContext<'a> {
                 // For other types (Catalog, Document, etc.), check in metadata_objects
                 _ => {
                     let found = metadata.has_metadata_object(mdo_type, object_name);
-                    tracing::info!(
+                    tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = %object_name,
                         found = found,
@@ -315,7 +315,7 @@ impl<'a> LoweringContext<'a> {
         // Start with empty fields - metadata will provide all fields including standard ones
         let mut fields = Vec::new();
 
-        tracing::info!(
+        tracing::debug!(
             full_name = %full_name_for_logging,
             mdo_type = ?mdo_type,
             object_name = %object_name,
@@ -341,7 +341,7 @@ impl<'a> LoweringContext<'a> {
             );
         }
 
-        tracing::info!(
+        tracing::debug!(
             mdo_type = ?mdo_type,
             object_name = object_name,
             total_fields = fields.len(),
@@ -380,7 +380,7 @@ impl<'a> LoweringContext<'a> {
             | MdoType::AccumulationRegister
             | MdoType::AccountingRegister
             | MdoType::CalculationRegister => {
-                tracing::info!(
+                tracing::debug!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,
                     object_name = %object_name,
@@ -420,7 +420,7 @@ impl<'a> LoweringContext<'a> {
                         fields.push(FieldDef::new(attribute.name(), ty));
                     }
 
-                    tracing::info!(
+                    tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = object_name,
                         dimensions = register.dimensions().len(),
@@ -446,7 +446,7 @@ impl<'a> LoweringContext<'a> {
             | MdoType::BusinessProcess
             | MdoType::Task
             | MdoType::ExchangePlan => {
-                tracing::info!(
+                tracing::debug!(
                     full_name = %full_name,
                     mdo_type = ?mdo_type,
                     object_name = %object_name,
@@ -461,7 +461,7 @@ impl<'a> LoweringContext<'a> {
                         fields.push(FieldDef::new(attribute.name.clone(), ty));
                     }
 
-                    tracing::info!(
+                    tracing::debug!(
                         mdo_type = ?mdo_type,
                         object_name = object_name,
                         attributes = obj.attributes.len(),
@@ -497,7 +497,7 @@ impl<'a> LoweringContext<'a> {
             return;
         };
 
-        tracing::info!(
+        tracing::debug!(
             full_name = %full_name,
             mdo_type = ?mdo_type,
             object_name = %object_name,
@@ -553,7 +553,7 @@ impl<'a> LoweringContext<'a> {
             return;
         };
 
-        tracing::info!(
+        tracing::debug!(
             tabular_section_name = %tabular_section_name,
             attributes_count = tabular_section.attributes().len(),
             "Found tabular section in metadata"
@@ -581,7 +581,7 @@ impl<'a> LoweringContext<'a> {
             ));
         }
 
-        tracing::info!(
+        tracing::debug!(
             mdo_type = ?mdo_type,
             object_name = %object_name,
             tabular_section_name = %tabular_section_name,

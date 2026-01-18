@@ -8,17 +8,26 @@ use syntax::ast::AstNode;
 use super::context::LoweringContext;
 
 impl<'a> LoweringContext<'a> {
+    /// Lower SELECT field list.
+    ///
+    /// # Arguments
+    /// * `field_list` - The field list AST node
+    /// * `distinct` - Whether DISTINCT is specified
+    /// * `top` - TOP N limit if specified
+    /// * `is_union` - Whether this is a UNION query (skips alias diagnostics)
     pub(super) fn lower_field_list(
         &mut self,
         field_list: Option<syntax::ast::SdblFieldList>,
         distinct: bool,
         top: Option<u32>,
+        is_union: bool,
     ) -> SelectHir {
         let Some(fl) = field_list else {
             return SelectHir::empty();
         };
 
-        let fields: Vec<FieldHir> = fl.fields().map(|f| self.lower_selected_field(&f)).collect();
+        let fields: Vec<FieldHir> =
+            fl.fields().map(|f| self.lower_selected_field(&f, is_union)).collect();
 
         SelectHir { fields, distinct, top }
     }
@@ -92,9 +101,14 @@ impl<'a> LoweringContext<'a> {
     }
 
     /// Lower a selected field.
+    ///
+    /// # Arguments
+    /// * `field` - The field AST node
+    /// * `is_union` - Whether this is a UNION query (skips alias diagnostics)
     pub(super) fn lower_selected_field(
         &mut self,
         field: &syntax::ast::SdblSelectedField,
+        is_union: bool,
     ) -> FieldHir {
         // Check for asterisk
         if field.is_asterisk() {
@@ -110,13 +124,13 @@ impl<'a> LoweringContext<'a> {
 
         // Lower expression (expression() returns Option<SyntaxNode>)
         let expr = if let Some(e) = field.expression() {
-            tracing::info!(
+            tracing::trace!(
                 expr_text = %e.text(),
                 expr_kind = ?e.kind(),
                 "DIAGNOSTIC LOWERING: lowering SELECT field expression"
             );
             let lowered = self.lower_expr(&e);
-            tracing::info!(
+            tracing::trace!(
                 expr_text = %e.text(),
                 lowered_variant = ?std::mem::discriminant(&lowered),
                 lowered_type = ?lowered.ty(),
@@ -177,65 +191,72 @@ impl<'a> LoweringContext<'a> {
         });
 
         // Check for AliasWithoutAsKeyword diagnostic
-        // Important: UNION queries should NOT be checked (only main/first query in UNION)
-        let is_in_union_query = field
-            .syntax()
-            .ancestors()
-            .any(|node| node.kind() == syntax::SyntaxKind::SDBL_UNION_CLAUSE);
+        // OPTIMIZATION: is_union flag is passed from above (avoids O(fields × depth) ancestors())
+        // OPTIMIZATION: Check alias first - if AS keyword present, skip expensive has_error check
+        if !is_union {
+            // Quick check: if alias with AS keyword exists, no diagnostic needed
+            let alias_node = field.alias();
+            let needs_diagnostic = match &alias_node {
+                Some(a) => !a.has_as_keyword(), // Has alias but missing AS keyword
+                None => true,                   // No alias at all
+            };
 
-        if !is_in_union_query {
-            // Skip fields with parse errors
-            let has_error = field
-                .syntax()
-                .descendants_with_tokens()
-                .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
+            if needs_diagnostic {
+                // Only check for errors when diagnostic might be needed
+                let has_error = field
+                    .syntax()
+                    .descendants_with_tokens()
+                    .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
 
-            if !has_error {
-                // Get trimmed range (expression only, without trailing trivia)
-                let range = if let Some(expr) = field.expression() {
-                    // Trim trailing whitespace/comments/newlines from expression
-                    let last_token = expr.last_token();
-                    let last_non_trivia = last_token.and_then(|t| {
-                        let mut token = t;
-                        while matches!(
-                            token.kind(),
-                            syntax::SyntaxKind::WHITESPACE
-                                | syntax::SyntaxKind::COMMENT
-                                | syntax::SyntaxKind::NEWLINE
-                        ) {
-                            token = token.prev_token()?;
+                if !has_error {
+                    // Get trimmed range (expression only, without trailing trivia)
+                    let range = if let Some(expr) = field.expression() {
+                        // Trim trailing whitespace/comments/newlines from expression
+                        let last_token = expr.last_token();
+                        let last_non_trivia = last_token.and_then(|t| {
+                            let mut token = t;
+                            while matches!(
+                                token.kind(),
+                                syntax::SyntaxKind::WHITESPACE
+                                    | syntax::SyntaxKind::COMMENT
+                                    | syntax::SyntaxKind::NEWLINE
+                            ) {
+                                token = token.prev_token()?;
+                            }
+                            Some(token)
+                        });
+
+                        if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
+                            syntax::TextRange::new(
+                                first.text_range().start(),
+                                last.text_range().end(),
+                            )
+                        } else {
+                            expr.text_range()
                         }
-                        Some(token)
-                    });
-
-                    if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
-                        syntax::TextRange::new(first.text_range().start(), last.text_range().end())
                     } else {
-                        expr.text_range()
-                    }
-                } else {
-                    field.syntax().text_range()
-                };
+                        field.syntax().text_range()
+                    };
 
-                if let Some(alias_node) = field.alias() {
-                    // Has alias but check for AS keyword
-                    if !alias_node.has_as_keyword() {
-                        // Include alias in range for implicit alias case
-                        let range_with_alias = if let Some(alias_ident) = alias_node.identifier() {
+                    if let Some(alias) = alias_node {
+                        // Has alias but missing AS keyword - include alias in range
+                        let range_with_alias = if let Some(alias_ident) = alias.identifier() {
                             syntax::TextRange::new(range.start(), alias_ident.text_range().end())
                         } else {
                             range
                         };
 
                         self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
-                            field_name: alias_node.name(),
+                            field_name: alias.name(),
                             range: range_with_alias,
                         });
+                    } else {
+                        // No alias at all - use expression range
+                        self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
+                            field_name: None,
+                            range,
+                        });
                     }
-                } else {
-                    // No alias at all - use expression range
-                    self.diagnostics
-                        .push(SdblDiagnostic::AliasWithoutAsKeyword { field_name: None, range });
                 }
             }
         }

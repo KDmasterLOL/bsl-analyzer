@@ -159,23 +159,32 @@ impl<'a> SdblPositionMapper<'a> {
     /// Takes a range within the extracted SDBL text and returns the corresponding
     /// range in the original BSL source file. Accounts for `""` → `"` quote escaping.
     pub fn map_range(&self, sdbl_range: TextRange, sdbl_text: &str) -> TextRange {
-        // 1. Convert SDBL byte offsets to line:column (in SDBL coordinates WITHOUT corrections)
-        let (sdbl_start_line, sdbl_start_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.start()));
+        // OPTIMIZATION: Build line index for SDBL text once (O(n)),
+        // then use O(log n) lookups instead of O(n) per lookup
+        let sdbl_line_starts = build_line_index(sdbl_text);
+
+        // 1. Convert SDBL byte offsets to line:column using fast lookup
+        let (sdbl_start_line, sdbl_start_col) = byte_offset_to_line_col_fast(
+            sdbl_text,
+            &sdbl_line_starts,
+            u32::from(sdbl_range.start()),
+        );
         let (sdbl_end_line, sdbl_end_col) =
-            byte_offset_to_line_col(sdbl_text, u32::from(sdbl_range.end()));
+            byte_offset_to_line_col_fast(sdbl_text, &sdbl_line_starts, u32::from(sdbl_range.end()));
 
         // 2. Calculate quote escape corrections (PER-LINE!)
         // Corrections only apply to characters on the SAME line in SDBL
         let sdbl_start = u32::from(sdbl_range.start()) as usize;
         let sdbl_end = u32::from(sdbl_range.end()) as usize;
 
-        // For start position: sum corrections on the same SDBL line, before start column
+        // OPTIMIZATION: Pre-compute line numbers for all corrections once
+        // instead of calling byte_offset_to_line_col for each correction
         let start_correction: usize = self
             .quote_corrections
             .iter()
             .filter(|(pos, _)| {
-                let (line, _col) = byte_offset_to_line_col(sdbl_text, *pos as u32);
+                let (line, _col) =
+                    byte_offset_to_line_col_fast(sdbl_text, &sdbl_line_starts, *pos as u32);
                 line == sdbl_start_line && *pos < sdbl_start
             })
             .map(|(_, chars)| chars)
@@ -186,7 +195,8 @@ impl<'a> SdblPositionMapper<'a> {
             .quote_corrections
             .iter()
             .filter(|(pos, _)| {
-                let (line, _col) = byte_offset_to_line_col(sdbl_text, *pos as u32);
+                let (line, _col) =
+                    byte_offset_to_line_col_fast(sdbl_text, &sdbl_line_starts, *pos as u32);
                 line == sdbl_end_line && *pos < sdbl_end
             })
             .map(|(_, chars)| chars)
@@ -254,6 +264,7 @@ impl<'a> SdblPositionMapper<'a> {
 /// Convert byte offset to (line, column) position - 0-indexed.
 ///
 /// Iterates through the text counting newlines and character positions.
+/// **WARNING:** This is O(n) - use `byte_offset_to_line_col_fast` with pre-built line index instead.
 pub fn byte_offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
     let mut line = 0;
     let mut col = 0;
@@ -271,6 +282,44 @@ pub fn byte_offset_to_line_col(text: &str, offset: u32) -> (u32, u32) {
     }
 
     (line, col)
+}
+
+/// Convert byte offset to (line, column) position using pre-built line index.
+///
+/// **OPTIMIZATION:** O(log n) binary search for line + O(col) for column,
+/// instead of O(n) full text scan.
+fn byte_offset_to_line_col_fast(text: &str, line_starts: &[usize], offset: u32) -> (u32, u32) {
+    let offset = offset as usize;
+
+    // Clamp offset to text length
+    let offset = offset.min(text.len());
+
+    // Binary search to find the line containing this offset
+    // line_starts[i] = byte offset where line i starts
+    // We want the largest i such that line_starts[i] <= offset
+    let line = match line_starts.binary_search(&offset) {
+        Ok(exact) => exact, // offset is exactly at line start
+        Err(insert_pos) => insert_pos.saturating_sub(1), // offset is within line (insert_pos - 1)
+    };
+
+    // Calculate column (character count from line start to offset)
+    let line_start = line_starts[line];
+    let col = if offset > line_start {
+        // Count characters (not bytes!) from line_start to offset
+        // Use char_indices to safely handle UTF-8 boundaries
+        let mut char_count = 0;
+        for (byte_idx, _) in text[line_start..].char_indices() {
+            if line_start + byte_idx >= offset {
+                break;
+            }
+            char_count += 1;
+        }
+        char_count
+    } else {
+        0
+    };
+
+    (line as u32, col as u32)
 }
 
 /// Convert (line, column) position to byte offset - 0-indexed.

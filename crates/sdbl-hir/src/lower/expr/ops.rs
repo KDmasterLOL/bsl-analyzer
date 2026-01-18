@@ -9,7 +9,7 @@ impl<'a> LoweringContext<'a> {
         use crate::hir::BinaryOp;
         use syntax::SyntaxKind;
 
-        tracing::info!(
+        tracing::debug!(
             node_text = %node.text(),
             node_kind = ?node.kind(),
             "DIAGNOSTIC LOWERING: lower_binary_expr called"
@@ -47,7 +47,7 @@ impl<'a> LoweringContext<'a> {
         // For example: "Таблица.Поле" may be wrapped in LOGICAL_OR_EXPR → LOGICAL_AND_EXPR →
         // ADDITIVE_EXPR → MULTIPLICATIVE_EXPR → COLUMN_REF, even though there are no operators.
         if children.len() == 1 {
-            tracing::info!(
+            tracing::debug!(
                 node_text = %node.text(),
                 "DIAGNOSTIC LOWERING: Binary expr with no operator - unwrapping child"
             );

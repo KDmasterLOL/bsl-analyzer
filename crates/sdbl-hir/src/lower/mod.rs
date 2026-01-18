@@ -77,18 +77,9 @@ pub fn lower_sdbl_to_hir(
     sdbl_ast: &Parse<syntax::SyntaxNode>,
     metadata: Option<&Configuration>,
 ) -> crate::hir::SdblPackage {
-    let _span = tracing::info_span!("lower_sdbl_to_hir").entered();
+    let _span = tracing::debug_span!("lower_sdbl_to_hir").entered();
 
     let root = sdbl_ast.syntax_node();
-
-    // DEBUG: Log the actual text being lowered
-    let text = root.text().to_string();
-    let text_preview: String = text.chars().take(200).collect();
-    tracing::info!(
-        text_len = text.len(),
-        text_preview = %text_preview,
-        "lower_sdbl_to_hir: starting with AST text"
-    );
 
     // Try to cast root as query package
     let Some(package) = SdblQueryPackage::cast(root) else {
@@ -124,7 +115,7 @@ pub fn lower_sdbl_to_hir(
             // Push scope frame for main query (clears FROM/JOIN scope, keeps temp tables)
             ctx.scope.push_frame();
 
-            let query_hir = ctx.lower_query(&main_query);
+            let query_hir = ctx.lower_query(&main_query, false);
             // IMPORTANT: Use select_query.text_range() to include outer SELECT clause
             // when query has INTO clause (e.g., SELECT ... ПОМЕСТИТЬ ... ИЗ (subquery))
             let range = select_query.syntax().text_range();
@@ -191,7 +182,7 @@ pub fn lower_sdbl_to_hir(
                 // Push scope frame for UNION query (clears FROM/JOIN scope, keeps temp tables)
                 ctx.scope.push_frame();
 
-                let query_hir = ctx.lower_query(&union_query);
+                let query_hir = ctx.lower_query(&union_query, true);
                 let range = union_query.syntax().text_range();
 
                 tracing::debug!(
@@ -246,7 +237,15 @@ impl LoweringContext<'_> {
     /// This method processes one query from a SELECT statement, which can be:
     /// - The main query before UNION
     /// - A query after UNION/UNION ALL
-    pub(crate) fn lower_query(&mut self, query: &syntax::ast::SdblQuery) -> SdblHir {
+    ///
+    /// # Arguments
+    /// * `query` - The query AST node to lower
+    /// * `is_union` - Whether this query is part of a UNION clause (skips alias diagnostics)
+    pub(crate) fn lower_query(
+        &mut self,
+        query: &syntax::ast::SdblQuery,
+        is_union: bool,
+    ) -> SdblHir {
         // Record SELECT keyword
         self.record_keyword_by_text(
             query.syntax(),
@@ -277,7 +276,8 @@ impl LoweringContext<'_> {
         let (distinct, top) = self.extract_limitations(query.syntax());
 
         // 5. Lower SELECT clause (uses scope for name resolution)
-        let select = self.lower_field_list(query.field_list(), distinct, top);
+        // Skip alias diagnostics for UNION queries (check for errors is done per-field)
+        let select = self.lower_field_list(query.field_list(), distinct, top, is_union);
 
         // 6. Lower WHERE clause
         let where_clause = query.where_clause().map(|w| self.lower_where_clause(&w));
@@ -309,7 +309,7 @@ impl LoweringContext<'_> {
             range,
         };
 
-        // 8. Check JOINs for unprotected fields (after complete HIR built)
+        // 10. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);
 
         // Merge diagnostics collected during JOIN checking

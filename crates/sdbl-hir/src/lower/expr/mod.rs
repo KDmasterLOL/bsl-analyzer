@@ -16,7 +16,7 @@ impl<'a> LoweringContext<'a> {
     pub(in crate::lower) fn lower_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use syntax::SyntaxKind;
 
-        tracing::info!(
+        tracing::debug!(
             node_text = %node.text(),
             node_kind = ?node.kind(),
             "DIAGNOSTIC LOWERING: lower_expr called"
@@ -64,7 +64,7 @@ impl<'a> LoweringContext<'a> {
             (None, Name::from(parts[0].trim()))
         };
 
-        tracing::info!(
+        tracing::debug!(
             text = %text,
             parts_count = parts.len(),
             table_alias = ?table_alias.as_ref().map(|n| n.as_str()),
@@ -88,7 +88,7 @@ impl<'a> LoweringContext<'a> {
             .scope
             .resolve_column_type(table_alias.as_ref().map(|n| n.as_str()), column_name.as_str());
 
-        tracing::info!(
+        tracing::debug!(
             text = %text,
             resolved_type = ?ty,
             "DIAGNOSTIC LOWERING: resolved column type from scope"

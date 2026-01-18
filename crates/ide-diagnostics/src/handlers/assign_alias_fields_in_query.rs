@@ -42,7 +42,6 @@
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use sdbl_hir;
-use tracing::debug;
 
 /// Runs the AssignAliasFieldsInQuery diagnostic.
 ///
@@ -55,32 +54,49 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    // Get SDBL HIR with collected diagnostics
+    // PROFILING: Get SDBL HIR with collected diagnostics
+    let t0 = Instant::now();
     let sdbl_hirs = ctx.sdbl_hir_in_file();
+    let hir_time = t0.elapsed();
 
+    // PROFILING: Get BSL source
+    let t1 = Instant::now();
     let bsl_source = ctx.file_text();
+    let source_time = t1.elapsed();
 
-    // Get cached SDBL queries for position mapping
+    // PROFILING: Get cached SDBL queries for position mapping
+    let t2 = Instant::now();
     let sdbl_queries = ctx.all_sdbl_in_file();
+    let queries_time = t2.elapsed();
 
-    // Build shared line index
+    // PROFILING: Build shared line index
+    let t3 = Instant::now();
     use crate::sdbl_utils::build_line_index_shared;
     let line_starts = build_line_index_shared(&bsl_source);
+    let line_index_time = t3.elapsed();
 
     let mut diagnostics = Vec::new();
+    let mut mapper_time_total = std::time::Duration::ZERO;
+    let mut map_range_time_total = std::time::Duration::ZERO;
+    let mut diag_count = 0usize;
 
     // Iterate SDBL HIRs and corresponding query infos in parallel
     // Both are sorted by position in file, so we can zip them
     for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
         sdbl_hirs.iter().zip(sdbl_queries.iter())
     {
+        let t_mapper = Instant::now();
         let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
+        mapper_time_total += t_mapper.elapsed();
 
         // Emit diagnostics from HIR
         for hir_diag in sdbl_package.all_diagnostics() {
             if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = hir_diag
             {
+                diag_count += 1;
+                let t_map = Instant::now();
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
+                map_range_time_total += t_map.elapsed();
 
                 let message = if let Some(name) = field_name {
                     format!("Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК", name)
@@ -100,10 +116,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "AssignAliasFieldsInQuery completed"
+    let total_time = start.elapsed();
+    tracing::warn!(
+        total_ms = total_time.as_millis(),
+        hir_ms = hir_time.as_millis(),
+        source_ms = source_time.as_millis(),
+        queries_ms = queries_time.as_millis(),
+        line_index_ms = line_index_time.as_millis(),
+        mapper_ms = mapper_time_total.as_millis(),
+        map_range_ms = map_range_time_total.as_millis(),
+        sdbl_count = sdbl_hirs.len(),
+        diag_count = diag_count,
+        "AssignAliasFieldsInQuery PROFILE"
     );
 
     diagnostics

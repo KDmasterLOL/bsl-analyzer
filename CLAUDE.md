@@ -110,11 +110,12 @@ The project uses a layered architecture inspired by rust-analyzer:
 ```
 bsl-analyzer (LSP Server)
     └── ide (High-level API)
-        ├── ide-diagnostics (~90 diagnostics implemented)
+        ├── ide-diagnostics (101 diagnostics implemented)
         ├── ide-assists (Code actions)
         └── ide-db (Database + Salsa)
-            └── hir (Semantic analysis)
-                ├── cfg (Control Flow Graph)
+            └── hir / hir-def / hir-ty (Semantic analysis)
+                ├── cfg + dataflow (Control Flow Graph, reaching definitions)
+                ├── sdbl-hir (SDBL query language HIR)
                 └── syntax (AST with Rowan)
                     └── parser (Event-based)
                         └── lexer (logos-based)
@@ -151,7 +152,7 @@ bsl-analyzer (LSP Server)
 - Each diagnostic is a separate module in `ide-diagnostics/src/handlers/`
 - Uniform interface via `DiagnosticContext`
 - Full compatibility with bsl-language-server codes
-- **~90 diagnostics implemented** (of 181 total planned)
+- **101 diagnostics implemented** (of 181 total planned)
 
 **HIR-based Diagnostics (rust-analyzer pattern):**
 
@@ -168,11 +169,11 @@ bsl-analyzer (LSP Server)
 - XML loader for Designer format
 - Salsa integration for caching
 
-**ModuleGraph:**
+**Dataflow Analysis:**
 
-- **Status:** ✅ Implemented (`module-graph` crate)
-- Dependency graph for BSL modules
-- Cycle detection and incremental CI support
+- **Status:** ✅ Implemented (`cfg`, `dataflow` crates)
+- `file_dependencies_query` for module dependencies
+- Reaching definitions, liveness analysis
 
 **Control Flow Graph (CFG):**
 
@@ -183,22 +184,22 @@ bsl-analyzer (LSP Server)
 ### Crate Structure
 
 - **bsl-analyzer** - Main LSP server binary
-- **lexer** - Tokenization using logos (80+ tokens, bilingual RU/EN keywords)
-- **parser** - BSL grammar implementation with error recovery
-- **syntax** - CST/AST using Rowan (120+ SyntaxKind variants, 23+ AST wrappers)
-- **hir** / **hir-def** - High-level IR and semantic analysis
+- **lexer** - Tokenization using logos (80+ BSL, 150+ SDBL tokens)
+- **parser** - BSL/SDBL grammar with error recovery
+- **syntax** - CST/AST using Rowan (120+ SyntaxKind variants)
+- **hir** / **hir-def** / **hir-ty** - High-level IR, semantic analysis, type inference
+- **sdbl-hir** - SDBL query language HIR + type inference
 - **ide** - High-level API coordinating all subsystems
 - **ide-db** - RootDatabase with Salsa integration
-- **ide-diagnostics** - ~90 diagnostics implemented (of 181 planned)
+- **ide-diagnostics** - 101 diagnostics implemented (of 181 planned)
 - **ide-assists** - Code actions and refactorings
 - **base-db** - Source database with Salsa
-- **vfs** - Virtual file system
+- **vfs** / **vfs-notify** - Virtual file system + file watching
 - **bsl-metadata** - 1C metadata (Configuration, CommonModule, etc.)
-- **module-graph** - Module dependency graph for incremental CI
-- **cfg** - Control Flow Graph for flow-sensitive analysis
+- **bsl-platform** - Platform types (Строка, Число, Массив)
+- **cfg** / **dataflow** - Control Flow Graph, reaching definitions, liveness
 - **project-model** - Project configuration (.bsl-analyzer.json support)
-- **intern** / **stdx** - Utilities
-- **profile** - Profiling utilities
+- **line-index** / **intern** / **stdx** / **paths** - Utilities
 - **test-fixture** / **test-utils** - Testing infrastructure
 
 ## Critical Development Rules
@@ -382,22 +383,21 @@ let path = "~/src/lsp/bsl-parser/...";  // ❌
 
 **Completed:**
 
-- ✅ Lexer with 80+ BSL tokens + 150+ SDBL tokens
-- ✅ Parser for BSL (expressions, statements, preprocessor)
-- ✅ SDBL infrastructure (tokens, parser, SyntaxKind nodes)
-- ✅ Syntax trees (Rowan integration)
-- ✅ Base Infrastructure (VFS, SourceDatabase with Salsa)
-- ✅ HIR / hir-def (ItemTree, SymbolTree, type inference)
-- ✅ Metadata Infrastructure (`bsl-metadata` crate)
-- ✅ ModuleGraph (`module-graph` crate)
-- ✅ Control Flow Graph (`cfg` crate)
-- ✅ ~90 diagnostics implemented
+- ✅ Lexer (80+ BSL, 150+ SDBL tokens)
+- ✅ Parser for BSL/SDBL with error recovery
+- ✅ Syntax trees (Rowan CST, typed AST wrappers)
+- ✅ Base Infrastructure (VFS, Salsa 0.25.2)
+- ✅ HIR / hir-def / hir-ty (ItemTree, SymbolTree, type inference)
+- ✅ SDBL HIR (`sdbl-hir` crate with type inference)
+- ✅ Metadata Infrastructure (`bsl-metadata`, `bsl-platform` crates)
+- ✅ Dataflow Analysis (`cfg`, `dataflow` crates)
+- ✅ 101 diagnostics implemented
 - ✅ Tracing infrastructure (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 - ✅ CI/CD with GitLab
 
 **Next Steps:**
 
-- Remaining ~91 diagnostics (of 181 total)
+- Remaining 80 diagnostics (of 181 total)
 - LSP Server integration
 - IDE features (hover, completion, etc.)
 
@@ -428,3 +428,5 @@ Must maintain 100% compatibility with bsl-language-server:
 ## Общие правила
 - Можно менять код если пользователь дал согласие с твоими выводами или планами. Иначе менять код запрещено!
 - Если какой-то пакет, который ты хочешь использовать, отсутствует в системе, попроси пользователя его доставить. Только если пользователь отказал в установке, подбирай альтернативы!
+- Используй паттерны чистой архитектуры и чистого кода. Единая точка истины. Не дублируй код.
+- Неиспользуемый код нужно удалять
