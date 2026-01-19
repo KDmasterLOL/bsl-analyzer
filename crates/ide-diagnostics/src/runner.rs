@@ -240,6 +240,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         handlers::missing_returned_value_description::check,
     ));
     diagnostics.extend(run_diagnostic(
+        "PublicMethodsDescription",
+        ctx,
+        handlers::public_methods_description::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "OrdinaryAppSupport",
         ctx,
         handlers::ordinary_app_support::check,

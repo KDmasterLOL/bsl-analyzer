@@ -112,6 +112,7 @@ pub enum DiagnosticCode {
     WrongUseOfRollbackTransactionMethod,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
+    PublicMethodsDescription,
     CachedPublic,
     CommandModuleExportMethods,
     CommonModuleAssign,

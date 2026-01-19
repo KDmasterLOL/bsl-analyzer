@@ -327,21 +327,23 @@ fn find_method_node(
 
     let root = parse.syntax_node();
 
-    // Get the method item from ItemTree
+    // Get the method item and its source_range from ItemTree
     let items = tree.top_level_items();
     let item = items.get(method.local_id as usize)?;
 
-    // Find corresponding AST node
-    // Note: This is a simplified version - in production we'd use source maps
+    let source_range = match item {
+        ModItem::Procedure(idx) => tree.procedure(*idx).source_range,
+        ModItem::Function(idx) => tree.function(*idx).source_range,
+        ModItem::Variable(_) => return None,
+    };
+
+    // Find AST node by exact source_range match
     for node in root.descendants() {
-        match (item, node.kind()) {
-            (ModItem::Procedure(_), SyntaxKind::PROCEDURE_DEF)
-            | (ModItem::Function(_), SyntaxKind::FUNCTION_DEF) => {
-                // TODO: Need better matching using source maps
-                // For now, return first matching node type
-                return Some(node);
-            }
-            _ => {}
+        let kind = node.kind();
+        if (kind == SyntaxKind::PROCEDURE_DEF || kind == SyntaxKind::FUNCTION_DEF)
+            && node.text_range() == source_range
+        {
+            return Some(node);
         }
     }
 
