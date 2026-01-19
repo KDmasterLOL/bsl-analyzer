@@ -108,6 +108,7 @@ pub mod non_standard_region;
 pub mod number_of_optional_params;
 pub mod number_of_params;
 pub mod number_of_values_in_structure_constructor;
+pub mod one_statement_per_line;
 pub mod rewrite_method_parameter;
 pub mod self_assign;
 pub mod space_at_start_comment;

@@ -166,5 +166,8 @@ fn dispatch_hir_diagnostic(
         BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
             handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
         }
+        BodyDiagnostic::OneStatementPerLine { range } => {
+            handlers::one_statement_per_line::from_hir(*range, ctx)
+        }
     }
 }

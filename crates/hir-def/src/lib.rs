@@ -884,11 +884,20 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     let module_var_names: FxHashSet<String> =
         result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
 
+    // Create line index for OneStatementPerLine diagnostic
+    let file_text_input = db.file_text_input(module_id.file_id);
+    let file_text = file_text_input.text(db);
+    let line_index = std::sync::Arc::new(line_index::LineIndex::new(&file_text));
+
     // Lower all collected methods
     for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
         let method_idx = method_idx as u32;
-        let lower_result =
-            body::lower_method_with_externals(&node, is_function, module_var_names.clone());
+        let lower_result = body::lower_method_with_externals_and_line_index(
+            &node,
+            is_function,
+            module_var_names.clone(),
+            line_index.clone(),
+        );
 
         // Collect diagnostics with MethodId
         let method_id = MethodId { module: module_id, local_id: method_idx };
@@ -903,7 +912,7 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     }
 
     // Third pass: lower module-level code (statements outside procedures)
-    let module_code_result = body::lower_module_code(&root);
+    let module_code_result = body::lower_module_code_with_line_index(&root, line_index);
 
     // Collect diagnostics from module-level code
     // Use a special MethodId with local_id = u32::MAX to indicate module-level code

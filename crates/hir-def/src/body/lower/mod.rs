@@ -33,7 +33,9 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
+use line_index::LineIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -109,6 +111,14 @@ pub(crate) struct LoweringCtx {
     /// External module references collected during lowering.
     /// Used to build module dependency graph for lazy loading.
     pub(crate) external_refs: Vec<crate::body::ExternalRef>,
+
+    /// Line index for OneStatementPerLine diagnostic.
+    /// If set, statements are tracked by their starting line.
+    pub(crate) line_index: Option<Arc<LineIndex>>,
+
+    /// Statements grouped by line number for OneStatementPerLine diagnostic.
+    /// Key: 0-based line number, Value: list of statement TextRanges starting on that line.
+    pub(crate) statements_by_line: FxHashMap<u32, Vec<TextRange>>,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -148,6 +158,44 @@ impl LoweringCtx {
             is_client_only: false, // Will be set in lower_method_with_externals
             has_no_context_annotation: false, // Will be set in lower_method_with_externals
             external_refs: Vec::new(),
+            line_index: None, // Will be set in lower_method_with_externals_and_line_index
+            statements_by_line: FxHashMap::default(),
+        }
+    }
+
+    /// Set the line index for OneStatementPerLine diagnostic.
+    pub(crate) fn set_line_index(&mut self, line_index: Arc<LineIndex>) {
+        self.line_index = Some(line_index);
+    }
+
+    /// Track a statement by its starting line for OneStatementPerLine diagnostic.
+    /// Returns true if this is NOT the first statement on the line (i.e., should emit diagnostic).
+    pub(crate) fn track_statement_line(&mut self, range: TextRange) -> bool {
+        let Some(ref line_index) = self.line_index else {
+            return false;
+        };
+
+        let line = line_index.line_col(range.start()).line;
+        let statements = self.statements_by_line.entry(line).or_default();
+        statements.push(range);
+
+        // Return true if this is not the first statement on the line
+        statements.len() > 1
+    }
+
+    /// Emit OneStatementPerLine diagnostics for all lines with multiple statements.
+    pub(crate) fn emit_one_statement_per_line_diagnostics(&mut self) {
+        if self.line_index.is_none() {
+            return;
+        }
+
+        for (_line, ranges) in std::mem::take(&mut self.statements_by_line) {
+            if ranges.len() > 1 {
+                // Skip the first statement, emit diagnostic for each subsequent one
+                for range in ranges.into_iter().skip(1) {
+                    self.emit(BodyDiagnostic::OneStatementPerLine { range });
+                }
+            }
         }
     }
 
@@ -564,6 +612,133 @@ pub fn lower_method_with_externals(
     }
 }
 
+/// Lower a method AST node to HIR with known externals and line index for OneStatementPerLine.
+///
+/// This is the full version that supports OneStatementPerLine diagnostic.
+pub fn lower_method_with_externals_and_line_index(
+    method_node: &SyntaxNode,
+    is_function: bool,
+    known_externals: FxHashSet<String>,
+    line_index: Arc<LineIndex>,
+) -> LowerResult {
+    let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
+
+    // Set line index for OneStatementPerLine diagnostic
+    ctx.set_line_index(line_index);
+
+    // Check if method is client-only (&НаКлиенте annotation ONLY)
+    ctx.is_client_only = is_client_only_method(method_node);
+
+    // Check if method has "БезКонтекста" (NoContext) annotation
+    ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
+
+    // Check for FunctionNameStartsWithGet diagnostic
+    if is_function {
+        // Get function name
+        if let Some(name_token) = method_node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        {
+            let name_text = name_token.text();
+            // Check if name starts with "Получить" (case-insensitive)
+            if name_text.to_lowercase().starts_with("получить") {
+                ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
+                    name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+
+            // Check for GlobalContextMethodCollision8312 diagnostic
+            if is_global_context_collision_8312(name_text) {
+                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
+                    method_name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+        }
+    } else {
+        // For procedures, only check GlobalContextMethodCollision8312
+        if let Some(name_token) = method_node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|tok| tok.kind() == SyntaxKind::IDENT)
+        {
+            let name_text = name_token.text();
+            if is_global_context_collision_8312(name_text) {
+                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
+                    method_name: name_text.to_string(),
+                    range: name_token.text_range(),
+                });
+            }
+        }
+    }
+
+    // Lower parameters
+    if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {
+        let params = stmt::lower_params(&mut ctx, &param_list);
+        ctx.body.params = params.into_boxed_slice();
+    }
+
+    // Lower body statements
+    if let Some(stmt_list) = method_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
+        let stmts = stmt::lower_stmt_list(&mut ctx, &stmt_list);
+        ctx.body.body_stmts = stmts.into_boxed_slice();
+
+        // Control flow checks
+        let cf_analysis = control_flow::analyze_control_flow(&stmt_list);
+
+        // Check for FunctionShouldHaveReturn (no return statement at all)
+        if is_function && !cf_analysis.has_return {
+            let name_range = method_node
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT)
+                .map(|tok| tok.text_range())
+                .unwrap_or_else(|| method_node.text_range());
+
+            ctx.emit(BodyDiagnostic::FunctionShouldHaveReturn { range: name_range });
+        }
+
+        // Check for MissingReturn (some paths don't return)
+        if is_function && cf_analysis.has_return {
+            let name_range = method_node
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT)
+                .map(|tok| tok.text_range())
+                .unwrap_or_else(|| method_node.text_range());
+
+            ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
+        }
+
+        // Check for code after async calls
+        diagnostics::check_code_after_async_call(&mut ctx, &cf_analysis.call_stmts[..]);
+    }
+
+    // Check for FunctionReturnsSamePrimitive
+    if is_function {
+        check_function_returns_same_primitive(&mut ctx, method_node);
+    }
+
+    // Check for magic numbers using HIR
+    magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
+
+    // Emit OneStatementPerLine diagnostics
+    ctx.emit_one_statement_per_line_diagnostics();
+
+    // Collect referenced externals
+    let referenced_externals = collect_referenced_externals(&ctx.body);
+
+    LowerResult {
+        body: ctx.body,
+        source_map: ctx.source_map,
+        diagnostics: ctx.diagnostics,
+        referenced_externals,
+        external_refs: ctx.external_refs,
+    }
+}
+
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.
@@ -638,6 +813,102 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
     ctx.body.body_stmts = stmts.into_boxed_slice();
 
     // Collect referenced externals (variables used but not declared locally)
+    let referenced_externals = collect_referenced_externals(&ctx.body);
+
+    LowerResult {
+        body: ctx.body,
+        source_map: ctx.source_map,
+        diagnostics: ctx.diagnostics,
+        referenced_externals,
+        external_refs: ctx.external_refs,
+    }
+}
+
+/// Lower module-level code with line index for OneStatementPerLine diagnostic.
+///
+/// This is the full version that supports OneStatementPerLine diagnostic.
+pub fn lower_module_code_with_line_index(
+    root: &SyntaxNode,
+    line_index: Arc<LineIndex>,
+) -> LowerResult {
+    let mut ctx = LoweringCtx::new(false);
+
+    // Set line index for OneStatementPerLine diagnostic
+    ctx.set_line_index(line_index);
+
+    let mut stmts = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
+    for node in root.children() {
+        // Handle preprocessor directives at module level
+        if node.kind() == SyntaxKind::PRE_IF_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(node.text_range());
+            }
+            preproc::process_preproc_if(&mut ctx, &node);
+            continue;
+        }
+        if node.kind() == SyntaxKind::PRE_REGION_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(node.text_range());
+            }
+            preproc::process_preproc_region(&mut ctx, &node);
+            continue;
+        }
+
+        // Skip non-statement nodes (procedures, functions, var declarations, etc.)
+        if !control_flow::is_statement_node(&node) {
+            continue;
+        }
+
+        // Skip VAR_DEF - module-level Перем declarations are tracked separately
+        if node.kind() == SyntaxKind::VAR_DEF {
+            continue;
+        }
+
+        // If we're in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(node.text_range());
+            if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
+                stmts.push(stmt_id);
+            }
+            continue;
+        }
+
+        // Lower the statement
+        if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
+            stmts.push(stmt_id);
+
+            // Track statement line for OneStatementPerLine diagnostic
+            if !stmt::should_skip_one_statement_per_line(&node) {
+                ctx.track_statement_line(node.text_range());
+            }
+
+            // Check if this statement is a control flow that makes subsequent code unreachable
+            if control_flow::is_control_flow_terminator(&node)
+                || (node.kind() == SyntaxKind::IF_STMT
+                    && control_flow::if_all_branches_terminate(&node))
+            {
+                unreachable_start = Some(node.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic for module-level code
+    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
+        if let Some(first_unreachable) = control_flow::find_first_unreachable_at_root(root, start) {
+            let range = TextRange::new(first_unreachable.start(), end.end());
+            ctx.emit(BodyDiagnostic::UnreachableCode { range });
+        }
+    }
+
+    ctx.body.body_stmts = stmts.into_boxed_slice();
+
+    // Emit OneStatementPerLine diagnostics
+    ctx.emit_one_statement_per_line_diagnostics();
+
+    // Collect referenced externals
     let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {

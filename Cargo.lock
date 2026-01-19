@@ -719,6 +719,7 @@ dependencies = [
  "intern",
  "la-arena",
  "lexer",
+ "line-index",
  "once_cell",
  "ordered-float",
  "parser",

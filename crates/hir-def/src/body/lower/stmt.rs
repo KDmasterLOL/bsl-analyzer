@@ -463,6 +463,12 @@ pub(super) fn lower_stmt_list_with_unreachable(
         if let Some(stmt_id) = lower_stmt(ctx, &child) {
             stmts.push(stmt_id);
 
+            // Track statement line for OneStatementPerLine diagnostic
+            // Exclude: EMPTY_STMT (handled in lower_stmt), preprocessor, parse errors
+            if emit_diagnostics && !should_skip_one_statement_per_line(&child) {
+                ctx.track_statement_line(child.text_range());
+            }
+
             // Check if this statement is a control flow that makes subsequent code unreachable
             if is_control_flow_terminator(&child) {
                 // Mark that subsequent statements are unreachable
@@ -1028,6 +1034,42 @@ fn lower_remove_handler_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option
         expr_iter.next().map(|n| lower_expr_node(ctx, &n)).unwrap_or_else(|| ctx.missing_expr());
 
     Some(Stmt::RemoveHandler { event, handler })
+}
+
+/// Check if a statement should be skipped for OneStatementPerLine diagnostic.
+///
+/// Matches Java behavior - excludes:
+/// 1. Empty statements (standalone `;`)
+/// 2. Statements containing preprocessor directives
+/// 3. Statements with parse errors
+pub(crate) fn should_skip_one_statement_per_line(node: &SyntaxNode) -> bool {
+    // 1. Empty statement (EMPTY_STMT) - already filtered by lower_stmt returning None
+    // But we double-check here in case called directly
+    if node.kind() == SyntaxKind::EMPTY_STMT {
+        return true;
+    }
+
+    // 2. Contains preprocessor directive (check for any PRE_* nodes)
+    if node.descendants().any(|n| {
+        matches!(
+            n.kind(),
+            SyntaxKind::PRE_IF_DIR
+                | SyntaxKind::PRE_ELSIF_CLAUSE
+                | SyntaxKind::PRE_ELSE_CLAUSE
+                | SyntaxKind::PRE_REGION_DIR
+                | SyntaxKind::PRE_DELETE_DIR
+                | SyntaxKind::PRE_INSERT_DIR
+        )
+    }) {
+        return true;
+    }
+
+    // 3. Contains parse error
+    if node.descendants().any(|n| n.kind() == SyntaxKind::ERROR) {
+        return true;
+    }
+
+    false
 }
 
 /// Lower variable declaration.

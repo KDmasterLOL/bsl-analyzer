@@ -571,6 +571,11 @@ pub enum BodyDiagnostic {
     /// Detected when template string has mismatched parameter count, invalid placeholders, or wrong numbers.
     /// Checks: %1-%10 valid, %0/%11+ invalid, parameter count matches placeholders.
     IncorrectUseOfStrTemplate { range: TextRange },
+
+    /// Multiple statements on one line.
+    /// Detected when more than one statement starts on the same line.
+    /// Exclusions: preprocessor directives, empty statements (`;`), statements with parse errors.
+    OneStatementPerLine { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -723,6 +728,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
             BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,
+            BodyDiagnostic::OneStatementPerLine { range } => *range,
         }
     }
 }
@@ -746,11 +752,38 @@ pub fn lower_method_with_externals(
     lower::lower_method_with_externals(method_node, is_function, known_externals)
 }
 
+/// Lower a method AST node to HIR Body with known externals and line index.
+///
+/// This version supports OneStatementPerLine diagnostic by tracking statement lines.
+pub fn lower_method_with_externals_and_line_index(
+    method_node: &SyntaxNode,
+    is_function: bool,
+    known_externals: rustc_hash::FxHashSet<String>,
+    line_index: std::sync::Arc<line_index::LineIndex>,
+) -> LowerResult {
+    lower::lower_method_with_externals_and_line_index(
+        method_node,
+        is_function,
+        known_externals,
+        line_index,
+    )
+}
+
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.
 pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
     lower::lower_module_code(root)
+}
+
+/// Lower module-level code with line index for OneStatementPerLine diagnostic.
+///
+/// This version supports OneStatementPerLine diagnostic by tracking statement lines.
+pub fn lower_module_code_with_line_index(
+    root: &SyntaxNode,
+    line_index: std::sync::Arc<line_index::LineIndex>,
+) -> LowerResult {
+    lower::lower_module_code_with_line_index(root, line_index)
 }
 
 #[cfg(test)]
