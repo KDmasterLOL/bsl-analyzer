@@ -576,6 +576,10 @@ pub enum BodyDiagnostic {
     /// Detected when more than one statement starts on the same line.
     /// Exclusions: preprocessor directives, empty statements (`;`), statements with parse errors.
     OneStatementPerLine { range: TextRange },
+
+    /// ПользователиОС() / OSUsers() call.
+    /// Security risk: potential Pass-the-hash attack vulnerability.
+    OSUsersMethod { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -729,6 +733,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,
             BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,
             BodyDiagnostic::OneStatementPerLine { range } => *range,
+            BodyDiagnostic::OSUsersMethod { range } => *range,
         }
     }
 }

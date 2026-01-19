@@ -398,6 +398,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::ExternalAppStarting { range: actual_callee.text_range() });
         }
 
+        // Check for OSUsers method (security risk)
+        if is_os_users_method(&name) {
+            // Emit OSUsersMethod diagnostic
+            // Range is just the method name (IDENT token), not the whole call
+            ctx.diagnostics
+                .push(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
+        }
+
         // Check for file system access methods
         if is_file_system_method(&name) {
             // Emit FileSystemAccess diagnostic
@@ -1213,6 +1221,18 @@ pub(crate) fn exprs_are_equal(body: &Body, lhs: ExprIdx, rhs: ExprIdx) -> bool {
         // Different expression types or complex expressions - not equal
         _ => false,
     }
+}
+
+/// Check if method name is OSUsers (security risk).
+///
+/// ПользователиОС() / OSUsers() method returns information about operating system users.
+/// This creates security vulnerabilities:
+/// - Pass-the-hash attack vectors
+/// - Information disclosure
+/// - May violate security policies
+fn is_os_users_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "пользователиос" | "osusers")
 }
 
 /// Check if method name is an external application starting method.

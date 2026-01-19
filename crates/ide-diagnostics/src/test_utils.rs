@@ -552,6 +552,7 @@ fn convert_hir_diagnostic(
         BodyDiagnostic::OneStatementPerLine { range } => {
             handlers::one_statement_per_line::from_hir(*range, ctx)
         }
+        BodyDiagnostic::OSUsersMethod { range } => handlers::os_users_method::from_hir(*range, ctx),
     }
 }
 
