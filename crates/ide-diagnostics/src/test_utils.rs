@@ -216,12 +216,14 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     };
 
     // Run HIR diagnostics via module_bodies
+    // Uses hir_dispatch::dispatch_hir_diagnostic - single source of truth
     let module_id = ModuleId::new(file_id);
     let module_bodies = ctx.db.module_bodies(module_id);
 
     let mut diagnostics = Vec::new();
     for (method_id, body_diag) in module_bodies.all_diagnostics() {
-        if let Some(diag) = convert_hir_diagnostic(body_diag, method_id, &ctx) {
+        if let Some(diag) = crate::hir_dispatch::dispatch_hir_diagnostic(body_diag, method_id, &ctx)
+        {
             diagnostics.push(diag);
         }
     }
@@ -243,43 +245,24 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Run SDBL-based diagnostics on test code with default configuration.
+/// Alias for `check_ast_diagnostic` - runs a handler's check() function.
 ///
-/// Creates a database with the given code and runs all SDBL/Query diagnostics.
-/// Used for testing SDBL diagnostic handlers that parse and analyze SQL-like queries.
+/// NOTE: Despite the name, this works for ANY handler with check() function,
+/// not just SDBL diagnostics. Use `check_ast_diagnostic` for new code.
 ///
-/// # Arguments
-/// * `code` - The BSL source code containing SDBL queries
-/// * `check_fn` - Closure that runs diagnostics (typically `|ctx| handlers::some_handler::check(ctx)`)
-///
-/// # Returns
-/// Vector of diagnostics found in the code
-///
-/// # Example
-/// ```ignore
-/// let diagnostics = check_sdbl_diagnostic(r#"
-/// Procedure Test()
-///     Query = "SELECT * FROM Table1 FULL OUTER JOIN Table2 ON T1.ID = T2.ID";
-/// EndProcedure
-/// "#, |ctx| full_outer_join_query::check(ctx));
-/// ```
+/// Kept for backward compatibility with existing tests.
+#[inline]
 pub fn check_sdbl_diagnostic<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    let config = crate::DiagnosticsConfig::default();
-    check_sdbl_diagnostic_with_config(code, config, check_fn)
+    check_ast_diagnostic(code, check_fn)
 }
 
-/// Run SDBL-based diagnostics on test code with custom configuration.
+/// Alias for `check_ast_diagnostic_with_config`.
 ///
-/// # Arguments
-/// * `code` - The BSL source code containing SDBL queries
-/// * `config` - The diagnostics configuration to use
-/// * `check_fn` - Closure that runs diagnostics
-///
-/// # Returns
-/// Vector of diagnostics found in the code
+/// Kept for backward compatibility with existing tests.
+#[inline]
 pub fn check_sdbl_diagnostic_with_config<F>(
     code: &str,
     config: crate::DiagnosticsConfig,
@@ -288,45 +271,10 @@ pub fn check_sdbl_diagnostic_with_config<F>(
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-    use vfs::VfsPath;
-
-    let fixture_text = format!("//- /test.bsl\n{}", code);
-    let fixture = Fixture::parse(&fixture_text);
-    let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-    let mut db = RootDatabaseImpl::new();
-
-    // Set up source root for file_text_input to work (required for SDBL diagnostics)
-    let mut file_set = vfs::FileSet::default();
-    file_set.insert(file_id, VfsPath::new("/test.bsl"));
-    let source_root = SourceRoot::new_local(file_set);
-    db.set_source_root(SourceRootId(0), source_root);
-    db.set_file_source_root(file_id, SourceRootId(0));
-
-    for (fid, file) in &fixture.files {
-        db.set_file_text(*fid, &file.content);
-    }
-
-    let config = Rc::new(config);
-    let ctx = crate::DiagnosticsContext {
-        db: &db,
-        config: &config,
-        file_id,
-        provider: None,
-        workspace_root: None,
-        configuration_path: None,
-        configuration_path_input: None,
-        file_set: None,
-    };
-
-    check_fn(&ctx)
+    check_ast_diagnostic_with_config(code, config, check_fn)
 }
 
-/// Run AST-based diagnostics on test code with default configuration.
+/// Run a handler's check() function on test code with default configuration.
 ///
 /// Creates a database with the given code and runs the provided check function.
 /// Used for testing AST diagnostic handlers that don't use HIR.
@@ -406,154 +354,6 @@ where
     };
 
     check_fn(&ctx)
-}
-
-/// Convert a BodyDiagnostic to Diagnostic for testing.
-fn convert_hir_diagnostic(
-    body_diag: &hir::BodyDiagnostic,
-    method_id: &hir::MethodId,
-    ctx: &crate::DiagnosticsContext,
-) -> Option<Diagnostic> {
-    use crate::handlers;
-    use hir::BodyDiagnostic;
-
-    match body_diag {
-        BodyDiagnostic::FunctionShouldHaveReturn { range } => {
-            handlers::function_should_have_return::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::EmptyCodeBlock { range } => {
-            handlers::empty_code_block::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::MagicNumber { value, range } => {
-            handlers::magic_number::from_hir(value, *range, ctx)
-        }
-        BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
-        BodyDiagnostic::UnusedVariable { name, range } => {
-            handlers::unused_local_variable::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::UnreachableCode { range } => {
-            handlers::unreachable_code::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::MissingReturn { range } => {
-            handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)
-        }
-        BodyDiagnostic::DeprecatedMethod { name, range } => {
-            handlers::deprecated_method::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::DeprecatedCurrentDate { name, range } => {
-            handlers::deprecated_current_date::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::DeprecatedFind { name, range } => {
-            handlers::deprecated_find::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::DeprecatedMessage { name, range } => {
-            handlers::deprecated_message::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
-            handlers::deprecated_type_managed_form::from_hir(type_name, *range, ctx)
-        }
-        BodyDiagnostic::DisableSafeMode { method_name, range } => {
-            handlers::disable_safe_mode::from_hir(method_name, *range, ctx)
-        }
-        // NOTE: MissingCommonModuleMethod removed from HIR lowering (Phase 4)
-        // Now collected via AST-based check() with path resolution
-        BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
-            handlers::begin_transaction_before_try_catch::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::MissedRequiredParameter {
-            callee,
-            module,
-            mdo_type,
-            mdo_name,
-            args,
-            range,
-        } => handlers::missed_required_parameter::from_hir(
-            callee,
-            module.as_deref(),
-            mdo_type.as_deref(),
-            mdo_name.as_deref(),
-            args,
-            *range,
-            ctx,
-        ),
-        BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
-            handlers::if_else_duplicated_code_block::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
-            handlers::code_after_async_call::from_hir(method_name, *range, ctx)
-        }
-        BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
-            handlers::commit_transaction_outside_try_catch::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::CommonModuleAssign { variable_name, range } => {
-            handlers::common_module_assign::from_hir(variable_name, *range, ctx)
-        }
-        BodyDiagnostic::RewriteMethodParameter { param_id, stmt_id, range } => {
-            handlers::rewrite_method_parameter::from_hir(*param_id, *stmt_id, *range, ctx)
-        }
-        BodyDiagnostic::CreateQueryInCycle { range } => {
-            handlers::create_query_in_cycle::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::DeletingCollectionItem { collection_text, range } => {
-            handlers::deleting_collection_item::from_hir(collection_text, *range, ctx)
-        }
-        BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range } => {
-            handlers::deprecated_attributes_8312::from_hir(name, *kind, *range, ctx)
-        }
-        BodyDiagnostic::ExecuteExternalCode { range } => {
-            handlers::execute_external_code::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::ExternalAppStarting { range } => {
-            handlers::external_app_starting::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::ExtraCommas { range } => handlers::extra_commas::from_hir(*range, ctx),
-        BodyDiagnostic::FileSystemAccess { range } => {
-            handlers::file_system_access::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::FormDataToValue { range } => {
-            handlers::form_data_to_value::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::GetFormMethod { method_name, range } => {
-            handlers::get_form_method::from_hir(method_name, *range, ctx)
-        }
-        BodyDiagnostic::GlobalContextMethodCollision8312 { method_name, range } => {
-            handlers::global_context_method_collision8312::from_hir(method_name, *range, ctx)
-        }
-        BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
-            handlers::function_name_starts_with_get::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::FunctionOutParameter { name, range } => {
-            handlers::function_out_parameter::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
-            handlers::function_returns_same_primitive::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::EmptyRegion { name, range } => {
-            handlers::empty_region::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::EmptyStatement { range } => {
-            handlers::empty_statement::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::IfConditionComplexity { complexity, max_complexity, range } => {
-            handlers::if_condition_complexity::from_hir(*complexity, *max_complexity, *range, ctx)
-        }
-        BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
-            handlers::if_else_duplicated_condition::from_hir(*first_occurrence_index, *range, ctx)
-        }
-        BodyDiagnostic::IfElseIfEndsWithElse { range } => {
-            handlers::if_else_if_ends_with_else::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::IncorrectUseOfStrTemplate { range } => {
-            handlers::incorrect_use_of_str_template::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
-            handlers::missing_common_module_method::from_hir(module, method, *range, ctx)
-        }
-        BodyDiagnostic::OneStatementPerLine { range } => {
-            handlers::one_statement_per_line::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::OSUsersMethod { range } => handlers::os_users_method::from_hir(*range, ctx),
-    }
 }
 
 #[cfg(test)]

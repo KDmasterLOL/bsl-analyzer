@@ -31,7 +31,10 @@ pub fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 /// Dispatch BodyDiagnostic to appropriate handler's from_hir() function.
-fn dispatch_hir_diagnostic(
+///
+/// This is the single source of truth for HIR diagnostic dispatch.
+/// Used by both production code and tests.
+pub fn dispatch_hir_diagnostic(
     body_diag: &BodyDiagnostic,
     method_id: &hir::MethodId,
     ctx: &DiagnosticsContext,

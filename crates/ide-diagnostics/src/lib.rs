@@ -31,204 +31,51 @@ pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, Text
 
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
-use runner::{collect_text_diagnostics, run_diagnostic};
+use runner::{
+    collect_dataflow_diagnostics, collect_metadata_ast_diagnostics, collect_sdbl_hir_diagnostics,
+    collect_semantic_diagnostics, collect_syntax_diagnostics, collect_text_diagnostics,
+};
 
 /// Runs all diagnostics on a file.
+///
+/// This is the single entry point for all diagnostics. Each diagnostic type
+/// has a dedicated collector function in `runner.rs` or its own module.
+///
+/// ## Diagnostic Types (in execution order)
+///
+/// 1. **Text-based** - Line/formatting checks (single AST pass)
+/// 2. **Syntax (Tier 1)** - Syntactic pattern checks
+/// 3. **Semantic (Tier 2)** - Semantic analysis checks
+/// 4. **Metadata AST (Tier 3)** - AST-based metadata property checks
+/// 5. **SDBL HIR** - Query language diagnostics (collected during SDBL lowering)
+/// 6. **HIR** - Diagnostics collected during BSL AST→HIR lowering
+/// 7. **Dataflow** - CFG + liveness/reaching definitions analysis
+/// 8. **Metadata HIR** - ModuleMetadata-based checks
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
-    // Text-based diagnostics (single AST pass)
+    // 1. Text-based diagnostics (single AST pass)
     result.extend(collect_text_diagnostics(ctx));
 
-    // Tier 1: Syntax diagnostics
-    result.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
-    result.extend(run_diagnostic(
-        "DuplicatedInsertionIntoCollection",
-        ctx,
-        handlers::duplicated_insertion_into_collection::check,
-    ));
-    result.extend(run_diagnostic(
-        "ExcessiveAutoTestCheck",
-        ctx,
-        handlers::excessive_auto_test_check::check,
-    ));
-    result.extend(run_diagnostic(
-        "IdenticalExpressions",
-        ctx,
-        handlers::identical_expressions::check,
-    ));
-    result.extend(run_diagnostic(
-        "IncorrectUseOfStrTemplate",
-        ctx,
-        handlers::incorrect_use_of_str_template::check,
-    ));
-    result.extend(run_diagnostic(
-        "MultilingualStringHasAllDeclaredLanguages",
-        ctx,
-        handlers::multilingual_string_has_all_declared_languages::check,
-    ));
-    result.extend(run_diagnostic(
-        "MultilingualStringUsingWithTemplate",
-        ctx,
-        handlers::multilingual_string_using_with_template::check,
-    ));
-    result.extend(run_diagnostic(
-        "NestedConstructorsInStructureDeclaration",
-        ctx,
-        handlers::nested_constructors_in_structure_declaration::check,
-    ));
-    result.extend(run_diagnostic(
-        "NestedFunctionInParameters",
-        ctx,
-        handlers::nested_function_in_parameters::check,
-    ));
-    result.extend(run_diagnostic(
-        "NonExportMethodsInApiRegion",
-        ctx,
-        handlers::non_export_methods_in_api_region::check,
-    ));
+    // 2. Tier 1: Syntax diagnostics
+    result.extend(collect_syntax_diagnostics(ctx));
 
-    // Tier 2: Semantic diagnostics
-    result.extend(run_diagnostic(
-        "CreateQueryInCycle",
-        ctx,
-        handlers::create_query_in_cycle::check,
-    ));
-    result.extend(run_diagnostic(
-        "DataExchangeLoading",
-        ctx,
-        handlers::data_exchange_loading::check,
-    ));
-    result.extend(run_diagnostic(
-        "DeletingCollectionItem",
-        ctx,
-        handlers::deleting_collection_item::check,
-    ));
-    result.extend(run_diagnostic(
-        "DeprecatedAttributes8312",
-        ctx,
-        handlers::deprecated_attributes_8312::check,
-    ));
-    result.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
-    result.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
-    result.extend(run_diagnostic(
-        "CognitiveComplexity",
-        ctx,
-        handlers::cognitive_complexity::check,
-    ));
-    result.extend(run_diagnostic(
-        "CyclomaticComplexity",
-        ctx,
-        handlers::cyclomatic_complexity::check,
-    ));
-    result.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
-    result.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
-    result.extend(run_diagnostic(
-        "NumberOfOptionalParams",
-        ctx,
-        handlers::number_of_optional_params::check,
-    ));
-    result.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
-    result.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
-    result.extend(run_diagnostic(
-        "NumberOfValuesInStructureConstructor",
-        ctx,
-        handlers::number_of_values_in_structure_constructor::check,
-    ));
-    result.extend(run_diagnostic(
-        "MissingCodeTryCatchEx",
-        ctx,
-        handlers::missing_code_try_catch_ex::check,
-    ));
-    result.extend(run_diagnostic(
-        "MissingTempStorageDeletion",
-        ctx,
-        handlers::missing_temp_storage_deletion::check,
-    ));
-    result.extend(run_diagnostic(
-        "MissingTemporaryFileDeletion",
-        ctx,
-        handlers::missing_temporary_file_deletion::check,
-    ));
+    // 3. Tier 2: Semantic diagnostics
+    result.extend(collect_semantic_diagnostics(ctx));
 
-    // Tier 3: Metadata diagnostics
-    result.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
-    result.extend(run_diagnostic(
-        "CommandModuleExportMethods",
-        ctx,
-        handlers::command_module_export_methods::check,
-    ));
-    result.extend(run_diagnostic(
-        "CommonModuleMissingAPI",
-        ctx,
-        handlers::common_module_missing_api::check,
-    ));
-    result.extend(run_diagnostic(
-        "DenyIncompleteValues",
-        ctx,
-        handlers::deny_incomplete_values::check,
-    ));
-    result.extend(run_diagnostic(
-        "MetadataObjectNameLength",
-        ctx,
-        handlers::metadata_object_name_length::check,
-    ));
-    result.extend(run_diagnostic(
-        "MissingReturnedValueDescription",
-        ctx,
-        handlers::missing_returned_value_description::check,
-    ));
-    result.extend(run_diagnostic("OrdinaryAppSupport", ctx, handlers::ordinary_app_support::check));
+    // 4. Tier 3: Metadata diagnostics (AST-based)
+    result.extend(collect_metadata_ast_diagnostics(ctx));
 
-    // SDBL diagnostics
-    result.extend(run_diagnostic(
-        "AssignAliasFieldsInQuery",
-        ctx,
-        handlers::assign_alias_fields_in_query::check,
-    ));
-    result.extend(run_diagnostic(
-        "FieldsFromJoinsWithoutIsNull",
-        ctx,
-        handlers::fields_from_joins_without_is_null::check,
-    ));
-    result.extend(run_diagnostic(
-        "FullOuterJoinQuery",
-        ctx,
-        handlers::full_outer_join_query::check,
-    ));
-    result.extend(run_diagnostic("JoinWithSubQuery", ctx, handlers::join_with_sub_query::check));
-    result.extend(run_diagnostic(
-        "LogicalOrInJoinQuerySection",
-        ctx,
-        handlers::logical_or_in_join_query_section::check,
-    ));
-    result.extend(run_diagnostic(
-        "LogicalOrInTheWhereSectionOfQuery",
-        ctx,
-        handlers::logical_or_in_the_where_section_of_query::check,
-    ));
-    result.extend(run_diagnostic(
-        "MultilineStringInQuery",
-        ctx,
-        handlers::multiline_string_in_query::check,
-    ));
-    result.extend(run_diagnostic(
-        "LatinAndCyrillicSymbolInWord",
-        ctx,
-        handlers::latin_and_cyrillic_symbol_in_word::check,
-    ));
+    // 5. SDBL HIR diagnostics (collected during SDBL lowering)
+    result.extend(collect_sdbl_hir_diagnostics(ctx));
 
-    // HIR-based diagnostics (collected during AST→HIR lowering)
+    // 6. HIR-based diagnostics (collected during AST→HIR lowering)
     result.extend(collect_hir_diagnostics(ctx));
 
-    // Dataflow-based diagnostics (using CFG + liveness analysis)
-    result.extend(run_diagnostic(
-        "UnusedLocalVariable",
-        ctx,
-        handlers::unused_local_variable::check,
-    ));
+    // 7. Dataflow-based diagnostics (using CFG + liveness analysis)
+    result.extend(collect_dataflow_diagnostics(ctx));
 
-    // Metadata-based diagnostics (Phase 2: using module_metadata from HIR)
+    // 8. Metadata-based diagnostics (using module_metadata from HIR)
     result.extend(collect_metadata_diagnostics(ctx));
 
     result
