@@ -244,6 +244,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         ctx,
         handlers::ordinary_app_support::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "PrivilegedModuleMethodCall",
+        ctx,
+        handlers::privileged_module_method_call::check,
+    ));
 
     diagnostics
 }

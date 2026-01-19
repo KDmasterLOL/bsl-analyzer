@@ -130,6 +130,7 @@ pub enum DiagnosticCode {
     MissingCommonModuleMethod,
     MissingEventSubscriptionHandler,
     OrdinaryAppSupport,
+    PrivilegedModuleMethodCall,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
