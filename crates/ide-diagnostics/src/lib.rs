@@ -129,6 +129,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::number_of_optional_params::check,
     ));
     result.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
+    result.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
     result.extend(run_diagnostic(
         "NumberOfValuesInStructureConstructor",
         ctx,
