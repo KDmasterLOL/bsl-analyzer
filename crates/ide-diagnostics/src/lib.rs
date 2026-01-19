@@ -1378,6 +1378,12 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     ));
     result.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
     result.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
+    result.extend(run_diagnostic(
+        "NumberOfOptionalParams",
+        ctx,
+        handlers::number_of_optional_params::check,
+    ));
+    result.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
     // NOTE: MissedRequiredParameter migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::MissedRequiredParameter
     // and dispatched through collect_hir_diagnostics()
