@@ -705,13 +705,48 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 }
 
 /// Lower argument list.
+///
+/// Handles empty arguments (e.g., `Method(a,,b)`) by creating `Expr::Missing` for empty positions.
+/// This preserves the argument count for diagnostics like NumberOfValuesInStructureConstructor.
 fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprIdx> {
     // Check for trailing comma before lowering
     if let Some(comma_range) = find_trailing_comma(node) {
         ctx.diagnostics.push(BodyDiagnostic::ExtraCommas { range: comma_range });
     }
 
-    node.children().map(|n| lower_expr_node(ctx, &n)).collect()
+    let mut args = Vec::new();
+    let mut current_expr: Option<ExprIdx> = None;
+    let mut has_any_content = false;
+
+    for child in node.children_with_tokens() {
+        match child.kind() {
+            SyntaxKind::COMMA => {
+                // Push current argument (or Missing if empty)
+                args.push(current_expr.unwrap_or_else(|| ctx.missing_expr()));
+                current_expr = None;
+            }
+            SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => {
+                // Skip parentheses
+            }
+            kind if kind.is_trivia() => {
+                // Skip whitespace and comments
+            }
+            _ => {
+                // Expression node - lower it
+                if let Some(expr_node) = child.as_node() {
+                    current_expr = Some(lower_expr_node(ctx, expr_node));
+                    has_any_content = true;
+                }
+            }
+        }
+    }
+
+    // Handle last argument (after last comma or only argument)
+    if has_any_content || !args.is_empty() {
+        args.push(current_expr.unwrap_or_else(|| ctx.missing_expr()));
+    }
+
+    args
 }
 
 /// Find the first trailing comma in an ARG_LIST node.

@@ -178,6 +178,7 @@ pub enum DiagnosticCode {
     TooManyReturns,
     NumberOfParams,
     NumberOfOptionalParams,
+    NumberOfValuesInStructureConstructor,
     OrderOfParams,
     MissedRequiredParameter,
     FunctionOutParameter,
@@ -375,6 +376,7 @@ impl DiagnosticCode {
             Self::NestedStatements => "NestedStatements",
             Self::NumberOfOptionalParams => "NumberOfOptionalParams",
             Self::NumberOfParams => "NumberOfParams",
+            Self::NumberOfValuesInStructureConstructor => "NumberOfValuesInStructureConstructor",
             Self::OrderOfParams => "OrderOfParams",
             Self::PairingBrokenTransaction => "PairingBrokenTransaction",
             Self::ProcedureReturnsValue => "ProcedureReturnsValue",
@@ -1384,6 +1386,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::number_of_optional_params::check,
     ));
     result.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
+    result.extend(run_diagnostic(
+        "NumberOfValuesInStructureConstructor",
+        ctx,
+        handlers::number_of_values_in_structure_constructor::check,
+    ));
     // NOTE: MissedRequiredParameter migrated to HIR-based collection
     // The HIR version is collected during lowering via BodyDiagnostic::MissedRequiredParameter
     // and dispatched through collect_hir_diagnostics()
@@ -1926,6 +1933,9 @@ impl std::str::FromStr for DiagnosticCode {
             "TooManyReturns" => Ok(Self::TooManyReturns),
             "NumberOfParams" => Ok(Self::NumberOfParams),
             "NumberOfOptionalParams" => Ok(Self::NumberOfOptionalParams),
+            "NumberOfValuesInStructureConstructor" => {
+                Ok(Self::NumberOfValuesInStructureConstructor)
+            }
             "OrderOfParams" => Ok(Self::OrderOfParams),
             "MissedRequiredParameter" => Ok(Self::MissedRequiredParameter),
             "FunctionOutParameter" => Ok(Self::FunctionOutParameter),

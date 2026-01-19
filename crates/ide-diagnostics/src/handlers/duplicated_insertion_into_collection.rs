@@ -1067,11 +1067,12 @@ mod tests {
         let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Expected: 18 diagnostics (17 from Java that HIR can detect + 1 extra we find)
+        // Expected: 17 diagnostics matching Java behavior
         // Note: Line 59 (inside #Если/#Иначе) is NOT detected because HIR does not analyze
         // code inside preprocessor directives. This is a known limitation.
-        // We find Line 197 which Java doesn't report (complex Тип() call).
-        assert_eq!(diagnostics.len(), 18, "Expected 18 diagnostics");
+        // Note: Line 197 has empty first arg (Missing), so is_special_value returns true
+        // and the call is not tracked for duplicates (correct behavior per fixture comment).
+        assert_eq!(diagnostics.len(), 17, "Expected 17 diagnostics");
 
         // Sort diagnostics by position for consistent ordering
         let mut sorted_diagnostics = diagnostics.clone();
@@ -1108,11 +1109,9 @@ mod tests {
         assert_diagnostic_range(code, &sorted_diagnostics[13], 161, 4, 37);
         // Line 172: Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 9, Истина)
         assert_diagnostic_range(code, &sorted_diagnostics[14], 171, 4, 65);
-        // Line 197: Текст.Добавить(, Тип("ПереводСтрокиФорматированногоДокумента"))
-        assert_diagnostic_range(code, &sorted_diagnostics[15], 196, 4, 67);
         // Line 266: Коллекция().Добавить(СтрокаТаблицы)
-        assert_diagnostic_range(code, &sorted_diagnostics[16], 265, 4, 39);
+        assert_diagnostic_range(code, &sorted_diagnostics[15], 265, 4, 39);
         // Line 269: Коллекция2().Реквизит.Добавить(СтрокаТаблицы2)
-        assert_diagnostic_range(code, &sorted_diagnostics[17], 268, 4, 50);
+        assert_diagnostic_range(code, &sorted_diagnostics[16], 268, 4, 50);
     }
 }
