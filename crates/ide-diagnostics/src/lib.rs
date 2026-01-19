@@ -178,6 +178,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::missing_returned_value_description::check,
     ));
+    result.extend(run_diagnostic("OrdinaryAppSupport", ctx, handlers::ordinary_app_support::check));
 
     // SDBL diagnostics
     result.extend(run_diagnostic(

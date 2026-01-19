@@ -127,6 +127,7 @@ pub enum DiagnosticCode {
     MetadataObjectNameLength,
     MissingCommonModuleMethod,
     MissingEventSubscriptionHandler,
+    OrdinaryAppSupport,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
