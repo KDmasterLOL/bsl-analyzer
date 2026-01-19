@@ -46,8 +46,9 @@ pub fn expression(p: &mut Parser) {
 
 /// Parses a postfix expression for use in assignment left-hand side.
 /// This allows parsing "Var", "Obj.Field", "Arr[Index]" without consuming `=` as comparison.
-pub fn postfix_expression_for_assignment(p: &mut Parser) {
-    postfix_expr(p);
+/// Returns true if the expression ends with a call (has parentheses).
+pub fn postfix_expression_for_assignment(p: &mut Parser) -> bool {
+    postfix_expr_with_call_info(p)
 }
 
 fn or_expr(p: &mut Parser) {
@@ -174,9 +175,17 @@ fn unary_expr(p: &mut Parser) {
 }
 
 fn postfix_expr(p: &mut Parser) {
+    postfix_expr_with_call_info(p);
+}
+
+/// Parses a postfix expression and returns whether it ends with a call.
+/// Used by assignment_or_call to distinguish `Foo()` (call) from `Foo` (error).
+fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
     let Some(mut lhs) = primary_expr(p) else {
-        return;
+        return false;
     };
+
+    let mut ends_with_call = false;
 
     loop {
         p.check_iteration_limit();
@@ -192,6 +201,7 @@ fn postfix_expr(p: &mut Parser) {
                 if is_ident_or_keyword(p) {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
+                    ends_with_call = false;
                 } else {
                     p.error(); // Expected property name after dot
                                // ERROR RECOVERY: Complete as FieldExpr anyway, exit loop
@@ -208,16 +218,20 @@ fn postfix_expr(p: &mut Parser) {
                 p.skip_trivia();
                 p.expect(TokenKind::RBracket);
                 lhs = m.complete(p, NodeKind::IndexExpr);
+                ends_with_call = false;
             }
             Some(TokenKind::LParen) => {
                 // Wrap the base in a CallExpr
                 let m = lhs.precede(p);
                 arg_list(p);
                 lhs = m.complete(p, NodeKind::CallExpr);
+                ends_with_call = true;
             }
             _ => break,
         }
     }
+
+    ends_with_call
 }
 
 fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {

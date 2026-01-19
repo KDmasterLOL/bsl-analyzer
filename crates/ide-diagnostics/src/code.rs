@@ -8,6 +8,7 @@ use strum::{Display, EnumString, IntoStaticStr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr)]
 pub enum DiagnosticCode {
     // Tier 1: Simple (syntax-only)
+    ParseError,
     CanonicalSpellingKeywords,
     ConsecutiveEmptyLines,
     LineLength,

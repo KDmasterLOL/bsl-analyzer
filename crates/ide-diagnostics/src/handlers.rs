@@ -113,6 +113,7 @@ pub mod order_of_params;
 pub mod ordinary_app_support;
 pub mod os_users_method;
 pub mod pairing_broken_transaction;
+pub mod parse_error;
 pub mod rewrite_method_parameter;
 pub mod self_assign;
 pub mod space_at_start_comment;

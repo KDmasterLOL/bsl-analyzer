@@ -57,6 +57,7 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
+    diagnostics.extend(handlers::parse_error::check(ctx));
     diagnostics.extend(handlers::consecutive_empty_lines::check(ctx));
     diagnostics.extend(handlers::line_length::check(ctx));
     diagnostics.extend(handlers::commented_code::check(ctx));
