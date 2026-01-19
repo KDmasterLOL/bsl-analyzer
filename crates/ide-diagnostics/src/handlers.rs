@@ -116,6 +116,7 @@ pub mod pairing_broken_transaction;
 pub mod parse_error;
 pub mod privileged_module_method_call;
 pub mod procedure_returns_value;
+pub mod protected_module;
 pub mod rewrite_method_parameter;
 pub mod self_assign;
 pub mod space_at_start_comment;

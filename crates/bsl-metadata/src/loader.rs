@@ -148,11 +148,15 @@ fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
 
                 let xml_path = dir.join(format!("{}.xml", name));
                 let module_bsl_path = module_dir.join("Ext/Module.bsl");
+                let module_bin_path = module_dir.join("Ext/Module.bin");
 
                 if xml_path.exists() {
                     // Parse XML to get properties
                     let xml = fs::read_to_string(&xml_path)?;
                     let mut module = xml_parser::parse_common_module_xml(&xml)?;
+
+                    // Module is protected if .bin exists but .bsl does not
+                    let is_protected = module_bin_path.exists() && !module_bsl_path.exists();
 
                     // Build URI to .bsl file if it exists
                     if module_bsl_path.exists() {
@@ -170,12 +174,30 @@ fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
                             .server_call(module.is_server_call())
                             .privileged(module.is_privileged())
                             .return_values_reuse(module.return_values_reuse())
+                            .protected(false)
+                            .build();
+                    } else if is_protected {
+                        // Protected module - has .bin without .bsl
+                        module = crate::common_module::CommonModule::builder()
+                            .uuid(*module.uuid())
+                            .name(module.name())
+                            .uri(None::<String>)
+                            .server(module.is_server())
+                            .global(module.is_global())
+                            .client_managed_application(module.is_client_managed_application())
+                            .client_ordinary_application(module.is_client_ordinary_application())
+                            .external_connection(module.is_external_connection())
+                            .server_call(module.is_server_call())
+                            .privileged(module.is_privileged())
+                            .return_values_reuse(module.return_values_reuse())
+                            .protected(true)
                             .build();
                     }
 
                     tracing::debug!(
                         module = %module.name(),
                         has_code = module_bsl_path.exists(),
+                        is_protected = is_protected,
                         "loaded common module"
                     );
 
@@ -714,9 +736,9 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
         let config = load_from_directory(path).unwrap();
 
-        // Should load common modules
+        // Should load common modules (3 with .bsl + 1 protected with .bin)
         assert!(!config.common_modules().is_empty(), "No common modules loaded");
-        assert_eq!(config.common_modules().len(), 3, "Expected 3 common modules");
+        assert_eq!(config.common_modules().len(), 4, "Expected 4 common modules");
 
         // Check specific modules exist
         let global_server = config.find_common_module("ГлобальныйСерверныйМодуль");
@@ -771,6 +793,22 @@ mod tests {
             let ts = &cat.tabular_sections[0];
             assert_eq!(ts.name(), "ТабличнаяЧасть1");
         }
+    }
+
+    #[test]
+    fn test_load_protected_module() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+        let config = load_from_directory(path).unwrap();
+
+        // Check protected module is loaded
+        let protected_module = config.find_common_module("ЗащищенныйМодуль");
+        assert!(protected_module.is_some(), "ЗащищенныйМодуль not found");
+
+        let module = protected_module.unwrap();
+        assert!(module.is_protected(), "Module should be protected");
+        assert!(module.uri().is_none(), "Protected module should not have URI");
+        assert!(module.is_server(), "Should be server module");
+        assert!(module.is_server_call(), "Should have server call");
     }
 
     /// Test loading enum values from doc3 project

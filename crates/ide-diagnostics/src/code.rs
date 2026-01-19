@@ -131,6 +131,7 @@ pub enum DiagnosticCode {
     MissingEventSubscriptionHandler,
     OrdinaryAppSupport,
     PrivilegedModuleMethodCall,
+    ProtectedModule,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

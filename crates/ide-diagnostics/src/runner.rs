@@ -249,6 +249,7 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         ctx,
         handlers::privileged_module_method_call::check,
     ));
+    diagnostics.extend(run_diagnostic("ProtectedModule", ctx, handlers::protected_module::check));
 
     diagnostics
 }
