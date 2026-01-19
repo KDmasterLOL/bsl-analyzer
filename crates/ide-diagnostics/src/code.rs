@@ -1,0 +1,170 @@
+//! Diagnostic codes matching bsl-language-server.
+
+use strum::{Display, EnumString, IntoStaticStr};
+
+/// Diagnostic code - matches bsl-language-server codes.
+///
+/// Uses strum for automatic as_str/from_str generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr)]
+pub enum DiagnosticCode {
+    // Tier 1: Simple (syntax-only)
+    CanonicalSpellingKeywords,
+    ConsecutiveEmptyLines,
+    LineLength,
+    MissingSpace,
+    OneStatementPerLine,
+    SemicolonPresence,
+    SpaceAtStartComment,
+    IncorrectLineBreak,
+    IncorrectUseOfStrTemplate,
+    ExtraCommas,
+    CommentedCode,
+    EmptyCodeBlock,
+    EmptyRegion,
+    EmptyStatement,
+    UnreachableCode,
+    CodeBlockBeforeSub,
+    CodeOutOfRegion,
+    MagicNumber,
+    MagicDate,
+    YoLetterUsage,
+    LatinAndCyrillicSymbolInWord,
+    InvalidCharacterInFile,
+    DoubleNegatives,
+    NestedTernaryOperator,
+    NonExportMethodsInApiRegion,
+    TernaryOperatorUsage,
+    UnaryPlusInConcatenation,
+    UselessTernaryOperator,
+    BadWords,
+    DuplicateStringLiteral,
+    DuplicateRegion,
+    NonStandardRegion,
+    DuplicatedInsertionIntoCollection,
+    ExcessiveAutoTestCheck,
+    IdenticalExpressions,
+    IfElseDuplicatedCodeBlock,
+    IfElseDuplicatedCondition,
+    IfElseIfEndsWithElse,
+    MultilingualStringHasAllDeclaredLanguages,
+    MultilingualStringUsingWithTemplate,
+    NestedConstructorsInStructureDeclaration,
+    NestedFunctionInParameters,
+
+    // Tier 2: Medium (requires symbol table)
+    AllFunctionPathMustHaveReturn,
+    FunctionShouldHaveReturn,
+    ProcedureReturnsValue,
+    FunctionReturnsSamePrimitive,
+    FunctionNameStartsWithGet,
+    TooManyReturns,
+    NumberOfParams,
+    NumberOfOptionalParams,
+    NumberOfValuesInStructureConstructor,
+    OrderOfParams,
+    MissedRequiredParameter,
+    FunctionOutParameter,
+    UnusedParameters,
+    MissingParameterDescription,
+    MissingReturnedValueDescription,
+    RewriteMethodParameter,
+    UnusedLocalVariable,
+    UnusedLocalMethod,
+    ExportVariables,
+    MissingVariablesDescription,
+    SelfAssign,
+    ThisObjectAssign,
+    CyclomaticComplexity,
+    CognitiveComplexity,
+    NestedStatements,
+    MethodSize,
+    IfConditionComplexity,
+    MissingCodeTryCatchEx,
+    MissingTempStorageDeletion,
+    MissingTemporaryFileDeletion,
+    UsingGoto,
+    BeginTransactionBeforeTryCatch,
+    CodeAfterAsyncCall,
+    CommitTransactionOutsideTryCatch,
+    CompilationDirectiveLost,
+    CreateQueryInCycle,
+    DataExchangeLoading,
+    DeletingCollectionItem,
+    DeprecatedCurrentDate,
+    DeprecatedFind,
+    DeprecatedMessage,
+    DeprecatedTypeManagedForm,
+    DeprecatedMethods8310,
+    DeprecatedMethods8317,
+    DeprecatedAttributes8312,
+    DisableSafeMode,
+    ExecuteExternalCode,
+    ExternalAppStarting,
+    FileSystemAccess,
+    FormDataToValue,
+    GetFormMethod,
+    GlobalContextMethodCollision8312,
+    InternetAccess,
+    IsInRoleMethod,
+    PairingBrokenTransaction,
+    WrongUseOfRollbackTransactionMethod,
+
+    // Tier 3: Metadata (requires 1C configuration metadata)
+    CachedPublic,
+    CommandModuleExportMethods,
+    CommonModuleAssign,
+    CommonModuleInvalidType,
+    CommonModuleMissingAPI,
+    CommonModuleNameCached,
+    CommonModuleNameClient,
+    CommonModuleNameClientServer,
+    CommonModuleNameFullAccess,
+    CommonModuleNameGlobal,
+    CommonModuleNameGlobalClient,
+    CommonModuleNameServerCall,
+    CommonModuleNameWords,
+    DenyIncompleteValues,
+    MetadataObjectNameLength,
+    MissingCommonModuleMethod,
+    MissingEventSubscriptionHandler,
+
+    // SDBL Diagnostics
+    AssignAliasFieldsInQuery,
+    FieldsFromJoinsWithoutIsNull,
+    FullOuterJoinQuery,
+    JoinWithSubQuery,
+    LogicalOrInJoinQuerySection,
+    LogicalOrInTheWhereSectionOfQuery,
+    MultilineStringInQuery,
+}
+
+impl DiagnosticCode {
+    /// Returns the string representation (for LSP and SonarQube).
+    pub fn as_str(&self) -> &'static str {
+        (*self).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_as_str() {
+        assert_eq!(DiagnosticCode::LineLength.as_str(), "LineLength");
+        assert_eq!(DiagnosticCode::EmptyCodeBlock.as_str(), "EmptyCodeBlock");
+    }
+
+    #[test]
+    fn test_from_str() {
+        assert_eq!(DiagnosticCode::from_str("LineLength"), Ok(DiagnosticCode::LineLength));
+        assert_eq!(DiagnosticCode::from_str("EmptyCodeBlock"), Ok(DiagnosticCode::EmptyCodeBlock));
+        assert!(DiagnosticCode::from_str("UnknownCode").is_err());
+    }
+
+    #[test]
+    fn test_display() {
+        assert_eq!(format!("{}", DiagnosticCode::LineLength), "LineLength");
+    }
+}

@@ -107,6 +107,8 @@ regex = "1.10"
 unicase = "2.7"
 fixedbitset = "0.5"
 ordered-float = "5.1"
+strum = { version = "0.26", features = ["derive"] }
+strum_macros = "0.26"
 walkdir = "2.4"
 notify = "6.1"
 camino = "1.1"
