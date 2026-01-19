@@ -74,6 +74,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return vec![];
     }
 
+    // maxTransactionLevel: limits DFS depth to prevent stack overflow on pathological CFGs
+    // (e.g., BeginTransaction in infinite loop). In practice, nesting rarely exceeds 2-3.
+    let max_level = ctx
+        .config
+        .get_int(DiagnosticCode::PairingBrokenTransaction, "maxTransactionLevel")
+        .unwrap_or(32) as i32;
+
     let module_bodies = ctx.module_bodies();
     let module_cfgs = ctx.module_cfgs();
     let mut diagnostics = Vec::new();
@@ -90,14 +97,25 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         };
 
         // Check Begin-Commit pairing
-        let issues = check_transaction_pairing_cfg(body, source_map, cfg, PairingMode::BeginCommit);
+        let issues = check_transaction_pairing_cfg(
+            body,
+            source_map,
+            cfg,
+            PairingMode::BeginCommit,
+            max_level,
+        );
         for issue in issues {
             diagnostics.push(create_diagnostic(issue));
         }
 
         // Check Begin-Rollback pairing
-        let issues =
-            check_transaction_pairing_cfg(body, source_map, cfg, PairingMode::BeginRollback);
+        let issues = check_transaction_pairing_cfg(
+            body,
+            source_map,
+            cfg,
+            PairingMode::BeginRollback,
+            max_level,
+        );
         for issue in issues {
             diagnostics.push(create_diagnostic(issue));
         }
@@ -154,6 +172,7 @@ fn check_transaction_pairing_cfg(
     source_map: &BodySourceMap,
     cfg: &ControlFlowGraph,
     mode: PairingMode,
+    max_level: i32,
 ) -> Vec<TransactionIssue> {
     let entry = match cfg.entry_point() {
         Some(e) => e,
@@ -163,18 +182,12 @@ fn check_transaction_pairing_cfg(
     // Pre-compute transaction calls per CFG node for efficiency
     let node_tx_calls = precompute_transaction_calls(body, source_map, cfg, mode);
 
+    let dfs_ctx = DfsContext { cfg, node_tx_calls: &node_tx_calls, mode, max_level };
+
     let mut issues = Vec::new();
     let mut visited_states: FxHashMap<NodeIndex, FxHashSet<i32>> = FxHashMap::default();
 
-    dfs_check_paths(
-        entry,
-        PathState::new(),
-        &mut visited_states,
-        cfg,
-        &node_tx_calls,
-        mode,
-        &mut issues,
-    );
+    dfs_check_paths(entry, PathState::new(), &mut visited_states, &mut issues, &dfs_ctx);
 
     // Deduplicate issues by range (same location may be reported from multiple paths)
     let mut seen_ranges: FxHashSet<TextRange> = FxHashSet::default();
@@ -211,16 +224,27 @@ fn precompute_transaction_calls(
     result
 }
 
+/// Context for DFS traversal (immutable during traversal).
+struct DfsContext<'a> {
+    cfg: &'a ControlFlowGraph,
+    node_tx_calls: &'a FxHashMap<NodeIndex, Vec<TransactionCall>>,
+    mode: PairingMode,
+    max_level: i32,
+}
+
 /// DFS traversal checking transaction pairing on all paths.
 fn dfs_check_paths(
     node: NodeIndex,
     mut state: PathState,
     visited_states: &mut FxHashMap<NodeIndex, FxHashSet<i32>>,
-    cfg: &ControlFlowGraph,
-    node_tx_calls: &FxHashMap<NodeIndex, Vec<TransactionCall>>,
-    mode: PairingMode,
     issues: &mut Vec<TransactionIssue>,
+    ctx: &DfsContext,
 ) {
+    // Prevent stack overflow on pathological cases (e.g., BeginTransaction in infinite loop)
+    if state.level > ctx.max_level || state.level < -ctx.max_level {
+        return;
+    }
+
     // Cycle detection: if we've visited this node with the same level, skip
     // (prevents infinite loops in cycles while still exploring different levels)
     let levels_at_node = visited_states.entry(node).or_default();
@@ -229,7 +253,7 @@ fn dfs_check_paths(
     }
 
     // Process transaction calls in this node
-    if let Some(calls) = node_tx_calls.get(&node) {
+    if let Some(calls) = ctx.node_tx_calls.get(&node) {
         for call in calls {
             match call.tx_type {
                 TransactionType::Begin => {
@@ -243,7 +267,7 @@ fn dfs_check_paths(
                         issues.push(TransactionIssue {
                             range: call.range,
                             method_name: call.method_name.clone(),
-                            pair_method: mode.pair_method_for_end(),
+                            pair_method: ctx.mode.pair_method_for_end(),
                         });
                         // Reset level to 0 to continue checking (don't cascade errors)
                         state.level = 0;
@@ -256,22 +280,22 @@ fn dfs_check_paths(
     }
 
     // Check if we reached exit
-    if node == cfg.exit_point() {
+    if node == ctx.cfg.exit_point() {
         // Report orphaned begins (level > 0 means unmatched begins)
         for begin_call in &state.begin_stack {
             issues.push(TransactionIssue {
                 range: begin_call.range,
                 method_name: begin_call.method_name.clone(),
-                pair_method: mode.pair_method_for_begin(),
+                pair_method: ctx.mode.pair_method_for_begin(),
             });
         }
         return;
     }
 
     // Continue DFS to successors
-    let successors: Vec<_> = cfg.outgoing_edges(node).map(|(idx, _)| idx).collect();
+    let successors: Vec<_> = ctx.cfg.outgoing_edges(node).map(|(idx, _)| idx).collect();
     for succ in successors {
-        dfs_check_paths(succ, state.clone(), visited_states, cfg, node_tx_calls, mode, issues);
+        dfs_check_paths(succ, state.clone(), visited_states, issues, ctx);
     }
 }
 
