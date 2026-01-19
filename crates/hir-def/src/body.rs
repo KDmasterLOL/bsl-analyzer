@@ -580,6 +580,10 @@ pub enum BodyDiagnostic {
     /// ПользователиОС() / OSUsers() call.
     /// Security risk: potential Pass-the-hash attack vulnerability.
     OSUsersMethod { range: TextRange },
+
+    /// Return statement with value inside a procedure.
+    /// Only functions can return values, procedures must use `Return;` without value.
+    ProcedureReturnsValue { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -734,6 +738,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::IncorrectUseOfStrTemplate { range } => *range,
             BodyDiagnostic::OneStatementPerLine { range } => *range,
             BodyDiagnostic::OSUsersMethod { range } => *range,
+            BodyDiagnostic::ProcedureReturnsValue { range } => *range,
         }
     }
 }

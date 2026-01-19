@@ -666,6 +666,9 @@ fn lower_call_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 /// Lower return statement.
 fn lower_return_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let value = node.children().next().map(|n| lower_expr_node(ctx, &n));
+    if !ctx.is_function && value.is_some() {
+        ctx.emit(BodyDiagnostic::ProcedureReturnsValue { range: node.text_range() });
+    }
     Some(Stmt::Return { value })
 }
 

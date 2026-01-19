@@ -173,5 +173,8 @@ pub fn dispatch_hir_diagnostic(
             handlers::one_statement_per_line::from_hir(*range, ctx)
         }
         BodyDiagnostic::OSUsersMethod { range } => handlers::os_users_method::from_hir(*range, ctx),
+        BodyDiagnostic::ProcedureReturnsValue { range } => {
+            handlers::procedure_returns_value::from_hir(*range, ctx)
+        }
     }
 }
