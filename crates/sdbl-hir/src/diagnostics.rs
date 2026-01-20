@@ -218,7 +218,10 @@ impl SdblDiagnostic {
     pub fn message(&self) -> String {
         match self {
             Self::QueryToMissingMetadata { table_name, .. } => {
-                format!("Таблица '{}' не найдена в метаданных", table_name)
+                format!(
+                    "Исправьте обращение к несуществующему метаданному \"{}\" в запросе",
+                    table_name
+                )
             }
             Self::JoinWithVirtualTable { table_name, virtual_table_type, .. } => {
                 format!(

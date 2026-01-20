@@ -308,6 +308,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::query_nested_fields_by_dot::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "QueryToMissingMetadata",
+        ctx,
+        handlers::query_to_missing_metadata::check,
+    ));
 
     diagnostics
 }

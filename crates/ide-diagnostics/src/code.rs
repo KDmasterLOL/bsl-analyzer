@@ -144,6 +144,7 @@ pub enum DiagnosticCode {
     MultilineStringInQuery,
     QueryNestedFieldsByDot,
     QueryParseError,
+    QueryToMissingMetadata,
 }
 
 impl DiagnosticCode {

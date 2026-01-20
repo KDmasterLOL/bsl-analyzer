@@ -298,6 +298,13 @@ impl<'a> LoweringContext<'a> {
 
         let object_name = &parts[1];
 
+        // Handle ExternalDataSource specially (4-part or 6-part paths)
+        // 4-part: ВнешнийИсточникДанных.EDSName.Таблица.TableName
+        // 6-part: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
+        if mdo_type == MdoType::ExternalDataSource && parts.len() >= 4 {
+            return self.resolve_external_data_source(parts, range);
+        }
+
         // Check if this is a 3-part name (tabular section reference)
         // But NOT if the third part is a virtual table name (СрезПоследних, Остатки, etc.)
         let tabular_section_name = if parts.len() == 3 && !is_virtual_table_name(&parts[2]) {
@@ -634,6 +641,118 @@ impl<'a> LoweringContext<'a> {
             total_fields = fields.len(),
             "Added tabular section fields"
         );
+    }
+
+    /// Resolve ExternalDataSource table path.
+    ///
+    /// Handles 4-part and 6-part paths:
+    /// - 4-part: ВнешнийИсточникДанных.EDSName.Таблица.TableName
+    /// - 6-part: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
+    fn resolve_external_data_source(
+        &mut self,
+        parts: &[String],
+        range: TextRange,
+    ) -> (Option<MdoType>, Option<ResolvedTable>) {
+        let eds_name = &parts[1];
+
+        tracing::debug!(
+            eds_name = %eds_name,
+            parts_len = parts.len(),
+            "Resolving ExternalDataSource path"
+        );
+
+        let Some(metadata) = self.metadata else {
+            tracing::debug!("No metadata available for EDS validation");
+            return (Some(MdoType::ExternalDataSource), None);
+        };
+
+        // Check if EDS exists
+        let eds_obj = metadata.find_metadata_object(MdoType::ExternalDataSource, eds_name);
+        if eds_obj.is_none() {
+            tracing::debug!(eds_name = %eds_name, "ExternalDataSource not found in metadata");
+            self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
+                table_name: format!("{}.{}", parts[0], eds_name),
+                range,
+            });
+            return (Some(MdoType::ExternalDataSource), None);
+        }
+
+        let eds_obj = eds_obj.unwrap();
+
+        // Check 3rd part: "Таблица"/"Table" or "Куб"/"Cube"
+        let container_type = parts[2].to_lowercase();
+
+        // 4-part path: ВнешнийИсточникДанных.EDSName.Таблица.TableName
+        if parts.len() == 4 && (container_type == "таблица" || container_type == "table") {
+            // For now, we don't validate individual tables inside EDS
+            // This would require loading Table children which is not yet implemented
+            tracing::debug!(
+                eds_name = %eds_name,
+                table_name = %parts[3],
+                "EDS table path (table validation not implemented)"
+            );
+            return (Some(MdoType::ExternalDataSource), None);
+        }
+
+        // 6-part path: ВнешнийИсточникДанных.EDSName.Куб.CubeName.ТаблицаИзмерения.DimTableName
+        if parts.len() == 6 && (container_type == "куб" || container_type == "cube") {
+            let cube_name = &parts[3];
+            let dim_table_type = parts[4].to_lowercase();
+            let dim_table_name = &parts[5];
+
+            // Validate Cube exists in EDS children
+            let cube_obj = eds_obj.find_child(cube_name);
+            if cube_obj.is_none() {
+                tracing::debug!(
+                    eds_name = %eds_name,
+                    cube_name = %cube_name,
+                    "Cube not found in ExternalDataSource"
+                );
+                self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
+                    table_name: format!("{}.{}.{}.{}", parts[0], eds_name, parts[2], cube_name),
+                    range,
+                });
+                return (Some(MdoType::ExternalDataSource), None);
+            }
+
+            let cube_obj = cube_obj.unwrap();
+
+            // Validate DimensionTable if path specifies it
+            if dim_table_type == "таблицаизмерения" || dim_table_type == "dimensiontable"
+            {
+                let dim_table_obj = cube_obj.find_child(dim_table_name);
+                if dim_table_obj.is_none() {
+                    tracing::debug!(
+                        cube_name = %cube_name,
+                        dim_table_name = %dim_table_name,
+                        "DimensionTable not found in Cube"
+                    );
+                    self.diagnostics.push(SdblDiagnostic::QueryToMissingMetadata {
+                        table_name: format!(
+                            "{}.{}.{}.{}.{}.{}",
+                            parts[0], eds_name, parts[2], cube_name, parts[4], dim_table_name
+                        ),
+                        range,
+                    });
+                    return (Some(MdoType::ExternalDataSource), None);
+                }
+            }
+
+            tracing::debug!(
+                eds_name = %eds_name,
+                cube_name = %cube_name,
+                dim_table_name = %dim_table_name,
+                "EDS Cube DimensionTable resolved"
+            );
+            return (Some(MdoType::ExternalDataSource), None);
+        }
+
+        // Fallback for other patterns
+        tracing::debug!(
+            parts = ?parts,
+            "Unhandled EDS path pattern"
+        );
+        (Some(MdoType::ExternalDataSource), None)
     }
 
     /// Parse attribute type from type_str (simplified for MVP).
