@@ -128,6 +128,7 @@ pub mod rewrite_method_parameter;
 pub mod same_metadata_object_and_child_names;
 pub mod scheduled_job_handler;
 pub mod self_assign;
+pub mod self_insertion;
 pub mod space_at_start_comment;
 pub mod unreachable_code;
 pub mod unused_local_variable;

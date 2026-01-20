@@ -1,0 +1,133 @@
+//! SelfInsertion diagnostic.
+//!
+//! Detects insertion of a collection into itself via Insert/Add methods.
+//!
+//! ## Why?
+//! Inserting a collection into itself:
+//! - Creates infinite recursion or corrupted data structures
+//! - Results in undefined behavior
+//! - Indicates a logic error in the code
+//!
+//! ## Bad practice
+//! ```bsl
+//! Товары.Добавить(Товары);           // Error: array into itself
+//! Структура.Вставить("Ключ", Структура);  // Error: structure into itself
+//! ```
+//!
+//! ## Good practice
+//! ```bsl
+//! Товары.Добавить(Товар);            // Add different item
+//! Структура.Вставить("Ключ", Значение);   // Insert different value
+//! ```
+//!
+//! ## Configuration
+//! - **Enabled by default:** Yes
+//! - **Severity:** Error (MAJOR)
+//!
+//! ## Implementation
+//! Ported from SelfInsertionDiagnostic.java (bsl-language-server).
+
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use ide_db::TextRange;
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch.rs when `BodyDiagnostic::SelfInsertion` is encountered.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::SelfInsertion) {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code: DiagnosticCode::SelfInsertion,
+        message: "Удалите вставку коллекции в саму себя".to_string(),
+        severity: Severity::Error,
+        range,
+        tags: vec![],
+        fixes: vec![],
+    })
+}
+
+pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::DiagnosticCode;
+
+    #[test]
+    fn test_array_add_self() {
+        let code =
+            "Процедура Тест()\nТовары = Новый Массив();\nТовары.Добавить(Товары);\nКонецПроцедуры";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 1);
+        assert_diagnostic_range(code, diags[0], 2, 0, 23);
+    }
+
+    #[test]
+    fn test_structure_insert_self() {
+        let code = "Процедура Тест()\nНастройки = Новый Структура();\nНастройки.Вставить(\"Ключ\", Настройки);\nКонецПроцедуры";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_different_objects_ok() {
+        let code = "Процедура Тест()\nМассив1 = Новый Массив();\nМассив2 = Новый Массив();\nМассив1.Добавить(Массив2);\nКонецПроцедуры";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_other_method_ok() {
+        let code = "Процедура Тест()\nМодуль.ВыполнитьПроверку(Модуль);\nКонецПроцедуры";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_english_methods() {
+        let code = "Procedure Test()\nArr = New Array();\nArr.Add(Arr);\nEndProcedure";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_insert_english() {
+        let code = "Procedure Test()\nMap = New Map();\nMap.Insert(\"key\", Map);\nEndProcedure";
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_comprehensive() {
+        let code = include_str!("../test_data/SelfInsertionDiagnostic.bsl");
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfInsertion).collect();
+
+        // Expected: 2 diagnostics
+        // Line 3: НастройкиПроверки.Вставить("ТутЯ", НастройкиПроверки);
+        // Line 9: Товары.Добавить(Товары);
+        assert_eq!(diags.len(), 2, "Should match Java: 2 diagnostics");
+
+        // Verify positions match Java implementation
+        assert_diagnostic_range(code, diags[0], 3, 4, 57);
+        assert_diagnostic_range(code, diags[1], 9, 4, 27);
+    }
+}

@@ -473,6 +473,10 @@ pub enum BodyDiagnostic {
         range: TextRange,        // Range of the Delete call
     },
 
+    /// Self-insertion: collection is inserted into itself.
+    /// Examples: `arr.Добавить(arr)`, `struct.Вставить("key", struct)`
+    SelfInsertion { range: TextRange },
+
     /// Deprecated attribute/method usage (8.3.12).
     /// Detected when deprecated chart-related attributes, methods, or enums are used.
     /// Categories:
@@ -759,6 +763,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::RewriteMethodParameter { ident_range, .. } => *ident_range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
+            BodyDiagnostic::SelfInsertion { range } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
             BodyDiagnostic::ExecuteExternalCode { range } => *range,
             BodyDiagnostic::ExternalAppStarting { range } => *range,

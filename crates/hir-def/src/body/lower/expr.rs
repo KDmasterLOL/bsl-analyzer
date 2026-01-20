@@ -686,6 +686,35 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // Check for SelfInsertion: Collection.Insert/Add(Collection)
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last()
+        {
+            let method_name = method_token.text().to_lowercase();
+            if matches!(method_name.as_str(), "insert" | "вставить" | "add" | "добавить")
+            {
+                let receiver = match ctx.body.expr_idx(callee) {
+                    Expr::Field { base, .. } => Some(*base),
+                    Expr::MethodCall { receiver, .. } => Some(*receiver),
+                    _ => None,
+                };
+
+                if let Some(receiver_id) = receiver {
+                    for &arg_id in args.iter() {
+                        if exprs_are_equal(&ctx.body, receiver_id, arg_id) {
+                            ctx.emit(BodyDiagnostic::SelfInsertion { range: node.text_range() });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
     // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
     if actual_callee.kind() == SyntaxKind::IDENT {

@@ -92,6 +92,7 @@ pub enum DiagnosticCode {
     CreateQueryInCycle,
     DataExchangeLoading,
     DeletingCollectionItem,
+    SelfInsertion,
     DeprecatedCurrentDate,
     DeprecatedFind,
     DeprecatedMessage,
