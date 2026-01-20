@@ -143,6 +143,7 @@ pub enum DiagnosticCode {
     LogicalOrInTheWhereSectionOfQuery,
     MultilineStringInQuery,
     QueryNestedFieldsByDot,
+    QueryParseError,
 }
 
 impl DiagnosticCode {

@@ -266,6 +266,8 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
 pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
+    // QueryParseError runs first - detects parse errors at AST level
+    diagnostics.extend(run_diagnostic("QueryParseError", ctx, handlers::query_parse_error::check));
     diagnostics.extend(run_diagnostic(
         "AssignAliasFieldsInQuery",
         ctx,

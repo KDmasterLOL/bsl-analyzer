@@ -138,16 +138,18 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
                 let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
 
-                if !sdbl_ast.has_errors() {
-                    let query_info = syntax::SdblQueryInfo::new(
-                        node.text_range(),
-                        sdbl_text,
-                        Some(sdbl_ast),
-                        quote_corrections,
-                    );
+                // Store query info regardless of parse errors
+                // - Valid queries: query_ast = Some(ast) with no errors
+                // - Invalid queries: query_ast = Some(ast) with errors
+                // QueryParseError diagnostic uses is_valid() to detect parse errors
+                let query_info = syntax::SdblQueryInfo::new(
+                    node.text_range(),
+                    sdbl_text,
+                    Some(sdbl_ast),
+                    quote_corrections,
+                );
 
-                    ctx.pending_sdbl.push((node.text_range(), query_info));
-                }
+                ctx.pending_sdbl.push((node.text_range(), query_info));
             }
 
             Literal::String(value)

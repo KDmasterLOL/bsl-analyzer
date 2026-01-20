@@ -119,6 +119,7 @@ pub mod procedure_returns_value;
 pub mod protected_module;
 pub mod public_methods_description;
 pub mod query_nested_fields_by_dot;
+pub mod query_parse_error;
 pub mod rewrite_method_parameter;
 pub mod self_assign;
 pub mod space_at_start_comment;
