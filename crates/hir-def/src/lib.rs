@@ -584,6 +584,12 @@ pub struct ModuleMetadata {
     /// Used for non-CommonModule types (ObjectModule, FormModule, etc.)
     /// Arc-wrapped for efficient sharing.
     pub mdo: Option<Arc<bsl_metadata::MetadataObject>>,
+
+    /// Register metadata if this module belongs to a register.
+    ///
+    /// Used for InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister.
+    /// Arc-wrapped for efficient sharing.
+    pub register: Option<Arc<bsl_metadata::Register>>,
 }
 
 impl ModuleMetadata {
@@ -591,7 +597,13 @@ impl ModuleMetadata {
     ///
     /// Used when metadata loading fails or module is outside Designer format.
     pub fn unknown(module_type: bsl_metadata::ModuleType) -> Self {
-        Self { module_type, execution_context: None, common_module: None, mdo: None }
+        Self {
+            module_type,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+        }
     }
 }
 

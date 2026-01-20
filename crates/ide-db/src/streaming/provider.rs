@@ -167,6 +167,7 @@ impl AnalysisProvider for StreamingProvider {
                             execution_context: Some(execution_context),
                             common_module: Some(Arc::new(common_module.clone())),
                             mdo: None,
+                            register: None,
                         });
                     }
                 }

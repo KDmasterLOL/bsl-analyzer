@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// Dimension (measurement) in a register
 ///
 /// Dimensions define the key fields by which register records are indexed and queried.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dimension {
     /// Unique identifier
     #[serde(rename = "uuid")]

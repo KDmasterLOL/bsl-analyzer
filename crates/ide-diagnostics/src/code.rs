@@ -135,6 +135,7 @@ pub enum DiagnosticCode {
     PrivilegedModuleMethodCall,
     ProtectedModule,
     RedundantAccessToObject,
+    SameMetadataObjectAndChildNames,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

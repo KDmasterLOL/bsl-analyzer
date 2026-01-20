@@ -73,51 +73,83 @@ pub fn module_metadata_query<'db>(
                 execution_context: None,
                 common_module: None,
                 mdo: None,
+                register: None,
             });
         }
     };
 
+    let uri = file_path.to_string_lossy().to_string();
+
+    // Parse module path to get MDO type and name
+    let path_info = crate::metadata::parse_module_path(&uri);
+
     // Determine module type from file URI
-    let module_type = {
-        let uri = file_path.to_string_lossy().to_string();
-        crate::metadata::get_module_type_from_uri(&uri)
-            .unwrap_or(bsl_metadata::ModuleType::CommonModule)
-    };
+    let module_type = crate::metadata::get_module_type_from_uri(&uri)
+        .unwrap_or(bsl_metadata::ModuleType::CommonModule);
 
-    // Load metadata if this is a CommonModule
-    let (execution_context, common_module) =
-        if matches!(module_type, bsl_metadata::ModuleType::CommonModule) {
-            // Find configuration root by searching for Configuration.xml
-            match crate::find_configuration_root_for_metadata(db, &file_path) {
-                Some(config_root) => {
-                    let config_path_str = config_root.to_string_lossy().to_string();
-                    tracing::debug!(?config_path_str, "Loading configuration for metadata");
+    // Find configuration root
+    let config_root = crate::find_configuration_root_for_metadata(db, &file_path);
+    let configuration = config_root.map(|root| {
+        let config_path_str = root.to_string_lossy().to_string();
+        let path_input = ConfigurationPathInput::new(db, config_path_str);
+        load_configuration(db, path_input)
+    });
 
-                    // Load configuration via Salsa query (already tracked!)
-                    let path_input = ConfigurationPathInput::new(db, config_path_str);
-                    let configuration = load_configuration(db, path_input);
+    // Initialize result fields
+    let mut execution_context = None;
+    let mut common_module = None;
+    let mut mdo = None;
+    let mut register = None;
 
-                    // Find CommonModule for this file
-                    if let Some(common_module) =
-                        crate::find_common_module_by_uri(&configuration, &file_path)
-                    {
-                        let execution_context = hir_def::compute_execution_context(&common_module);
-                        (Some(execution_context), Some(Arc::new(common_module)))
-                    } else {
-                        tracing::debug!("CommonModule not found in configuration");
-                        (None, None)
-                    }
-                }
-                None => {
-                    tracing::debug!("Configuration root not found");
-                    (None, None)
+    // Load metadata based on module type
+    if let Some(config) = &configuration {
+        match module_type {
+            bsl_metadata::ModuleType::CommonModule => {
+                // Find CommonModule by URI
+                if let Some(cm) = crate::find_common_module_by_uri(config, &file_path) {
+                    execution_context = Some(hir_def::compute_execution_context(&cm));
+                    common_module = Some(Arc::new(cm));
                 }
             }
-        } else {
-            (None, None)
-        };
+            bsl_metadata::ModuleType::ManagerModule
+            | bsl_metadata::ModuleType::ObjectModule
+            | bsl_metadata::ModuleType::RecordSetModule => {
+                // Load MDO or Register based on path info
+                if let Some(ref info) = path_info {
+                    if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
+                        // Check if this is a register type
+                        if matches!(
+                            mdo_type,
+                            bsl_metadata::MdoType::InformationRegister
+                                | bsl_metadata::MdoType::AccumulationRegister
+                                | bsl_metadata::MdoType::AccountingRegister
+                                | bsl_metadata::MdoType::CalculationRegister
+                        ) {
+                            // Find register by type and name
+                            if let Some(reg) = config.find_register_by_type_and_name(mdo_type, name)
+                            {
+                                register = Some(Arc::new(reg.clone()));
+                            }
+                        } else {
+                            // Find metadata object
+                            if let Some(obj) = config.find_metadata_object(mdo_type, name) {
+                                mdo = Some(Arc::new(obj.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
-    Arc::new(hir_def::ModuleMetadata { module_type, execution_context, common_module, mdo: None })
+    Arc::new(hir_def::ModuleMetadata {
+        module_type,
+        execution_context,
+        common_module,
+        mdo,
+        register,
+    })
 }
 
 /// Get all SDBL queries in a file with their SdblExprId.

@@ -64,6 +64,7 @@ mod tests {
             execution_context: None,
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -84,6 +85,7 @@ mod tests {
             execution_context: None,
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -104,6 +106,7 @@ mod tests {
             execution_context: None,
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();

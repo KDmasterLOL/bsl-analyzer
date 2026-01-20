@@ -68,6 +68,7 @@ mod tests {
             execution_context: Some(ide_db::hir_def::ExecutionContext::Client),
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -93,6 +94,7 @@ mod tests {
             execution_context: Some(ide_db::hir_def::ExecutionContext::Client),
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -117,6 +119,7 @@ mod tests {
             execution_context: None,
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -132,6 +135,7 @@ mod tests {
             execution_context: None,
             common_module: None,
             mdo: None,
+            register: None,
         };
 
         let config = DiagnosticsConfig::default();

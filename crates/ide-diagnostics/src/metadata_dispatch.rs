@@ -61,5 +61,20 @@ pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         }
     }
 
+    diagnostics.extend(handlers::same_metadata_object_and_child_names::from_metadata(
+        metadata_ref,
+        ctx.config,
+    ));
+
+    let file_text = ctx.file_text();
+    diagnostics.extend(handlers::deny_incomplete_values::from_metadata(
+        metadata_ref,
+        ctx.config,
+        &file_text,
+    ));
+
+    diagnostics
+        .extend(handlers::metadata_object_name_length::from_metadata(metadata_ref, ctx.config));
+
     diagnostics
 }

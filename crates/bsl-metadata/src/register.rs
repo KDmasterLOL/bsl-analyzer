@@ -179,7 +179,7 @@ pub enum AccumulationRegisterType {
 /// - CalculationRegister (Регистр расчета)
 ///
 /// All register types share the same dimension structure.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Register {
     /// Unique identifier
     #[serde(rename = "uuid")]

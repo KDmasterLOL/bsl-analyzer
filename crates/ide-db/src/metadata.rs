@@ -166,6 +166,90 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     None
 }
 
+/// Information extracted from a module file path.
+///
+/// Contains the parsed components of a Designer format module path.
+#[derive(Debug, Clone)]
+pub struct ModulePathInfo {
+    /// Type of metadata object (Catalog, Document, Register, etc.)
+    pub mdo_type: Option<bsl_metadata::MdoType>,
+    /// Name of the metadata object
+    pub name: Option<String>,
+    /// Type of the module file
+    pub module_type: bsl_metadata::ModuleType,
+}
+
+/// Parse module file path to extract MDO type and name.
+///
+/// Parses Designer format paths like:
+/// - `Catalogs/<Name>/Ext/ManagerModule.bsl` → (Catalog, Name, ManagerModule)
+/// - `InformationRegisters/<Name>/Ext/RecordSetModule.bsl` → (InformationRegister, Name, RecordSetModule)
+///
+/// # Arguments
+/// * `file_uri` - Relative path to the module file
+///
+/// # Returns
+/// Parsed path information or None if path format is unrecognized.
+pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
+    let parts: Vec<&str> = file_uri.split('/').collect();
+
+    if parts.len() < 4 {
+        return None;
+    }
+
+    let type_plural = parts[0];
+    let name = parts[1].to_string();
+
+    // Determine MDO type from plural form
+    let mdo_type = match type_plural {
+        // Metadata objects
+        "Catalogs" | "Справочники" => Some(bsl_metadata::MdoType::Catalog),
+        "Documents" | "Документы" => Some(bsl_metadata::MdoType::Document),
+        "BusinessProcesses" | "БизнесПроцессы" => {
+            Some(bsl_metadata::MdoType::BusinessProcess)
+        }
+        "Tasks" | "Задачи" => Some(bsl_metadata::MdoType::Task),
+        "ExchangePlans" | "ПланыОбмена" => Some(bsl_metadata::MdoType::ExchangePlan),
+        "ChartsOfAccounts" | "ПланыСчетов" => {
+            Some(bsl_metadata::MdoType::ChartOfAccounts)
+        }
+        "ChartsOfCalculationTypes" | "ПланыВидовРасчета" => {
+            Some(bsl_metadata::MdoType::ChartOfCalculationTypes)
+        }
+        "ChartsOfCharacteristicTypes" | "ПланыВидовХарактеристик" => {
+            Some(bsl_metadata::MdoType::ChartOfCharacteristicTypes)
+        }
+        // Registers
+        "InformationRegisters" | "РегистрыСведений" => {
+            Some(bsl_metadata::MdoType::InformationRegister)
+        }
+        "AccumulationRegisters" | "РегистрыНакопления" => {
+            Some(bsl_metadata::MdoType::AccumulationRegister)
+        }
+        "AccountingRegisters" | "РегистрыБухгалтерии" => {
+            Some(bsl_metadata::MdoType::AccountingRegister)
+        }
+        "CalculationRegisters" | "РегистрыРасчета" => {
+            Some(bsl_metadata::MdoType::CalculationRegister)
+        }
+        // Common modules don't have MDO type in the same sense
+        "CommonModules" => None,
+        _ => None,
+    };
+
+    // Determine module type from file name
+    let module_file = parts[parts.len() - 1];
+    let module_type = match module_file {
+        "ObjectModule.bsl" => bsl_metadata::ModuleType::ObjectModule,
+        "ManagerModule.bsl" => bsl_metadata::ModuleType::ManagerModule,
+        "RecordSetModule.bsl" => bsl_metadata::ModuleType::RecordSetModule,
+        "Module.bsl" if type_plural == "CommonModules" => bsl_metadata::ModuleType::CommonModule,
+        _ => bsl_metadata::ModuleType::Unknown,
+    };
+
+    Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
+}
+
 /// Find a metadata object by type and name.
 ///
 /// This is a convenience function for looking up metadata objects.

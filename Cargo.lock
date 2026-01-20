@@ -964,6 +964,7 @@ dependencies = [
  "syntax",
  "test-fixture",
  "tracing",
+ "uuid",
  "vfs",
 ]
 

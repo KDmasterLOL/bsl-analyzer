@@ -230,16 +230,6 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         handlers::common_module_missing_api::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "DenyIncompleteValues",
-        ctx,
-        handlers::deny_incomplete_values::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MetadataObjectNameLength",
-        ctx,
-        handlers::metadata_object_name_length::check,
-    ));
-    diagnostics.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
         handlers::missing_returned_value_description::check,

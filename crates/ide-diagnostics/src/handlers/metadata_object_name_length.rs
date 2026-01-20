@@ -4,56 +4,67 @@
 //!
 //! Ported from: MetadataObjectNameLengthDiagnostic.java
 
-use crate::metadata_diagnostic::MetadataDiagnostic;
-use crate::rules::metadata_object_name_length::MetadataObjectNameLength;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
-use bsl_metadata::traits::{MdObject, Module};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+use bsl_metadata::traits::MdObject;
+use hir_def::ModuleMetadata;
 use ide_db::TextRange;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MetadataObjectNameLength) {
+/// Default maximum metadata object name length.
+const DEFAULT_MAX_LENGTH: usize = 80;
+
+/// Collect diagnostics from module metadata.
+///
+/// Checks metadata object name length based on module type:
+/// - CommonModule: check common_module name
+/// - MetadataObject modules: check mdo name and children
+/// - Register modules: check register name
+pub fn from_metadata(metadata: &ModuleMetadata, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+    if config.is_disabled(DiagnosticCode::MetadataObjectNameLength) {
         return Vec::new();
     }
 
-    let max_length = ctx
-        .config
+    let max_length = config
         .get_int(DiagnosticCode::MetadataObjectNameLength, "maxMetadataObjectNameLength")
-        .unwrap_or(80) as usize;
-
-    let configuration = match ctx.load_configuration() {
-        Some(config) => config,
-        None => return Vec::new(),
-    };
+        .unwrap_or(DEFAULT_MAX_LENGTH as i64) as usize;
 
     let mut diagnostics = Vec::new();
 
-    if is_session_module(ctx) {
-        check_metadata_without_modules(&configuration, max_length, &mut diagnostics);
-    } else if let Some(common_module) = find_common_module_for_file(ctx, &configuration) {
-        check_common_module(&common_module, max_length, &mut diagnostics);
-    } else if let Some(metadata_object) = find_metadata_object_for_file(ctx, &configuration) {
-        check_metadata_object(ctx.db, &metadata_object, max_length, &mut diagnostics);
-    } else if let Some(register) = find_register_for_file(ctx, &configuration) {
-        check_register(&register, max_length, &mut diagnostics);
+    // Check CommonModule
+    if let Some(ref common_module) = metadata.common_module {
+        check_common_module(common_module, max_length, &mut diagnostics);
+    }
+
+    // Check MetadataObject
+    if let Some(ref mdo) = metadata.mdo {
+        check_metadata_object(mdo, max_length, &mut diagnostics);
+    }
+
+    // Check Register
+    if let Some(ref register) = metadata.register {
+        check_register(register, max_length, &mut diagnostics);
     }
 
     diagnostics
 }
 
-fn is_session_module(ctx: &DiagnosticsContext) -> bool {
-    if let Some(file_path) = ctx.file_path() {
-        file_path.ends_with("/Ext/SessionModule.bsl")
-            || file_path.ends_with("\\Ext\\SessionModule.bsl")
-    } else {
-        false
-    }
-}
-
-fn check_metadata_without_modules(
+/// Check for SessionModule - needs full configuration access.
+///
+/// SessionModule is special: it checks ALL metadata objects without modules.
+/// This is called from runner.rs with DiagnosticsContext.
+pub fn check_session_module(
     configuration: &bsl_metadata::Configuration,
-    max_length: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+    config: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    if config.is_disabled(DiagnosticCode::MetadataObjectNameLength) {
+        return Vec::new();
+    }
+
+    let max_length = config
+        .get_int(DiagnosticCode::MetadataObjectNameLength, "maxMetadataObjectNameLength")
+        .unwrap_or(DEFAULT_MAX_LENGTH as i64) as usize;
+
+    let mut diagnostics = Vec::new();
+
     for mdo in configuration.metadata_objects() {
         if !has_modules(&mdo.mdo_type) {
             let name_length = mdo.name.chars().count();
@@ -72,6 +83,8 @@ fn check_metadata_without_modules(
             }
         }
     }
+
+    diagnostics
 }
 
 fn has_modules(mdo_type: &bsl_metadata::MdoType) -> bool {
@@ -111,20 +124,20 @@ fn check_common_module(
 }
 
 fn check_metadata_object(
-    db: &dyn ide_db::RootDatabase,
     mdo: &bsl_metadata::MetadataObject,
     max_length: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let diagnostic = MetadataObjectNameLength::with_max_length(max_length);
-    let range = TextRange::empty(0.into());
-
-    for meta_diag in diagnostic.check_metadata(db, mdo, range) {
+    let name_length = mdo.name.chars().count();
+    if name_length > max_length {
         diagnostics.push(Diagnostic {
             code: DiagnosticCode::MetadataObjectNameLength,
-            message: meta_diag.message,
+            message: format!(
+                "Rename the metadata object `{}` so that the name length is less than {}",
+                mdo.name, max_length
+            ),
             severity: Severity::Major,
-            range: meta_diag.range,
+            range: TextRange::empty(0.into()),
             tags: vec![],
             fixes: vec![],
         });
@@ -153,236 +166,136 @@ fn check_register(
     }
 }
 
-fn find_common_module_for_file(
-    ctx: &DiagnosticsContext,
-    configuration: &bsl_metadata::Configuration,
-) -> Option<bsl_metadata::CommonModule> {
-    let file_path = ctx.file_path()?;
-
-    configuration
-        .common_modules()
-        .iter()
-        .find(|module| {
-            if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_path.to_lowercase()
-            } else {
-                false
-            }
-        })
-        .cloned()
-}
-
-fn find_metadata_object_for_file(
-    ctx: &DiagnosticsContext,
-    configuration: &bsl_metadata::Configuration,
-) -> Option<bsl_metadata::MetadataObject> {
-    let file_path = ctx.file_path()?;
-    let object_name = extract_metadata_object_name(&file_path)?;
-
-    configuration
-        .metadata_objects()
-        .iter()
-        .find(|obj| obj.name.to_lowercase() == object_name.to_lowercase())
-        .cloned()
-}
-
-fn find_register_for_file(
-    ctx: &DiagnosticsContext,
-    configuration: &bsl_metadata::Configuration,
-) -> Option<bsl_metadata::Register> {
-    let file_path = ctx.file_path()?;
-    let register_name = extract_register_name(&file_path)?;
-
-    configuration.find_register(&register_name).cloned()
-}
-
-fn extract_metadata_object_name(file_path: &str) -> Option<String> {
-    let object_types = [
-        "Catalogs",
-        "Documents",
-        "DataProcessors",
-        "Reports",
-        "BusinessProcesses",
-        "Tasks",
-        "ChartsOfAccounts",
-        "ChartsOfCalculationTypes",
-        "ChartsOfCharacteristicTypes",
-        "ExchangePlans",
-        "DocumentJournals",
-    ];
-
-    for object_type in &object_types {
-        if let Some(pos) = file_path.find(object_type) {
-            let after_type = &file_path[pos + object_type.len()..];
-            // Skip leading slash(es) first
-            let trimmed = after_type.trim_start_matches('/');
-            if let Some(name_end) = trimmed.find('/') {
-                return Some(trimmed[..name_end].to_string());
-            }
-        }
-    }
-
-    None
-}
-
-fn extract_register_name(file_path: &str) -> Option<String> {
-    let register_types = [
-        "InformationRegisters",
-        "AccumulationRegisters",
-        "AccountingRegisters",
-        "CalculationRegisters",
-    ];
-
-    for register_type in &register_types {
-        if let Some(pos) = file_path.find(register_type) {
-            let after_type = &file_path[pos + register_type.len()..];
-            // Skip leading slash(es) first
-            let trimmed = after_type.trim_start_matches('/');
-            if let Some(name_end) = trimmed.find('/') {
-                return Some(trimmed[..name_end].to_string());
-            }
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
-    use bsl_metadata::Configuration;
-    use ide_db::base_db::SourceDatabase;
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
+    use std::sync::Arc;
 
     const LONG_NAME: &str =
         "ОченьДлинноеИмяОбъектаКотороеВызываетПроблемыВРаботеАТакжеОшибкиВыгрузкиКонфигурации";
 
-    fn check_with_metadata(
-        code: &str,
-        _configuration: Configuration,
-        _config_path: &str,
-    ) -> Vec<Diagnostic> {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
+    fn make_metadata_with_common_module(module: bsl_metadata::CommonModule) -> ModuleMetadata {
+        ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::CommonModule,
+            execution_context: None,
+            common_module: Some(Arc::new(module)),
+            mdo: None,
+            register: None,
+        }
+    }
 
-        let mut db = RootDatabaseImpl::new();
-        db.set_file_text(file_id, code);
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+    fn make_metadata_with_mdo(mdo: bsl_metadata::MetadataObject) -> ModuleMetadata {
+        ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::ObjectModule,
+            execution_context: None,
+            common_module: None,
+            mdo: Some(Arc::new(mdo)),
+            register: None,
+        }
+    }
 
-        let config = DiagnosticsConfig::default();
+    fn make_metadata_with_register(register: bsl_metadata::Register) -> ModuleMetadata {
+        ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::ManagerModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: Some(Arc::new(register)),
+        }
+    }
 
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        check(&ctx)
+    fn default_config() -> DiagnosticsConfig {
+        DiagnosticsConfig::default()
     }
 
     #[test]
-    fn test_disabled() {
-        let db = RootDatabaseImpl::new();
+    fn test_common_module_long_name() {
+        let module = bsl_metadata::CommonModule::builder().name(LONG_NAME).build();
+
+        let metadata = make_metadata_with_common_module(module);
+        let diagnostics = from_metadata(&metadata, &default_config());
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains(LONG_NAME));
+    }
+
+    #[test]
+    fn test_common_module_short_name() {
+        let module = bsl_metadata::CommonModule::builder().name("ОбщийМодуль").build();
+
+        let metadata = make_metadata_with_common_module(module);
+        let diagnostics = from_metadata(&metadata, &default_config());
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_object_long_name() {
+        let mdo = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Catalog, LONG_NAME);
+
+        let metadata = make_metadata_with_mdo(mdo);
+        let diagnostics = from_metadata(&metadata, &default_config());
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains(LONG_NAME));
+    }
+
+    #[test]
+    fn test_register_long_name() {
+        let register = bsl_metadata::Register::builder()
+            .name(LONG_NAME)
+            .mdo_type(bsl_metadata::MdoType::InformationRegister)
+            .build();
+
+        let metadata = make_metadata_with_register(register);
+        let diagnostics = from_metadata(&metadata, &default_config());
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains(LONG_NAME));
+    }
+
+    #[test]
+    fn test_register_short_name() {
+        let register = bsl_metadata::Register::builder()
+            .name("РегистрСведений")
+            .mdo_type(bsl_metadata::MdoType::InformationRegister)
+            .build();
+
+        let metadata = make_metadata_with_register(register);
+        let diagnostics = from_metadata(&metadata, &default_config());
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_disabled_diagnostic() {
+        let module = bsl_metadata::CommonModule::builder().name(LONG_NAME).build();
+
+        let metadata = make_metadata_with_common_module(module);
+
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::MetadataObjectNameLength);
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id: vfs::FileId(0),
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let diagnostics = from_metadata(&metadata, &config);
 
-        let diagnostics = check(&ctx);
-        assert_eq!(diagnostics.len(), 0);
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
-    fn test_no_workspace() {
-        let db = RootDatabaseImpl::new();
-        let config = DiagnosticsConfig::default();
+    fn test_custom_max_length() {
+        let module = bsl_metadata::CommonModule::builder().name("ШортМодуль").build();
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id: vfs::FileId(0),
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let metadata = make_metadata_with_common_module(module);
 
-        let diagnostics = check(&ctx);
-        assert_eq!(diagnostics.len(), 0);
-    }
-
-    #[test]
-    fn test_no_metadata_file() {
-        let configuration = Configuration::new("Configuration");
-        let code = "Перем Маркер;";
-        let diagnostics = check_with_metadata(code, configuration, "/test.bsl");
-        assert_eq!(diagnostics.len(), 0);
-    }
-
-    #[test]
-    fn test_custom_max_length_parameter() {
-        let db = RootDatabaseImpl::new();
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::MetadataObjectNameLength,
-            serde_json::json!({"maxMetadataObjectNameLength": 10}),
+            serde_json::json!({"maxMetadataObjectNameLength": 5}),
         );
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id: vfs::FileId(0),
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let diagnostics = from_metadata(&metadata, &config);
 
-        let max_length = ctx
-            .config
-            .get_int(DiagnosticCode::MetadataObjectNameLength, "maxMetadataObjectNameLength")
-            .unwrap_or(80) as usize;
-
-        assert_eq!(max_length, 10);
-    }
-
-    #[test]
-    fn test_long_name_is_84_chars() {
-        assert_eq!(LONG_NAME.chars().count(), 84);
-    }
-
-    #[test]
-    #[ignore = "requires VFS setup for file path resolution"]
-    fn test_is_session_module_detection() {
-        // SessionModule detection will work when full VFS integration is ready
-        // Expected: Files at /Ext/SessionModule.bsl should be detected
-    }
-
-    #[test]
-    #[ignore = "requires VFS setup for file path resolution"]
-    fn test_is_not_session_module() {
-        // SessionModule detection will work when full VFS integration is ready
-        // Expected: Other files should not be detected as SessionModule
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
@@ -396,5 +309,29 @@ mod tests {
         assert!(!has_modules(&MdoType::Enum));
         assert!(!has_modules(&MdoType::Constant));
         assert!(!has_modules(&MdoType::InformationRegister));
+    }
+
+    #[test]
+    fn test_long_name_is_84_chars() {
+        assert_eq!(LONG_NAME.chars().count(), 84);
+    }
+
+    #[test]
+    fn test_session_module_checks_no_module_objects() {
+        let mut config = bsl_metadata::Configuration::new("TestConfig");
+
+        // Add object WITH modules - should NOT be checked
+        let catalog = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Catalog, LONG_NAME);
+        config.add_metadata_object(catalog);
+
+        // Add object WITHOUT modules - SHOULD be checked
+        let constant =
+            bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Constant, LONG_NAME);
+        config.add_metadata_object(constant);
+
+        let diagnostics = check_session_module(&config, &default_config());
+
+        // Only the constant should be flagged (Catalog has modules)
+        assert_eq!(diagnostics.len(), 1);
     }
 }
