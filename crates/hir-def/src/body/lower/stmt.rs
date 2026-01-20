@@ -591,12 +591,11 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         if let Some(&param_id) = ctx.by_value_params.get(&key) {
             // Convert typed BindingIdx to opaque BindingId for diagnostic
             let opaque_param_id = cfg_types::BindingId::from_idx(param_id);
-            // Use full statement range for BodySourceMap lookup
-            // (identifier range is used for displaying diagnostic to user)
             ctx.emit(BodyDiagnostic::RewriteMethodParameter {
                 param_id: opaque_param_id,
                 stmt_id: StmtId::from_raw(la_arena::RawIdx::from(0)), // Placeholder - will find via range in handler
-                range: node.text_range(), // Full statement range for lookup
+                stmt_range: node.text_range(), // Full statement range for BodySourceMap lookup
+                ident_range: range, // Identifier range for diagnostic display (Java compatibility)
             });
         }
     }

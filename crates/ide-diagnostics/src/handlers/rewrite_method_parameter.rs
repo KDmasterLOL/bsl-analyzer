@@ -85,19 +85,25 @@ use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
-///Called from lib.rs dispatch when `BodyDiagnostic::RewriteMethodParameter` is encountered.
+/// Called from lib.rs dispatch when `BodyDiagnostic::RewriteMethodParameter` is encountered.
 ///
 /// ## Algorithm
 ///
-/// 1. Find StmtId for the assignment using range lookup in BodySourceMap
+/// 1. Find StmtId for the assignment using stmt_range lookup in BodySourceMap
 /// 2. Get reaching definitions for this statement from module-level query
 /// 3. Check if reaching defs contain only initial parameter definition
 /// 4. Handle self-assign case: if RHS uses parameter, skip this assignment
 /// 5. Emit diagnostic if parameter not used before overwrite
+///
+/// ## Parameters
+///
+/// - `stmt_range`: Full statement range for BodySourceMap lookup
+/// - `ident_range`: Identifier range for diagnostic display (Java compatibility)
 pub fn from_hir(
     param_id: BindingId,
     _stmt_id: StmtId, // Placeholder from lowering - we'll find real one via range
-    range: TextRange,
+    stmt_range: TextRange,
+    ident_range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::RewriteMethodParameter) {
@@ -107,15 +113,15 @@ pub fn from_hir(
     // Get module bodies and find the method containing this diagnostic
     let module_bodies = ctx.module_bodies();
 
-    // Find which method contains this range
+    // Find which method contains this stmt_range
     let (local_id, body, source_map) =
         module_bodies.method_bodies().find(|(_local_id, _body, source_map)| {
             // Check if any statement in this method has matching range
-            source_map.stmt_at_range(range).is_some()
+            source_map.stmt_at_range(stmt_range).is_some()
         })?;
 
     // Get the actual StmtId for this assignment
-    let stmt_id = source_map.stmt_at_range(range)?;
+    let stmt_id = source_map.stmt_at_range(stmt_range)?;
 
     // Get parameter name for diagnostic message
     let param = body.binding(param_id);
@@ -163,7 +169,7 @@ pub fn from_hir(
                     code: DiagnosticCode::RewriteMethodParameter,
                     message: format!("Переприсваивание параметра метода '{}'", param_name),
                     severity: Severity::Major,
-                    range,
+                    range: ident_range, // Use identifier range for Java compatibility
                     tags: vec![],
                     fixes: vec![],
                 });
@@ -489,19 +495,22 @@ mod tests {
             "Expected 5 RewriteMethodParameter diagnostics from Java fixture"
         );
 
-        // Line 2 (Тест1): Парам1 = 10; - simple overwrite (12 chars)
-        assert_diagnostic_range(code, rewrite_diags[0], 1, 4, 15);
+        // Java positions are 0-based line, character columns (not byte offsets)
+        // Range now covers only identifier, not full statement (Java compatibility)
 
-        // Line 10 (Тест3): Парам31 = 3; - overwrite with default value param (12 chars)
-        assert_diagnostic_range(code, rewrite_diags[1], 9, 4, 15);
+        // Line 2 (Тест1): Парам1 = 10; - "Парам1" is 6 chars at col 4-10
+        assert_diagnostic_range(code, rewrite_diags[0], 1, 4, 10);
 
-        // Line 23 (Тест6): Парам61 = 12; - overwrite after self-assign
-        assert_diagnostic_range(code, rewrite_diags[2], 22, 4, 16);
+        // Line 10 (Тест3): Парам31 = 3; - "Парам31" is 7 chars at col 4-11
+        assert_diagnostic_range(code, rewrite_diags[1], 9, 4, 11);
 
-        // Line 30 (Тест7): Парам71 = 12; - overwrite after multiple self-assigns
-        assert_diagnostic_range(code, rewrite_diags[3], 29, 4, 16);
+        // Line 23 (Тест6): Парам61 = 12; - "Парам61" is 7 chars at col 4-11
+        assert_diagnostic_range(code, rewrite_diags[2], 22, 4, 11);
 
-        // Line 38 (Тест9): Парам91 = 12; - overwrite before use
-        assert_diagnostic_range(code, rewrite_diags[4], 37, 4, 16);
+        // Line 30 (Тест7): Парам71 = 12; - "Парам71" is 7 chars at col 4-11
+        assert_diagnostic_range(code, rewrite_diags[3], 29, 4, 11);
+
+        // Line 38 (Тест9): Парам91 = 12; - "Парам91" is 7 chars at col 4-11
+        assert_diagnostic_range(code, rewrite_diags[4], 37, 4, 11);
     }
 }

@@ -455,9 +455,10 @@ pub enum BodyDiagnostic {
     /// Validation using reaching definitions happens in from_hir() to check if parameter
     /// was used before the assignment.
     RewriteMethodParameter {
-        param_id: BindingId, // Parameter being overwritten
-        stmt_id: StmtId,     // Assignment statement for CFG analysis
-        range: TextRange,    // Range of the assignment for diagnostic
+        param_id: BindingId,    // Parameter being overwritten
+        stmt_id: StmtId,        // Assignment statement for CFG analysis
+        stmt_range: TextRange,  // Full statement range for BodySourceMap lookup
+        ident_range: TextRange, // Identifier range for diagnostic display (Java compatibility)
     },
 
     /// Query/QueryBuilder/ReportBuilder Execute() call inside a loop.
@@ -755,7 +756,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => *range,
             BodyDiagnostic::CommonModuleAssign { range, .. } => *range,
             BodyDiagnostic::MissingCommonModuleMethod { range, .. } => *range,
-            BodyDiagnostic::RewriteMethodParameter { range, .. } => *range,
+            BodyDiagnostic::RewriteMethodParameter { ident_range, .. } => *ident_range,
             BodyDiagnostic::CreateQueryInCycle { range } => *range,
             BodyDiagnostic::DeletingCollectionItem { range, .. } => *range,
             BodyDiagnostic::DeprecatedAttribute8312 { range, .. } => *range,
