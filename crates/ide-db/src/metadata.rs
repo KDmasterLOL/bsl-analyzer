@@ -137,6 +137,14 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return None;
     }
 
+    // Ext/ManagedApplicationModule.bsl → ManagedApplicationModule
+    if parts.len() >= 2
+        && parts[parts.len() - 2] == "Ext"
+        && parts[parts.len() - 1] == "ManagedApplicationModule.bsl"
+    {
+        return Some(bsl_metadata::ModuleType::ManagedApplicationModule);
+    }
+
     // CommonModules/<Name>/Ext/Module.bsl
     if parts.len() >= 4 && parts[0] == "CommonModules" {
         return Some(bsl_metadata::ModuleType::CommonModule);
@@ -705,5 +713,21 @@ mod tests {
     fn test_get_module_type_unknown() {
         let uri = "SomeRandomPath/File.bsl";
         assert_eq!(get_module_type_from_uri(uri), None);
+    }
+
+    #[test]
+    fn test_get_module_type_managed_application_module() {
+        let uri = "Ext/ManagedApplicationModule.bsl";
+        assert_eq!(
+            get_module_type_from_uri(uri),
+            Some(bsl_metadata::ModuleType::ManagedApplicationModule)
+        );
+
+        // With full path
+        let uri = "Configuration/Ext/ManagedApplicationModule.bsl";
+        assert_eq!(
+            get_module_type_from_uri(uri),
+            Some(bsl_metadata::ModuleType::ManagedApplicationModule)
+        );
     }
 }

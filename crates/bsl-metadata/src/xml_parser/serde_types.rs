@@ -648,3 +648,44 @@ pub(crate) struct DefinedTypeProperties {
     #[serde(rename = "Type")]
     pub defined_type: TypeXml,
 }
+
+// ============================================================================
+// Role types
+// ============================================================================
+
+/// Root XML structure for Role
+#[derive(Debug, Deserialize)]
+pub(crate) struct RoleRoot {
+    #[serde(rename = "Role")]
+    pub role: RoleXml,
+}
+
+/// Role XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct RoleXml {
+    #[serde(rename = "@uuid")]
+    pub uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: RoleProperties,
+}
+
+/// Role properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct RoleProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+}
+
+/// Rights XML structure (from Ext/Rights.xml)
+#[derive(Debug, Deserialize)]
+pub(crate) struct RightsXml {
+    #[serde(rename = "setForNewObjects", default)]
+    pub set_for_new_objects: BoolValue,
+
+    #[serde(rename = "setForAttributesByDefault", default)]
+    pub set_for_attributes_by_default: BoolValue,
+
+    #[serde(rename = "independentRightsOfChildObjects", default)]
+    pub independent_rights_of_child_objects: BoolValue,
+}

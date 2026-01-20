@@ -192,5 +192,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::ServerCallsInFormEvents { callee, range } => {
             handlers::server_calls_in_form_events::from_hir(callee, *range, ctx)
         }
+        BodyDiagnostic::SetPrivilegedModeCall { range } => {
+            handlers::set_privileged_mode::from_hir(*range, ctx)
+        }
     }
 }

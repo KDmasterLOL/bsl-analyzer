@@ -103,6 +103,7 @@ pub mod form;
 pub mod loader;
 pub mod metadata_object;
 pub mod register;
+pub mod role;
 pub mod scheduled_job;
 pub mod tabular_section;
 pub mod traits;
@@ -122,6 +123,7 @@ pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
 };
+pub use role::{Role, RoleData};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};

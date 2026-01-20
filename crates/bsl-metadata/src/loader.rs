@@ -83,6 +83,9 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load ScheduledJobs
     load_scheduled_jobs(&path.join("ScheduledJobs"), &mut config)?;
 
+    // Load Roles
+    load_roles(&path.join("Roles"), &mut config)?;
+
     // Load DefinedTypes
     load_defined_types(&path.join("DefinedTypes"), &mut config)?;
 
@@ -119,6 +122,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         registers = config.registers().len(),
         event_subscriptions = config.event_subscriptions().len(),
         scheduled_jobs = config.scheduled_jobs().len(),
+        roles = config.roles().len(),
         defined_types = config.defined_types().len(),
         "configuration loaded"
     );
@@ -676,6 +680,58 @@ fn load_scheduled_jobs(dir: &Path, config: &mut Configuration) -> Result<()> {
             );
 
             config.add_scheduled_job(job);
+        }
+    }
+
+    Ok(())
+}
+
+/// Load Roles from directory
+///
+/// **CRITICAL:** Roles have NO code files - only XML!
+///
+/// Designer format structure:
+/// - XML: `Roles/<Name>.xml` - basic info (uuid, name)
+/// - Rights: `Roles/<Name>/Ext/Rights.xml` - permissions data
+fn load_roles(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_roles", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process .xml files (role definition)
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
+            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                let xml = fs::read_to_string(&path)?;
+                let mut role = xml_parser::parse_role_xml(&xml)?;
+
+                // Try to load Rights.xml for this role
+                let rights_path = dir.join(name).join("Ext").join("Rights.xml");
+                if rights_path.exists() {
+                    let rights_xml = fs::read_to_string(&rights_path)?;
+                    if let Ok(rights_data) = xml_parser::parse_rights_xml(&rights_xml) {
+                        role = crate::role::Role::with_data(
+                            *role.uuid(),
+                            role.name().to_string(),
+                            rights_data,
+                        );
+                    }
+                }
+
+                tracing::debug!(
+                    role_name = %role.name(),
+                    set_for_new_objects = role.data().set_for_new_objects(),
+                    "loaded role"
+                );
+
+                config.add_role(role);
+            }
         }
     }
 

@@ -202,6 +202,13 @@ pub(crate) fn is_safe_mode_method(name: &str) -> bool {
     )
 }
 
+/// Check if a method name is УстановитьПривилегированныйРежим / SetPrivilegedMode.
+/// Returns true if the method sets privileged mode.
+pub(crate) fn is_set_privileged_mode(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "установитьпривилегированныйрежим" | "setprivilegedmode")
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================

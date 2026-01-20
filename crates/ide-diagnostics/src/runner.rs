@@ -255,6 +255,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         ctx,
         handlers::server_side_export_form_method::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "SetPermissionsForNewObjects",
+        ctx,
+        handlers::set_permissions_for_new_objects::check,
+    ));
 
     diagnostics
 }

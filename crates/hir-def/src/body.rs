@@ -621,6 +621,10 @@ pub enum BodyDiagnostic {
         /// Range of the call expression.
         range: TextRange,
     },
+
+    /// SetPrivilegedMode/УстановитьПривилегированныйРежим call that enables privileged mode.
+    /// Safe mode calls (with False argument) are not flagged.
+    SetPrivilegedModeCall { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -804,6 +808,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
             BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
+            BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
         }
     }
 }

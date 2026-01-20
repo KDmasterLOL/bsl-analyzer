@@ -140,6 +140,8 @@ pub enum DiagnosticCode {
     ScheduledJobHandler,
     ServerCallsInFormEvents,
     ServerSideExportFormMethod,
+    SetPermissionsForNewObjects,
+    SetPrivilegedMode,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

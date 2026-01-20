@@ -293,6 +293,9 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Track safe mode method name for later diagnostic check
     let mut safe_mode_name: Option<String> = None;
 
+    // Track privileged mode method name for later diagnostic check
+    let mut privileged_mode_name: Option<String> = None;
+
     // Track if this is a StrTemplate call for later validation
     let mut is_str_template_call = false;
 
@@ -304,6 +307,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_safe_mode_method;
         if is_safe_mode_method(&name) {
             safe_mode_name = Some(name.clone());
+        }
+
+        // Check for privileged mode methods
+        use super::diagnostics::is_set_privileged_mode;
+        if is_set_privileged_mode(&name) {
+            privileged_mode_name = Some(name.clone());
         }
 
         // Check for deprecated global methods (8.3.12)
@@ -566,6 +575,29 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     method_name,
                     range: token.text_range(),
                 });
+            }
+        }
+    }
+
+    // Check for SetPrivilegedMode diagnostic after args are lowered
+    if privileged_mode_name.is_some() {
+        // Safe only if argument is literal False (disabling privileged mode)
+        let is_safe = if !args.is_empty() {
+            matches!(&ctx.body.exprs[args[0]], Expr::Literal(Literal::Bool(false)))
+        } else {
+            false // No argument - not safe
+        };
+
+        if !is_safe {
+            // Find the method name token for the range
+            let method_token = callee_node
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| tok.kind() == SyntaxKind::IDENT);
+
+            if let Some(token) = method_token {
+                ctx.diagnostics
+                    .push(BodyDiagnostic::SetPrivilegedModeCall { range: token.text_range() });
             }
         }
     }

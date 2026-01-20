@@ -11,6 +11,7 @@ mod event_subscription;
 mod form;
 mod helpers;
 mod register;
+mod role;
 mod scheduled_job;
 mod serde_types;
 mod standard_attributes;
@@ -31,6 +32,7 @@ pub use register::{
     parse_accounting_register_xml, parse_accumulation_register_xml, parse_calculation_register_xml,
     parse_information_register_xml,
 };
+pub use role::{parse_rights_xml, parse_role_xml};
 pub use scheduled_job::parse_scheduled_job_xml;
 
 #[cfg(test)]

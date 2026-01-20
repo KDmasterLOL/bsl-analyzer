@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::metadata_object::{MdoType, MetadataObject};
 use crate::register::Register;
+use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
 use crate::traits::{MdObject, Module};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,10 @@ pub struct Configuration {
     #[serde(rename = "scheduledJobs", default)]
     scheduled_jobs: Vec<ScheduledJob>,
 
+    /// Roles (Роли)
+    #[serde(rename = "roles", default)]
+    roles: Vec<Role>,
+
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
@@ -76,6 +81,10 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_scheduled_job: HashMap<String, usize>,
 
+    /// Cache: Name -> Role index mapping (not serialized)
+    #[serde(skip)]
+    name_to_role: HashMap<String, usize>,
+
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
     use_managed_form_in_ordinary_application: bool,
@@ -96,6 +105,7 @@ impl PartialEq for Configuration {
             && self.event_subscriptions == other.event_subscriptions
             && self.defined_types == other.defined_types
             && self.scheduled_jobs == other.scheduled_jobs
+            && self.roles == other.roles
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -115,12 +125,14 @@ impl Configuration {
             event_subscriptions: Vec::new(),
             defined_types: Vec::new(),
             scheduled_jobs: Vec::new(),
+            roles: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
             name_to_event_subscription: HashMap::new(),
             name_to_defined_type: HashMap::new(),
             name_to_scheduled_job: HashMap::new(),
+            name_to_role: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
         }
@@ -150,6 +162,7 @@ impl Configuration {
         self.name_to_event_subscription.clear();
         self.name_to_defined_type.clear();
         self.name_to_scheduled_job.clear();
+        self.name_to_role.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -172,6 +185,10 @@ impl Configuration {
 
         for (idx, scheduled_job) in self.scheduled_jobs.iter().enumerate() {
             self.name_to_scheduled_job.insert(scheduled_job.name().to_lowercase(), idx);
+        }
+
+        for (idx, role) in self.roles.iter().enumerate() {
+            self.name_to_role.insert(role.name().to_lowercase(), idx);
         }
     }
 
@@ -396,6 +413,28 @@ impl Configuration {
         let idx = self.scheduled_jobs.len();
         self.name_to_scheduled_job.insert(job.name().to_lowercase(), idx);
         self.scheduled_jobs.push(job);
+    }
+
+    /// Get all roles
+    ///
+    /// Java equivalent: `getRoles()`
+    pub fn roles(&self) -> &[Role] {
+        &self.roles
+    }
+
+    /// Find role by name (case-insensitive)
+    ///
+    /// Java equivalent: `findRole(String)`
+    pub fn find_role(&self, name: &str) -> Option<&Role> {
+        let name_lower = name.to_lowercase();
+        self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))
+    }
+
+    /// Add role
+    pub(crate) fn add_role(&mut self, role: Role) {
+        let idx = self.roles.len();
+        self.name_to_role.insert(role.name().to_lowercase(), idx);
+        self.roles.push(role);
     }
 }
 
