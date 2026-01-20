@@ -469,6 +469,15 @@ pub(super) fn lower_stmt_list_with_unreachable(
                 ctx.track_statement_line(child.text_range());
             }
 
+            // Check for missing semicolon (SemicolonPresence diagnostic)
+            if emit_diagnostics
+                && !should_skip_semicolon_check(&child)
+                && !has_trailing_semicolon(&child)
+            {
+                let range = get_last_meaningful_token_range(&child);
+                ctx.emit(BodyDiagnostic::MissingSemicolon { range });
+            }
+
             // Check if this statement is a control flow that makes subsequent code unreachable
             if is_control_flow_terminator(&child) {
                 // Mark that subsequent statements are unreachable
@@ -1098,4 +1107,75 @@ fn lower_var_decl(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     }
 
     Some(Stmt::VarDecl { bindings: bindings.into_boxed_slice() })
+}
+
+/// Check if a statement should be skipped for SemicolonPresence diagnostic.
+///
+/// Skip:
+/// - EMPTY_STMT (this is the semicolon itself)
+/// - LABEL_STMT (~Label: doesn't require semicolon)
+/// - Statements with parse errors
+pub(super) fn should_skip_semicolon_check(node: &SyntaxNode) -> bool {
+    if matches!(node.kind(), SyntaxKind::EMPTY_STMT | SyntaxKind::LABEL_STMT) {
+        return true;
+    }
+    node.descendants().any(|n| n.kind() == SyntaxKind::ERROR)
+}
+
+/// Check if a statement has a trailing semicolon token.
+///
+/// IMPORTANT: In our parser, SEMICOLON is consumed AFTER m.complete() for most
+/// statements (ASSIGN_STMT, CALL_STMT, etc.), so it's NOT a child of the statement.
+/// It becomes the next sibling in STMT_LIST.
+///
+/// For compound statements (IF_STMT, WHILE_STMT, etc.), SEMICOLON is consumed
+/// BEFORE m.complete(), so it's a DIRECT child token of the statement node.
+///
+/// This function checks both cases.
+pub(super) fn has_trailing_semicolon(node: &SyntaxNode) -> bool {
+    // First check next sibling (for simple statements like ASSIGN_STMT)
+    // Skip whitespace/newlines to find the actual next token
+    use syntax::NodeOrToken;
+    let mut next = node.next_sibling_or_token();
+    while let Some(element) = next {
+        match element {
+            NodeOrToken::Token(ref token) => {
+                if token.kind() == SyntaxKind::SEMICOLON {
+                    return true;
+                }
+                if !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
+                    // Found non-whitespace token that's not semicolon, stop searching
+                    break;
+                }
+            }
+            NodeOrToken::Node(_) => {
+                // Found next node (next statement), stop searching siblings
+                break;
+            }
+        }
+        next = element.next_sibling_or_token();
+    }
+
+    // Then check direct children tokens (for compound statements like IF_STMT)
+    // We only check direct children, NOT descendants, because descendants would
+    // find semicolons inside nested branches (e.g., "А = 0;" inside IF body)
+    node.children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == SyntaxKind::SEMICOLON)
+}
+
+/// Get the range of the last meaningful token in a statement.
+///
+/// Skips whitespace, newlines, and comments.
+/// Uses descendants_with_tokens() to find tokens at any depth.
+/// Used for SemicolonPresence diagnostic to match Java behavior (ctx.getStop()).
+pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|t| {
+            !matches!(t.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT)
+        })
+        .last()
+        .map(|t| t.text_range())
+        .unwrap_or_else(|| node.text_range())
 }

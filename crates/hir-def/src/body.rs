@@ -557,6 +557,10 @@ pub enum BodyDiagnostic {
     /// Detected when EMPTY_STMT AST node is encountered without parser errors nearby.
     EmptyStatement { range: TextRange },
 
+    /// Statement without trailing semicolon.
+    /// Detected when statement AST node has no SEMICOLON token.
+    MissingSemicolon { range: TextRange },
+
     /// Overly complex if condition with too many boolean operations.
     /// Detected when if/elsif condition has more boolean operations (AND/OR) than maxComplexity.
     /// Complexity = number of boolean operations + 1 (default max: 3).
@@ -777,6 +781,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::GlobalContextMethodCollision8312 { range, .. } => *range,
             BodyDiagnostic::EmptyRegion { range, .. } => *range,
             BodyDiagnostic::EmptyStatement { range } => *range,
+            BodyDiagnostic::MissingSemicolon { range } => *range,
             BodyDiagnostic::IfConditionComplexity { range, .. } => *range,
             BodyDiagnostic::IfElseDuplicatedCondition { range, .. } => *range,
             BodyDiagnostic::IfElseIfEndsWithElse { range } => *range,

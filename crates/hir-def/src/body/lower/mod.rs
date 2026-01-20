@@ -792,6 +792,12 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
         if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
             stmts.push(stmt_id);
 
+            // Check for missing semicolon (SemicolonPresence diagnostic)
+            if !stmt::should_skip_semicolon_check(&node) && !stmt::has_trailing_semicolon(&node) {
+                let range = stmt::get_last_meaningful_token_range(&node);
+                ctx.emit(BodyDiagnostic::MissingSemicolon { range });
+            }
+
             // Check if this statement is a control flow that makes subsequent code unreachable
             if control_flow::is_control_flow_terminator(&node)
                 || (node.kind() == SyntaxKind::IF_STMT
@@ -883,6 +889,12 @@ pub fn lower_module_code_with_line_index(
             // Track statement line for OneStatementPerLine diagnostic
             if !stmt::should_skip_one_statement_per_line(&node) {
                 ctx.track_statement_line(node.text_range());
+            }
+
+            // Check for missing semicolon (SemicolonPresence diagnostic)
+            if !stmt::should_skip_semicolon_check(&node) && !stmt::has_trailing_semicolon(&node) {
+                let range = stmt::get_last_meaningful_token_range(&node);
+                ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
 
             // Check if this statement is a control flow that makes subsequent code unreachable
