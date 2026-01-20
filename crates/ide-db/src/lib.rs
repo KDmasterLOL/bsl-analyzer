@@ -744,6 +744,33 @@ pub(crate) fn find_common_module_by_uri(
         .cloned()
 }
 
+/// Load Form metadata from BSL module path.
+///
+/// Given a FormModule BSL path like:
+/// `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
+///
+/// Loads form metadata from corresponding XML:
+/// `Catalogs/Справочник1/Forms/ФормаЭлемента.xml`
+///
+/// Returns None if:
+/// - Path doesn't match FormModule pattern
+/// - XML file doesn't exist
+/// - XML parsing fails
+pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
+    use bsl_metadata::xml_parser::parse_form_from_bsl_path;
+
+    match parse_form_from_bsl_path(file_path) {
+        Ok(form) => {
+            tracing::debug!(form_name = %form.name(), form_type = ?form.form_type(), "Loaded form metadata");
+            Some(Arc::new(form))
+        }
+        Err(e) => {
+            tracing::debug!(?e, "Could not load form metadata");
+            None
+        }
+    }
+}
+
 #[salsa::db]
 impl metadata::MetadataDb for RootDatabaseImpl {}
 

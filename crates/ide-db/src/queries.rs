@@ -74,6 +74,7 @@ pub fn module_metadata_query<'db>(
                 common_module: None,
                 mdo: None,
                 register: None,
+                form: None,
             });
         }
     };
@@ -100,6 +101,7 @@ pub fn module_metadata_query<'db>(
     let mut common_module = None;
     let mut mdo = None;
     let mut register = None;
+    let mut form = None;
 
     // Load metadata based on module type
     if let Some(config) = &configuration {
@@ -139,8 +141,17 @@ pub fn module_metadata_query<'db>(
                     }
                 }
             }
+            bsl_metadata::ModuleType::FormModule => {
+                // Load Form metadata for FormModule
+                form = crate::load_form_from_path(&file_path);
+            }
             _ => {}
         }
+    }
+
+    // For FormModule without configuration, try to load form from XML directly
+    if module_type == bsl_metadata::ModuleType::FormModule && form.is_none() {
+        form = crate::load_form_from_path(&file_path);
     }
 
     Arc::new(hir_def::ModuleMetadata {
@@ -149,6 +160,7 @@ pub fn module_metadata_query<'db>(
         common_module,
         mdo,
         register,
+        form,
     })
 }
 

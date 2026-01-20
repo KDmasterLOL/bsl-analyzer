@@ -123,6 +123,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: Some(Arc::new(register)),
+            form: None,
         }
     }
 
@@ -214,6 +215,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: None,
+            form: None,
         };
 
         let file_text = "Процедура Тест()\nКонецПроцедуры";

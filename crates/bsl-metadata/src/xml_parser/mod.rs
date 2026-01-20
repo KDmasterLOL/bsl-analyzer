@@ -8,6 +8,7 @@ mod constant;
 mod defined_type;
 mod enum_parser;
 mod event_subscription;
+mod form;
 mod helpers;
 mod register;
 mod scheduled_job;
@@ -25,6 +26,7 @@ pub use constant::parse_constant_xml;
 pub use defined_type::parse_defined_type_xml;
 pub use enum_parser::parse_enum_xml;
 pub use event_subscription::parse_event_subscription_xml;
+pub use form::{parse_form_from_bsl_path, parse_form_xml};
 pub use register::{
     parse_accounting_register_xml, parse_accumulation_register_xml, parse_calculation_register_xml,
     parse_information_register_xml,

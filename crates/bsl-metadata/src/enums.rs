@@ -118,6 +118,33 @@ pub enum SupportVariant {
     Unknown,
 }
 
+/// Form type (managed vs ordinary form)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum FormType {
+    /// Managed form (управляемая форма)
+    #[serde(rename = "Managed")]
+    #[default]
+    Managed,
+    /// Ordinary form (обычная форма)
+    #[serde(rename = "Ordinary")]
+    Ordinary,
+    /// Unknown form type
+    #[serde(other)]
+    Unknown,
+}
+
+impl FormType {
+    /// Parse from Russian or English name
+    pub fn from_name(name: &str) -> Self {
+        let name_lower = name.to_lowercase();
+        match name_lower.as_str() {
+            "managed" | "управляемая" => Self::Managed,
+            "ordinary" | "обычная" => Self::Ordinary,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +164,15 @@ mod tests {
         assert_eq!(ModuleType::default(), ModuleType::Unknown);
         assert_eq!(ObjectBelonging::default(), ObjectBelonging::Own);
         assert_eq!(SupportVariant::default(), SupportVariant::Unknown);
+        assert_eq!(FormType::default(), FormType::Managed);
+    }
+
+    #[test]
+    fn test_form_type_from_name() {
+        assert_eq!(FormType::from_name("Managed"), FormType::Managed);
+        assert_eq!(FormType::from_name("управляемая"), FormType::Managed);
+        assert_eq!(FormType::from_name("Ordinary"), FormType::Ordinary);
+        assert_eq!(FormType::from_name("обычная"), FormType::Ordinary);
+        assert_eq!(FormType::from_name("unknown"), FormType::Unknown);
     }
 }

@@ -356,6 +356,262 @@ where
     check_fn(&ctx)
 }
 
+/// Run diagnostics on test code in a managed/ordinary form context.
+///
+/// Creates a database with the given code as a FormModule with the specified FormType.
+/// Used for testing ServerSideExportFormMethod and similar form-specific diagnostics.
+///
+/// # Arguments
+/// * `form_type` - The form type (Managed or Ordinary)
+/// * `code` - The BSL source code to analyze
+/// * `expected_positions` - Expected diagnostic positions as (line, start_col, end_col) tuples
+///
+/// # Example
+/// ```ignore
+/// check_diagnostics_in_form(
+///     FormType::Managed,
+///     "Процедура Тест() Экспорт\nКонецПроцедуры",
+///     &[(0, 10, 14)],
+/// );
+/// ```
+pub fn check_diagnostics_in_form(
+    form_type: bsl_metadata::FormType,
+    code: &str,
+    expected_positions: &[(u32, u32, u32)],
+) {
+    use bsl_metadata::Form;
+    use hir_def::{DefDatabase, ModuleMetadata};
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use test_fixture::Fixture;
+    use uuid::Uuid;
+    use vfs::VfsPath;
+
+    // Create fixture
+    let fixture_text = format!("//- /test.bsl\n{}", code);
+    let fixture = Fixture::parse(&fixture_text);
+    let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+    let mut db = RootDatabaseImpl::new();
+
+    // Set up source root with form module path
+    let mut file_set = vfs::FileSet::default();
+    file_set
+        .insert(file_id, VfsPath::new("/Catalogs/Catalog1/Forms/FormElement/Ext/Form/Module.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    for (fid, file) in &fixture.files {
+        db.set_file_text(*fid, &file.content);
+    }
+
+    // Create form metadata
+    let form = Form::new("FormElement".to_string(), form_type, Uuid::nil());
+
+    // Create module metadata
+    let metadata = Arc::new(ModuleMetadata {
+        module_type: bsl_metadata::ModuleType::FormModule,
+        execution_context: None,
+        common_module: None,
+        mdo: None,
+        register: None,
+        form: Some(Arc::new(form)),
+    });
+
+    let config = Rc::new(crate::DiagnosticsConfig::default());
+
+    // Create provider that returns our custom metadata
+    struct FormTestProvider {
+        db: RootDatabaseImpl,
+        metadata: Arc<ModuleMetadata>,
+    }
+
+    impl ide_db::provider::AnalysisProvider for FormTestProvider {
+        fn configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
+            None
+        }
+
+        fn workspace_symbols(
+            &self,
+            source_root_id: SourceRootId,
+        ) -> Arc<hir_def::WorkspaceSymbols> {
+            self.db.workspace_symbols(source_root_id)
+        }
+
+        fn module_index(&self, source_root_id: SourceRootId) -> Arc<hir_def::ModuleIndex> {
+            self.db.module_index(source_root_id)
+        }
+
+        fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
+            use ide_db::base_db::RootQueryDb;
+            self.db.parse(file_id)
+        }
+
+        fn file_text(&self, file_id: vfs::FileId) -> String {
+            use ide_db::base_db::SourceDatabase;
+            let input = self.db.file_text_input(file_id);
+            input.text(&self.db).to_string()
+        }
+
+        fn item_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::ItemTree> {
+            use hir_def::DefDatabase;
+            self.db.item_tree(file_id)
+        }
+
+        fn symbol_tree(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::SymbolTree> {
+            use hir_def::DefDatabase;
+            self.db.symbol_tree(module_id)
+        }
+
+        fn module_bodies(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleBodies> {
+            use hir_def::DefDatabase;
+            self.db.module_bodies(module_id)
+        }
+
+        fn module_metadata(&self, _module_id: hir_def::ModuleId) -> Arc<ModuleMetadata> {
+            Arc::clone(&self.metadata)
+        }
+
+        fn line_index(&self, file_id: vfs::FileId) -> Arc<line_index::LineIndex> {
+            use ide_db::RootDatabase;
+            let input = ide_db::base_db::FileIdInput::new(&self.db, file_id);
+            self.db.line_index(input)
+        }
+
+        fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
+            Some("/Catalogs/Catalog1/Forms/FormElement/Ext/Form/Module.bsl".to_string())
+        }
+
+        fn file_source_root_id(&self, file_id: vfs::FileId) -> SourceRootId {
+            use ide_db::base_db::SourceDatabase;
+            let input = self.db.file_source_root_input(file_id);
+            input.source_root_id(&self.db)
+        }
+
+        fn region_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::RegionTree> {
+            use hir_def::DefDatabase;
+            self.db.region_tree(file_id)
+        }
+
+        fn module_level_regions(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<Vec<ide_db::base_db::RegionInfo>> {
+            use ide_db::base_db::RootQueryDb;
+            self.db.module_level_regions(file_id)
+        }
+
+        fn sdbl_hir_in_file(&self, file_id: vfs::FileId) -> ide_db::SdblHirEntries {
+            use ide_db::RootDatabase;
+            self.db.sdbl_hir_in_file(file_id)
+        }
+
+        fn all_sdbl_in_file(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+            use ide_db::RootDatabase;
+            self.db.all_sdbl_in_file(file_id)
+        }
+
+        fn module_data(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleData> {
+            use hir_def::DefDatabase;
+            self.db.module_data(module_id)
+        }
+
+        fn method_docs(
+            &self,
+            method_id: hir_def::MethodId,
+        ) -> Option<Arc<hir_def::docs::MethodDocs>> {
+            use hir_def::DefDatabase;
+            self.db.method_docs(method_id)
+        }
+
+        fn module_cfgs(&self, file_id: vfs::FileId) -> Arc<cfg::ModuleCfgs> {
+            use ide_db::RootDatabase;
+            let input = ide_db::base_db::FileIdInput::new(&self.db, file_id);
+            self.db.module_cfgs(input)
+        }
+
+        fn module_liveness_analysis(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<dataflow::liveness::ModuleLiveness> {
+            use ide_db::RootDatabase;
+            let input = ide_db::base_db::FileIdInput::new(&self.db, file_id);
+            self.db.module_liveness_analysis(input)
+        }
+
+        fn module_reaching_definitions(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+            use ide_db::RootDatabase;
+            let input = ide_db::base_db::FileIdInput::new(&self.db, file_id);
+            self.db.module_reaching_definitions(input)
+        }
+
+        fn reaching_definitions(
+            &self,
+            method_id: hir_def::MethodId,
+        ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+            use ide_db::RootDatabase;
+            self.db.reaching_definitions(method_id)
+        }
+
+        fn resolve_vfs_path(
+            &self,
+            source_root_id: SourceRootId,
+            vfs_path: &vfs::VfsPath,
+        ) -> Option<vfs::FileId> {
+            use ide_db::base_db::SourceDatabase;
+            self.db.resolve_vfs_path(source_root_id, vfs_path)
+        }
+    }
+
+    let provider = FormTestProvider { db, metadata };
+
+    let ctx = crate::DiagnosticsContext {
+        db: &provider.db,
+        config: &config,
+        file_id,
+        provider: Some(&provider),
+        workspace_root: None,
+        configuration_path: None,
+        configuration_path_input: None,
+        file_set: None,
+    };
+
+    // Run the diagnostic
+    let diagnostics = crate::handlers::server_side_export_form_method::check(&ctx);
+
+    // Verify count
+    assert_eq!(
+        diagnostics.len(),
+        expected_positions.len(),
+        "Expected {} diagnostics, got {}. Diagnostics: {:?}",
+        expected_positions.len(),
+        diagnostics.len(),
+        diagnostics
+    );
+
+    // Verify positions
+    for (i, (expected_line, expected_start_col, expected_end_col)) in
+        expected_positions.iter().enumerate()
+    {
+        assert_diagnostic_range(
+            code,
+            &diagnostics[i],
+            *expected_line,
+            *expected_start_col,
+            *expected_end_col,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

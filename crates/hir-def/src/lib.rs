@@ -590,6 +590,12 @@ pub struct ModuleMetadata {
     /// Used for InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister.
     /// Arc-wrapped for efficient sharing.
     pub register: Option<Arc<bsl_metadata::Register>>,
+
+    /// Form metadata if this module is a FormModule.
+    ///
+    /// Contains form type (Managed/Ordinary) needed for ServerSideExportFormMethod diagnostic.
+    /// Arc-wrapped for efficient sharing.
+    pub form: Option<Arc<bsl_metadata::Form>>,
 }
 
 impl ModuleMetadata {
@@ -603,6 +609,7 @@ impl ModuleMetadata {
             common_module: None,
             mdo: None,
             register: None,
+            form: None,
         }
     }
 }

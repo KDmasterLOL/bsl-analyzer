@@ -63,6 +63,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            form: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -80,6 +81,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            form: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -97,6 +99,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            form: None,
         };
 
         let config = DiagnosticsConfig::default();
@@ -114,6 +117,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            form: None,
         };
 
         let config = DiagnosticsConfig::default();

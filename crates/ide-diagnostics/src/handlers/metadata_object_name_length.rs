@@ -181,6 +181,7 @@ mod tests {
             common_module: Some(Arc::new(module)),
             mdo: None,
             register: None,
+            form: None,
         }
     }
 
@@ -191,6 +192,7 @@ mod tests {
             common_module: None,
             mdo: Some(Arc::new(mdo)),
             register: None,
+            form: None,
         }
     }
 
@@ -201,6 +203,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: Some(Arc::new(register)),
+            form: None,
         }
     }
 

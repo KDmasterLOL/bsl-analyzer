@@ -139,6 +139,7 @@ pub enum DiagnosticCode {
     SameMetadataObjectAndChildNames,
     ScheduledJobHandler,
     ServerCallsInFormEvents,
+    ServerSideExportFormMethod,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
