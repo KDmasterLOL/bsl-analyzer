@@ -118,6 +118,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblMultiplicativeExpr => SK::SDBL_MULTIPLICATIVE_EXPR,
         NodeKind::SdblUnaryExpr => SK::SDBL_UNARY_EXPR,
         NodeKind::SdblParenExpr => SK::SDBL_PAREN_EXPR,
+        NodeKind::SdblTupleExpr => SK::SDBL_TUPLE_EXPR,
         NodeKind::SdblSubqueryExpr => SK::SDBL_SUBQUERY_EXPR,
         NodeKind::SdblColumnRef => SK::SDBL_COLUMN_REF,
         NodeKind::SdblFunctionCall => SK::SDBL_FUNCTION_CALL,

@@ -196,22 +196,68 @@ impl<'a> LoweringContext<'a> {
             })
             .map(|s| Name::from(s.as_str()));
 
+        // Lower virtual table parameters if this is a virtual table
+        // Virtual table params are expression children inside SDBL_TABLE_REF after L_PAREN
+        // Example: РегистрНакопления.Расчеты.Обороты(&Начало, &Конец, , (A.B, C.D) В ...)
+        let virtual_table_params = if is_virtual {
+            tracing::debug!(table_name = %full_name, "Lowering virtual table parameters");
+
+            table_ref
+                .syntax()
+                .children()
+                .filter(|n| {
+                    matches!(
+                        n.kind(),
+                        syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                            | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                            | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+                            | syntax::SyntaxKind::SDBL_ADDITIVE_EXPR
+                            | syntax::SyntaxKind::SDBL_MULTIPLICATIVE_EXPR
+                            | syntax::SyntaxKind::SDBL_UNARY_EXPR
+                            | syntax::SyntaxKind::SDBL_COLUMN_REF
+                            | syntax::SyntaxKind::SDBL_LITERAL
+                            | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+                            | syntax::SyntaxKind::SDBL_PARAMETER
+                            | syntax::SyntaxKind::SDBL_PAREN_EXPR
+                            | syntax::SyntaxKind::SDBL_TUPLE_EXPR
+                            | syntax::SyntaxKind::SDBL_IN_EXPR
+                    )
+                })
+                .map(|expr| self.lower_expr(&expr))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         TableRef {
             parts: parts.iter().map(|s| Name::from(s.as_str())).collect(),
             full_name,
             alias: alias_name,
             metadata: resolved,
             is_virtual_table: is_virtual,
-            virtual_table_params: Vec::new(),
+            virtual_table_params,
             subquery: Vec::new(),
             range: table_ref.syntax().text_range(),
         }
     }
 
     /// Parse table name into parts.
+    ///
+    /// Uses IDENT tokens instead of text split to correctly handle virtual tables
+    /// with parameters like `Регистр.Расчеты.Обороты(&Начало, ..., (A.B) В ...)`.
     fn parse_table_name(&self, table_ref: &syntax::ast::SdblTableRef) -> Vec<String> {
-        let text = table_ref.syntax().text().to_string();
-        text.split('.').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        // Extract only IDENT tokens as table name parts
+        // This correctly handles virtual tables - parameters are child nodes, not IDENT tokens
+        table_ref
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| match child {
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                    Some(token.text().to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Resolve table in metadata.

@@ -35,6 +35,7 @@ impl<'a> LoweringContext<'a> {
                     ExprHir::Missing { range: node.text_range() }
                 }
             }
+            SyntaxKind::SDBL_TUPLE_EXPR => self.lower_tuple_expr(node),
             SyntaxKind::SDBL_LOGICAL_OR_EXPR
             | SyntaxKind::SDBL_LOGICAL_AND_EXPR
             | SyntaxKind::SDBL_COMPARISON_EXPR
@@ -54,25 +55,23 @@ impl<'a> LoweringContext<'a> {
     }
 
     /// Lower column reference.
+    ///
+    /// Stores all parts of the path in HIR. Diagnostics like QueryNestedFieldsByDot
+    /// are checked later by analyzing the HIR structure, not during lowering.
     fn lower_column_ref(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         let text = node.text().to_string();
-        let parts: Vec<&str> = text.split('.').collect();
+        let str_parts: Vec<&str> = text.split('.').collect();
 
-        let (table_alias, column_name) = if parts.len() >= 2 {
-            (Some(Name::from(parts[0].trim())), Name::from(parts[1].trim()))
-        } else {
-            (None, Name::from(parts[0].trim()))
-        };
+        // Convert to Name parts
+        let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
 
         tracing::debug!(
             text = %text,
             parts_count = parts.len(),
-            table_alias = ?table_alias.as_ref().map(|n| n.as_str()),
-            column_name = %column_name.as_str(),
             "lower_column_ref called"
         );
 
-        // NEW: Extract IDENT ranges from AST for semantic highlighting
+        // Extract IDENT ranges from AST for semantic highlighting
         let ident_ranges: Vec<TextRange> = node
             .children_with_tokens()
             .filter_map(|child| match child {
@@ -83,25 +82,29 @@ impl<'a> LoweringContext<'a> {
             })
             .collect();
 
-        // Resolve type from scope
-        let ty = self
-            .scope
-            .resolve_column_type(table_alias.as_ref().map(|n| n.as_str()), column_name.as_str());
+        // Resolve type from scope (using first part as alias, second as column for 2+ parts)
+        let (table_alias_str, column_name_str) = if parts.len() >= 2 {
+            (Some(parts[0].as_str()), parts[1].as_str())
+        } else {
+            (None, parts[0].as_str())
+        };
+
+        let ty = self.scope.resolve_column_type(table_alias_str, column_name_str);
 
         tracing::debug!(
             text = %text,
             resolved_type = ?ty,
-            "DIAGNOSTIC LOWERING: resolved column type from scope"
+            "resolved column type from scope"
         );
 
         // Check for unknown field
         if ty == SdblType::Unknown {
-            if let Some(ref alias) = table_alias {
-                if let Some(table) = self.scope.find_table(alias.as_str()) {
+            if let Some(alias) = table_alias_str {
+                if let Some(table) = self.scope.find_table(alias) {
                     if table.metadata.is_some() {
                         self.diagnostics.push(SdblDiagnostic::UnknownField {
                             table_name: table.full_name.clone(),
-                            field_name: column_name.to_string(),
+                            field_name: column_name_str.to_string(),
                             range: node.text_range(),
                         });
                     }
@@ -109,24 +112,24 @@ impl<'a> LoweringContext<'a> {
             }
         } else if ty == SdblType::Error {
             // Ambiguous column
-            let possible_tables = self.scope.find_tables_with_column(column_name.as_str());
+            let possible_tables = self.scope.find_tables_with_column(column_name_str);
             self.diagnostics.push(SdblDiagnostic::AmbiguousColumnRef {
-                column_name: column_name.to_string(),
+                column_name: column_name_str.to_string(),
                 possible_tables,
                 range: node.text_range(),
             });
         }
 
-        // NEW: Record ALL identifiers in source_map for semantic highlighting
+        // Record ALL identifiers in source_map for semantic highlighting
         // This handles nested field references like Table.Field1.Field2.Field3
         for (idx, range) in ident_ranges.iter().enumerate() {
-            if idx == 0 && table_alias.is_some() {
+            if idx == 0 && parts.len() >= 2 {
                 // First identifier = table alias
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(
                         *range,
                         syntax::SyntaxKind::IDENT,
-                        parts[idx].trim(),
+                        str_parts[idx].trim(),
                     ),
                     crate::source_map::TokenCategory::TableAlias,
                 );
@@ -141,14 +144,14 @@ impl<'a> LoweringContext<'a> {
                     crate::source_map::TokenInfo::new(
                         *range,
                         syntax::SyntaxKind::IDENT,
-                        parts[idx].trim(),
+                        str_parts[idx].trim(),
                     ),
                     category,
                 );
             }
         }
 
-        ExprHir::ColumnRef { table_alias, column: column_name, ty, range: node.text_range() }
+        ExprHir::ColumnRef { parts, ty, range: node.text_range() }
     }
 
     /// Lower literal.
@@ -322,6 +325,7 @@ impl<'a> LoweringContext<'a> {
                         | syntax::SyntaxKind::SDBL_MULTI_STRING
                         | syntax::SyntaxKind::SDBL_FUNCTION_CALL
                         | syntax::SyntaxKind::SDBL_PAREN_EXPR
+                        | syntax::SyntaxKind::SDBL_TUPLE_EXPR
                         | syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
                         | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
                         | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
@@ -334,10 +338,39 @@ impl<'a> LoweringContext<'a> {
             .map(|arg| self.lower_expr(&arg))
             .collect();
 
+        // Extract member access chain after closing paren
+        // Token sequence: FUNC ( args ) . Field1 . Field2
+        // We need IDENT tokens that come after RPAREN
+        let member_access: Vec<Name> = {
+            let tokens: Vec<_> =
+                node.children_with_tokens().filter_map(|c| c.into_token()).collect();
+
+            // Find position of closing paren
+            let rparen_pos = tokens.iter().position(|t| t.kind() == syntax::SyntaxKind::R_PAREN);
+
+            if let Some(pos) = rparen_pos {
+                // Collect IDENT tokens after RPAREN (these are member access fields)
+                tokens[pos + 1..]
+                    .iter()
+                    .filter(|t| t.kind() == syntax::SyntaxKind::IDENT)
+                    .map(|t| Name::from(t.text()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        // QueryNestedFieldsByDot: check for nested field dereference after CAST
+        // ВЫРАЗИТЬ(...).Field1.Field2 - if 2+ fields, it's nested access
+        if matches!(function, FunctionKind::Cast) && member_access.len() > 1 {
+            self.diagnostics
+                .push(SdblDiagnostic::QueryNestedFieldsByDot { range: node.text_range() });
+        }
+
         // Infer return type
         let ty = self.infer_function_return_type(&function, &args);
 
-        ExprHir::FunctionCall { function, args, ty, range: node.text_range() }
+        ExprHir::FunctionCall { function, args, member_access, ty, range: node.text_range() }
     }
 
     /// Infer function return type.
@@ -408,7 +441,7 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
-    /// Lower binary expression.
+    /// Lower parameter expression.
     fn lower_parameter(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         let text = node.text().to_string();
         let name = text.trim_start_matches('&').to_string();
@@ -418,5 +451,37 @@ impl<'a> LoweringContext<'a> {
             ty: SdblType::Unknown, // Parameters have unknown type without context
             range: node.text_range(),
         }
+    }
+
+    /// Lower tuple expression (expr1, expr2, ...).
+    ///
+    /// Used for row-wise comparison in IN predicates:
+    /// `(field1, field2) IN (SELECT col1, col2 FROM ...)`
+    fn lower_tuple_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
+        // Get all expression children - filter by expression SyntaxKinds
+        let elements: Vec<ExprHir> = node
+            .children()
+            .filter(|c| {
+                matches!(
+                    c.kind(),
+                    syntax::SyntaxKind::SDBL_COLUMN_REF
+                        | syntax::SyntaxKind::SDBL_LITERAL
+                        | syntax::SyntaxKind::SDBL_MULTI_STRING
+                        | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+                        | syntax::SyntaxKind::SDBL_PAREN_EXPR
+                        | syntax::SyntaxKind::SDBL_TUPLE_EXPR
+                        | syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                        | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                        | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+                        | syntax::SyntaxKind::SDBL_ADDITIVE_EXPR
+                        | syntax::SyntaxKind::SDBL_MULTIPLICATIVE_EXPR
+                        | syntax::SyntaxKind::SDBL_UNARY_EXPR
+                        | syntax::SyntaxKind::SDBL_PARAMETER
+                )
+            })
+            .map(|child| self.lower_expr(&child))
+            .collect();
+
+        ExprHir::Tuple { elements, range: node.text_range() }
     }
 }

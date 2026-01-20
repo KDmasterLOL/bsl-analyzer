@@ -50,8 +50,9 @@ mod types;
 
 pub use diagnostics::SdblDiagnostic;
 pub use hir::{
-    ExprHir, FieldDef, FieldHir, GroupByHir, JoinHir, JoinType, OrderByHir, ResolvedTable, SdblHir,
-    SdblPackage, SdblQuery, SelectHir, TableRef, UnionHir,
+    ExprHir, FieldDef, FieldHir, FunctionKind, GroupByHir, InValues, JoinHir, JoinType, Name,
+    OrderByHir, OrderByItem, ResolvedTable, SdblHir, SdblPackage, SdblQuery, SelectHir, TableRef,
+    UnionHir, WhenClause,
 };
 pub use lower::{lower_sdbl_to_hir, SdblLowerResult};
 pub use scope::Scope;
@@ -1027,7 +1028,8 @@ fn is_join_type_context(text_before: &str) -> Option<String> {
 /// Check if a string is an MDO type keyword.
 ///
 /// Returns true for known metadata object type names in both Russian and English.
-fn is_mdo_type(s: &str) -> bool {
+/// Used by diagnostics to distinguish table aliases from MDO type paths.
+pub fn is_mdo_type(s: &str) -> bool {
     let s_upper = s.to_uppercase();
     matches!(
         s_upper.as_str(),
@@ -1057,6 +1059,51 @@ fn is_mdo_type(s: &str) -> bool {
         "ПЛАНОБМЕНА" | "EXCHANGEPLAN" |
         "ВНЕШНИЙИСТОЧНИКДАННЫХ" | "EXTERNALDATASOURCE"
     )
+}
+
+/// Check if column reference text represents a nested field access (dereference).
+///
+/// Returns `Some((alias, fields))` if text has 3+ dot-separated parts where
+/// the first part is a valid table alias (not an MDO type keyword).
+///
+/// # Examples
+/// - `"T.Ссылка.Организация"` → `Some(("T", ["Ссылка", "Организация"]))`
+/// - `"T.Ссылка"` → `None` (only 2 parts - not nested)
+/// - `"Справочник.Валюты.Код"` → `None` (MDO type, not alias)
+///
+/// # Usage
+/// - Diagnostics: QueryNestedFieldsByDot detection during HIR lowering
+/// - Autocomplete: Can be used by `parse_nested_field_chain()`
+pub fn parse_nested_column_ref(text: &str) -> Option<(String, Vec<String>)> {
+    let parts: Vec<&str> = text.split('.').collect();
+
+    // Need 3+ parts: alias.field1.field2...
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let potential_alias = parts[0].trim();
+
+    // Check heuristics for table alias:
+    // 1. Not empty
+    // 2. Starts with uppercase letter
+    // 3. NOT an MDO type keyword
+    if potential_alias.is_empty() {
+        return None;
+    }
+
+    if !potential_alias.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return None;
+    }
+
+    if is_mdo_type(potential_alias) {
+        return None;
+    }
+
+    let alias = potential_alias.to_string();
+    let fields: Vec<String> = parts[1..].iter().map(|s| s.trim().to_string()).collect();
+
+    Some((alias, fields))
 }
 
 /// Parse nested field reference chain from "alias.field1.field2.field3..." pattern.
@@ -3106,5 +3153,54 @@ mod tests {
             }
             _ => panic!("Expected AfterCastExpression, got {:?}", context),
         }
+    }
+
+    // ========== parse_nested_column_ref tests ==========
+
+    #[test]
+    fn test_parse_nested_column_ref_3_parts() {
+        // 3 parts: alias.field1.field2
+        let result = parse_nested_column_ref("T.Ссылка.Организация");
+        assert!(result.is_some());
+        let (alias, fields) = result.unwrap();
+        assert_eq!(alias, "T");
+        assert_eq!(fields, vec!["Ссылка", "Организация"]);
+    }
+
+    #[test]
+    fn test_parse_nested_column_ref_4_parts() {
+        // 4 parts
+        let result = parse_nested_column_ref("ЗаказКлиентаТовары.Ссылка.Контрагент.Наименование");
+        assert!(result.is_some());
+        let (alias, fields) = result.unwrap();
+        assert_eq!(alias, "ЗаказКлиентаТовары");
+        assert_eq!(fields, vec!["Ссылка", "Контрагент", "Наименование"]);
+    }
+
+    #[test]
+    fn test_parse_nested_column_ref_2_parts_returns_none() {
+        // 2 parts - should return None
+        let result = parse_nested_column_ref("T.Ссылка");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_nested_column_ref_mdo_type_returns_none() {
+        // MDO type paths should return None
+        let result = parse_nested_column_ref("Справочник.Валюты.Код");
+        assert!(result.is_none());
+
+        let result = parse_nested_column_ref("Документ.Заказ.Товары");
+        assert!(result.is_none());
+
+        let result = parse_nested_column_ref("РегистрСведений.Курсы.Валюта");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_nested_column_ref_lowercase_first_part_returns_none() {
+        // First part should start with uppercase
+        let result = parse_nested_column_ref("table.Field1.Field2");
+        assert!(result.is_none());
     }
 }

@@ -122,7 +122,7 @@ impl<'a> LoweringContext<'a> {
     #[allow(clippy::only_used_in_recursion)]
     fn extract_table_alias(&self, expr: &ExprHir) -> Option<String> {
         match expr {
-            ExprHir::ColumnRef { table_alias: Some(alias), .. } => Some(alias.to_string()),
+            ExprHir::ColumnRef { parts, .. } if parts.len() >= 2 => Some(parts[0].to_string()),
             ExprHir::BinaryOp { lhs, rhs, .. } => {
                 // Try left side first, then right
                 self.extract_table_alias(lhs).or_else(|| self.extract_table_alias(rhs))
@@ -239,14 +239,15 @@ impl<'a> LoweringContext<'a> {
         }
 
         match expr {
-            ExprHir::ColumnRef { table_alias, column, range, .. } => {
-                // Check if this references the protected table
-                if let Some(alias) = table_alias {
+            ExprHir::ColumnRef { parts, range, .. } => {
+                // Check if this references the protected table (first part is alias for 2+ parts)
+                if parts.len() >= 2 {
+                    let alias = &parts[0];
                     if alias.eq_ignore_ascii_case(protected_table) {
-                        // Found unprotected reference!
+                        // Found unprotected reference! Column is the second part
                         unprotected_refs.push(crate::diagnostics::UnprotectedFieldRef {
                             table_alias: alias.to_string(),
-                            field_name: column.to_string(),
+                            field_name: parts[1].to_string(),
                             range: *range,
                         });
                     }
@@ -333,6 +334,13 @@ impl<'a> LoweringContext<'a> {
                 }
             }
 
+            ExprHir::Tuple { elements, .. } => {
+                // Check all elements of the tuple
+                for elem in elements {
+                    self.find_unprotected_refs(elem, protected_table, unprotected_refs);
+                }
+            }
+
             ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {
                 // No field references
             }
@@ -376,18 +384,18 @@ impl<'a> LoweringContext<'a> {
 
     /// Check if an expression references a specific table.
     #[allow(clippy::only_used_in_recursion)]
-    fn expr_references_table(&self, expr: &ExprHir, table_alias: &str) -> bool {
+    fn expr_references_table(&self, expr: &ExprHir, table_name: &str) -> bool {
         match expr {
-            ExprHir::ColumnRef { table_alias: Some(alias), .. } => {
-                alias.eq_ignore_ascii_case(table_alias)
+            ExprHir::ColumnRef { parts, .. } if parts.len() >= 2 => {
+                parts[0].eq_ignore_ascii_case(table_name)
             }
             ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.expr_references_table(lhs, table_alias)
-                    || self.expr_references_table(rhs, table_alias)
+                self.expr_references_table(lhs, table_name)
+                    || self.expr_references_table(rhs, table_name)
             }
-            ExprHir::UnaryOp { expr, .. } => self.expr_references_table(expr, table_alias),
+            ExprHir::UnaryOp { expr, .. } => self.expr_references_table(expr, table_name),
             ExprHir::FunctionCall { args, .. } => {
-                args.iter().any(|arg| self.expr_references_table(arg, table_alias))
+                args.iter().any(|arg| self.expr_references_table(arg, table_name))
             }
             _ => false,
         }

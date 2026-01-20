@@ -385,12 +385,19 @@ pub struct UnionHir {
 /// SDBL expression HIR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprHir {
-    /// Column reference (Table.Field or Field).
+    /// Column reference (Table.Field, Field, or nested like Table.Field1.Field2).
+    ///
+    /// Parts are stored in order: `["Table", "Field1", "Field2"]` for `Table.Field1.Field2`.
+    /// - 1 part: unqualified column `Field`
+    /// - 2 parts: qualified column `Table.Field`
+    /// - 3+ parts: nested field dereference `Table.Field1.Field2` (N+1 problem)
     ColumnRef {
-        /// Table alias (if qualified).
-        table_alias: Option<Name>,
-        /// Column name.
-        column: Name,
+        /// All parts of the column reference path.
+        /// Examples:
+        /// - `["Код"]` for `Код`
+        /// - `["T", "Код"]` for `T.Код`
+        /// - `["T", "Ссылка", "Организация"]` for `T.Ссылка.Организация`
+        parts: Vec<Name>,
         /// Inferred type.
         ty: SdblType,
         /// Source range.
@@ -434,11 +441,18 @@ pub enum ExprHir {
     },
 
     /// Function call.
+    ///
+    /// For CAST expressions, may include member access chain after closing paren:
+    /// `ВЫРАЗИТЬ(field КАК Документ.Продажа).Контрагент.Наименование`
+    /// → member_access = ["Контрагент", "Наименование"]
     FunctionCall {
         /// Function.
         function: FunctionKind,
         /// Arguments.
         args: Vec<ExprHir>,
+        /// Member access chain after function call (for CAST expressions).
+        /// Example: CAST(...).Field1.Field2 → ["Field1", "Field2"]
+        member_access: Vec<Name>,
         /// Return type.
         ty: SdblType,
         /// Source range.
@@ -537,6 +551,15 @@ pub enum ExprHir {
         range: TextRange,
     },
 
+    /// Tuple expression (expr1, expr2, ...).
+    /// Used for row-wise comparison in IN predicates.
+    Tuple {
+        /// Tuple elements.
+        elements: Vec<ExprHir>,
+        /// Source range.
+        range: TextRange,
+    },
+
     /// Missing/error expression.
     Missing {
         /// Source range.
@@ -560,6 +583,7 @@ impl ExprHir {
             Self::Between { ty, .. } => ty,
             Self::Like { ty, .. } => ty,
             Self::IsNull { ty, .. } => ty,
+            Self::Tuple { .. } => &SdblType::Unknown, // Tuple doesn't have a single type
             Self::Missing { .. } => &SdblType::Error,
         }
     }
@@ -579,14 +603,49 @@ impl ExprHir {
             Self::Between { range, .. } => *range,
             Self::Like { range, .. } => *range,
             Self::IsNull { range, .. } => *range,
+            Self::Tuple { range, .. } => *range,
             Self::Missing { range } => *range,
         }
     }
 
     /// Get column name if this is a column reference.
+    ///
+    /// For multi-part references like `T.Ссылка.Организация`, returns the last part (`Организация`).
+    /// For simple references like `T.Код`, returns `Код`.
     pub fn column_name(&self) -> Option<&Name> {
         match self {
-            Self::ColumnRef { column, .. } => Some(column),
+            Self::ColumnRef { parts, .. } => parts.last(),
+            _ => None,
+        }
+    }
+
+    /// Get table alias if this is a qualified column reference.
+    ///
+    /// Returns the first part if there are 2+ parts.
+    pub fn table_alias(&self) -> Option<&Name> {
+        match self {
+            Self::ColumnRef { parts, .. } if parts.len() >= 2 => parts.first(),
+            _ => None,
+        }
+    }
+
+    /// Check if this column reference has nested field access (3+ parts).
+    ///
+    /// Examples:
+    /// - `T.Ссылка.Организация` → true (3 parts)
+    /// - `T.Код` → false (2 parts)
+    /// - `Код` → false (1 part)
+    pub fn is_nested_field_access(&self) -> bool {
+        match self {
+            Self::ColumnRef { parts, .. } => parts.len() >= 3,
+            _ => false,
+        }
+    }
+
+    /// Get all parts of a column reference.
+    pub fn column_parts(&self) -> Option<&[Name]> {
+        match self {
+            Self::ColumnRef { parts, .. } => Some(parts),
             _ => None,
         }
     }

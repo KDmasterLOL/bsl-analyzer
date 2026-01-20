@@ -134,19 +134,19 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        // Lower ON condition - get the first expression child as the ON expression
-        let condition_node = join.data_source().and_then(|ds| {
-            // The ON condition is typically a child of the join clause
-            ds.syntax().parent().and_then(|parent| {
-                parent.children().find(|n| {
-                    matches!(
-                        n.kind(),
-                        syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
-                            | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
-                            | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
-                    )
-                })
-            })
+        // Lower ON condition - get the expression child directly from JOIN clause
+        // AST structure: SDBL_JOIN_CLAUSE contains SDBL_DATA_SOURCE + expression (ON condition)
+        let condition_node = join.syntax().children().find(|n| {
+            matches!(
+                n.kind(),
+                syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                    | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                    | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+                    | syntax::SyntaxKind::SDBL_IS_NULL_EXPR
+                    | syntax::SyntaxKind::SDBL_IN_EXPR
+                    | syntax::SyntaxKind::SDBL_BETWEEN_EXPR
+                    | syntax::SyntaxKind::SDBL_LIKE_EXPR
+            )
         });
 
         // Check for OR with multiple fields in JOIN condition

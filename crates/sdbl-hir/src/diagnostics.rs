@@ -177,6 +177,16 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Nested field dereference by dot (performance issue).
+    ///
+    /// BSL-LS diagnostic code: QueryNestedFieldsByDot
+    ///
+    /// Accessing reference fields through multiple dots causes N+1 query problem.
+    QueryNestedFieldsByDot {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -199,6 +209,7 @@ impl SdblDiagnostic {
             Self::QueryToMissingMetadata { .. } => Some(122),
             Self::JoinWithVirtualTable { .. } => Some(79),
             Self::VirtualTableCallWithoutParameters { .. } => Some(174),
+            Self::QueryNestedFieldsByDot { .. } => None, // Uses string code
             _ => None, // Other diagnostics don't have BSL-LS codes
         }
     }
@@ -292,6 +303,9 @@ impl SdblDiagnostic {
             Self::MultilineString { .. } => {
                 "Check if multiline literal is correct".to_string()
             }
+            Self::QueryNestedFieldsByDot { .. } => {
+                "Обнаружено разыменование ссылочного поля".to_string()
+            }
         }
     }
 
@@ -315,6 +329,7 @@ impl SdblDiagnostic {
             Self::LogicalOrInJoin { range } => *range,
             Self::FieldsFromJoinWithoutNullCheck { range, .. } => *range,
             Self::MultilineString { range } => *range,
+            Self::QueryNestedFieldsByDot { range } => *range,
         }
     }
 
@@ -341,6 +356,7 @@ impl SdblDiagnostic {
             Self::LogicalOrInJoin { .. } => false,
             Self::FieldsFromJoinWithoutNullCheck { .. } => false, // Warning/Critical, not an error
             Self::MultilineString { .. } => false, // Warning - likely incorrect quoting
+            Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
         }
     }
 }

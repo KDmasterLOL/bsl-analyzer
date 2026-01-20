@@ -252,7 +252,8 @@ pub enum SyntaxKind {
     SDBL_ADDITIVE_EXPR, // Additive operators (+, -)
     SDBL_MULTIPLICATIVE_EXPR, // Multiplicative operators (*, /, MOD)
     SDBL_UNARY_EXPR, // Unary operators (+, -, NOT)
-    SDBL_PAREN_EXPR, // Parenthesized expression
+    SDBL_PAREN_EXPR, // Parenthesized expression (single expr)
+    SDBL_TUPLE_EXPR, // Tuple expression (expr, expr, ...) for row-wise comparison
     SDBL_SUBQUERY_EXPR, // Subquery in expression context
 
     // Primary Expressions

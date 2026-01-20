@@ -301,6 +301,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::multiline_string_in_query::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "QueryNestedFieldsByDot",
+        ctx,
+        handlers::query_nested_fields_by_dot::check,
+    ));
 
     diagnostics
 }

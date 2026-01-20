@@ -93,9 +93,7 @@ mod tests {
     /// Lines 0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57
     #[test]
     fn test_8312() {
-        let code = include_str!(
-            "global_context_method_collision8312/GlobalContextMethodCollision8312Diagnostic.bsl"
-        );
+        let code = include_str!("../../test_data/GlobalContextMethodCollision8312Diagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
         let collision_diags: Vec<_> = diagnostics

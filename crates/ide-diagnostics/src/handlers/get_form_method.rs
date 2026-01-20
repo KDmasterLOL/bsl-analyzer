@@ -192,7 +192,7 @@ EndProcedure
     #[test]
     fn test_from_java_fixture() {
         // Source: bsl-language-server/src/test/resources/diagnostics/GetFormMethodDiagnostic.bsl
-        let code = include_str!("get_form_method/GetFormMethodDiagnostic.bsl");
+        let code = include_str!("../../test_data/GetFormMethodDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();

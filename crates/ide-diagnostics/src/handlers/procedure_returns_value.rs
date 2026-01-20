@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_fixture_java_compatibility() {
-        let code = include_str!("../test_data/ProcedureReturnsValueDiagnostic.bsl");
+        let code = include_str!("../../test_data/ProcedureReturnsValueDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()

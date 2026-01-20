@@ -1320,4 +1320,104 @@ mod tests {
             field_count
         );
     }
+
+    #[test]
+    fn test_tuple_in_in_predicate() {
+        // Tuple on left side of IN predicate - row-wise comparison
+        let input = r#"ВЫБРАТЬ *
+ИЗ Документ.Заказ КАК Заказ
+ГДЕ (Заказ.Партнер, Заказ.Контрагент, Заказ.Организация) В
+    (ВЫБРАТЬ Т.Партнер, Т.Контрагент, Т.Организация ИЗ ВТ_Данные КАК Т)"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should have TUPLE_EXPR node
+        assert!(
+            text.contains("SDBL_TUPLE_EXPR"),
+            "Expected SDBL_TUPLE_EXPR for tuple in IN predicate.\nTree: {}",
+            text
+        );
+
+        // Should have IN expression
+        assert!(text.contains("SDBL_IN_EXPR"), "Expected SDBL_IN_EXPR.\nTree: {}", text);
+
+        // Should have subquery inside IN
+        assert!(
+            text.contains("SDBL_SUBQUERY"),
+            "Expected subquery inside IN predicate.\nTree: {}",
+            text
+        );
+
+        // No parse errors expected
+        assert!(!parse.has_errors(), "Should parse without errors: {:?}", parse.errors());
+    }
+
+    #[test]
+    fn test_simple_tuple() {
+        // Simple tuple with multiple elements
+        // Note: using "Г" instead of "В" because "В" is IN keyword in Russian
+        let input = r#"ВЫБРАТЬ * ИЗ Т ГДЕ (А, Б, Г) = (1, 2, 3)"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should have 2 TUPLE_EXPR nodes (left and right of =)
+        let tuple_count = text.matches("SDBL_TUPLE_EXPR").count();
+        assert!(
+            tuple_count >= 2,
+            "Expected at least 2 SDBL_TUPLE_EXPR nodes. Got: {}\nTree: {}",
+            tuple_count,
+            text
+        );
+    }
+
+    #[test]
+    fn test_paren_expr_not_tuple() {
+        // Single expression in parentheses should NOT be a tuple
+        let input = r#"ВЫБРАТЬ (А + Б) КАК Сумма ИЗ Т"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should NOT have TUPLE_EXPR
+        assert!(
+            !text.contains("SDBL_TUPLE_EXPR"),
+            "Single parenthesized expression should not create SDBL_TUPLE_EXPR.\nTree: {}",
+            text
+        );
+
+        // Should have PAREN_EXPR
+        assert!(
+            text.contains("SDBL_PAREN_EXPR"),
+            "Expected SDBL_PAREN_EXPR for single parenthesized expression.\nTree: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_tuple_in_virtual_table_params() {
+        // Tuple inside virtual table parameters
+        let input = r#"ВЫБРАТЬ *
+ИЗ РегистрНакопления.Расчеты.Обороты(
+    &Начало,
+    &Конец,
+    ,
+    (Аналитика.Партнер, Аналитика.Контрагент) В
+        (ВЫБРАТЬ Т.Партнер, Т.Контрагент ИЗ ВТ_Данные КАК Т)
+) КАК Обороты"#;
+
+        let parse = parse_sdbl(input);
+        let text = format!("{:#?}", parse.syntax_node());
+
+        // Should have TUPLE_EXPR
+        assert!(
+            text.contains("SDBL_TUPLE_EXPR"),
+            "Expected SDBL_TUPLE_EXPR in virtual table params.\nTree: {}",
+            text
+        );
+
+        // Should have TABLE_REF (virtual table)
+        assert!(text.contains("SDBL_TABLE_REF"), "Expected SDBL_TABLE_REF.\nTree: {}", text);
+    }
 }

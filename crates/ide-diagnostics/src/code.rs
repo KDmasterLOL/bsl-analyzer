@@ -142,6 +142,7 @@ pub enum DiagnosticCode {
     LogicalOrInJoinQuerySection,
     LogicalOrInTheWhereSectionOfQuery,
     MultilineStringInQuery,
+    QueryNestedFieldsByDot,
 }
 
 impl DiagnosticCode {

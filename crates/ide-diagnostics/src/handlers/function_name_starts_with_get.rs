@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_function_name_starts_with_get() {
-        let code = include_str!("../test_data/FunctionNameStartsWithGetDiagnostic.bsl");
+        let code = include_str!("../../test_data/FunctionNameStartsWithGetDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
             .iter()

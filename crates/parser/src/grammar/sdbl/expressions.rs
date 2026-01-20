@@ -705,11 +705,21 @@ fn parameter_expr(p: &mut Parser) {
     m.complete(p, NodeKind::SdblParameter);
 }
 
-/// Parse parenthesized expression or subquery
+/// Parse parenthesized expression, tuple, or subquery
 ///
-/// Grammar: `LPAREN (expression | subquery) RPAREN`
+/// Grammar:
+/// ```text
+/// LPAREN (subquery | tupleExpr | expression) RPAREN
+/// tupleExpr: expression (COMMA expression)+
+/// ```
 ///
-/// Lookahead: if SELECT keyword after LPAREN, it's a subquery
+/// Lookahead:
+/// - SELECT keyword → subquery
+/// - After first expression, COMMA → tuple
+/// - Otherwise → parenthesized expression
+///
+/// Tuples are used for row-wise comparison in IN predicates:
+/// `(field1, field2, field3) IN (SELECT col1, col2, col3 FROM ...)`
 fn paren_or_subquery_expr(p: &mut Parser) {
     let m = p.start();
 
@@ -717,18 +727,40 @@ fn paren_or_subquery_expr(p: &mut Parser) {
     p.skip_trivia();
 
     // Lookahead: if SELECT keyword, it's a subquery
-    if p.at_keyword("SELECT") {
+    if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
         // Parse subquery
         super::select::subquery(p);
         p.skip_trivia();
         p.expect(TokenKind::RParen);
         m.complete(p, NodeKind::SdblSubqueryExpr);
     } else {
-        // Parse regular expression
+        // Parse first expression
         expression(p);
         p.skip_trivia();
-        p.expect(TokenKind::RParen);
-        m.complete(p, NodeKind::SdblParenExpr);
+
+        // Check for comma → tuple expression (expr1, expr2, ...)
+        if p.at(TokenKind::Comma) {
+            // It's a tuple - parse remaining expressions
+            while p.eat(TokenKind::Comma) {
+                p.check_iteration_limit();
+                p.skip_trivia();
+
+                // Handle trailing comma or empty element
+                if p.at(TokenKind::RParen) || !is_expression_start(p) {
+                    break;
+                }
+
+                expression(p);
+                p.skip_trivia();
+            }
+
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblTupleExpr);
+        } else {
+            // Single expression in parentheses
+            p.expect(TokenKind::RParen);
+            m.complete(p, NodeKind::SdblParenExpr);
+        }
     }
 }
 

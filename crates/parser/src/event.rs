@@ -126,6 +126,7 @@ pub enum NodeKind {
     SdblMultiplicativeExpr,
     SdblUnaryExpr,
     SdblParenExpr,
+    SdblTupleExpr,
     SdblSubqueryExpr,
     SdblColumnRef,
     SdblFunctionCall,
