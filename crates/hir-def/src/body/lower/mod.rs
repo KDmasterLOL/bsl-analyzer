@@ -119,6 +119,10 @@ pub(crate) struct LoweringCtx {
     /// Statements grouped by line number for OneStatementPerLine diagnostic.
     /// Key: 0-based line number, Value: list of statement TextRanges starting on that line.
     pub(crate) statements_by_line: FxHashMap<u32, Vec<TextRange>>,
+
+    /// Current method name (for ServerCallsInFormEvents diagnostic).
+    /// Set at the beginning of method lowering.
+    pub(crate) current_method_name: Option<String>,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -160,6 +164,7 @@ impl LoweringCtx {
             external_refs: Vec::new(),
             line_index: None, // Will be set in lower_method_with_externals_and_line_index
             statements_by_line: FxHashMap::default(),
+            current_method_name: None, // Will be set in lower_method_with_externals_and_line_index
         }
     }
 
@@ -632,45 +637,35 @@ pub fn lower_method_with_externals_and_line_index(
     // Check if method has "БезКонтекста" (NoContext) annotation
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
 
-    // Check for FunctionNameStartsWithGet diagnostic
-    if is_function {
-        // Get function name
-        if let Some(name_token) = method_node
-            .children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|tok| tok.kind() == SyntaxKind::IDENT)
-        {
-            let name_text = name_token.text();
-            // Check if name starts with "Получить" (case-insensitive)
-            if name_text.to_lowercase().starts_with("получить") {
-                ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
-                    name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
+    // Extract method name once for all checks
+    let name_token = method_node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::IDENT);
 
-            // Check for GlobalContextMethodCollision8312 diagnostic
-            if is_global_context_collision_8312(name_text) {
-                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
-                    method_name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
+    // Set current method name for ServerCallsInFormEvents diagnostic
+    if let Some(ref token) = name_token {
+        ctx.current_method_name = Some(token.text().to_string());
+    }
+
+    // Check for FunctionNameStartsWithGet and GlobalContextMethodCollision8312 diagnostics
+    if let Some(ref token) = name_token {
+        let name_text = token.text();
+
+        // Check FunctionNameStartsWithGet (functions only)
+        if is_function && name_text.to_lowercase().starts_with("получить") {
+            ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
+                name: name_text.to_string(),
+                range: token.text_range(),
+            });
         }
-    } else {
-        // For procedures, only check GlobalContextMethodCollision8312
-        if let Some(name_token) = method_node
-            .children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|tok| tok.kind() == SyntaxKind::IDENT)
-        {
-            let name_text = name_token.text();
-            if is_global_context_collision_8312(name_text) {
-                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
-                    method_name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
+
+        // Check GlobalContextMethodCollision8312 (both functions and procedures)
+        if is_global_context_collision_8312(name_text) {
+            ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
+                method_name: name_text.to_string(),
+                range: token.text_range(),
+            });
         }
     }
 

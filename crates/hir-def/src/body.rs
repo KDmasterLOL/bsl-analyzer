@@ -608,6 +608,19 @@ pub enum BodyDiagnostic {
     /// - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
     /// - CommonModule with ReturnValueReuse != DontUse are NOT checked
     RedundantAccessToObject { kind: RedundantAccessKind, range: TextRange },
+
+    /// Server method call in form event handler (ПриАктивизацииСтроки / НачалоВыбора).
+    ///
+    /// Emitted during lowering for unqualified calls inside methods with forbidden event suffixes.
+    /// Validation of the called method's annotations (AtServer, AtServerNoContext) happens in from_hir().
+    ///
+    /// Only FormModule should trigger this diagnostic (checked in from_hir).
+    ServerCallsInFormEvents {
+        /// Name of the called method.
+        callee: String,
+        /// Range of the call expression.
+        range: TextRange,
+    },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -790,6 +803,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::OSUsersMethod { range } => *range,
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
+            BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
         }
     }
 }

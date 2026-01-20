@@ -350,6 +350,20 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        // Check for ServerCallsInFormEvents candidate
+        // Emit for any unqualified call inside a method with forbidden event name suffix.
+        // The from_hir() handler will verify if the callee has server annotation.
+        use super::diagnostics::is_forbidden_form_event;
+
+        if let Some(ref method_name) = ctx.current_method_name {
+            if is_forbidden_form_event(method_name) {
+                ctx.diagnostics.push(BodyDiagnostic::ServerCallsInFormEvents {
+                    callee: name.clone(),
+                    range: node.text_range(),
+                });
+            }
+        }
+
         use super::diagnostics::{is_deprecated_managed_form, is_type_method};
 
         if is_type_method(&name) {

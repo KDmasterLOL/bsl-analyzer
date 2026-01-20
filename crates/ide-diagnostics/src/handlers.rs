@@ -130,6 +130,7 @@ pub mod scheduled_job_handler;
 pub mod self_assign;
 pub mod self_insertion;
 pub mod semicolon_presence;
+pub mod server_calls_in_form_events;
 pub mod space_at_start_comment;
 pub mod unreachable_code;
 pub mod unused_local_variable;

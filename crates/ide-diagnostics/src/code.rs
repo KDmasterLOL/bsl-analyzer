@@ -138,6 +138,7 @@ pub enum DiagnosticCode {
     RedundantAccessToObject,
     SameMetadataObjectAndChildNames,
     ScheduledJobHandler,
+    ServerCallsInFormEvents,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
