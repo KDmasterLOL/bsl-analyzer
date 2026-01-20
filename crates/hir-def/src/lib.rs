@@ -50,8 +50,8 @@ use base_db::SourceRootId;
 use vfs::FileId;
 
 pub use body::{
-    lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, ExternalRef, LowerResult,
-    ManagerType,
+    lower_method, lower_module_code, Body, BodyDiagnostic, BodySourceMap, DeprecatedKind8312,
+    ExternalRef, LowerResult, ManagerType, RedundantAccessKind,
 };
 pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
 

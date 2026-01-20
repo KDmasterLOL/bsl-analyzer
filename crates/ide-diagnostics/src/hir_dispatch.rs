@@ -176,5 +176,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::ProcedureReturnsValue { range } => {
             handlers::procedure_returns_value::from_hir(*range, ctx)
         }
+        BodyDiagnostic::RedundantAccessToObject { kind, range } => {
+            handlers::redundant_access_to_object::from_hir(kind, *range, ctx)
+        }
     }
 }

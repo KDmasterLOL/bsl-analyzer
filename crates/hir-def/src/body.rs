@@ -584,6 +584,21 @@ pub enum BodyDiagnostic {
     /// Return statement with value inside a procedure.
     /// Only functions can return values, procedures must use `Return;` without value.
     ProcedureReturnsValue { range: TextRange },
+
+    /// Redundant access to object via ЭтотОбъект/ThisObject or module name.
+    ///
+    /// Emitted during lowering as candidates - validation against module type/metadata
+    /// happens in from_hir().
+    ///
+    /// Examples:
+    /// - ObjectModule: `ЭтотОбъект.Контрагент` → redundant, use `Контрагент`
+    /// - CommonModule: `МойМодуль.МояФункция()` → redundant, use `МояФункция()`
+    /// - ManagerModule: `Справочники.Справочник1.Метод()` → redundant, use `Метод()`
+    ///
+    /// Exclusions:
+    /// - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
+    /// - CommonModule with ReturnValueReuse != DontUse are NOT checked
+    RedundantAccessToObject { kind: RedundantAccessKind, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -599,6 +614,30 @@ pub enum DeprecatedKind8312 {
     EnumName,
     /// Deprecated enum value
     EnumValue,
+}
+
+/// Kind of redundant access pattern.
+///
+/// Used by RedundantAccessToObject diagnostic to distinguish between different patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedundantAccessKind {
+    /// ЭтотОбъект.Field or ThisObject.Field (in ObjectModule/FormModule/RecordSetModule)
+    ThisObject {
+        /// The prefix used (ЭтотОбъект or ThisObject, preserving original case)
+        prefix: String,
+    },
+    /// Module.Method() where Module is the current common module
+    TwoLevel {
+        /// Module name used in the call
+        module: String,
+    },
+    /// MdoType.MdoName.Method() where this is the current manager module
+    ThreeLevel {
+        /// MDO type keyword (Справочники, Документы, etc.)
+        mdo_type: String,
+        /// MDO object name
+        mdo_name: String,
+    },
 }
 
 /// External reference collected during body lowering.
@@ -739,6 +778,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::OneStatementPerLine { range } => *range,
             BodyDiagnostic::OSUsersMethod { range } => *range,
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
+            BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
         }
     }
 }

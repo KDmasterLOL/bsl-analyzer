@@ -10,7 +10,7 @@
 
 Успешно реализован полнофункциональный LSP (Language Server Protocol) сервер для BSL (1C:Enterprise) на базе архитектуры rust-analyzer. MVP включает все критически важные функции для продуктивной работы в редакторе кода:
 
-- ✅ **Диагностики** - 101 правило анализа кода
+- ✅ **Диагностики** - 118 правил анализа кода
 - ✅ **Навигация** - Go to Definition, Find References
 - ✅ **Семантическая подсветка** - расширенное выделение синтаксиса на основе семантического анализа
 - ✅ **VSCode Extension** - готовое расширение для тестирования
@@ -81,7 +81,7 @@
 - Поддержка DiagnosticTags (Unnecessary, Deprecated)
 
 **Диагностические правила:**
-- 101 правило из ide-diagnostics
+- 118 правил из ide-diagnostics
 - Совместимость с bsl-language-server кодами
 - Configurable severity через .bsl-analyzer.json
 
@@ -430,7 +430,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | Критерий | Статус | Комментарий |
 |----------|--------|-------------|
 | VSCode подключается к серверу | ✅ | Extension готов |
-| Диагностики в Problems panel | ✅ | 101 правило |
+| Диагностики в Problems panel | ✅ | 118 правил |
 | Goto Definition (F12) | ✅ | Работает |
 | Find References (Shift+F12) | ✅ | Работает |
 | Semantic highlighting | ✅ | Реализовано |

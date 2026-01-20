@@ -4,7 +4,7 @@
 
 use syntax::{SyntaxKind, SyntaxNode};
 
-use crate::body::{Body, BodyDiagnostic, ExternalRef, ManagerType};
+use crate::body::{Body, BodyDiagnostic, ExternalRef, ManagerType, RedundantAccessKind};
 use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
 use crate::{Name, QualifiedName};
 
@@ -921,6 +921,19 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // NOTE: External app starting methods are now detected in lower_call_expr()
     // for both global calls (IDENT) and method calls (FIELD_EXPR)
 
+    // === Emit candidates for RedundantAccessToObject ===
+    // ThisObject pattern: ЭтотОбъект.Field or ThisObject.Field
+    // This check applies to both field access and method calls
+    if let Some(ref object_name) = object_name_opt {
+        let lower = object_name.to_lowercase();
+        if lower == "этотобъект" || lower == "thisobject" {
+            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+                kind: RedundantAccessKind::ThisObject { prefix: object_name.clone() },
+                range: node.text_range(),
+            });
+        }
+    }
+
     if arg_list_node.is_some() {
         let method = field_name.to_string();
         tracing::warn!(method = %method, "lower_field_expr: has arg_list, analyzing call");
@@ -948,6 +961,28 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                             range: node.text_range(),
                         });
                     }
+                }
+            }
+        }
+
+        // === Emit candidates for RedundantAccessToObject (TwoLevel/ThreeLevel) ===
+        // These are method calls like Module.Method() or Справочники.Справочник1.Method()
+        if let Some(ref info) = call_info {
+            match info {
+                QualifiedCallInfo::TwoLevel { module } => {
+                    ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+                        kind: RedundantAccessKind::TwoLevel { module: module.clone() },
+                        range: node.text_range(),
+                    });
+                }
+                QualifiedCallInfo::ThreeLevel { mdo_type, mdo_name } => {
+                    ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+                        kind: RedundantAccessKind::ThreeLevel {
+                            mdo_type: mdo_type.clone(),
+                            mdo_name: mdo_name.clone(),
+                        },
+                        range: node.text_range(),
+                    });
                 }
             }
         }

@@ -110,7 +110,7 @@ The project uses a layered architecture inspired by rust-analyzer:
 ```
 bsl-analyzer (LSP Server)
     └── ide (High-level API)
-        ├── ide-diagnostics (101 diagnostics implemented)
+        ├── ide-diagnostics (118 diagnostics implemented)
         ├── ide-assists (Code actions)
         └── ide-db (Database + Salsa)
             └── hir / hir-def / hir-ty (Semantic analysis)
@@ -152,7 +152,7 @@ bsl-analyzer (LSP Server)
 - Each diagnostic is a separate module in `ide-diagnostics/src/handlers/`
 - Uniform interface via `DiagnosticContext`
 - Full compatibility with bsl-language-server codes
-- **101 diagnostics implemented** (of 181 total planned)
+- **118 diagnostics implemented** (of 181 total planned)
 
 **HIR-based Diagnostics (rust-analyzer pattern):**
 
@@ -191,7 +191,7 @@ bsl-analyzer (LSP Server)
 - **sdbl-hir** - SDBL query language HIR + type inference
 - **ide** - High-level API coordinating all subsystems
 - **ide-db** - RootDatabase with Salsa integration
-- **ide-diagnostics** - 101 diagnostics implemented (of 181 planned)
+- **ide-diagnostics** - 118 diagnostics implemented (of 181 planned)
 - **ide-assists** - Code actions and refactorings
 - **base-db** - Source database with Salsa
 - **vfs** / **vfs-notify** - Virtual file system + file watching
@@ -391,7 +391,7 @@ let path = "~/src/lsp/bsl-parser/...";  // ❌
 - ✅ SDBL HIR (`sdbl-hir` crate with type inference)
 - ✅ Metadata Infrastructure (`bsl-metadata`, `bsl-platform` crates)
 - ✅ Dataflow Analysis (`cfg`, `dataflow` crates)
-- ✅ 101 diagnostics implemented
+- ✅ 118 diagnostics implemented
 - ✅ Tracing infrastructure (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
 - ✅ CI/CD with GitLab
 

@@ -133,6 +133,7 @@ pub enum DiagnosticCode {
     OrdinaryAppSupport,
     PrivilegedModuleMethodCall,
     ProtectedModule,
+    RedundantAccessToObject,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

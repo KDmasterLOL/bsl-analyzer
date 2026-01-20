@@ -19,7 +19,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
 │ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│ 101 diagnostics│   │ Code actions  │    │ RootDatabase  │
+│ 118 diagnostics│   │ Code actions  │    │ RootDatabase  │
 └───────────────┘    └───────────────┘    └───────────────┘
                               │
                               ▼
@@ -56,7 +56,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 |------|--------|------------|
 | **Анализ** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
 | **Семантика** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 101 диагностик, code actions, LSP API |
+| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 118 диагностик, code actions, LSP API |
 | **SDBL** | sdbl-hir | Query language HIR + type inference |
 | **Dataflow** | cfg, cfg-types, dataflow | CFG, reaching definitions, liveness |
 | **Metadata** | bsl-metadata, bsl-platform | 1C configuration, platform types |
