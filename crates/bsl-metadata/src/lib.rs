@@ -102,6 +102,7 @@ pub mod event_subscription;
 pub mod loader;
 pub mod metadata_object;
 pub mod register;
+pub mod scheduled_job;
 pub mod tabular_section;
 pub mod traits;
 pub mod xml_parser;
@@ -119,5 +120,6 @@ pub use register::{
     AccumulationRegisterType, Register, RegisterAttribute, RegisterBuilder, RegisterPeriodicity,
     RegisterResource,
 };
+pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};

@@ -136,6 +136,7 @@ pub enum DiagnosticCode {
     ProtectedModule,
     RedundantAccessToObject,
     SameMetadataObjectAndChildNames,
+    ScheduledJobHandler,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

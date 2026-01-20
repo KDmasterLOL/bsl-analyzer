@@ -126,6 +126,7 @@ pub mod ref_overuse;
 pub mod reserved_parameter_names;
 pub mod rewrite_method_parameter;
 pub mod same_metadata_object_and_child_names;
+pub mod scheduled_job_handler;
 pub mod self_assign;
 pub mod space_at_start_comment;
 pub mod unreachable_code;

@@ -10,6 +10,7 @@ mod enum_parser;
 mod event_subscription;
 mod helpers;
 mod register;
+mod scheduled_job;
 mod serde_types;
 mod standard_attributes;
 mod type_parser;
@@ -28,6 +29,7 @@ pub use register::{
     parse_accounting_register_xml, parse_accumulation_register_xml, parse_calculation_register_xml,
     parse_information_register_xml,
 };
+pub use scheduled_job::parse_scheduled_job_xml;
 
 #[cfg(test)]
 mod tests {

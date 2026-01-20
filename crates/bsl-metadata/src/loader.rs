@@ -80,6 +80,9 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load EventSubscriptions
     load_event_subscriptions(&path.join("EventSubscriptions"), &mut config)?;
 
+    // Load ScheduledJobs
+    load_scheduled_jobs(&path.join("ScheduledJobs"), &mut config)?;
+
     // Load DefinedTypes
     load_defined_types(&path.join("DefinedTypes"), &mut config)?;
 
@@ -115,6 +118,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         metadata_objects = config.metadata_objects().len(),
         registers = config.registers().len(),
         event_subscriptions = config.event_subscriptions().len(),
+        scheduled_jobs = config.scheduled_jobs().len(),
         defined_types = config.defined_types().len(),
         "configuration loaded"
     );
@@ -635,6 +639,43 @@ fn load_event_subscriptions(dir: &Path, config: &mut Configuration) -> Result<()
             );
 
             config.add_event_subscription(subscription);
+        }
+    }
+
+    Ok(())
+}
+
+/// Load ScheduledJobs from directory
+///
+/// **CRITICAL:** ScheduledJobs have NO code files - only XML!
+///
+/// Designer format structure:
+/// - XML: `ScheduledJobs/<Name>.xml` (NO folders, NO code files)
+fn load_scheduled_jobs(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_scheduled_jobs", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only process .xml files (ScheduledJobs have no code)
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
+            let xml = fs::read_to_string(&path)?;
+            let job = xml_parser::parse_scheduled_job_xml(&xml)?;
+
+            tracing::debug!(
+                job_name = %job.name(),
+                method_name = %job.method_name(),
+                predefined = job.is_predefined(),
+                "loaded scheduled job"
+            );
+
+            config.add_scheduled_job(job);
         }
     }
 

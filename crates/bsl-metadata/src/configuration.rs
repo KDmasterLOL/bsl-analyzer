@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::metadata_object::{MdoType, MetadataObject};
 use crate::register::Register;
+use crate::scheduled_job::ScheduledJob;
 use crate::traits::{MdObject, Module};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,6 +48,10 @@ pub struct Configuration {
     #[serde(rename = "definedTypes", default)]
     defined_types: Vec<DefinedType>,
 
+    /// Scheduled jobs (РегламентныеЗадания)
+    #[serde(rename = "scheduledJobs", default)]
+    scheduled_jobs: Vec<ScheduledJob>,
+
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
@@ -67,6 +72,10 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_defined_type: HashMap<String, usize>,
 
+    /// Cache: Name -> ScheduledJob index mapping (not serialized)
+    #[serde(skip)]
+    name_to_scheduled_job: HashMap<String, usize>,
+
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
     use_managed_form_in_ordinary_application: bool,
@@ -86,6 +95,7 @@ impl PartialEq for Configuration {
             && self.registers == other.registers
             && self.event_subscriptions == other.event_subscriptions
             && self.defined_types == other.defined_types
+            && self.scheduled_jobs == other.scheduled_jobs
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -104,11 +114,13 @@ impl Configuration {
             registers: Vec::new(),
             event_subscriptions: Vec::new(),
             defined_types: Vec::new(),
+            scheduled_jobs: Vec::new(),
             uri_to_module: HashMap::new(),
             name_to_common_module: HashMap::new(),
             name_to_register: HashMap::new(),
             name_to_event_subscription: HashMap::new(),
             name_to_defined_type: HashMap::new(),
+            name_to_scheduled_job: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
         }
@@ -137,6 +149,7 @@ impl Configuration {
         self.name_to_register.clear();
         self.name_to_event_subscription.clear();
         self.name_to_defined_type.clear();
+        self.name_to_scheduled_job.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -155,6 +168,10 @@ impl Configuration {
 
         for (idx, defined_type) in self.defined_types.iter().enumerate() {
             self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
+        }
+
+        for (idx, scheduled_job) in self.scheduled_jobs.iter().enumerate() {
+            self.name_to_scheduled_job.insert(scheduled_job.name().to_lowercase(), idx);
         }
     }
 
@@ -357,6 +374,28 @@ impl Configuration {
         let idx = self.defined_types.len();
         self.name_to_defined_type.insert(defined_type.name().to_lowercase(), idx);
         self.defined_types.push(defined_type);
+    }
+
+    /// Get all scheduled jobs
+    ///
+    /// Java equivalent: `getScheduledJobs()`
+    pub fn scheduled_jobs(&self) -> &[ScheduledJob] {
+        &self.scheduled_jobs
+    }
+
+    /// Find scheduled job by name (case-insensitive)
+    ///
+    /// Java equivalent: `findScheduledJob(String)`
+    pub fn find_scheduled_job(&self, name: &str) -> Option<&ScheduledJob> {
+        let name_lower = name.to_lowercase();
+        self.name_to_scheduled_job.get(&name_lower).and_then(|&idx| self.scheduled_jobs.get(idx))
+    }
+
+    /// Add scheduled job
+    pub(crate) fn add_scheduled_job(&mut self, job: ScheduledJob) {
+        let idx = self.scheduled_jobs.len();
+        self.name_to_scheduled_job.insert(job.name().to_lowercase(), idx);
+        self.scheduled_jobs.push(job);
     }
 }
 

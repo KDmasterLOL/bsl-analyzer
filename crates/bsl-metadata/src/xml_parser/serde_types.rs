@@ -230,6 +230,43 @@ pub(crate) struct EventSubscriptionRoot {
     pub event_subscription: EventSubscriptionXml,
 }
 
+// ============================================================================
+// ScheduledJob types
+// ============================================================================
+
+/// Root XML structure for ScheduledJob
+#[derive(Debug, Deserialize)]
+pub(crate) struct ScheduledJobRoot {
+    #[serde(rename = "ScheduledJob")]
+    pub scheduled_job: ScheduledJobXml,
+}
+
+/// ScheduledJob XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct ScheduledJobXml {
+    #[serde(rename = "@uuid")]
+    pub uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: ScheduledJobProperties,
+}
+
+/// ScheduledJob Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct ScheduledJobProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "MethodName", default)]
+    pub method_name: String,
+
+    #[serde(rename = "Predefined", default)]
+    pub predefined: BoolValue,
+
+    #[serde(rename = "Use", default)]
+    pub use_flag: BoolValue,
+}
+
 /// EventSubscription XML structure
 #[derive(Debug, Deserialize)]
 pub(crate) struct EventSubscriptionXml {
