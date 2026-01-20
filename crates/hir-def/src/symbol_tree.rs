@@ -485,8 +485,18 @@ mod tests {
             name: Name::new("СПараметрами"),
             is_export: false,
             params: Box::new([
-                Param { name: Name::new("Параметр1"), is_val: true, has_default: false },
-                Param { name: Name::new("Параметр2"), is_val: false, has_default: true },
+                Param {
+                    name: Name::new("Параметр1"),
+                    is_val: true,
+                    has_default: false,
+                    name_range: make_text_range(0, 10),
+                },
+                Param {
+                    name: Name::new("Параметр2"),
+                    is_val: false,
+                    has_default: true,
+                    name_range: make_text_range(12, 22),
+                },
             ]),
             annotations: Box::new([]),
             source_range: make_text_range(0, 10),

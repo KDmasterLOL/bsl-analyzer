@@ -185,6 +185,8 @@ pub struct Param {
     pub is_val: bool,
     /// Does this parameter have a default value?
     pub has_default: bool,
+    /// Source location of the parameter name (for diagnostics).
+    pub name_range: TextRange,
 }
 
 /// Annotation on a procedure or function.
@@ -276,8 +278,18 @@ mod tests {
             name: Name::new("ТестоваяФункция"),
             is_export: false,
             params: Box::new([
-                Param { name: Name::new("Параметр1"), is_val: true, has_default: false },
-                Param { name: Name::new("Параметр2"), is_val: false, has_default: true },
+                Param {
+                    name: Name::new("Параметр1"),
+                    is_val: true,
+                    has_default: false,
+                    name_range: TextRange::new(0.into(), 10.into()),
+                },
+                Param {
+                    name: Name::new("Параметр2"),
+                    is_val: false,
+                    has_default: true,
+                    name_range: TextRange::new(12.into(), 22.into()),
+                },
             ]),
             annotations: Box::new([]),
             source_range: TextRange::new(0.into(), 10.into()),

@@ -154,6 +154,15 @@ impl DiagnosticsConfig {
             .map(|s| s.to_string())
     }
 
+    /// Get a string array parameter for a diagnostic.
+    pub fn get_string_array(&self, code: DiagnosticCode, param: &str) -> Option<Vec<String>> {
+        self.parameters
+            .get(&code)
+            .and_then(|v| v.get(param))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+    }
+
     /// Get a float parameter for a diagnostic.
     pub fn get_float(&self, code: DiagnosticCode, param: &str) -> Option<f64> {
         self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_f64())

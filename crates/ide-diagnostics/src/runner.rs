@@ -178,6 +178,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     diagnostics.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
     diagnostics.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
     diagnostics.extend(run_diagnostic(
+        "ReservedParameterNames",
+        ctx,
+        handlers::reserved_parameter_names::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "NumberOfValuesInStructureConstructor",
         ctx,
         handlers::number_of_values_in_structure_constructor::check,

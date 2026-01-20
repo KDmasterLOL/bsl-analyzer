@@ -158,6 +158,8 @@ impl Ctx {
 
     /// Lower a parameter list.
     fn lower_params(&mut self, param_list: Option<ast::ParamList>) -> Box<[Param]> {
+        use syntax::ast::AstNode;
+
         let Some(param_list) = param_list else {
             return Box::new([]);
         };
@@ -165,12 +167,18 @@ impl Ctx {
         param_list
             .params()
             .map(|p| {
-                let name = p.name().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+                let name_token = p.name();
+                let name =
+                    name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+                let name_range = name_token
+                    .as_ref()
+                    .map(|t| t.text_range())
+                    .unwrap_or_else(|| p.syntax().text_range());
 
                 let is_val = p.val_keyword().is_some();
                 let has_default = p.default_value();
 
-                Param { name, is_val, has_default }
+                Param { name, is_val, has_default, name_range }
             })
             .collect()
     }
