@@ -315,6 +315,9 @@ impl LoweringContext<'_> {
         // 11. Check SELECT fields for missing AS keyword (after complete HIR built)
         self.check_alias_without_as_keyword(&hir, is_union);
 
+        // 12. Check for nested field dereference by dot (N+1 query problem)
+        self.check_nested_fields_by_dot(&hir);
+
         // Merge diagnostics collected during post-lowering checks
         hir.diagnostics.extend(std::mem::take(&mut self.diagnostics));
 

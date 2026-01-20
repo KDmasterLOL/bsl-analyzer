@@ -360,14 +360,9 @@ impl<'a> LoweringContext<'a> {
             }
         };
 
-        // QueryNestedFieldsByDot: check for nested field dereference after CAST
-        // ВЫРАЗИТЬ(...).Field1.Field2 - if 2+ fields, it's nested access
-        if matches!(function, FunctionKind::Cast) && member_access.len() > 1 {
-            self.diagnostics
-                .push(SdblDiagnostic::QueryNestedFieldsByDot { range: node.text_range() });
-        }
-
         // Infer return type
+        // Note: QueryNestedFieldsByDot for CAST with 2+ member_access is checked
+        // in post-lowering phase (check_nested_fields_by_dot)
         let ty = self.infer_function_return_type(&function, &args);
 
         ExprHir::FunctionCall { function, args, member_access, ty, range: node.text_range() }

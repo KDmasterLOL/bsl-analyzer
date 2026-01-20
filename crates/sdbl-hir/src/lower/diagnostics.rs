@@ -404,6 +404,186 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
+    /// Check for nested field dereference by dot (N+1 query problem).
+    ///
+    /// Called after HIR is built, uses only HIR data (no AST access).
+    ///
+    /// Detects:
+    /// - ColumnRef with 3+ parts (e.g., `T.Ссылка.Организация`)
+    /// - ColumnRef with 2+ parts inside virtual table parameters
+    /// - CAST function with 2+ member_access fields
+    ///
+    /// Excludes MDO type paths (e.g., `Справочник.Валюты.Код`).
+    pub(super) fn check_nested_fields_by_dot(&mut self, hir: &SdblHir) {
+        self.collect_nested_field_diagnostics(hir);
+
+        // Recursively check UNION subqueries
+        for union in &hir.unions {
+            self.check_nested_fields_by_dot(&union.query);
+        }
+    }
+
+    /// Collect nested field dereference diagnostics from HIR.
+    fn collect_nested_field_diagnostics(&mut self, hir: &SdblHir) {
+        // Check SELECT fields
+        for field in &hir.select.fields {
+            self.check_expr_for_nested_fields(&field.expr, false);
+        }
+
+        // Check FROM tables (including virtual table params)
+        for table in &hir.from {
+            self.check_table_ref_for_nested_fields(table);
+        }
+
+        // Check JOINs
+        for join in &hir.joins {
+            self.check_table_ref_for_nested_fields(&join.table);
+            if let Some(ref cond) = join.condition {
+                self.check_expr_for_nested_fields(cond, false);
+            }
+        }
+
+        // Check WHERE
+        if let Some(ref where_expr) = hir.where_clause {
+            self.check_expr_for_nested_fields(where_expr, false);
+        }
+
+        // Check GROUP BY
+        if let Some(ref group_by) = hir.group_by {
+            for expr in &group_by.exprs {
+                self.check_expr_for_nested_fields(expr, false);
+            }
+        }
+
+        // Check HAVING
+        if let Some(ref having) = hir.having {
+            self.check_expr_for_nested_fields(having, false);
+        }
+
+        // Check ORDER BY
+        if let Some(ref order_by) = hir.order_by {
+            for item in &order_by.items {
+                self.check_expr_for_nested_fields(&item.expr, false);
+            }
+        }
+    }
+
+    /// Check table reference for nested fields (including virtual table params).
+    fn check_table_ref_for_nested_fields(&mut self, table: &TableRef) {
+        // Check virtual table parameters - here even 2-part paths are dereferences
+        if table.is_virtual_table {
+            for param in &table.virtual_table_params {
+                self.check_expr_for_nested_fields(param, true);
+            }
+        }
+
+        // Check subqueries
+        for subquery in &table.subquery {
+            self.collect_nested_field_diagnostics(subquery);
+        }
+    }
+
+    /// Check expression for nested field dereferences.
+    ///
+    /// `in_virtual_table_params`: if true, even 2-part column refs are considered dereferences.
+    fn check_expr_for_nested_fields(&mut self, expr: &ExprHir, in_virtual_table_params: bool) {
+        match expr {
+            ExprHir::ColumnRef { parts, range, .. } => {
+                // Check for nested field dereference
+                let is_nested = if in_virtual_table_params {
+                    // Inside virtual table params: 2+ parts (if not MDO type)
+                    parts.len() >= 2 && !crate::is_mdo_type(parts[0].as_str())
+                } else {
+                    // Normal context: 3+ parts (if not MDO type)
+                    parts.len() >= 3 && !crate::is_mdo_type(parts[0].as_str())
+                };
+
+                if is_nested {
+                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot { range: *range });
+                }
+            }
+
+            ExprHir::FunctionCall { function, args, member_access, range, .. } => {
+                // Check args recursively
+                for arg in args {
+                    self.check_expr_for_nested_fields(arg, in_virtual_table_params);
+                }
+
+                // CAST with 2+ member access fields is a dereference
+                if matches!(function, crate::hir::FunctionKind::Cast) && member_access.len() > 1 {
+                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot { range: *range });
+                }
+            }
+
+            ExprHir::BinaryOp { lhs, rhs, .. } => {
+                self.check_expr_for_nested_fields(lhs, in_virtual_table_params);
+                self.check_expr_for_nested_fields(rhs, in_virtual_table_params);
+            }
+
+            ExprHir::UnaryOp { expr: inner, .. } => {
+                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
+            }
+
+            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+                if let Some(op) = operand {
+                    self.check_expr_for_nested_fields(op, in_virtual_table_params);
+                }
+                for clause in when_clauses {
+                    self.check_expr_for_nested_fields(&clause.condition, in_virtual_table_params);
+                    self.check_expr_for_nested_fields(&clause.result, in_virtual_table_params);
+                }
+                if let Some(else_e) = else_expr {
+                    self.check_expr_for_nested_fields(else_e, in_virtual_table_params);
+                }
+            }
+
+            ExprHir::Subquery { query, .. } => {
+                self.collect_nested_field_diagnostics(query);
+            }
+
+            ExprHir::In { expr: inner, values, .. } => {
+                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
+                match values {
+                    crate::hir::InValues::List(items) => {
+                        for item in items {
+                            self.check_expr_for_nested_fields(item, in_virtual_table_params);
+                        }
+                    }
+                    crate::hir::InValues::Subquery(sq) => {
+                        self.collect_nested_field_diagnostics(sq);
+                    }
+                }
+            }
+
+            ExprHir::Between { expr: inner, low, high, .. } => {
+                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
+                self.check_expr_for_nested_fields(low, in_virtual_table_params);
+                self.check_expr_for_nested_fields(high, in_virtual_table_params);
+            }
+
+            ExprHir::Like { expr: inner, pattern, escape, .. } => {
+                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
+                self.check_expr_for_nested_fields(pattern, in_virtual_table_params);
+                if let Some(esc) = escape {
+                    self.check_expr_for_nested_fields(esc, in_virtual_table_params);
+                }
+            }
+
+            ExprHir::IsNull { expr: inner, .. } => {
+                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
+            }
+
+            ExprHir::Tuple { elements, .. } => {
+                for elem in elements {
+                    self.check_expr_for_nested_fields(elem, in_virtual_table_params);
+                }
+            }
+
+            // Leaf nodes - no recursion needed
+            ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {}
+        }
+    }
+
     /// Check SELECT fields for missing AS keyword.
     ///
     /// Called after HIR is built, uses only HIR data (no AST access).
