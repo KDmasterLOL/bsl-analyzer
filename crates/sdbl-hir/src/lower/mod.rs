@@ -312,7 +312,10 @@ impl LoweringContext<'_> {
         // 10. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);
 
-        // Merge diagnostics collected during JOIN checking
+        // 11. Check SELECT fields for missing AS keyword (after complete HIR built)
+        self.check_alias_without_as_keyword(&hir, is_union);
+
+        // Merge diagnostics collected during post-lowering checks
         hir.diagnostics.extend(std::mem::take(&mut self.diagnostics));
 
         hir

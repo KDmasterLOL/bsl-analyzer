@@ -1,6 +1,5 @@
 //! SELECT field list lowering and limitations (DISTINCT, TOP).
 
-use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{ExprHir, FieldHir, Name, SelectHir};
 use crate::types::SdblType;
 use syntax::ast::AstNode;
@@ -102,23 +101,31 @@ impl<'a> LoweringContext<'a> {
 
     /// Lower a selected field.
     ///
+    /// Collects all information needed for diagnostics into HIR fields.
+    /// Diagnostics are emitted in a separate post-lowering phase.
+    ///
     /// # Arguments
     /// * `field` - The field AST node
-    /// * `is_union` - Whether this is a UNION query (skips alias diagnostics)
+    /// * `_is_union` - Whether this is a UNION query (unused, kept for API stability)
     pub(super) fn lower_selected_field(
         &mut self,
         field: &syntax::ast::SdblSelectedField,
-        is_union: bool,
+        _is_union: bool,
     ) -> FieldHir {
+        let field_range = field.syntax().text_range();
+
         // Check for asterisk
         if field.is_asterisk() {
             return FieldHir {
-                expr: ExprHir::Missing { range: field.syntax().text_range() },
+                expr: ExprHir::Missing { range: field_range },
                 alias: None,
+                has_as_keyword: false,
+                has_parse_error: false,
                 raw_name: None,
                 ty: SdblType::Unknown,
                 is_asterisk: true,
-                range: field.syntax().text_range(),
+                diagnostic_range: field_range,
+                range: field_range,
             };
         }
 
@@ -138,12 +145,18 @@ impl<'a> LoweringContext<'a> {
             );
             lowered
         } else {
-            ExprHir::Missing { range: field.syntax().text_range() }
+            ExprHir::Missing { range: field_range }
         };
 
-        // Get alias (name() returns Option<String>)
-        let alias = field
-            .alias()
+        // Get alias node for processing
+        let alias_node = field.alias();
+
+        // Compute has_as_keyword
+        let has_as_keyword = alias_node.as_ref().map(|a| a.has_as_keyword()).unwrap_or(false);
+
+        // Get alias name and record tokens
+        let alias = alias_node
+            .as_ref()
             .and_then(|a| {
                 // Record AS/КАК keyword in source map for semantic highlighting
                 if a.has_as_keyword() {
@@ -155,7 +168,7 @@ impl<'a> LoweringContext<'a> {
                     );
                 }
 
-                // NEW: Record field alias identifier
+                // Record field alias identifier
                 if let Some(ident_token) = a.identifier() {
                     self.source_map.add_token(
                         crate::source_map::TokenInfo::new(
@@ -190,84 +203,69 @@ impl<'a> LoweringContext<'a> {
             last_ident.map(|s| Name::from(s.as_str()))
         });
 
-        // Check for AliasWithoutAsKeyword diagnostic
-        // OPTIMIZATION: is_union flag is passed from above (avoids O(fields × depth) ancestors())
-        // OPTIMIZATION: Check alias first - if AS keyword present, skip expensive has_error check
-        if !is_union {
-            // Quick check: if alias with AS keyword exists, no diagnostic needed
-            let alias_node = field.alias();
-            let needs_diagnostic = match &alias_node {
-                Some(a) => !a.has_as_keyword(), // Has alias but missing AS keyword
-                None => true,                   // No alias at all
-            };
+        // Compute has_parse_error (once, for later diagnostic check)
+        let has_parse_error = field
+            .syntax()
+            .descendants_with_tokens()
+            .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
 
-            if needs_diagnostic {
-                // Only check for errors when diagnostic might be needed
-                let has_error = field
-                    .syntax()
-                    .descendants_with_tokens()
-                    .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
-
-                if !has_error {
-                    // Get trimmed range (expression only, without trailing trivia)
-                    let range = if let Some(expr) = field.expression() {
-                        // Trim trailing whitespace/comments/newlines from expression
-                        let last_token = expr.last_token();
-                        let last_non_trivia = last_token.and_then(|t| {
-                            let mut token = t;
-                            while matches!(
-                                token.kind(),
-                                syntax::SyntaxKind::WHITESPACE
-                                    | syntax::SyntaxKind::COMMENT
-                                    | syntax::SyntaxKind::NEWLINE
-                            ) {
-                                token = token.prev_token()?;
-                            }
-                            Some(token)
-                        });
-
-                        if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
-                            syntax::TextRange::new(
-                                first.text_range().start(),
-                                last.text_range().end(),
-                            )
-                        } else {
-                            expr.text_range()
-                        }
-                    } else {
-                        field.syntax().text_range()
-                    };
-
-                    if let Some(alias) = alias_node {
-                        // Has alias but missing AS keyword - include alias in range
-                        let range_with_alias = if let Some(alias_ident) = alias.identifier() {
-                            syntax::TextRange::new(range.start(), alias_ident.text_range().end())
-                        } else {
-                            range
-                        };
-
-                        self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
-                            field_name: alias.name(),
-                            range: range_with_alias,
-                        });
-                    } else {
-                        // No alias at all - use expression range
-                        self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
-                            field_name: None,
-                            range,
-                        });
-                    }
-                }
-            }
-        }
+        // Compute diagnostic_range (trimmed expression + optional alias)
+        let diagnostic_range = self.compute_diagnostic_range(field, alias_node.as_ref());
 
         FieldHir {
             expr,
             alias,
+            has_as_keyword,
+            has_parse_error,
             raw_name,
             ty,
             is_asterisk: false,
-            range: field.syntax().text_range(),
+            diagnostic_range,
+            range: field_range,
         }
+    }
+
+    /// Compute trimmed range for diagnostic highlighting.
+    ///
+    /// Returns:
+    /// - For alias without AS: expression start to alias identifier end
+    /// - For no alias: expression range trimmed of trailing trivia
+    fn compute_diagnostic_range(
+        &self,
+        field: &syntax::ast::SdblSelectedField,
+        alias_node: Option<&syntax::ast::SdblAlias>,
+    ) -> syntax::TextRange {
+        // Get expression range without trailing trivia
+        let expr_range = if let Some(expr) = field.expression() {
+            let last_non_trivia = expr.last_token().and_then(|t| {
+                let mut token = t;
+                while matches!(
+                    token.kind(),
+                    syntax::SyntaxKind::WHITESPACE
+                        | syntax::SyntaxKind::COMMENT
+                        | syntax::SyntaxKind::NEWLINE
+                ) {
+                    token = token.prev_token()?;
+                }
+                Some(token)
+            });
+
+            if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
+                syntax::TextRange::new(first.text_range().start(), last.text_range().end())
+            } else {
+                expr.text_range()
+            }
+        } else {
+            field.syntax().text_range()
+        };
+
+        // Extend to alias identifier if present (for "Field Alias" without AS)
+        if let Some(alias) = alias_node {
+            if let Some(alias_ident) = alias.identifier() {
+                return syntax::TextRange::new(expr_range.start(), alias_ident.text_range().end());
+            }
+        }
+
+        expr_range
     }
 }

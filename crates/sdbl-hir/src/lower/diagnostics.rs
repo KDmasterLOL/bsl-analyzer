@@ -1,4 +1,7 @@
-//! JOIN diagnostics for unprotected fields.
+//! Post-lowering diagnostics.
+//!
+//! Diagnostics that are emitted after HIR is fully built,
+//! using only HIR data (no AST access).
 
 use super::context::LoweringContext;
 use crate::diagnostics::SdblDiagnostic;
@@ -398,6 +401,52 @@ impl<'a> LoweringContext<'a> {
                 args.iter().any(|arg| self.expr_references_table(arg, table_name))
             }
             _ => false,
+        }
+    }
+
+    /// Check SELECT fields for missing AS keyword.
+    ///
+    /// Called after HIR is built, uses only HIR data (no AST access).
+    ///
+    /// Rules:
+    /// - Skip asterisk fields (*, Table.*)
+    /// - Skip fields with parse errors
+    /// - Emit diagnostic if:
+    ///   - No alias at all
+    ///   - Has alias but without AS keyword
+    ///
+    /// # Arguments
+    /// * `hir` - The lowered HIR (must have select.fields populated)
+    /// * `is_union` - Whether this is a UNION query (aliases not required in UNION)
+    pub(super) fn check_alias_without_as_keyword(&mut self, hir: &SdblHir, is_union: bool) {
+        // Skip UNION queries - aliases not required
+        if is_union {
+            return;
+        }
+
+        for field in &hir.select.fields {
+            // Skip asterisk fields
+            if field.is_asterisk {
+                continue;
+            }
+
+            // Skip fields with parse errors
+            if field.has_parse_error {
+                continue;
+            }
+
+            // Check if needs diagnostic
+            let needs_diagnostic = match &field.alias {
+                Some(_) => !field.has_as_keyword, // Has alias but missing AS
+                None => true,                     // No alias at all
+            };
+
+            if needs_diagnostic {
+                self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
+                    field_name: field.alias.as_ref().map(|n| n.to_string()),
+                    range: field.diagnostic_range,
+                });
+            }
         }
     }
 }

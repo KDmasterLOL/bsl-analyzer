@@ -110,6 +110,16 @@ pub struct FieldHir {
     /// Field alias (if specified with AS).
     pub alias: Option<Name>,
 
+    /// Whether alias has explicit AS/КАК keyword.
+    /// - true: alias specified with AS keyword (e.g., "Field AS Alias")
+    /// - false: alias specified without AS keyword (e.g., "Field Alias")
+    /// - Only meaningful when alias.is_some()
+    pub has_as_keyword: bool,
+
+    /// Whether the field has parser errors.
+    /// Used to skip diagnostics for malformed fields.
+    pub has_parse_error: bool,
+
     /// Raw field name from AST (e.g., "ИмяЭлемента" from "Т.ИмяЭлемента").
     /// This is extracted from the last identifier in the field expression,
     /// regardless of whether we can resolve it to a ColumnRef.
@@ -122,7 +132,12 @@ pub struct FieldHir {
     /// Is this an asterisk field (* or Table.*).
     pub is_asterisk: bool,
 
-    /// Source range in SDBL.
+    /// Range for diagnostic highlighting (trimmed, without trivia).
+    /// For alias without AS: includes expression + alias identifier.
+    /// For no alias: just the expression range.
+    pub diagnostic_range: TextRange,
+
+    /// Source range in SDBL (full field including trivia).
     pub range: TextRange,
 }
 

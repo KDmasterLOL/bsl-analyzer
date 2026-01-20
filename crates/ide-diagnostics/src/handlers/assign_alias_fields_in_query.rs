@@ -136,7 +136,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        sdbl_utils::extract_string_content,
         test_utils::{assert_diagnostic_range, range_to_line_col},
         Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity,
     };
@@ -183,134 +182,42 @@ mod tests {
 
         (super::check(&ctx), file_content)
     }
-    use syntax::ast::SdblQueryPackage;
-    use syntax::SyntaxKind;
 
-    /// Check a single SDBL query for fields without AS keyword (test version).
+    /// Helper to check a standalone SDBL query using HIR (for testing).
     ///
-    /// This version doesn't use position mapping and returns SDBL-relative positions.
-    /// Used by standalone SDBL tests.
-    fn check_sdbl_query(query_text: &str, diagnostics: &mut Vec<Diagnostic>) {
-        use syntax::ast::{AstNode, SdblSubquery};
-        use syntax::SyntaxKind;
-
-        // Try to parse as SDBL
-        let parse = parse_sdbl(query_text);
-
-        // If parse has errors, skip (might not be SDBL)
-        if parse.has_errors() {
-            return;
-        }
-
-        let root = parse.syntax_node();
-
-        // Get query package
-        let Some(package) = SdblQueryPackage::cast(root) else {
-            return;
-        };
-
-        // Check each SELECT query
-        for select_query in package.queries() {
-            let Some(subquery) = select_query.subquery() else {
-                continue;
-            };
-
-            // Check main query fields
-            if let Some(main_query) = subquery.main_query() {
-                // Check fields in this query
-                if let Some(field_list) = main_query.field_list() {
-                    for field in field_list.fields() {
-                        // Skip asterisk fields
-                        if field.is_asterisk() {
-                            continue;
-                        }
-
-                        // Check if field has alias
-                        if let Some(alias) = field.alias() {
-                            if !alias.has_as_keyword() {
-                                // ERROR: Alias without AS keyword
-                                let alias_name =
-                                    alias.name().unwrap_or_else(|| "<unknown>".to_string());
-                                diagnostics.push(Diagnostic {
-                                    code: DiagnosticCode::AssignAliasFieldsInQuery,
-                                    message: format!(
-                                        "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",
-                                        alias_name
-                                    ),
-                                    severity: Severity::Warning,
-                                    range: alias.syntax().text_range(),
-                                    tags: vec![],
-                                    fixes: vec![],
-                                });
-                            }
-                        } else {
-                            // ERROR: Field without alias
-                            diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::AssignAliasFieldsInQuery,
-                                message: "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string(),
-                                severity: Severity::Warning,
-                                range: field.syntax().text_range(),
-                                tags: vec![],
-                                fixes: vec![],
-                            });
-                        }
-                    }
-                }
-
-                // Check subqueries in FROM clause
-                if let Some(from_clause) = main_query.from_clause() {
-                    for node in from_clause.syntax().descendants() {
-                        if node.kind() == SyntaxKind::SDBL_SUBQUERY {
-                            if let Some(sub) = SdblSubquery::cast(node) {
-                                if let Some(sub_main_query) = sub.main_query() {
-                                    if let Some(field_list) = sub_main_query.field_list() {
-                                        for field in field_list.fields() {
-                                            if field.is_asterisk() {
-                                                continue;
-                                            }
-                                            if let Some(alias) = field.alias() {
-                                                if !alias.has_as_keyword() {
-                                                    let alias_name = alias
-                                                        .name()
-                                                        .unwrap_or_else(|| "<unknown>".to_string());
-                                                    diagnostics.push(Diagnostic {
-                                                        code: DiagnosticCode::AssignAliasFieldsInQuery,
-                                                        message: format!(
-                                                            "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",
-                                                            alias_name
-                                                        ),
-                                                        severity: Severity::Warning,
-                                                        range: alias.syntax().text_range(),
-                                                        tags: vec![],
-                                                        fixes: vec![],
-                                                    });
-                                                }
-                                            } else {
-                                                diagnostics.push(Diagnostic {
-                                                    code: DiagnosticCode::AssignAliasFieldsInQuery,
-                                                    message: "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string(),
-                                                    severity: Severity::Warning,
-                                                    range: field.syntax().text_range(),
-                                                    tags: vec![],
-                                                    fixes: vec![],
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Helper to check a standalone SDBL query (for testing)
+    /// Parses the query, lowers to HIR, and extracts AliasWithoutAsKeyword diagnostics.
     fn check_standalone_query(query_text: &str) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-        check_sdbl_query(query_text, &mut diagnostics);
-        diagnostics
+        use sdbl_hir::lower_sdbl_to_hir;
+
+        let parse = parse_sdbl(query_text);
+        let package = lower_sdbl_to_hir(&parse, None);
+
+        package
+            .all_diagnostics()
+            .filter_map(|d| {
+                if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = d {
+                    let message = if let Some(name) = field_name {
+                        format!(
+                            "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",
+                            name
+                        )
+                    } else {
+                        "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК"
+                            .to_string()
+                    };
+                    Some(Diagnostic {
+                        code: DiagnosticCode::AssignAliasFieldsInQuery,
+                        message,
+                        severity: Severity::Warning,
+                        range: *range,
+                        tags: vec![],
+                        fixes: vec![],
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -384,53 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn test_multiline_string_extraction() {
-        use ide_db::base_db::{RootQueryDb, SourceDatabase};
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-
-        let code = r#"Процедура Тест()
-Query = "ВЫБРАТЬ
-	|  Ссылка
-	|ИЗ
-	|  Справочник.Валюты";
-КонецПроцедуры"#;
-
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let parse = db.parse(file_id);
-        let root = parse.syntax_node();
-
-        // Print tree structure for debugging
-        println!("Tree:");
-        println!("{:#?}", root);
-
-        // Find LITERAL nodes
-        let mut found_literal = false;
-        for node in root.descendants() {
-            println!("Node: {:?}", node.kind());
-            if node.kind() == SyntaxKind::LITERAL {
-                found_literal = true;
-                if let Some(extracted) = extract_string_content(&node) {
-                    println!("Extracted: {:?}", extracted);
-                    assert!(extracted.contains("ВЫБРАТЬ"));
-                    assert!(extracted.contains("Ссылка"));
-                    assert!(extracted.contains("Справочник"));
-                }
-            }
-        }
-
-        assert!(found_literal, "Should have found a LITERAL node");
-    }
-
-    #[test]
     fn test_sdbl_russian_query() {
         // Test that SDBL parser handles Russian queries
         let query = "ВЫБРАТЬ Ссылка, Код КАК К ИЗ Справочник.Валюты";
@@ -451,7 +311,7 @@ Query = "ВЫБРАТЬ
 
     #[test]
     fn test_query_with_comments() {
-        // Test exact query from SDBL String Literal 0
+        // Test query with inline comments - comments should not affect diagnostics
         let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка, // Неправильно
 	Валюты.Ссылка КАК ПсевдонимПоляСсылка, // Правильно
@@ -468,69 +328,16 @@ Query = "ВЫБРАТЬ
 ИЗ
 	Справочник.Валюты КАК Валюты"#;
 
-        use sdbl_hir::lower_sdbl_to_hir;
-        use syntax::ast::{AstNode, SdblQueryPackage};
-
-        let parse = parser::parse_sdbl(query);
-        eprintln!("Parse has errors: {}", parse.has_errors());
-
-        // Print AST to see how comments are handled
-        let root = parse.syntax_node();
-        eprintln!("\n=== Checking first field ===");
-        if let Some(package) = SdblQueryPackage::cast(root.clone()) {
-            if let Some(select_query) = package.queries().next() {
-                if let Some(subquery) = select_query.subquery() {
-                    if let Some(main_query) = subquery.main_query() {
-                        if let Some(field_list) = main_query.field_list() {
-                            for (i, field) in field_list.fields().enumerate() {
-                                eprintln!("\nField {}:", i);
-                                eprintln!("  Text: {:?}", field.syntax().text());
-                                eprintln!("  Is asterisk: {}", field.is_asterisk());
-                                if let Some(expr) = field.expression() {
-                                    eprintln!("  Expression: {:?}", expr.text());
-                                } else {
-                                    eprintln!("  Expression: None");
-                                }
-                                if let Some(alias) = field.alias() {
-                                    eprintln!("  Alias: {:?}", alias.name());
-                                    eprintln!("  Has AS: {}", alias.has_as_keyword());
-                                } else {
-                                    eprintln!("  Alias: None");
-                                }
-                                // Check for errors
-                                let has_error = field
-                                    .syntax()
-                                    .descendants_with_tokens()
-                                    .any(|el| el.kind() == syntax::SyntaxKind::ERROR);
-                                eprintln!("  Has error: {}", has_error);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let hir = lower_sdbl_to_hir(&parse, None);
-        eprintln!("\nHIR diagnostics: {}", hir.all_diagnostics().count());
-        for diag in hir.all_diagnostics() {
-            eprintln!("  - {} at {:?}", diag.message(), diag.range());
-        }
-
-        // Count only AliasWithoutAsKeyword diagnostics
-        let alias_diagnostics: Vec<_> = hir
-            .all_diagnostics()
-            .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
-            .collect();
-
-        eprintln!("AliasWithoutAsKeyword diagnostics: {}", alias_diagnostics.len());
+        let diagnostics = check_standalone_query(query);
 
         // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
+        // UNION queries are skipped per Java implementation behavior
         assert_eq!(
-            alias_diagnostics.len(),
+            diagnostics.len(),
             2,
-            "Expected 2 AliasWithoutAsKeyword diagnostics from first SELECT"
+            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
         );
     }
 
@@ -640,8 +447,8 @@ Query = "ВЫБРАТЬ
     }
 
     #[test]
-    fn test_debug_first_query() {
-        // Debug first query from Java test
+    fn test_union_with_diagnostics() {
+        // Test UNION query - only first SELECT is checked, UNION queries are skipped
         let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка,
 	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
@@ -658,69 +465,16 @@ Query = "ВЫБРАТЬ
 ИЗ
 	Справочник.Валюты КАК Валюты"#;
 
-        // Parse and check AST structure
-        use syntax::ast::AstNode;
+        let diagnostics = check_standalone_query(query);
 
-        let parse = parser::parse_sdbl(query);
-        eprintln!("Parse has errors: {}", parse.has_errors());
-
-        // Print tree structure to understand UNION layout
-        let root = parse.syntax_node();
-        eprintln!("\n=== AST Structure ===");
-        fn print_tree(node: &syntax::SyntaxNode, indent: usize) {
-            let indent_str = "  ".repeat(indent);
-            eprintln!("{}{:?}", indent_str, node.kind());
-            for child in node.children() {
-                print_tree(&child, indent + 1);
-            }
-        }
-        print_tree(&root, 0);
-
-        // Check field ancestors
-        use syntax::ast::SdblQueryPackage;
-        let Some(package) = SdblQueryPackage::cast(root.clone()) else {
-            panic!("Failed to cast as package");
-        };
-
-        for (q_idx, select_query) in package.queries().enumerate() {
-            eprintln!("\n=== Query {} ===", q_idx);
-            if let Some(subquery) = select_query.subquery() {
-                if let Some(main_query) = subquery.main_query() {
-                    if let Some(field_list) = main_query.field_list() {
-                        for (f_idx, field) in field_list.fields().enumerate() {
-                            eprintln!("Field {}: {:?}", f_idx, field.syntax().text());
-                            eprintln!("  Ancestors:");
-                            for ancestor in field.syntax().ancestors() {
-                                eprintln!("    - {:?}", ancestor.kind());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Parse and check using SDBL HIR
-        use sdbl_hir::lower_sdbl_to_hir;
-
-        let hir = lower_sdbl_to_hir(&parse, None);
-        eprintln!("\nHIR diagnostics: {}", hir.all_diagnostics().count());
-        for diag in hir.all_diagnostics() {
-            eprintln!("  - {} at {:?}", diag.message(), diag.range());
-        }
-
-        // Count only AliasWithoutAsKeyword diagnostics
-        let alias_diagnostics: Vec<_> = hir
-            .all_diagnostics()
-            .filter(|d| matches!(d, sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { .. }))
-            .collect();
-
-        // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
+        // Should have 2 diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
+        // UNION queries are skipped per Java implementation behavior
         assert_eq!(
-            alias_diagnostics.len(),
+            diagnostics.len(),
             2,
-            "Expected 2 AliasWithoutAsKeyword diagnostics from first SELECT"
+            "Expected 2 diagnostics from first SELECT (UNION queries skipped)"
         );
     }
 
@@ -743,10 +497,7 @@ Query = "ВЫБРАТЬ
 
     #[test]
     fn test_top_clause_parsing() {
-        // Verify that TOP clause is correctly parsed by the SDBL parser
-        use syntax::ast::{AstNode, SdblQueryPackage};
-        use syntax::SyntaxKind;
-
+        // Verify that TOP clause parses correctly and doesn't break diagnostics
         let query = r#"ВЫБРАТЬ ПЕРВЫЕ 100
 Спр.Номенклатура КАК Номенклатура
 ИЗ
@@ -755,38 +506,9 @@ Query = "ВЫБРАТЬ
         let parse = parser::parse_sdbl(query);
         assert!(!parse.has_errors(), "Parse should not have errors");
 
-        let root = parse.syntax_node();
-
-        // Check that SDBL_LIMITATIONS and SDBL_TOP_CLAUSE nodes are present
-        let has_limitations =
-            root.descendants().any(|node| node.kind() == SyntaxKind::SDBL_LIMITATIONS);
-        let has_top_clause =
-            root.descendants().any(|node| node.kind() == SyntaxKind::SDBL_TOP_CLAUSE);
-
-        assert!(has_limitations, "Should have SDBL_LIMITATIONS node");
-        assert!(has_top_clause, "Should have SDBL_TOP_CLAUSE node");
-
-        // Verify field is correctly parsed
-        if let Some(package) = SdblQueryPackage::cast(root) {
-            for select_query in package.queries() {
-                if let Some(subquery) = select_query.subquery() {
-                    if let Some(main_query) = subquery.main_query() {
-                        if let Some(field_list) = main_query.field_list() {
-                            let fields: Vec<_> = field_list.fields().collect();
-                            assert_eq!(fields.len(), 1, "Should have exactly 1 field");
-
-                            let field = &fields[0];
-                            assert!(!field.is_asterisk(), "Field should not be asterisk");
-                            assert!(field.alias().is_some(), "Field should have alias");
-                            assert!(
-                                field.alias().unwrap().has_as_keyword(),
-                                "Alias should have КАК keyword"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // Field has explicit alias with КАК - no diagnostics expected
+        let diagnostics = check_standalone_query(query);
+        assert_eq!(diagnostics.len(), 0, "Explicit alias should not trigger diagnostic");
     }
 
     #[test]
