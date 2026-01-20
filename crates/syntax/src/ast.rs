@@ -186,6 +186,10 @@ impl VarDef {
             .filter_map(|it| it.into_token())
             .find(|it| it.kind() == SyntaxKind::KW_EXPORT)
     }
+
+    pub fn annotations(&self) -> impl Iterator<Item = Annotation> + '_ {
+        self.0.children().filter_map(Annotation::cast)
+    }
 }
 
 /// Parameter list.

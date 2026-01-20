@@ -144,14 +144,26 @@ impl Ctx {
 
     /// Lower a variable definition.
     fn lower_variable(&mut self, var: &ast::VarDef) {
-        let name = var.name().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_token = var.name();
+        let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
+        let name_range = name_token
+            .as_ref()
+            .map(|t| t.text_range())
+            .unwrap_or_else(|| var.syntax().text_range());
 
         let is_export = var.export_keyword().is_some();
+        let annotations = self.lower_annotations(var.annotations());
         let source_range = var.syntax().text_range();
 
         trace!(name = %name, is_export, "lowering variable");
 
-        let idx = self.tree.variables.alloc(Variable { name, is_export, source_range });
+        let idx = self.tree.variables.alloc(Variable {
+            name,
+            is_export,
+            annotations,
+            source_range,
+            name_range,
+        });
 
         self.tree.top_level.push(ModItem::Variable(idx));
     }
@@ -654,5 +666,24 @@ EndFunction
         });
         assert_eq!(var3.name.as_str(), "Третья");
         assert!(!var3.is_export);
+    }
+
+    #[test]
+    fn test_variable_with_annotation() {
+        let tree = lower(
+            r#"
+&НаСервере
+Перем СерверныйСчетчик;
+            "#,
+        );
+
+        let var = tree.variable(match tree.top_level_items()[0] {
+            ModItem::Variable(idx) => idx,
+            _ => panic!("expected variable"),
+        });
+
+        assert_eq!(var.name.as_str(), "СерверныйСчетчик");
+        assert_eq!(var.annotations.len(), 1);
+        assert!(matches!(var.annotations[0].kind, AnnotationKind::AtServer));
     }
 }

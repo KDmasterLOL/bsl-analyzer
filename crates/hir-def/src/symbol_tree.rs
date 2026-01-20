@@ -92,8 +92,14 @@ pub struct VariableSymbol {
     /// Is exported?
     pub is_export: bool,
 
+    /// Annotations (&НаКлиенте, etc.).
+    pub annotations: Vec<Annotation>,
+
     /// Source location for navigation.
     pub source_range: TextRange,
+
+    /// Source location of the variable name (for diagnostics).
+    pub name_range: TextRange,
 }
 
 /// Parameter symbol.
@@ -267,7 +273,9 @@ impl SymbolTreeBuilder {
             id: variable_id,
             name: var.name.clone(),
             is_export: var.is_export,
+            annotations: var.annotations.to_vec(),
             source_range: var.source_range,
+            name_range: var.name_range,
         };
 
         let idx = self.variables.alloc(symbol);
@@ -375,7 +383,9 @@ mod tests {
         let var_idx = item_tree.variables.alloc(Variable {
             name: Name::new("МодульнаяПеременная"),
             is_export: true,
+            annotations: Box::new([]),
             source_range: make_text_range(40, 50),
+            name_range: make_text_range(40, 50),
         });
         item_tree.top_level.push(ModItem::Variable(var_idx));
 
@@ -578,7 +588,9 @@ mod tests {
         let var_idx = item_tree.variables.alloc(Variable {
             name: Name::new("МояПеременная"),
             is_export: false,
+            annotations: Box::new([]),
             source_range: make_text_range(0, 10),
+            name_range: make_text_range(0, 10),
         });
         item_tree.top_level.push(ModItem::Variable(var_idx));
 
@@ -600,7 +612,9 @@ mod tests {
         let var1_idx = item_tree.variables.alloc(Variable {
             name: Name::new("Приватная"),
             is_export: false,
+            annotations: Box::new([]),
             source_range: make_text_range(0, 10),
+            name_range: make_text_range(0, 10),
         });
         item_tree.top_level.push(ModItem::Variable(var1_idx));
 
@@ -608,7 +622,9 @@ mod tests {
         let var2_idx = item_tree.variables.alloc(Variable {
             name: Name::new("Публичная"),
             is_export: true,
+            annotations: Box::new([]),
             source_range: make_text_range(20, 30),
+            name_range: make_text_range(20, 30),
         });
         item_tree.top_level.push(ModItem::Variable(var2_idx));
 

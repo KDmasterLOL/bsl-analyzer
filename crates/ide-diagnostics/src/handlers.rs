@@ -134,6 +134,7 @@ pub mod server_calls_in_form_events;
 pub mod server_side_export_form_method;
 pub mod set_permissions_for_new_objects;
 pub mod set_privileged_mode;
+pub mod several_compiler_directives;
 pub mod space_at_start_comment;
 pub mod unreachable_code;
 pub mod unused_local_variable;

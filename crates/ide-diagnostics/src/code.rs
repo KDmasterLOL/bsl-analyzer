@@ -93,6 +93,7 @@ pub enum DiagnosticCode {
     DataExchangeLoading,
     DeletingCollectionItem,
     SelfInsertion,
+    SeveralCompilerDirectives,
     DeprecatedCurrentDate,
     DeprecatedFind,
     DeprecatedMessage,

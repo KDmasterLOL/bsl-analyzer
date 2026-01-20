@@ -207,6 +207,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::pairing_broken_transaction::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "SeveralCompilerDirectives",
+        ctx,
+        handlers::several_compiler_directives::check,
+    ));
 
     diagnostics
 }

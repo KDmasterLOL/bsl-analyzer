@@ -171,8 +171,11 @@ pub struct Function {
 pub struct Variable {
     pub name: Name,
     pub is_export: bool,
+    pub annotations: Box<[Annotation]>,
     /// Source location for mapping back to AST.
     pub source_range: TextRange,
+    /// Source location of the variable name (for diagnostics).
+    pub name_range: TextRange,
 }
 
 /// Function or procedure parameter.
