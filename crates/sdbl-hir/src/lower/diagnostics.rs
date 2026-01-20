@@ -629,4 +629,327 @@ impl<'a> LoweringContext<'a> {
             }
         }
     }
+
+    /// Check for redundant .Ссылка (Reference) field access.
+    ///
+    /// Called after HIR is built, uses only HIR data (no AST access).
+    ///
+    /// Detects patterns where `.Ссылка` causes an implicit LEFT JOIN:
+    /// - `T.Field.Ссылка` - accessing reference on a field (causes JOIN)
+    /// - `T.Ссылка.Field` - accessing field through reference (causes JOIN)
+    /// - `Alias.Ссылка` when Alias is NOT a tabular section (unnecessary JOIN)
+    ///
+    /// Does NOT emit diagnostic for:
+    /// - `TableAlias.Ссылка` from tabular section (back-reference to parent is OK)
+    /// - Virtual table slices (СрезПоследних, СрезПервых) - `.Ссылка` refers to dimension
+    pub(super) fn check_ref_overuse(&mut self, hir: &SdblHir) {
+        // Build set of table aliases that are tabular sections
+        let tabular_section_aliases = self.collect_tabular_section_aliases(hir);
+
+        // Check all expressions in query
+        self.check_ref_overuse_in_select(hir, &tabular_section_aliases);
+        self.check_ref_overuse_in_where(hir, &tabular_section_aliases);
+        self.check_ref_overuse_in_group_by(hir, &tabular_section_aliases);
+        self.check_ref_overuse_in_having(hir, &tabular_section_aliases);
+        self.check_ref_overuse_in_order_by(hir, &tabular_section_aliases);
+        self.check_ref_overuse_in_joins(hir, &tabular_section_aliases);
+
+        // Recursively check UNION subqueries
+        for union in &hir.unions {
+            self.check_ref_overuse(&union.query);
+        }
+    }
+
+    /// Collect table aliases that refer to tabular sections.
+    ///
+    /// Tabular section is identified by 3-part MDO path where:
+    /// - First part is MDO type (Справочник, Документ, etc.)
+    /// - Second part is object name
+    /// - Third part is NOT a virtual table (СрезПоследних, etc.)
+    fn collect_tabular_section_aliases(&self, hir: &SdblHir) -> std::collections::HashSet<String> {
+        let mut aliases = std::collections::HashSet::new();
+
+        // Check FROM tables
+        for table in &hir.from {
+            if self.is_tabular_section(table) {
+                aliases.insert(table.effective_name().to_lowercase());
+            }
+        }
+
+        // Check JOIN tables
+        for join in &hir.joins {
+            if self.is_tabular_section(&join.table) {
+                aliases.insert(join.table.effective_name().to_lowercase());
+            }
+        }
+
+        aliases
+    }
+
+    /// Check if TableRef refers to a tabular section.
+    ///
+    /// Tabular section has 3 parts: MDO_TYPE.OBJECT.TABULAR_SECTION
+    /// Example: Документ.Заказ.Товары, Справочник.Пользователи.КонтактнаяИнформация
+    fn is_tabular_section(&self, table: &TableRef) -> bool {
+        if table.parts.len() != 3 {
+            return false;
+        }
+
+        // First part must be MDO type
+        if !crate::is_mdo_type(table.parts[0].as_str()) {
+            return false;
+        }
+
+        // Third part must NOT be a virtual table
+        !crate::standard_fields::is_virtual_table_name(table.parts[2].as_str())
+    }
+
+    fn check_ref_overuse_in_select(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        for field in &hir.select.fields {
+            self.check_expr_for_ref_overuse(&field.expr, tabular_section_aliases);
+        }
+    }
+
+    fn check_ref_overuse_in_where(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        if let Some(ref where_expr) = hir.where_clause {
+            self.check_expr_for_ref_overuse(where_expr, tabular_section_aliases);
+        }
+    }
+
+    fn check_ref_overuse_in_group_by(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        if let Some(ref group_by) = hir.group_by {
+            for expr in &group_by.exprs {
+                self.check_expr_for_ref_overuse(expr, tabular_section_aliases);
+            }
+        }
+    }
+
+    fn check_ref_overuse_in_having(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        if let Some(ref having) = hir.having {
+            self.check_expr_for_ref_overuse(having, tabular_section_aliases);
+        }
+    }
+
+    fn check_ref_overuse_in_order_by(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        if let Some(ref order_by) = hir.order_by {
+            for item in &order_by.items {
+                self.check_expr_for_ref_overuse(&item.expr, tabular_section_aliases);
+            }
+        }
+    }
+
+    fn check_ref_overuse_in_joins(
+        &mut self,
+        hir: &SdblHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        for join in &hir.joins {
+            if let Some(ref cond) = join.condition {
+                self.check_expr_for_ref_overuse(cond, tabular_section_aliases);
+            }
+        }
+    }
+
+    /// Check expression for redundant .Ссылка usage.
+    fn check_expr_for_ref_overuse(
+        &mut self,
+        expr: &ExprHir,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        match expr {
+            ExprHir::ColumnRef { parts, range, .. } => {
+                self.check_column_ref_for_ref_overuse(parts, *range, tabular_section_aliases);
+            }
+
+            ExprHir::BinaryOp { lhs, rhs, .. } => {
+                self.check_expr_for_ref_overuse(lhs, tabular_section_aliases);
+                self.check_expr_for_ref_overuse(rhs, tabular_section_aliases);
+            }
+
+            ExprHir::UnaryOp { expr: inner, .. } => {
+                self.check_expr_for_ref_overuse(inner, tabular_section_aliases);
+            }
+
+            ExprHir::FunctionCall { args, .. } => {
+                for arg in args {
+                    self.check_expr_for_ref_overuse(arg, tabular_section_aliases);
+                }
+            }
+
+            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+                if let Some(op) = operand {
+                    self.check_expr_for_ref_overuse(op, tabular_section_aliases);
+                }
+                for clause in when_clauses {
+                    self.check_expr_for_ref_overuse(&clause.condition, tabular_section_aliases);
+                    self.check_expr_for_ref_overuse(&clause.result, tabular_section_aliases);
+                }
+                if let Some(else_e) = else_expr {
+                    self.check_expr_for_ref_overuse(else_e, tabular_section_aliases);
+                }
+            }
+
+            ExprHir::Subquery { query, .. } => {
+                self.check_ref_overuse(query);
+            }
+
+            ExprHir::In { expr: inner, values, .. } => {
+                self.check_expr_for_ref_overuse(inner, tabular_section_aliases);
+                match values {
+                    crate::hir::InValues::List(items) => {
+                        for item in items {
+                            self.check_expr_for_ref_overuse(item, tabular_section_aliases);
+                        }
+                    }
+                    crate::hir::InValues::Subquery(sq) => {
+                        self.check_ref_overuse(sq);
+                    }
+                }
+            }
+
+            ExprHir::Between { expr: inner, low, high, .. } => {
+                self.check_expr_for_ref_overuse(inner, tabular_section_aliases);
+                self.check_expr_for_ref_overuse(low, tabular_section_aliases);
+                self.check_expr_for_ref_overuse(high, tabular_section_aliases);
+            }
+
+            ExprHir::Like { expr: inner, pattern, escape, .. } => {
+                self.check_expr_for_ref_overuse(inner, tabular_section_aliases);
+                self.check_expr_for_ref_overuse(pattern, tabular_section_aliases);
+                if let Some(esc) = escape {
+                    self.check_expr_for_ref_overuse(esc, tabular_section_aliases);
+                }
+            }
+
+            ExprHir::IsNull { expr: inner, .. } => {
+                self.check_expr_for_ref_overuse(inner, tabular_section_aliases);
+            }
+
+            ExprHir::Tuple { elements, .. } => {
+                for elem in elements {
+                    self.check_expr_for_ref_overuse(elem, tabular_section_aliases);
+                }
+            }
+
+            // Leaf nodes - no check needed
+            ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {}
+        }
+    }
+
+    /// Check column reference for redundant .Ссылка usage.
+    ///
+    /// Algorithm:
+    /// 1. Find last "Ссылка"/"Reference" in parts (case-insensitive)
+    /// 2. If first part is MDO type, extract inner parts
+    /// 3. Determine if it's a valid exception:
+    ///    - Tabular section back-reference (OK)
+    ///    - Simple `Alias.Ссылка` where Alias is NOT tabular section (error only if parts.len() == 2)
+    /// 4. Emit diagnostic for redundant .Ссылка access
+    fn check_column_ref_for_ref_overuse(
+        &mut self,
+        parts: &[crate::hir::Name],
+        range: text_size::TextRange,
+        tabular_section_aliases: &std::collections::HashSet<String>,
+    ) {
+        if parts.is_empty() {
+            return;
+        }
+
+        // Check if path starts with MDO type (e.g., "Документ.Документ1.Файл.Ссылка")
+        let has_mdo_prefix = parts.len() >= 2 && crate::is_mdo_type(parts[0].as_str());
+
+        // Work with parts, possibly skipping MDO type prefix
+        let effective_parts: &[crate::hir::Name] = if parts.len() >= 3 && has_mdo_prefix {
+            // Pattern like "Справочник.Контрагенты.Ссылка.Поле"
+            // Skip MDO type and object name, work with remaining parts
+            &parts[2..]
+        } else {
+            parts
+        };
+
+        // If effective_parts is empty after stripping MDO, nothing to check
+        if effective_parts.is_empty() {
+            return;
+        }
+
+        // Find index of last "Ссылка"/"Reference" (case-insensitive)
+        let ref_index = effective_parts.iter().rposition(|p| {
+            let p_lower = p.to_lowercase();
+            p_lower == "ссылка" || p_lower == "reference"
+        });
+
+        let Some(ref_index) = ref_index else {
+            return; // No "Ссылка" found
+        };
+
+        let last_index = effective_parts.len() - 1;
+
+        // Case 1: "Alias.Ссылка" (2 parts, Ссылка at end)
+        if effective_parts.len() == 2 && ref_index == 1 {
+            let alias = effective_parts[0].to_lowercase();
+
+            // If alias is a tabular section, this is OK (back-reference to parent)
+            if tabular_section_aliases.contains(&alias) {
+                return;
+            }
+
+            // If original path had MDO prefix, this is "MDO.Object.Field.Ссылка" pattern
+            // which is an error (accessing .Ссылка on a field)
+            if has_mdo_prefix {
+                self.diagnostics.push(SdblDiagnostic::RefOveruse { range });
+                return;
+            }
+
+            // For regular "Alias.Ссылка" without MDO prefix, this is NOT an error
+            // It's just accessing the reference field of a table alias
+            return;
+        }
+
+        // Case 2: "Alias.Field.Ссылка" (3+ parts, Ссылка at end)
+        // This is always an error - accessing .Ссылка on a field
+        if ref_index == last_index && ref_index >= 2 {
+            self.diagnostics.push(SdblDiagnostic::RefOveruse { range });
+            return;
+        }
+
+        // Case 3: "Alias.Ссылка.Field" (Ссылка in middle, followed by field access)
+        // This is always an error - accessing field through .Ссылка
+        if ref_index < last_index {
+            self.diagnostics.push(SdblDiagnostic::RefOveruse { range });
+            return;
+        }
+
+        // Case 4: "Alias.Ссылка.Ссылка" (double Ссылка)
+        // This is an error
+        if effective_parts.len() >= 3 && ref_index == last_index {
+            // Check if there's another Ссылка before this one
+            let prev_ref_index = effective_parts[..ref_index].iter().rposition(|p| {
+                let p_lower = p.to_lowercase();
+                p_lower == "ссылка" || p_lower == "reference"
+            });
+            if prev_ref_index.is_some() {
+                self.diagnostics.push(SdblDiagnostic::RefOveruse { range });
+            }
+        }
+    }
 }

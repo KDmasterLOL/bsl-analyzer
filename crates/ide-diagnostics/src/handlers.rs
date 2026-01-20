@@ -122,6 +122,7 @@ pub mod query_nested_fields_by_dot;
 pub mod query_parse_error;
 pub mod query_to_missing_metadata;
 pub mod redundant_access_to_object;
+pub mod ref_overuse;
 pub mod rewrite_method_parameter;
 pub mod self_assign;
 pub mod space_at_start_comment;

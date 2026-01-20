@@ -187,6 +187,22 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Redundant use of .Ссылка (Reference) field in SDBL query.
+    ///
+    /// BSL-LS diagnostic code: RefOveruse
+    ///
+    /// Accessing `.Ссылка` on a reference field causes an implicit LEFT JOIN
+    /// with the source table, creating unnecessary database load.
+    ///
+    /// Exceptions:
+    /// - `Table.Ссылка` - direct reference field access (OK)
+    /// - Tabular section's `.Ссылка` - back-reference to parent object (OK)
+    /// - Virtual table slices (СрезПоследних, СрезПервых) - `.Ссылка` refers to dimension (OK)
+    RefOveruse {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -210,6 +226,7 @@ impl SdblDiagnostic {
             Self::JoinWithVirtualTable { .. } => Some(79),
             Self::VirtualTableCallWithoutParameters { .. } => Some(174),
             Self::QueryNestedFieldsByDot { .. } => None, // Uses string code
+            Self::RefOveruse { .. } => None,             // Uses string code
             _ => None, // Other diagnostics don't have BSL-LS codes
         }
     }
@@ -309,6 +326,9 @@ impl SdblDiagnostic {
             Self::QueryNestedFieldsByDot { .. } => {
                 "Обнаружено разыменование ссылочного поля".to_string()
             }
+            Self::RefOveruse { .. } => {
+                "Избавьтесь от получения поля \"Ссылка\" в запросе.".to_string()
+            }
         }
     }
 
@@ -333,6 +353,7 @@ impl SdblDiagnostic {
             Self::FieldsFromJoinWithoutNullCheck { range, .. } => *range,
             Self::MultilineString { range } => *range,
             Self::QueryNestedFieldsByDot { range } => *range,
+            Self::RefOveruse { range } => *range,
         }
     }
 
@@ -360,6 +381,7 @@ impl SdblDiagnostic {
             Self::FieldsFromJoinWithoutNullCheck { .. } => false, // Warning/Critical, not an error
             Self::MultilineString { .. } => false, // Warning - likely incorrect quoting
             Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
+            Self::RefOveruse { .. } => false,      // Warning - performance issue
         }
     }
 }

@@ -318,6 +318,9 @@ impl LoweringContext<'_> {
         // 12. Check for nested field dereference by dot (N+1 query problem)
         self.check_nested_fields_by_dot(&hir);
 
+        // 13. Check for redundant .Ссылка (Reference) field access
+        self.check_ref_overuse(&hir);
+
         // Merge diagnostics collected during post-lowering checks
         hir.diagnostics.extend(std::mem::take(&mut self.diagnostics));
 

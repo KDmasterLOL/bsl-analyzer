@@ -313,6 +313,7 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::query_to_missing_metadata::check,
     ));
+    diagnostics.extend(run_diagnostic("RefOveruse", ctx, handlers::ref_overuse::check));
 
     diagnostics
 }

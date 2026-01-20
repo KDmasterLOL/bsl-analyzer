@@ -146,6 +146,7 @@ pub enum DiagnosticCode {
     QueryNestedFieldsByDot,
     QueryParseError,
     QueryToMissingMetadata,
+    RefOveruse,
 }
 
 impl DiagnosticCode {
