@@ -195,5 +195,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::SetPrivilegedModeCall { range } => {
             handlers::set_privileged_mode::from_hir(*range, ctx)
         }
+        BodyDiagnostic::StyleElementConstructors { type_name, range } => {
+            handlers::style_element_constructors::from_hir(type_name, *range, ctx)
+        }
     }
 }

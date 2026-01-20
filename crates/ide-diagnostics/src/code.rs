@@ -94,6 +94,7 @@ pub enum DiagnosticCode {
     DeletingCollectionItem,
     SelfInsertion,
     SeveralCompilerDirectives,
+    StyleElementConstructors,
     DeprecatedCurrentDate,
     DeprecatedFind,
     DeprecatedMessage,

@@ -1281,10 +1281,27 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Check for file system access (security diagnostic)
     if let Some(ref name) = type_name {
         if is_file_system_type(name.as_str()) {
-            // Emit FileSystemAccess diagnostic
-            // Range is the entire NEW_EXPR node (matches Java behavior)
             ctx.diagnostics.push(BodyDiagnostic::FileSystemAccess { range: node.text_range() });
         }
+    }
+
+    // Check for style element constructors (Цвет/Color, Шрифт/Font, Рамка/Border)
+    // Two syntax forms: Новый Цвет(...) and Новый("Цвет", ...)
+    let style_type_name = if let Some(ref name) = type_name {
+        if is_style_element_type(name.as_str()) {
+            Some(name.as_str().to_string())
+        } else {
+            None
+        }
+    } else {
+        extract_type_name_from_first_arg(node).filter(|name| is_style_element_type(name))
+    };
+
+    if let Some(style_name) = style_type_name {
+        ctx.diagnostics.push(BodyDiagnostic::StyleElementConstructors {
+            type_name: style_name,
+            range: node.text_range(),
+        });
     }
 
     // Arguments
@@ -1431,6 +1448,32 @@ fn is_file_system_type(name: &str) -> bool {
             | "datareader"
             | "чтениеданных"
     )
+}
+
+/// Check if type name is a style element (Цвет/Color, Шрифт/Font, Рамка/Border).
+fn is_style_element_type(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "цвет" | "color" | "шрифт" | "font" | "рамка" | "border")
+}
+
+/// Extract type name from first string argument of Новый("ТипОбъекта", ...).
+fn extract_type_name_from_first_arg(node: &SyntaxNode) -> Option<String> {
+    let arg_list = node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST)?;
+    let first_arg = arg_list.children().next()?;
+
+    // Look for STRING token in the first argument
+    let string_token = first_arg
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|tok| tok.kind() == SyntaxKind::STRING)?;
+
+    let text = string_token.text();
+    // Remove quotes from string literal
+    if text.len() >= 2 && (text.starts_with('"') || text.starts_with('\'')) {
+        Some(text[1..text.len() - 1].to_string())
+    } else {
+        None
+    }
 }
 
 /// Check if method name indicates file system access (global method).

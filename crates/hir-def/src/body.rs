@@ -625,6 +625,11 @@ pub enum BodyDiagnostic {
     /// SetPrivilegedMode/УстановитьПривилегированныйРежим call that enables privileged mode.
     /// Safe mode calls (with False argument) are not flagged.
     SetPrivilegedModeCall { range: TextRange },
+
+    /// Style element constructor (Цвет/Color, Шрифт/Font, Рамка/Border).
+    /// Detected when New expression creates a style element type.
+    /// Should be replaced with getting style element from configuration.
+    StyleElementConstructors { type_name: String, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -809,6 +814,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
             BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
             BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
+            BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
         }
     }
 }
