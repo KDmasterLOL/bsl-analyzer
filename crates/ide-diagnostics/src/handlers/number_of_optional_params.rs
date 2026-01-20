@@ -31,7 +31,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::item_tree::ModItem;
-use ide_db::TextRange;
 
 const DEFAULT_MAX_OPTIONAL_PARAMS: i64 = 3;
 
@@ -63,11 +62,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_method(&proc.params, proc.param_list_range, &config, &mut diagnostics);
+                check_method(&proc.params, &config, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_method(&func.params, func.param_list_range, &config, &mut diagnostics);
+                check_method(&func.params, &config, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -78,28 +77,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 fn check_method(
     params: &[hir_def::item_tree::Param],
-    param_list_range: Option<TextRange>,
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let optional_count = params.iter().filter(|p| p.has_default).count();
+    let optional_params: Vec<_> = params.iter().filter(|p| p.has_default).collect();
+    let optional_count = optional_params.len();
 
     if optional_count > config.max_optional_params {
-        let Some(range) = param_list_range else {
-            return;
-        };
-
-        diagnostics.push(Diagnostic {
-            code: DiagnosticCode::NumberOfOptionalParams,
-            message: format!(
-                "Уменьшите количество необязательных параметров c {} до допустимого {}",
-                optional_count, config.max_optional_params
-            ),
-            severity: Severity::Warning,
-            range,
-            tags: vec![],
-            fixes: vec![],
-        });
+        // Report each excess optional parameter individually
+        for param in optional_params.iter().skip(config.max_optional_params) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::NumberOfOptionalParams,
+                message: format!(
+                    "Уменьшите количество необязательных параметров c {} до допустимого {}",
+                    optional_count, config.max_optional_params
+                ),
+                severity: Severity::Warning,
+                range: param.name_range,
+                tags: vec![],
+                fixes: vec![],
+            });
+        }
     }
 }
 
@@ -116,10 +114,13 @@ mod tests {
         let code = include_str!("../../test_data/NumberOfOptionalParamsDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
+        // "СработкаПоКоличествуНеобязательных" has 4 optional params (Раз, Четыре, Пять, Шесть)
+        // With max=3, only "Шесть" is excess (the 4th optional)
         assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 8, 45, 101);
         assert_eq!(diagnostics[0].code, DiagnosticCode::NumberOfOptionalParams);
         assert_eq!(diagnostics[0].severity, Severity::Warning);
+        // Шесть = 6 is on line 8 (0-indexed)
+        assert_diagnostic_range(code, &diagnostics[0], 8, 86, 91);
     }
 
     #[test]
@@ -131,7 +132,10 @@ mod tests {
             serde_json::json!({ "maxOptionalParamsCount": 1 }),
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 2);
+        // МимоТри: 3 optional (Пять, Шесть, Семь) → 2 excess
+        // СработкаПоКоличествуНеобязательных: 4 optional → 3 excess
+        // Total: 2 + 3 = 5
+        assert_eq!(diagnostics.len(), 5);
     }
 
     #[test]
@@ -146,5 +150,16 @@ mod tests {
         let code = r#"Процедура Тест(А, Б, В) КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_excess_optional() {
+        let code = r#"Процедура Тест(А = 1, Б = 2, В = 3, Г = 4, Д = 5)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        // 5 optional, max 3, so 2 excess: Г, Д
+        assert_eq!(diagnostics.len(), 2);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 36, 37); // Г
+        assert_diagnostic_range(code, &diagnostics[1], 0, 43, 44); // Д
     }
 }

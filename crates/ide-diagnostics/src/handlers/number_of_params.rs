@@ -31,7 +31,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::item_tree::ModItem;
-use ide_db::TextRange;
 
 const DEFAULT_MAX_PARAMS: i64 = 7;
 
@@ -63,11 +62,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_method(&proc.params, proc.param_list_range, &config, &mut diagnostics);
+                check_method(&proc.params, &config, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_method(&func.params, func.param_list_range, &config, &mut diagnostics);
+                check_method(&func.params, &config, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -78,28 +77,26 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 fn check_method(
     params: &[hir_def::item_tree::Param],
-    param_list_range: Option<TextRange>,
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let params_count = params.len();
 
     if params_count > config.max_params {
-        let Some(range) = param_list_range else {
-            return;
-        };
-
-        diagnostics.push(Diagnostic {
-            code: DiagnosticCode::NumberOfParams,
-            message: format!(
-                "Уменьшите количество параметров c {} до допустимого {}",
-                params_count, config.max_params
-            ),
-            severity: Severity::Warning,
-            range,
-            tags: vec![],
-            fixes: vec![],
-        });
+        // Report each excess parameter individually
+        for param in params.iter().skip(config.max_params) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::NumberOfParams,
+                message: format!(
+                    "Уменьшите количество параметров c {} до допустимого {}",
+                    params_count, config.max_params
+                ),
+                severity: Severity::Warning,
+                range: param.name_range,
+                tags: vec![],
+                fixes: vec![],
+            });
+        }
     }
 }
 
@@ -116,8 +113,9 @@ mod tests {
         let code = include_str!("../../test_data/NumberOfParamsDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
+        // Only "СработкаПоКоличеству" has 8 params (exceeds 7), reports "Восемь"
         assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 14, 29, 77);
+        assert_diagnostic_range(code, &diagnostics[0], 14, 71, 77);
         assert_eq!(diagnostics[0].code, DiagnosticCode::NumberOfParams);
         assert_eq!(diagnostics[0].severity, Severity::Warning);
     }
@@ -130,7 +128,10 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::NumberOfParams, serde_json::json!({ "maxParamsCount": 1 }));
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 5);
+        // With max=1: МимоДва(5) + МимоТри(6) + СработкаПоКоличеству(7)
+        //           + СработкаПоКоличествуНеобязательных(6) + СработкаПоНеобязательныйПередОбязательным(6)
+        // Total: 5 + 6 + 7 + 6 + 6 = 30 excess params
+        assert_eq!(diagnostics.len(), 30);
     }
 
     #[test]
@@ -145,5 +146,19 @@ mod tests {
         let code = r#"Процедура Тест() КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_excess_params() {
+        // NOTE: Using 2-letter names because single "И" is lexed as KwAnd (logical AND),
+        // not as Ident. This is expected BSL behavior - keywords can't be used as identifiers.
+        let code = r#"Процедура Тест(Аа, Бб, Вв, Гг, Дд, Ее, Жж, Зз, Ии)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        // 9 params, max 7, so 2 excess: Зз, Ии
+        assert_eq!(diagnostics.len(), 2);
+        // Positions: "Процедура Тест(" = 15 chars, then "Аа, Бб, Вв, Гг, Дд, Ее, Жж, " = 28 chars
+        assert_diagnostic_range(code, &diagnostics[0], 0, 43, 45); // Зз
+        assert_diagnostic_range(code, &diagnostics[1], 0, 47, 49); // Ии
     }
 }

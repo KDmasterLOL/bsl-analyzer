@@ -21,7 +21,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
 use hir_def::item_tree::ModItem;
-use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if ctx.config.is_disabled(DiagnosticCode::OrderOfParams) {
@@ -35,11 +34,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_method(&proc.params, proc.param_list_range, &mut diagnostics);
+                check_method(&proc.params, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_method(&func.params, func.param_list_range, &mut diagnostics);
+                check_method(&func.params, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -48,32 +47,28 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_method(
-    params: &[hir_def::item_tree::Param],
-    param_list_range: Option<TextRange>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    // Java logic: dropWhile(Objects::isNull).anyMatch(Objects::isNull)
-    // Skip required params until first optional, then check if any required follow
-    let has_required_after_optional = params
-        .iter()
-        .map(|p| p.has_default)
-        .skip_while(|&has_default| !has_default)
-        .any(|has_default| !has_default);
+fn check_method(params: &[hir_def::item_tree::Param], diagnostics: &mut Vec<Diagnostic>) {
+    // Find first optional parameter
+    let first_optional_idx = params.iter().position(|p| p.has_default);
+    let Some(first_optional_idx) = first_optional_idx else {
+        return; // No optional params - nothing to check
+    };
 
-    if has_required_after_optional {
-        let Some(range) = param_list_range else {
-            return;
-        };
-
-        diagnostics.push(Diagnostic {
-            code: DiagnosticCode::OrderOfParams,
-            message: "Переместите необязательные параметры после обязательных".into(),
-            severity: Severity::Major,
-            range,
-            tags: vec![],
-            fixes: vec![],
-        });
+    // Report each required parameter that comes after an optional one
+    for param in params.iter().skip(first_optional_idx + 1) {
+        if !param.has_default {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::OrderOfParams,
+                message: format!(
+                    "Переместите обязательный параметр '{}' перед необязательными",
+                    param.name.as_str()
+                ),
+                severity: Severity::Major,
+                range: param.name_range,
+                tags: vec![],
+                fixes: vec![],
+            });
+        }
     }
 }
 
@@ -88,10 +83,14 @@ mod tests {
         let code = include_str!("../../test_data/OrderOfParamsDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1);
-        assert_diagnostic_range(code, &diagnostics[0], 14, 52, 102);
+        // "СработкаПоНеобязательныйПередОбязательным(Раз, Два = 2, Три = 3, Четыре, Пять, Шесть, Семь=7)"
+        // Required after optional: Четыре, Пять, Шесть
+        assert_eq!(diagnostics.len(), 3);
         assert_eq!(diagnostics[0].code, DiagnosticCode::OrderOfParams);
         assert_eq!(diagnostics[0].severity, Severity::Major);
+        assert!(diagnostics[0].message.contains("Четыре"));
+        assert!(diagnostics[1].message.contains("Пять"));
+        assert!(diagnostics[2].message.contains("Шесть"));
     }
 
     #[test]
@@ -123,9 +122,23 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_order() {
-        let code = r#"Процедура Тест(А, Б = 2, В) КонецПроцедуры"#;
+    fn test_wrong_order_single() {
+        let code = r#"Процедура Тест(А, Б = 2, В)
+КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        // В is required after optional Б
         assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 25, 26); // В
+    }
+
+    #[test]
+    fn test_wrong_order_multiple() {
+        let code = r#"Процедура Тест(А = 1, Б, В)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        // Б and В are required after optional А
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].message.contains("Б"));
+        assert!(diagnostics[1].message.contains("В"));
     }
 }
