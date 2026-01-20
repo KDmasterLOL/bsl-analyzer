@@ -137,6 +137,7 @@ pub mod set_privileged_mode;
 pub mod several_compiler_directives;
 pub mod space_at_start_comment;
 pub mod style_element_constructors;
+pub mod temp_files_dir;
 pub mod unreachable_code;
 pub mod unused_local_variable;
 // TODO: Add all 181 handlers

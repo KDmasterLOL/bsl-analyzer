@@ -359,6 +359,15 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        use super::diagnostics::is_temp_files_dir;
+
+        if is_temp_files_dir(&name) {
+            ctx.diagnostics.push(BodyDiagnostic::TempFilesDir {
+                name: name.clone(),
+                range: actual_callee.text_range(),
+            });
+        }
+
         // Check for ServerCallsInFormEvents candidate
         // Emit for any unqualified call inside a method with forbidden event name suffix.
         // The from_hir() handler will verify if the callee has server annotation.

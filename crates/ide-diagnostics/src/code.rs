@@ -107,6 +107,7 @@ pub enum DiagnosticCode {
     ExternalAppStarting,
     FileSystemAccess,
     OSUsersMethod,
+    TempFilesDir,
     FormDataToValue,
     GetFormMethod,
     GlobalContextMethodCollision8312,

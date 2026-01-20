@@ -198,5 +198,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::StyleElementConstructors { type_name, range } => {
             handlers::style_element_constructors::from_hir(type_name, *range, ctx)
         }
+        BodyDiagnostic::TempFilesDir { name, range } => {
+            handlers::temp_files_dir::from_hir(name, *range, ctx)
+        }
     }
 }

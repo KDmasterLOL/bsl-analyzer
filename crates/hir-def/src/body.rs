@@ -630,6 +630,11 @@ pub enum BodyDiagnostic {
     /// Detected when New expression creates a style element type.
     /// Should be replaced with getting style element from configuration.
     StyleElementConstructors { type_name: String, range: TextRange },
+
+    /// TempFilesDir/КаталогВременныхФайлов() method call.
+    /// Detected when global TempFilesDir method is called.
+    /// Should use GetTempFileName/ПолучитьИмяВременногоФайла instead.
+    TempFilesDir { name: String, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -815,6 +820,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
             BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
+            BodyDiagnostic::TempFilesDir { range, .. } => *range,
         }
     }
 }

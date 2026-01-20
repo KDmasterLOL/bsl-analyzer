@@ -209,6 +209,13 @@ pub(crate) fn is_set_privileged_mode(name: &str) -> bool {
     matches!(lower.as_str(), "установитьпривилегированныйрежим" | "setprivilegedmode")
 }
 
+/// Check if a method name is КаталогВременныхФайлов / TempFilesDir.
+/// Returns true if the method is the temp files directory function.
+pub(crate) fn is_temp_files_dir(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "каталогвременныхфайлов" | "tempfilesdir")
+}
+
 // =============================================================================
 // Deprecated attributes 8.3.12 detection
 // =============================================================================
