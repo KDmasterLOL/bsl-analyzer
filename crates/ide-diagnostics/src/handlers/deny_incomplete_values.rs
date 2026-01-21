@@ -128,7 +128,7 @@ mod tests {
     }
 
     fn default_config() -> DiagnosticsConfig {
-        DiagnosticsConfig::default()
+        DiagnosticsConfig::all_enabled()
     }
 
     #[test]

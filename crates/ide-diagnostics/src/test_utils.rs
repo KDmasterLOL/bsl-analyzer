@@ -160,7 +160,9 @@ pub fn assert_diagnostic_range_multiline(
 /// Run HIR-based diagnostics on test code.
 ///
 /// Creates a database with the given code and runs all HIR diagnostics.
-/// Used for testing individual HIR diagnostic handlers.
+/// Uses `DiagnosticsConfig::all_enabled()` to enable all diagnostics including
+/// those disabled by default. Use `check_hir_diagnostic_with_config` for
+/// testing specific enable/disable behavior.
 ///
 /// # Arguments
 /// * `code` - The BSL source code to analyze
@@ -176,7 +178,24 @@ pub fn assert_diagnostic_range_multiline(
 /// assert!(diagnostics.iter().any(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn));
 /// ```
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
-    use crate::DiagnosticsConfig;
+    check_hir_diagnostic_with_config(code, crate::DiagnosticsConfig::all_enabled())
+}
+
+/// Run HIR-based diagnostics on test code with custom configuration.
+///
+/// Creates a database with the given code and runs all HIR diagnostics
+/// using the provided configuration.
+///
+/// # Arguments
+/// * `code` - The BSL source code to analyze
+/// * `config` - The diagnostics configuration to use
+///
+/// # Returns
+/// Vector of diagnostics found in the code
+pub fn check_hir_diagnostic_with_config(
+    code: &str,
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
     use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::{RootDatabase, RootDatabaseImpl};
@@ -203,7 +222,6 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
 
     #[allow(clippy::arc_with_non_send_sync)]
     let db = Arc::new(db) as Arc<dyn RootDatabase>;
-    let config = DiagnosticsConfig::default();
     let ctx = crate::DiagnosticsContext {
         db: db.as_ref(),
         config: &config,
@@ -274,10 +292,11 @@ where
     check_ast_diagnostic_with_config(code, config, check_fn)
 }
 
-/// Run a handler's check() function on test code with default configuration.
+/// Run a handler's check() function on test code.
 ///
 /// Creates a database with the given code and runs the provided check function.
-/// Used for testing AST diagnostic handlers that don't use HIR.
+/// Uses `DiagnosticsConfig::all_enabled()` to enable all diagnostics including
+/// those disabled by default. Used for testing AST diagnostic handlers that don't use HIR.
 ///
 /// # Arguments
 /// * `code` - The BSL source code to analyze
@@ -298,7 +317,7 @@ pub fn check_ast_diagnostic<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    let config = crate::DiagnosticsConfig::default();
+    let config = crate::DiagnosticsConfig::all_enabled();
     check_ast_diagnostic_with_config(code, config, check_fn)
 }
 

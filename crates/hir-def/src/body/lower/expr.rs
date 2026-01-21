@@ -258,6 +258,8 @@ fn lower_unary_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
 /// Lower ternary expression.
 fn lower_ternary_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
+    ctx.emit(BodyDiagnostic::TernaryOperatorUsage { range: node.text_range() });
+
     let mut children = node.children();
 
     let condition =

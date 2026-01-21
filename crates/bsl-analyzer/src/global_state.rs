@@ -158,6 +158,7 @@ impl GlobalState {
 
         // Convert DiagnosticCode enums back to strings for Salsa hashing
         let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
+        let enabled: Vec<String> = config.enabled.iter().map(|code| code.to_string()).collect();
 
         // Convert parameters HashMap<DiagnosticCode, Value> to Vec<(String, String)>
         let parameters: Vec<(String, String)> = config
@@ -170,6 +171,7 @@ impl GlobalState {
 
         DiagnosticsConfigInput::from_raw(
             disabled,
+            enabled,
             parameters,
             config.ordinary_app_support,
             config.dataflow_max_iterations,

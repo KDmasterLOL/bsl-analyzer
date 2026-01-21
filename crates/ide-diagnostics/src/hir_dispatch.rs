@@ -201,5 +201,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::TempFilesDir { name, range } => {
             handlers::temp_files_dir::from_hir(name, *range, ctx)
         }
+        BodyDiagnostic::TernaryOperatorUsage { range } => {
+            handlers::ternary_operator_usage::from_hir(*range, ctx)
+        }
     }
 }

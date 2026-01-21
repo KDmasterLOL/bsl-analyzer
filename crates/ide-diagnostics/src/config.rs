@@ -27,6 +27,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
+    /// Diagnostics explicitly enabled (for those disabled by default).
+    pub enabled: Vec<DiagnosticCode>,
     pub parameters: HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
     /// Maximum iterations for dataflow analysis (default: 10000)
@@ -37,10 +39,39 @@ pub struct DiagnosticsConfig {
     pub dataflow_max_iterations: usize,
 }
 
+const DISABLED_BY_DEFAULT: &[DiagnosticCode] = &[
+    DiagnosticCode::BadWords,
+    DiagnosticCode::CodeAfterAsyncCall,
+    DiagnosticCode::DenyIncompleteValues,
+    DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+    DiagnosticCode::FileSystemAccess,
+    DiagnosticCode::FunctionNameStartsWithGet,
+    DiagnosticCode::FunctionOutParameter,
+    DiagnosticCode::InternetAccess,
+    DiagnosticCode::MissingTempStorageDeletion,
+    DiagnosticCode::TernaryOperatorUsage,
+    DiagnosticCode::TooManyReturns,
+];
+
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             disabled: Vec::new(),
+            enabled: Vec::new(),
+            parameters: HashMap::new(),
+            ordinary_app_support: false,
+            dataflow_max_iterations: 10000,
+        }
+    }
+}
+
+impl DiagnosticsConfig {
+    /// Create a config with all diagnostics enabled (including those disabled by default).
+    /// Useful for testing.
+    pub fn all_enabled() -> Self {
+        Self {
+            disabled: Vec::new(),
+            enabled: DISABLED_BY_DEFAULT.to_vec(),
             parameters: HashMap::new(),
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
@@ -70,6 +101,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                 M: MapAccess<'de>,
             {
                 let mut disabled = Vec::new();
+                let mut enabled = Vec::new();
                 let mut parameters = HashMap::new();
                 let mut ordinary_app_support = false;
                 let mut dataflow_max_iterations = 10000usize;
@@ -91,9 +123,10 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                                             disabled.push(code);
                                         }
                                         serde_json::Value::Bool(true) => {
-                                            // enabled = default, skip
+                                            enabled.push(code);
                                         }
                                         serde_json::Value::Object(_) => {
+                                            enabled.push(code);
                                             parameters.insert(code, value);
                                         }
                                         _ => {
@@ -113,6 +146,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
 
                 Ok(DiagnosticsConfig {
                     disabled,
+                    enabled,
                     parameters,
                     ordinary_app_support,
                     dataflow_max_iterations,
@@ -126,8 +160,21 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
 
 impl DiagnosticsConfig {
     /// Check if a diagnostic is disabled.
+    ///
+    /// A diagnostic is disabled if:
+    /// 1. It's explicitly disabled via configuration, OR
+    /// 2. It's in the DISABLED_BY_DEFAULT list AND not explicitly enabled AND has no parameters
     pub fn is_disabled(&self, code: DiagnosticCode) -> bool {
-        self.disabled.contains(&code)
+        if self.disabled.contains(&code) {
+            return true;
+        }
+        if DISABLED_BY_DEFAULT.contains(&code)
+            && !self.enabled.contains(&code)
+            && !self.parameters.contains_key(&code)
+        {
+            return true;
+        }
+        false
     }
 
     /// Get a boolean parameter for a diagnostic.
@@ -176,6 +223,9 @@ impl DiagnosticsConfig {
         let disabled: Vec<DiagnosticCode> =
             input.disabled.iter().filter_map(|s| s.parse().ok()).collect();
 
+        let enabled: Vec<DiagnosticCode> =
+            input.enabled.iter().filter_map(|s| s.parse().ok()).collect();
+
         let parameters: HashMap<DiagnosticCode, serde_json::Value> = input
             .parameters
             .iter()
@@ -188,6 +238,7 @@ impl DiagnosticsConfig {
 
         Self {
             disabled,
+            enabled,
             parameters,
             ordinary_app_support: input.ordinary_app_support,
             dataflow_max_iterations: input.dataflow_max_iterations,

@@ -635,6 +635,10 @@ pub enum BodyDiagnostic {
     /// Detected when global TempFilesDir method is called.
     /// Should use GetTempFileName/ПолучитьИмяВременногоФайла instead.
     TempFilesDir { name: String, range: TextRange },
+
+    /// Usage of ternary operator `?(condition, true_value, false_value)`.
+    /// Disabled by default. Recommends using If-Else instead for readability.
+    TernaryOperatorUsage { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -821,6 +825,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::SetPrivilegedModeCall { range } => *range,
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
             BodyDiagnostic::TempFilesDir { range, .. } => *range,
+            BodyDiagnostic::TernaryOperatorUsage { range } => *range,
         }
     }
 }

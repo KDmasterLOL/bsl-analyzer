@@ -157,6 +157,12 @@ pub struct DiagnosticsConfigInput {
     /// Example: `["LineLength", "MissingReturn"]`
     pub disabled: Vec<String>,
 
+    /// Enabled diagnostic codes (sorted alphabetically).
+    /// Used to enable diagnostics that are disabled by default.
+    ///
+    /// Example: `["TernaryOperatorUsage", "BadWords"]`
+    pub enabled: Vec<String>,
+
     /// Per-diagnostic parameters as (code, json_string) pairs, sorted by code.
     ///
     /// JSON string is used instead of serde_json::Value because Value doesn't implement Hash.
@@ -182,6 +188,7 @@ impl DiagnosticsConfigInput {
     pub fn new() -> Self {
         Self {
             disabled: Vec::new(),
+            enabled: Vec::new(),
             parameters: Vec::new(),
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
@@ -190,11 +197,12 @@ impl DiagnosticsConfigInput {
 
     /// Build from raw config data, normalizing for deterministic hashing.
     ///
-    /// - Sorts disabled list alphabetically
+    /// - Sorts disabled/enabled lists alphabetically
     /// - Sorts parameters by code
     /// - Removes duplicates
     pub fn from_raw(
         disabled: impl IntoIterator<Item = String>,
+        enabled: impl IntoIterator<Item = String>,
         parameters: impl IntoIterator<Item = (String, String)>,
         ordinary_app_support: bool,
         dataflow_max_iterations: usize,
@@ -203,11 +211,15 @@ impl DiagnosticsConfigInput {
         disabled.sort();
         disabled.dedup();
 
+        let mut enabled: Vec<String> = enabled.into_iter().collect();
+        enabled.sort();
+        enabled.dedup();
+
         let mut parameters: Vec<(String, String)> = parameters.into_iter().collect();
         parameters.sort_by(|a, b| a.0.cmp(&b.0));
         parameters.dedup_by(|a, b| a.0 == b.0);
 
-        Self { disabled, parameters, ordinary_app_support, dataflow_max_iterations }
+        Self { disabled, enabled, parameters, ordinary_app_support, dataflow_max_iterations }
     }
 
     /// Check if a diagnostic code is disabled.

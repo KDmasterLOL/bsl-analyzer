@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_missing_temp_storage_deletion() {
         let code = include_str!("../../test_data/MissingTempStorageDeletionDiagnostic.bsl");
-        let config = DiagnosticsConfig::default();
+        let config = DiagnosticsConfig::all_enabled();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         // Expect 4 diagnostics
