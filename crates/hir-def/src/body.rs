@@ -639,6 +639,10 @@ pub enum BodyDiagnostic {
     /// Usage of ternary operator `?(condition, true_value, false_value)`.
     /// Disabled by default. Recommends using If-Else instead for readability.
     TernaryOperatorUsage { range: TextRange },
+
+    /// Too many return statements in a method/function.
+    /// Detected when method has more return statements than configured threshold.
+    TooManyReturns { method_name: String, method_name_range: TextRange, returns: Vec<TextRange> },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -826,6 +830,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::StyleElementConstructors { range, .. } => *range,
             BodyDiagnostic::TempFilesDir { range, .. } => *range,
             BodyDiagnostic::TernaryOperatorUsage { range } => *range,
+            BodyDiagnostic::TooManyReturns { method_name_range, .. } => *method_name_range,
         }
     }
 }

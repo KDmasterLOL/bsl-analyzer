@@ -204,5 +204,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::TernaryOperatorUsage { range } => {
             handlers::ternary_operator_usage::from_hir(*range, ctx)
         }
+        BodyDiagnostic::TooManyReturns { method_name, method_name_range, returns } => {
+            handlers::too_many_returns::from_hir(method_name, *method_name_range, returns, ctx)
+        }
     }
 }

@@ -677,6 +677,9 @@ fn lower_return_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     if !ctx.is_function && value.is_some() {
         ctx.emit(BodyDiagnostic::ProcedureReturnsValue { range: node.text_range() });
     }
+
+    ctx.return_statements.push(node.text_range());
+
     Some(Stmt::Return { value })
 }
 

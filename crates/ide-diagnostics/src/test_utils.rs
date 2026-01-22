@@ -703,7 +703,7 @@ where
 
 // TODO: Temporarily disabled until FormTestProvider is updated to match AnalysisProvider trait
 #[allow(unexpected_cfgs)]
-#[cfg(feature = "disabled-form-test-helper")]
+#[cfg(any())]
 /// Check diagnostics in a form module with specific form type.
 ///
 /// This helper sets up the correct form metadata and module path.

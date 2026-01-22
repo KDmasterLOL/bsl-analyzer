@@ -123,6 +123,10 @@ pub(crate) struct LoweringCtx {
     /// Current method name (for ServerCallsInFormEvents diagnostic).
     /// Set at the beginning of method lowering.
     pub(crate) current_method_name: Option<String>,
+
+    /// Return statements in current method for TooManyReturns diagnostic.
+    /// Stores TextRange of each return statement.
+    pub(crate) return_statements: Vec<TextRange>,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -165,6 +169,7 @@ impl LoweringCtx {
             line_index: None, // Will be set in lower_method_with_externals_and_line_index
             statements_by_line: FxHashMap::default(),
             current_method_name: None, // Will be set in lower_method_with_externals_and_line_index
+            return_statements: Vec::new(),
         }
     }
 
@@ -201,6 +206,22 @@ impl LoweringCtx {
                     self.emit(BodyDiagnostic::OneStatementPerLine { range });
                 }
             }
+        }
+    }
+
+    /// Emit TooManyReturns diagnostic if method has too many return statements.
+    /// Returns are collected during lowering, but threshold check happens in from_hir().
+    /// We emit diagnostic if there are more than 2 returns (minimum reasonable threshold).
+    pub(crate) fn emit_too_many_returns_diagnostic(
+        &mut self,
+        method_name: String,
+        method_name_range: TextRange,
+    ) {
+        const MIN_THRESHOLD: usize = 2;
+
+        let returns = std::mem::take(&mut self.return_statements);
+        if returns.len() > MIN_THRESHOLD {
+            self.emit(BodyDiagnostic::TooManyReturns { method_name, method_name_range, returns });
         }
     }
 
@@ -721,6 +742,11 @@ pub fn lower_method_with_externals_and_line_index(
 
     // Emit OneStatementPerLine diagnostics
     ctx.emit_one_statement_per_line_diagnostics();
+
+    // Emit TooManyReturns diagnostic
+    if let Some(ref token) = name_token {
+        ctx.emit_too_many_returns_diagnostic(token.text().to_string(), token.text_range());
+    }
 
     // Collect referenced externals
     let referenced_externals = collect_referenced_externals(&ctx.body);
