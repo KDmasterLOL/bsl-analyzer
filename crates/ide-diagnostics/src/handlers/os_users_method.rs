@@ -21,20 +21,22 @@
 //! - **Severity:** Critical
 //! - **Type:** SECURITY_HOTSPOT
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::OSUsersMethod) {
+    let code = DiagnosticCode::OSUsersMethod;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::OSUsersMethod,
+        code,
         message: "Check for a potentially dangerous OSUsers method call".to_string(),
         range,
-        severity: Severity::Critical,
-        tags: vec![],
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

@@ -50,7 +50,7 @@
 //! 2. SymbolTree lookups are Salsa-cached
 //! 3. Method resolution happens once during lowering
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::hir_def::{symbol_tree::MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
@@ -89,7 +89,9 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MissedRequiredParameter) {
+    let code = DiagnosticCode::MissedRequiredParameter;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -121,11 +123,11 @@ pub fn from_hir(
     let message = format!("Specify a required parameter {}", param_list);
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissedRequiredParameter,
+        code,
         message,
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -285,7 +287,9 @@ fn check_manager_module_call(
 /// - Metadata loading: cached by Salsa (< 1ms after first load)
 /// - Expected: < 20ms for 100K-node files with metadata
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MissedRequiredParameter) {
+    let code = DiagnosticCode::MissedRequiredParameter;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -319,6 +323,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     &call_expr,
                     config,
                     &mut common_module_file_cache,
+                    code,
                 ) {
                     diagnostics.push(diagnostic);
                 }
@@ -346,7 +351,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let missing = check_missing_params(method, &provided_args);
 
         if !missing.is_empty() {
-            diagnostics.push(create_diagnostic(&call_expr, &missing));
+            diagnostics.push(create_diagnostic(&call_expr, &missing, code, ctx));
         }
     }
 
@@ -369,6 +374,7 @@ fn check_qualified_call_cached(
     call_expr: &SyntaxNode,
     configuration: &bsl_metadata::Configuration,
     common_module_file_cache: &mut std::collections::HashMap<String, Option<FileId>>,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     let qualified_call = extract_qualified_call(call_expr)?;
 
@@ -380,6 +386,7 @@ fn check_qualified_call_cached(
             &object_name,
             &method_name,
             common_module_file_cache,
+            code,
         ),
         QualifiedCall::ThreeLevel { mdo_type_keyword, mdo_name, method_name } => {
             check_object_method_call(
@@ -389,10 +396,11 @@ fn check_qualified_call_cached(
                 &mdo_type_keyword,
                 &mdo_name,
                 &method_name,
+                code,
             )
         }
         QualifiedCall::ThisObject { method_name } => {
-            check_this_object_call(ctx, call_expr, &method_name)
+            check_this_object_call(ctx, call_expr, &method_name, code)
         }
     }
 }
@@ -404,6 +412,7 @@ fn check_common_module_call_cached(
     module_name: &str,
     method_name: &str,
     cache: &mut std::collections::HashMap<String, Option<FileId>>,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     // Use lowercase module name as cache key (BSL is case-insensitive)
     let cache_key = module_name.to_lowercase();
@@ -442,7 +451,7 @@ fn check_common_module_call_cached(
     if missing.is_empty() {
         None
     } else {
-        Some(create_diagnostic(call_expr, &missing))
+        Some(create_diagnostic(call_expr, &missing, code, ctx))
     }
 }
 
@@ -455,6 +464,7 @@ fn check_object_method_call(
     mdo_type_keyword: &str,
     mdo_name: &str,
     method_name: &str,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     let _span =
         tracing::debug_span!("check_object_method_call", mdo_type_keyword, mdo_name, method_name)
@@ -501,7 +511,7 @@ fn check_object_method_call(
     if missing.is_empty() {
         None
     } else {
-        Some(create_diagnostic(call_expr, &missing))
+        Some(create_diagnostic(call_expr, &missing, code, ctx))
     }
 }
 
@@ -509,6 +519,7 @@ fn check_this_object_call(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
     method_name: &str,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     let _span = tracing::debug_span!("check_this_object_call", method = method_name).entered();
 
@@ -528,7 +539,7 @@ fn check_this_object_call(
     if missing.is_empty() {
         None
     } else {
-        Some(create_diagnostic(call_expr, &missing))
+        Some(create_diagnostic(call_expr, &missing, code, ctx))
     }
 }
 
@@ -886,7 +897,12 @@ fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<St
 /// - Java compatibility: `ПервыйОбщийМодуль.ВерсионированиеПриЗаписи(1)` → range starts at `ВерсионированиеПриЗаписи`
 ///
 /// For **local calls** (`Method()`): Range of entire call expression
-fn create_diagnostic(call_node: &SyntaxNode, missing_params: &[String]) -> Diagnostic {
+fn create_diagnostic(
+    call_node: &SyntaxNode,
+    missing_params: &[String],
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     let param_list =
         missing_params.iter().map(|name| format!("'{}'", name)).collect::<Vec<_>>().join(", ");
 
@@ -933,11 +949,11 @@ fn create_diagnostic(call_node: &SyntaxNode, missing_params: &[String]) -> Diagn
     };
 
     Diagnostic {
-        code: DiagnosticCode::MissedRequiredParameter,
+        code,
         message,
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

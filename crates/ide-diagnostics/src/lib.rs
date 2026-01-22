@@ -6,7 +6,9 @@ mod code;
 mod config;
 mod context;
 mod hir_dispatch;
+mod metadata;
 mod metadata_dispatch;
+mod metadata_registry;
 mod query;
 mod runner;
 mod types;
@@ -24,8 +26,13 @@ pub mod test_utils;
 
 // Re-exports for public API
 pub use code::DiagnosticCode;
-pub use config::DiagnosticsConfig;
+pub use config::{DiagnosticsConfig, EffectiveMetadata, MetadataOverride};
 pub use context::DiagnosticsContext;
+pub use metadata::{
+    DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope, DiagnosticSeverityLevel,
+    DiagnosticType, MetadataTag,
+};
+pub use metadata_registry::get_metadata;
 pub use query::file_diagnostics_query;
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
 

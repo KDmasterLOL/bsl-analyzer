@@ -18,11 +18,13 @@ use bsl_metadata::{FormType, ModuleType};
 use hir_def::item_tree::AnnotationKind;
 use ide_db::TextRange;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 /// Check for server-side export methods in managed forms.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ServerSideExportFormMethod) {
+    let code = DiagnosticCode::ServerSideExportFormMethod;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -45,14 +47,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Check procedures
     for (_, proc) in item_tree.procedures() {
         if proc.is_export && !has_client_annotation(&proc.annotations) {
-            diagnostics.push(make_diagnostic(proc.name_range));
+            diagnostics.push(make_diagnostic(proc.name_range, code, ctx));
         }
     }
 
     // Check functions
     for (_, func) in item_tree.functions() {
         if func.is_export && !has_client_annotation(&func.annotations) {
-            diagnostics.push(make_diagnostic(func.name_range));
+            diagnostics.push(make_diagnostic(func.name_range, code, ctx));
         }
     }
 
@@ -65,13 +67,13 @@ fn has_client_annotation(annotations: &[hir_def::item_tree::Annotation]) -> bool
 }
 
 /// Create diagnostic for export method without client annotation.
-fn make_diagnostic(range: TextRange) -> Diagnostic {
+fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::ServerSideExportFormMethod,
+        code,
         message: "Запрещено создавать серверные экспортные методы в форме".to_string(),
         range,
-        severity: Severity::Blocker,
-        tags: Vec::new(),
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: Vec::new(),
     }
 }
@@ -88,10 +90,12 @@ pub fn from_metadata(
 }
 
 #[cfg(test)]
+#[allow(unexpected_cfgs)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "disabled-form-test-helper")]
     use crate::test_utils::check_diagnostics_in_form;
 
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_export_without_annotation() {
         // Line 0, columns 10-22: БезАннотации
@@ -103,6 +107,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_export_with_client_annotation() {
         // No diagnostic - client annotation is allowed
@@ -115,6 +121,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_export_with_server_annotation() {
         // Line 1, columns 10-19: НаСервере
@@ -127,6 +135,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_export_with_server_no_context_annotation() {
         // Line 1, columns 10-31: НаСервереБезКонтекста
@@ -139,6 +149,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_ordinary_form_no_diagnostics() {
         // Ordinary forms should have no diagnostics
@@ -150,6 +162,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_non_export_method_no_diagnostics() {
         // Non-export methods should have no diagnostics
@@ -162,6 +176,8 @@ mod tests {
         );
     }
 
+    #[allow(unexpected_cfgs)]
+    #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_full_fixture() {
         // Full test matching Java fixture (0-indexed positions):

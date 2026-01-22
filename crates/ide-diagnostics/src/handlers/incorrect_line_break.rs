@@ -31,7 +31,7 @@
 //! КонецЕсли;
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::LineIndex;
 use regex::RegexBuilder;
@@ -48,7 +48,9 @@ const DEFAULT_LIST_FOR_CHECK_END: &str = r"ИЛИ|И|OR|AND|\+|-|/|%|\*";
 const QUERY_START_LINE_OFFSET: usize = 2;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IncorrectLineBreak) {
+    let code = DiagnosticCode::IncorrectLineBreak;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -62,6 +64,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         DEFAULT_LIST_FOR_CHECK_START,
         DEFAULT_CHECK_END,
         DEFAULT_LIST_FOR_CHECK_END,
+        code,
+        ctx,
     );
 
     // Find comments and queries in the AST
@@ -81,6 +85,8 @@ struct IncorrectLineBreakChecker<'a> {
     list_of_incorrect_last_symbol: String,
     query_first_lines: HashSet<usize>,
     comment_starts: HashMap<usize, usize>,
+    code: DiagnosticCode,
+    ctx: &'a DiagnosticsContext<'a>,
 }
 
 impl<'a> IncorrectLineBreakChecker<'a> {
@@ -90,6 +96,8 @@ impl<'a> IncorrectLineBreakChecker<'a> {
         list_of_incorrect_first_symbol: &str,
         check_last_symbol: bool,
         list_of_incorrect_last_symbol: &str,
+        code: DiagnosticCode,
+        ctx: &'a DiagnosticsContext<'a>,
     ) -> Self {
         // Build line index once - O(n)
         let line_index = LineIndex::new(text);
@@ -102,6 +110,8 @@ impl<'a> IncorrectLineBreakChecker<'a> {
             list_of_incorrect_last_symbol: list_of_incorrect_last_symbol.to_string(),
             query_first_lines: HashSet::new(),
             comment_starts: HashMap::new(),
+            code,
+            ctx,
         }
     }
 
@@ -227,15 +237,15 @@ impl<'a> IncorrectLineBreakChecker<'a> {
                             );
 
                             diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::IncorrectLineBreak,
+                                code: self.code,
                                 message: format!(
                                     "Incorrect line break: '{}' at line {}",
                                     &line_text[start..end].trim(),
                                     if is_start { "start" } else { "end" }
                                 ),
-                                severity: Severity::Information,
+                                severity: self.ctx.severity(self.code),
                                 range,
-                                tags: vec![],
+                                tags: self.ctx.tags(self.code),
                                 fixes: vec![],
                             });
                         }

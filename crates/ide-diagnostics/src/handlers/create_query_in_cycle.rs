@@ -48,24 +48,26 @@
 //! - `crates/hir-def/src/body/lower/stmt.rs` - Loop handling and query variable tracking
 //! - `crates/hir-def/src/body/lower/expr.rs` - Execute() call detection
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::CreateQueryInCycle` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CreateQueryInCycle) {
+    let code = DiagnosticCode::CreateQueryInCycle;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
     Some(Diagnostic {
-        code: DiagnosticCode::CreateQueryInCycle,
+        code,
         message: "Выполнение запроса в цикле приводит к деградации производительности. \
                   Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла"
             .to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

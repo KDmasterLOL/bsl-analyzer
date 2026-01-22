@@ -41,23 +41,25 @@
 //! - EmptyRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - empty_region.rs (bsl-language-server-rust) - Algorithm reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::EmptyRegion` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::EmptyRegion) {
+    let code = DiagnosticCode::EmptyRegion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::EmptyRegion,
+        code,
         message: format!("Область '{}' пуста", name),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

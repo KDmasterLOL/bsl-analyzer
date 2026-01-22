@@ -28,22 +28,24 @@
 //! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedCodeBlockDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_code_block.rs
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::IfElseDuplicatedCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IfElseDuplicatedCodeBlock) {
+    let code = DiagnosticCode::IfElseDuplicatedCodeBlock;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
     Some(Diagnostic {
-        code: DiagnosticCode::IfElseDuplicatedCodeBlock,
+        code,
         message: "Ветки Если и Иначе содержат идентичный код".to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

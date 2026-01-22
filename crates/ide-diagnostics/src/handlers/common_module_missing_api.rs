@@ -4,12 +4,14 @@
 //!
 //! Ported from: CommonModuleMissingAPIDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::ast::{AstNode, FunctionDef, PreRegionDir, ProcedureDef};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CommonModuleMissingAPI) {
+    let code = DiagnosticCode::CommonModuleMissingAPI;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -26,11 +28,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     if !has_export || !has_api_region {
         vec![Diagnostic {
-            code: DiagnosticCode::CommonModuleMissingAPI,
+            code,
             message: "Общий модуль должен содержать экспортные методы и области API".to_string(),
-            severity: Severity::Information,
+            severity: ctx.severity(code),
             range: TextRange::empty(0.into()),
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         }]
     } else {

@@ -44,14 +44,16 @@
 //! #КонецОбласти
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 use hir_def::region_tree::RegionTree;
 use hir_def::MethodId;
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::PublicMethodsDescription) {
+    let code = DiagnosticCode::PublicMethodsDescription;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -68,7 +70,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for method_id in module_data.procedures.iter().chain(module_data.functions.iter()) {
         if let Some(diag) =
-            check_method(ctx, *method_id, &item_tree, &region_tree, check_all_region)
+            check_method(ctx, *method_id, &item_tree, &region_tree, check_all_region, code)
         {
             diagnostics.push(diag);
         }
@@ -83,6 +85,7 @@ fn check_method(
     item_tree: &hir_def::ItemTree,
     region_tree: &RegionTree,
     check_all_region: bool,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     let (is_export, name_range, source_range) = item_tree
         .top_level_items()
@@ -111,7 +114,7 @@ fn check_method(
     }
 
     if check_all_region {
-        return Some(create_diagnostic(name_range));
+        return Some(create_diagnostic(name_range, code, ctx));
     }
 
     let region_idx = region_tree.region_containing(source_range)?;
@@ -119,7 +122,7 @@ fn check_method(
     let root_region = region_tree.region(root_idx);
 
     if is_public_api_region(root_region.name.as_str()) {
-        return Some(create_diagnostic(name_range));
+        return Some(create_diagnostic(name_range, code, ctx));
     }
 
     None
@@ -130,13 +133,17 @@ fn is_public_api_region(name: &str) -> bool {
     lower == "программныйинтерфейс" || lower == "public"
 }
 
-fn create_diagnostic(range: TextRange) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::PublicMethodsDescription,
+        code,
         message: "Добавьте описание метода программного интерфейса".to_string(),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

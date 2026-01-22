@@ -20,12 +20,14 @@
 //! 3. No CFG/dataflow needed - pure structural pattern matching on expression trees
 //! 4. Single-pass AST traversal is optimal for this syntactic check
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::DoubleNegatives) {
+    let code = DiagnosticCode::DoubleNegatives;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -58,11 +60,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for node in &unary_exprs {
         if let Some(range) = check_double_not_optimized(node, &unary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DoubleNegatives,
+                code,
                 message: "Using double negatives complicates understanding of code".to_string(),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
@@ -72,11 +74,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for node in &unary_exprs {
         if let Some(range) = check_not_wrapping_neq_optimized(node, &binary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DoubleNegatives,
+                code,
                 message: "Using double negatives complicates understanding of code".to_string(),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
@@ -86,11 +88,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for node in &binary_exprs {
         if let Some(range) = check_not_on_left_neq_optimized(node, &unary_exprs, &node_info) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DoubleNegatives,
+                code,
                 message: "Using double negatives complicates understanding of code".to_string(),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

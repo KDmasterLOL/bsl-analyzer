@@ -40,7 +40,7 @@
 //! Now uses SDBL HIR with diagnostics collected during lowering.
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 
 /// Runs the AssignAliasFieldsInQuery diagnostic.
@@ -50,7 +50,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::AssignAliasFieldsInQuery) {
+    let code = DiagnosticCode::AssignAliasFieldsInQuery;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -105,11 +107,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 };
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::AssignAliasFieldsInQuery,
+                    code,
                     message,
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

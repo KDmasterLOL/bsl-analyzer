@@ -57,14 +57,16 @@
 //!   - No way to distinguish intentional split from separate statements
 //! - See `check_preprocessor_split_expressions()` for detailed explanation
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg_types::IdConversion;
 use hir_def::{BinaryOp, Body, BodySourceMap, Expr, ExprId, Literal, UnaryOp};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IdenticalExpressions) {
+    let code = DiagnosticCode::IdenticalExpressions;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -75,12 +77,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check module-level code (outside procedures/functions)
     if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(&module_code.body, &module_code.source_map, &mut diagnostics, ctx);
+        check_body(&module_code.body, &module_code.source_map, &mut diagnostics, code, ctx);
     }
 
     // Check all methods (procedures/functions)
     for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &mut diagnostics, ctx);
+        check_body(body, source_map, &mut diagnostics, code, ctx);
     }
 
     // AST fallback for preprocessor split expressions (Phase 5 evaluation)
@@ -88,7 +90,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // E.g., "Результат = Истина\n#Область\n ИЛИ Истина;\n#КонецОбласти"
     let parse = ctx.parse();
     let root = parse.syntax_node();
-    check_preprocessor_split_expressions(&root, &mut diagnostics);
+    check_preprocessor_split_expressions(&root, &mut diagnostics, code, ctx);
 
     diagnostics
 }
@@ -384,6 +386,7 @@ fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
     // Walk all expressions in the body
@@ -397,6 +400,7 @@ fn check_body(
                 body,
                 source_map,
                 diagnostics,
+                code,
                 ctx,
             );
         }
@@ -415,6 +419,7 @@ fn check_binary_expr_hir(
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) {
     // Skip assignment statements (e.g., "Перем1 = Перем1;")
@@ -433,7 +438,7 @@ fn check_binary_expr_hir(
         // Only check at top level of chain to avoid duplicate reports
         // Top level = this binary op is not nested inside another same-type binary op
         if !is_nested_in_logical_chain(expr_id, op, body) {
-            check_logical_chain_hir(expr_id, op, body, source_map, diagnostics);
+            check_logical_chain_hir(expr_id, op, body, source_map, diagnostics, code, ctx);
         }
         return;
     }
@@ -468,14 +473,14 @@ fn check_binary_expr_hir(
         let lhs_text = expr_to_string(lhs, body);
 
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::IdenticalExpressions,
+            code,
             message: format!(
                 "Одинаковые выражения '{}' с обеих сторон оператора '{}'",
                 lhs_text, op_text
             ),
-            severity: Severity::Major,
+            severity: ctx.severity(code),
             range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }
@@ -539,6 +544,8 @@ fn check_logical_chain_hir(
     body: &Body,
     source_map: &BodySourceMap,
     diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     let mut operands = Vec::new();
     collect_logical_chain_hir(root_expr_id, chain_op, body, &mut operands);
@@ -567,14 +574,14 @@ fn check_logical_chain_hir(
             };
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::IdenticalExpressions,
+                code,
                 message: format!(
                     "Повторяющееся выражение '{}' в цепочке оператора '{}'",
                     dup_text, op_text
                 ),
-                severity: Severity::Major,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
@@ -682,7 +689,12 @@ fn normalize_text(text: &str) -> String {
 /// - Extract RHS from assignment
 /// - Collect operands from directive content (including ERROR nodes)
 /// - Check for duplicates between assignment RHS and directive operands
-fn check_preprocessor_split_expressions(root: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
+fn check_preprocessor_split_expressions(
+    root: &SyntaxNode,
+    diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) {
     for node in root.descendants() {
         // Look for ASSIGN_STMT followed by preprocessor directive
         if node.kind() != SyntaxKind::ASSIGN_STMT {
@@ -731,14 +743,14 @@ fn check_preprocessor_split_expressions(root: &SyntaxNode, diagnostics: &mut Vec
             if !seen.insert(operand.clone()) {
                 // Found duplicate!
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::IdenticalExpressions,
+                    code,
                     message: format!(
                         "Повторяющееся выражение '{}' в выражении, разбитом препроцессорной директивой",
                         operand
                     ),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: node.text_range(),
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
                 break;

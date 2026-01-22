@@ -43,7 +43,7 @@
 //! Tier 3 diagnostic: Requires metadata (CommonModule, ReturnValueReuse).
 //! Uses HIR RegionTree and ItemTree for clean, cached access to regions and methods.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::ReturnValueReuse;
 
 /// Main entry point for CachedPublic diagnostic.
@@ -55,7 +55,8 @@ use bsl_metadata::ReturnValueReuse;
 ///
 /// Uses HIR RegionTree and ItemTree for clean access to structured data.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CachedPublic) {
+    let code = DiagnosticCode::CachedPublic;
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -106,11 +107,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     code: DiagnosticCode::CachedPublic,
                     message: "Кэшируемый модуль не должен содержать методы в публичных областях"
                         .to_string(),
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     // Use region range for compatibility with existing tests
                     // (region.name_range would be better UX but breaks tests)
                     range: region.range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 })
             } else {
@@ -171,13 +172,14 @@ fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Di
                     .any(|(_, func)| region.range.contains_range(func.source_range));
 
             if has_methods {
+                let code = DiagnosticCode::CachedPublic;
                 Some(Diagnostic {
-                    code: DiagnosticCode::CachedPublic,
+                    code,
                     message: "Кэшируемый модуль не должен содержать методы в публичных областях"
                         .to_string(),
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     range: region.range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 })
             } else {

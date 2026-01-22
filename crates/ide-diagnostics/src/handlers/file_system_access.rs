@@ -67,23 +67,25 @@
 //! - FileSystemAccessDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - file_system_access.rs (bsl-language-server-rust) - Rust reference (regex-based)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when FileSystemAccess diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::FileSystemAccess) {
+    let code = DiagnosticCode::FileSystemAccess;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::FileSystemAccess,
+        code,
         message: "File system access detected (security review required)".to_string(),
         range,
-        severity: Severity::Warning,
-        tags: vec![],
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

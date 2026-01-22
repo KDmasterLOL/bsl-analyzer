@@ -30,7 +30,7 @@
 //! - No parameters
 //! - Can be disabled via config
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxToken};
 
 /// Check if text contains Cyrillic characters
@@ -217,8 +217,9 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
 
 /// Main entry point for CanonicalSpellingKeywords diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CanonicalSpellingKeywords;
     // Check if disabled
-    if ctx.config.is_disabled(DiagnosticCode::CanonicalSpellingKeywords) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -247,9 +248,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         token.text(),
                         canonical
                     ),
-                    severity: Severity::Information,
+                    severity: ctx.severity(code),
                     range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

@@ -14,23 +14,25 @@
 //! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when EMPTY_STMT
 //! AST node is encountered during statement lowering (if no parser errors nearby).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::EmptyStatement` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::EmptyStatement) {
+    let code = DiagnosticCode::EmptyStatement;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::EmptyStatement,
+        code,
         message: "Empty statement".to_string(),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

@@ -49,7 +49,7 @@
 //!
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -60,21 +60,23 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::DeletingCollectionItem) {
+    let code = DiagnosticCode::DeletingCollectionItem;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::DeletingCollectionItem,
+        code,
         message: format!(
             "Удаление элемента из коллекции '{}' во время итерации по ней может \
              привести к пропуску элементов или ошибкам. Используйте обратный цикл \
              по индексу или соберите элементы для удаления отдельно",
             collection
         ),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

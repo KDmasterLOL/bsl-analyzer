@@ -83,7 +83,7 @@
 //! - Cleaner code (structured HIR vs raw AST)
 //! - Reusability (same calculation for code lens)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{self, item_tree::ModItem};
 
 #[derive(Debug, Clone)]
@@ -109,7 +109,8 @@ impl Config {
 ///
 /// Uses HIR-based complexity calculation for better performance and reusability.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CognitiveComplexity) {
+    let code = DiagnosticCode::CognitiveComplexity;
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -143,9 +144,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                                  Упростите логику или уменьшите вложенность",
                                 proc.name, complexity, config.complexity_threshold
                             ),
-                            severity: Severity::Warning,
+                            severity: ctx.severity(code),
                             range: proc.name_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -166,9 +167,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                                  Упростите логику или уменьшите вложенность",
                                 func.name, complexity, config.complexity_threshold
                             ),
-                            severity: Severity::Warning,
+                            severity: ctx.severity(code),
                             range: func.name_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -199,7 +200,7 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-    use crate::DiagnosticsConfig;
+    use crate::{DiagnosticsConfig, Severity};
     use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};

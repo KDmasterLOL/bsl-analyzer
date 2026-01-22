@@ -42,7 +42,7 @@
 //! - AccountingRegister (Регистр бухгалтерии)
 //! - CalculationRegister (Регистр расчета)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+use crate::{Diagnostic, DiagnosticCode};
 use hir_def::ModuleMetadata;
 use ide_db::TextRange;
 
@@ -51,10 +51,11 @@ use ide_db::TextRange;
 /// Checks register dimensions for DenyIncompleteValues=false flag.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
-    config: &DiagnosticsConfig,
-    file_text: &str,
+    ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    if config.is_disabled(DiagnosticCode::DenyIncompleteValues) {
+    let code = DiagnosticCode::DenyIncompleteValues;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -64,6 +65,7 @@ pub fn from_metadata(
     };
 
     let mut diagnostics = Vec::new();
+    let file_text = ctx.file_text();
 
     for dimension in register.dimensions() {
         if !dimension.is_deny_incomplete_values() {
@@ -81,11 +83,11 @@ pub fn from_metadata(
             let range = TextRange::new(0.into(), (end_offset as u32).into());
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DenyIncompleteValues,
+                code,
                 message,
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
@@ -114,6 +116,7 @@ fn format_register_full_name(register: &bsl_metadata::Register) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DiagnosticsConfig;
     use std::sync::Arc;
 
     fn make_metadata_with_register(register: bsl_metadata::Register) -> ModuleMetadata {
@@ -125,10 +128,6 @@ mod tests {
             register: Some(Arc::new(register)),
             form: None,
         }
-    }
-
-    fn default_config() -> DiagnosticsConfig {
-        DiagnosticsConfig::all_enabled()
     }
 
     #[test]
@@ -146,7 +145,8 @@ mod tests {
 
         let metadata = make_metadata_with_register(register);
         let file_text = "Процедура Тест()\nКонецПроцедуры";
-        let diagnostics = from_metadata(&metadata, &default_config(), file_text);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Справочник1"));
@@ -168,7 +168,8 @@ mod tests {
 
         let metadata = make_metadata_with_register(register);
         let file_text = "Процедура Тест()\nКонецПроцедуры";
-        let diagnostics = from_metadata(&metadata, &default_config(), file_text);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert!(diagnostics.is_empty());
     }
@@ -200,7 +201,8 @@ mod tests {
 
         let metadata = make_metadata_with_register(register);
         let file_text = "Процедура Тест()\nКонецПроцедуры";
-        let diagnostics = from_metadata(&metadata, &default_config(), file_text);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert_eq!(diagnostics.len(), 2);
         assert!(diagnostics[0].message.contains("Измерение1"));
@@ -219,7 +221,8 @@ mod tests {
         };
 
         let file_text = "Процедура Тест()\nКонецПроцедуры";
-        let diagnostics = from_metadata(&metadata, &default_config(), file_text);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert!(diagnostics.is_empty());
     }
@@ -243,7 +246,12 @@ mod tests {
         config.disabled.push(DiagnosticCode::DenyIncompleteValues);
 
         let file_text = "Процедура Тест()\nКонецПроцедуры";
-        let diagnostics = from_metadata(&metadata, &config, file_text);
+        let diagnostics = crate::test_utils::check_metadata_diagnostic_with_config(
+            metadata,
+            file_text,
+            config,
+            from_metadata,
+        );
 
         assert!(diagnostics.is_empty());
     }
@@ -290,7 +298,8 @@ mod tests {
 
         let metadata = make_metadata_with_register(register);
         let file_text = "//"; // Very small file (2 chars)
-        let diagnostics = from_metadata(&metadata, &default_config(), file_text);
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, file_text, from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         // Range should not exceed file length

@@ -35,7 +35,7 @@
 //! - LogicalOrInTheWhereSectionOfQueryDiagnostic.java (bsl-language-server)
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
 
@@ -46,7 +46,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::LogicalOrInTheWhereSectionOfQuery) {
+    let code = DiagnosticCode::LogicalOrInTheWhereSectionOfQuery;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -77,11 +79,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+                    code,
                     message: "Using OR operator in WHERE clause severely degrades query performance. Consider rewriting using UNION or restructuring conditions".to_string(),
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

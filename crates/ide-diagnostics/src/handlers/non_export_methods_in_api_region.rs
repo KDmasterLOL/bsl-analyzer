@@ -70,14 +70,16 @@
 //! (like &MyAnnotation) are filtered out in `item_tree::lower::lower_annotations()`.
 //! This allows `has_builtin_annotations()` to work by checking if annotations array is non-empty.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{item_tree::Annotation, region_tree::RegionTree, Name};
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NonExportMethodsInApiRegion::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::NonExportMethodsInApiRegion) {
+    let code = DiagnosticCode::NonExportMethodsInApiRegion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -102,6 +104,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &proc.annotations,
             skip_annotated_methods,
             &region_tree,
+            code,
+            ctx,
             &mut diagnostics,
         );
     }
@@ -116,6 +120,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &func.annotations,
             skip_annotated_methods,
             &region_tree,
+            code,
+            ctx,
             &mut diagnostics,
         );
     }
@@ -135,6 +141,8 @@ fn check_method(
     annotations: &[Annotation],
     skip_annotated_methods: bool,
     region_tree: &RegionTree,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Skip exported methods - they're allowed in API regions
@@ -154,15 +162,15 @@ fn check_method(
 
     // Report diagnostic
     diagnostics.push(Diagnostic {
-        code: DiagnosticCode::NonExportMethodsInApiRegion,
+        code,
         message: format!(
             "Move non export method \"{}\" from \"{}\" region",
             name.as_str(),
             region_name
         ),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range: name_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     });
 }

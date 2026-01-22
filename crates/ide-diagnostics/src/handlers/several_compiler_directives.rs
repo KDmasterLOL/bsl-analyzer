@@ -2,11 +2,13 @@
 //!
 //! Checks that a module variable or method has no more than one compiler directive.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::SeveralCompilerDirectives) {
+    let code = DiagnosticCode::SeveralCompilerDirectives;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -15,19 +17,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for (_, proc) in item_tree.procedures() {
         if proc.annotations.len() > 1 {
-            diagnostics.push(make_diagnostic(proc.name_range));
+            diagnostics.push(make_diagnostic(proc.name_range, code, ctx));
         }
     }
 
     for (_, func) in item_tree.functions() {
         if func.annotations.len() > 1 {
-            diagnostics.push(make_diagnostic(func.name_range));
+            diagnostics.push(make_diagnostic(func.name_range, code, ctx));
         }
     }
 
     for (_, var) in item_tree.variables() {
         if var.annotations.len() > 1 {
-            diagnostics.push(make_diagnostic(var.name_range));
+            diagnostics.push(make_diagnostic(var.name_range, code, ctx));
         }
     }
 
@@ -35,13 +37,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn make_diagnostic(range: TextRange) -> Diagnostic {
+fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::SeveralCompilerDirectives,
+        code,
         message: "Указано более одной директивы компиляции".to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

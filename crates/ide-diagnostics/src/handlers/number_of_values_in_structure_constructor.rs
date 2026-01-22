@@ -16,13 +16,15 @@
 //! Result = New Structure("A, B, C", 1, 2, 3);
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{Body, BodySourceMap, Expr, Name};
 
 const DEFAULT_MAX_VALUES_COUNT: i64 = 3;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::NumberOfValuesInStructureConstructor) {
+    let code = DiagnosticCode::NumberOfValuesInStructureConstructor;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -37,12 +39,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check module-level code
     if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(&module_code.body, &module_code.source_map, max_values_count, &mut diagnostics);
+        check_body(
+            &module_code.body,
+            &module_code.source_map,
+            max_values_count,
+            code,
+            ctx,
+            &mut diagnostics,
+        );
     }
 
     // Check all method bodies
     for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, max_values_count, &mut diagnostics);
+        check_body(body, source_map, max_values_count, code, ctx, &mut diagnostics);
     }
 
     // Sort by position (HIR expressions are stored in arena, not source order)
@@ -55,6 +64,8 @@ fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
     max_values_count: usize,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
@@ -77,15 +88,15 @@ fn check_body(
         };
 
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::NumberOfValuesInStructureConstructor,
+            code,
             message: format!(
                 "Слишком много значений в конструкторе Структура ({}, при допустимом {})",
                 args.len() - 1,
                 max_values_count
             ),
-            severity: Severity::Warning,
+            severity: ctx.severity(code),
             range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }

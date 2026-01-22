@@ -17,7 +17,7 @@
 //! Diagnostics are emitted in `from_clause.rs` when table resolution fails.
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
 
@@ -28,7 +28,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::QueryToMissingMetadata) {
+    let code = DiagnosticCode::QueryToMissingMetadata;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -52,14 +54,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::QueryToMissingMetadata,
+                    code,
                     message: format!(
                         "Исправьте обращение к несуществующему метаданному \"{}\" в запросе",
                         table_name
                     ),
-                    severity: Severity::Blocker,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

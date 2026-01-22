@@ -41,7 +41,7 @@
 //! - Automatic Salsa caching via module_bodies()
 //! - Module-level code coverage (not just methods)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::hir::ExprIdx;
 use hir_def::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
 use line_index::LineIndex;
@@ -90,7 +90,9 @@ impl Config {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::NestedFunctionInParameters) {
+    let code = DiagnosticCode::NestedFunctionInParameters;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -116,12 +118,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &config,
             &line_index,
             &root,
+            code,
+            ctx,
         );
     }
 
     // Check all method bodies (procedures and functions)
     for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &mut diagnostics, &config, &line_index, &root);
+        check_body(body, source_map, &mut diagnostics, &config, &line_index, &root, code, ctx);
     }
 
     // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
@@ -133,6 +137,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Check a single Body for nested function calls in parameters.
 ///
 /// HIR-based approach: iterates over expressions and checks calls semantically.
+#[allow(clippy::too_many_arguments)]
 fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
@@ -140,6 +145,8 @@ fn check_body(
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     // Walk all expressions in the body
     for (expr_id, expr) in body.exprs_iter() {
@@ -156,6 +163,8 @@ fn check_body(
                     config,
                     line_index,
                     root,
+                    code,
+                    ctx,
                 );
             }
             Expr::MethodCall { receiver: _, method, args } => {
@@ -169,6 +178,8 @@ fn check_body(
                     config,
                     line_index,
                     root,
+                    code,
+                    ctx,
                 );
             }
             Expr::New { type_name, args } => {
@@ -182,6 +193,8 @@ fn check_body(
                     config,
                     line_index,
                     root,
+                    code,
+                    ctx,
                 );
             }
             _ => {}
@@ -290,6 +303,8 @@ fn check_call_expr(
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     // Empty args - skip
     if args.is_empty() {
@@ -330,14 +345,14 @@ fn check_call_expr(
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
-        code: DiagnosticCode::NestedFunctionInParameters,
+        code,
         message: format!(
             "Убрать инициализацию параметров метода '{}' вложенными методами",
             method_name
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: name_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     });
 }
@@ -354,6 +369,8 @@ fn check_method_call_expr(
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     // Empty args - skip
     if args.is_empty() {
@@ -386,14 +403,14 @@ fn check_method_call_expr(
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
-        code: DiagnosticCode::NestedFunctionInParameters,
+        code,
         message: format!(
             "Убрать инициализацию параметров метода '{}' вложенными методами",
             method.as_str()
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: name_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     });
 }
@@ -410,6 +427,8 @@ fn check_new_expr(
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     // Empty args - skip
     if args.is_empty() {
@@ -444,14 +463,14 @@ fn check_new_expr(
     let name_range = find_name_token_range(range, root);
 
     diagnostics.push(Diagnostic {
-        code: DiagnosticCode::NestedFunctionInParameters,
+        code,
         message: format!(
             "Убрать инициализацию параметров конструктора '{}' вложенными методами",
             display_name
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: name_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     });
 }

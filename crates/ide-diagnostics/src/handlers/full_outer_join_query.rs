@@ -34,7 +34,7 @@
 //! - full_outer_join_query.rs (bsl-language-server-rust)
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
 
@@ -45,7 +45,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::FullOuterJoinQuery) {
+    let code = DiagnosticCode::FullOuterJoinQuery;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -76,13 +78,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::FullOuterJoinQuery,
+                    code,
                     message: "Using FULL OUTER JOIN significantly reduces query performance. \
                               Consider rewriting using UNION with LEFT JOIN"
                         .to_string(),
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }
@@ -102,7 +104,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
-    use crate::{DiagnosticCode, Severity};
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_full_outer_join_query_from_fixture() {
@@ -114,7 +116,6 @@ mod tests {
 
         // Verify it's the correct diagnostic type
         assert_eq!(diagnostics[0].code, DiagnosticCode::FullOuterJoinQuery);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert!(diagnostics[0].message.contains("FULL OUTER JOIN"));
 
         // Verify the diagnostic is in the query string (lines 4-13)

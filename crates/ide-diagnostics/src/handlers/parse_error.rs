@@ -1,8 +1,10 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ParseError) {
+    let code = DiagnosticCode::ParseError;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -12,11 +14,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     root.descendants()
         .filter(|node| node.kind() == SyntaxKind::ERROR && !node.text_range().is_empty())
         .map(|node| Diagnostic {
-            code: DiagnosticCode::ParseError,
+            code,
             message: "Ошибка разбора исходного кода".to_string(),
-            severity: Severity::Critical,
+            severity: ctx.severity(code),
             range: node.text_range(),
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         })
         .collect()

@@ -45,7 +45,7 @@
 //! - **Severity:** CRITICAL (ERROR)
 //! - **Tags:** ERROR, PERFORMANCE
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::AnnotationKind;
 use hir_def::Name;
 use ide_db::TextRange;
@@ -65,7 +65,9 @@ const SERVER_ANNOTATIONS: &[AnnotationKind] =
 /// 3. Find the called method in SymbolTree
 /// 4. Check if method has server annotation (AtServer or AtServerNoContext)
 pub fn from_hir(callee: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ServerCallsInFormEvents) {
+    let code = DiagnosticCode::ServerCallsInFormEvents;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -90,15 +92,15 @@ pub fn from_hir(callee: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opt
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::ServerCallsInFormEvents,
+        code,
         message: format!(
             "В событиях ПриАктивизацииСтроки и НачалоВыбора не должно быть вызовов \
              серверных процедур. Процедура \"{}\" выполняется на сервере",
             callee
         ),
-        severity: Severity::Critical,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

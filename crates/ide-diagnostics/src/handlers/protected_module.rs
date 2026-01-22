@@ -25,10 +25,12 @@
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::TextRange;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ProtectedModule) {
+    let code = DiagnosticCode::ProtectedModule;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -48,14 +50,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if common_module.is_protected() {
             let mdo_ref = format!("ОбщийМодуль.{}", common_module.name());
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::ProtectedModule,
+                code,
                 message: format!(
                     "Исходный код модуля отсутствует из-за защиты паролем. {}",
                     mdo_ref
                 ),
-                severity: Severity::Major,
+                severity: ctx.severity(code),
                 range: diagnostic_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

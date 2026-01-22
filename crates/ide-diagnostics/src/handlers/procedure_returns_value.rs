@@ -26,20 +26,22 @@
 //! - **Severity:** Blocker
 //! - **Type:** ERROR
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ProcedureReturnsValue) {
+    let code = DiagnosticCode::ProcedureReturnsValue;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::ProcedureReturnsValue,
+        code,
         message: "Процедура не должна возвращать значение".to_string(),
         range,
-        severity: Severity::Blocker,
-        tags: vec![],
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

@@ -4,7 +4,7 @@
 //!
 //! Ported from: CommonModuleAssignDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use ide_db::TextRange;
 
@@ -21,7 +21,9 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CommonModuleAssign) {
+    let code = DiagnosticCode::CommonModuleAssign;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -33,14 +35,14 @@ pub fn from_hir(
 
     // Found matching CommonModule - this is an error
     Some(Diagnostic {
-        code: DiagnosticCode::CommonModuleAssign,
+        code,
         message: format!(
             "Недопустимо присваивание значения общему модулю '{}'",
             common_module.name()
         ),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

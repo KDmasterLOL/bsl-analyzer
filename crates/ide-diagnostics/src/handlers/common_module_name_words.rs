@@ -4,7 +4,7 @@
 //!
 //! Ported from: CommonModuleNameWordsDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, Severity};
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
@@ -14,8 +14,14 @@ const DEFAULT_WORDS: &str = r"процедуры|procedures|функции|funct
 /// Check metadata-based diagnostics using ModuleMetadata.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
-    config: &crate::DiagnosticsConfig,
+    ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CommonModuleNameWords;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
     if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
         return Vec::new();
     }
@@ -26,20 +32,19 @@ pub fn from_metadata(
     };
 
     // Get words pattern from config, or use default
-    let words_pattern =
-        config.get_string(DiagnosticCode::CommonModuleNameWords, "words").unwrap_or(DEFAULT_WORDS);
+    let words_pattern = ctx.config.get_string(code, "words").unwrap_or(DEFAULT_WORDS);
 
     // Split pattern by | (regex alternation) and check if name contains any word
     let name_lower = module.name().to_lowercase();
     for word in words_pattern.split('|') {
         if name_lower.contains(&word.to_lowercase()) {
             return vec![Diagnostic {
-                code: DiagnosticCode::CommonModuleNameWords,
+                code,
                 message: "Имя общего модуля не должно содержать общих слов типа 'Процедуры', 'Функции', 'Модуль'"
                     .to_string(),
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range: TextRange::empty(0.into()),
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             }];
         }
@@ -66,8 +71,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -84,8 +89,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -102,8 +107,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -120,8 +125,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
 }

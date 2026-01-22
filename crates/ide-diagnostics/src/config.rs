@@ -1,6 +1,8 @@
 //! Diagnostics configuration.
 
-use crate::DiagnosticCode;
+use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
+use crate::metadata_registry;
+use crate::{DiagnosticCode, Severity};
 use base_db::DiagnosticsConfigInput;
 use std::collections::HashMap;
 
@@ -24,6 +26,70 @@ use std::collections::HashMap;
 /// - `false` = diagnostic disabled
 /// - `true` = diagnostic enabled (default)
 /// - `{...}` = diagnostic parameters
+///
+/// Metadata override from JSON configuration.
+///
+/// Allows runtime override of compile-time metadata.
+/// Matches Java's metadata override functionality.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataOverride {
+    pub severity: Option<DiagnosticSeverityLevel>,
+    pub diagnostic_type: Option<DiagnosticType>,
+    pub tags: Option<Vec<MetadataTag>>,
+    pub lsp_severity: Option<String>,
+}
+
+/// Effective metadata (base + overrides).
+///
+/// Combines compile-time const metadata with runtime config overrides.
+#[derive(Debug, Clone)]
+pub struct EffectiveMetadata {
+    base: &'static crate::metadata::DiagnosticMetadata,
+    severity_override: Option<DiagnosticSeverityLevel>,
+    type_override: Option<DiagnosticType>,
+    tags_override: Option<Vec<MetadataTag>>,
+    lsp_severity_override: Option<String>,
+}
+
+impl EffectiveMetadata {
+    /// Get effective severity (base or override).
+    pub fn severity_value(&self) -> Severity {
+        if let Some(override_str) = &self.lsp_severity_override {
+            return parse_severity(override_str);
+        }
+        self.base.calculate_severity()
+    }
+
+    /// Get effective tags (base or override).
+    pub fn tags(&self) -> Vec<MetadataTag> {
+        self.tags_override.clone().unwrap_or_else(|| self.base.tags.to_vec())
+    }
+
+    /// Get effective diagnostic type (base or override).
+    pub fn diagnostic_type(&self) -> DiagnosticType {
+        self.type_override.unwrap_or(self.base.diagnostic_type)
+    }
+
+    /// Get effective severity (base or override).
+    pub fn severity(&self) -> DiagnosticSeverityLevel {
+        self.severity_override.unwrap_or(self.base.severity)
+    }
+}
+
+/// Parse severity from string.
+fn parse_severity(s: &str) -> Severity {
+    match s.to_lowercase().as_str() {
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "information" | "info" => Severity::Information,
+        "hint" => Severity::Hint,
+        "blocker" => Severity::Blocker,
+        "critical" => Severity::Critical,
+        "major" => Severity::Major,
+        _ => Severity::Warning,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
@@ -37,21 +103,12 @@ pub struct DiagnosticsConfig {
     /// Increase this for very complex methods with deep nesting or many loops.
     /// Warning is logged if analysis exceeds this limit.
     pub dataflow_max_iterations: usize,
+    /// Metadata overrides from JSON configuration.
+    ///
+    /// Allows runtime override of compile-time metadata (severity, type, tags, lsp_severity).
+    /// Not yet fully implemented - placeholder for Phase 3 completion.
+    pub metadata_overrides: HashMap<DiagnosticCode, MetadataOverride>,
 }
-
-const DISABLED_BY_DEFAULT: &[DiagnosticCode] = &[
-    DiagnosticCode::BadWords,
-    DiagnosticCode::CodeAfterAsyncCall,
-    DiagnosticCode::DenyIncompleteValues,
-    DiagnosticCode::FieldsFromJoinsWithoutIsNull,
-    DiagnosticCode::FileSystemAccess,
-    DiagnosticCode::FunctionNameStartsWithGet,
-    DiagnosticCode::FunctionOutParameter,
-    DiagnosticCode::InternetAccess,
-    DiagnosticCode::MissingTempStorageDeletion,
-    DiagnosticCode::TernaryOperatorUsage,
-    DiagnosticCode::TooManyReturns,
-];
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
@@ -61,6 +118,7 @@ impl Default for DiagnosticsConfig {
             parameters: HashMap::new(),
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
+            metadata_overrides: HashMap::new(),
         }
     }
 }
@@ -69,13 +127,52 @@ impl DiagnosticsConfig {
     /// Create a config with all diagnostics enabled (including those disabled by default).
     /// Useful for testing.
     pub fn all_enabled() -> Self {
+        // Collect all diagnostics that are disabled by default from metadata registry
+        let mut enabled = Vec::new();
+        for code in [
+            DiagnosticCode::BadWords,
+            DiagnosticCode::CodeAfterAsyncCall,
+            DiagnosticCode::DenyIncompleteValues,
+            DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+            DiagnosticCode::FileSystemAccess,
+            DiagnosticCode::FunctionNameStartsWithGet,
+            DiagnosticCode::FunctionOutParameter,
+            DiagnosticCode::InternetAccess,
+            DiagnosticCode::MissingTempStorageDeletion,
+            DiagnosticCode::TernaryOperatorUsage,
+            DiagnosticCode::TooManyReturns,
+        ] {
+            if let Some(meta) = metadata_registry::get_metadata(code) {
+                if !meta.activated_by_default {
+                    enabled.push(code);
+                }
+            }
+        }
+
         Self {
             disabled: Vec::new(),
-            enabled: DISABLED_BY_DEFAULT.to_vec(),
+            enabled,
             parameters: HashMap::new(),
             ordinary_app_support: false,
             dataflow_max_iterations: 10000,
+            metadata_overrides: HashMap::new(),
         }
+    }
+
+    /// Get effective metadata (base + overrides).
+    ///
+    /// Returns `None` if no metadata is defined for this diagnostic yet.
+    pub fn get_effective_metadata(&self, code: DiagnosticCode) -> Option<EffectiveMetadata> {
+        let base = metadata_registry::get_metadata(code)?;
+        let override_data = self.metadata_overrides.get(&code);
+
+        Some(EffectiveMetadata {
+            base,
+            severity_override: override_data.and_then(|o| o.severity),
+            type_override: override_data.and_then(|o| o.diagnostic_type),
+            tags_override: override_data.and_then(|o| o.tags.clone()),
+            lsp_severity_override: override_data.and_then(|o| o.lsp_severity.clone()),
+        })
     }
 }
 
@@ -150,6 +247,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     parameters,
                     ordinary_app_support,
                     dataflow_max_iterations,
+                    metadata_overrides: HashMap::new(),
                 })
             }
         }
@@ -163,17 +261,22 @@ impl DiagnosticsConfig {
     ///
     /// A diagnostic is disabled if:
     /// 1. It's explicitly disabled via configuration, OR
-    /// 2. It's in the DISABLED_BY_DEFAULT list AND not explicitly enabled AND has no parameters
+    /// 2. Has metadata with activatedByDefault=false AND not explicitly enabled AND has no parameters
     pub fn is_disabled(&self, code: DiagnosticCode) -> bool {
         if self.disabled.contains(&code) {
             return true;
         }
-        if DISABLED_BY_DEFAULT.contains(&code)
-            && !self.enabled.contains(&code)
-            && !self.parameters.contains_key(&code)
-        {
-            return true;
+
+        // Check metadata for activatedByDefault
+        if let Some(metadata) = metadata_registry::get_metadata(code) {
+            if !metadata.activated_by_default
+                && !self.enabled.contains(&code)
+                && !self.parameters.contains_key(&code)
+            {
+                return true;
+            }
         }
+
         false
     }
 
@@ -242,6 +345,7 @@ impl DiagnosticsConfig {
             parameters,
             ordinary_app_support: input.ordinary_app_support,
             dataflow_max_iterations: input.dataflow_max_iterations,
+            metadata_overrides: HashMap::new(),
         }
     }
 }

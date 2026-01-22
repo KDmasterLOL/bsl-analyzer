@@ -35,7 +35,7 @@
 //! like `HTTPСоединение` or `ВИмениEnglish` (minimum 2 characters per language, total length ≥ 4).
 //! When `false`, all mixed-script identifiers are flagged.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::{Regex, RegexBuilder};
 use syntax::SyntaxKind;
@@ -347,7 +347,9 @@ fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::LatinAndCyrillicSymbolInWord) {
+    let code = DiagnosticCode::LatinAndCyrillicSymbolInWord;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -384,14 +386,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .filter(|id| has_mixed_scripts(&id.text, &cyrillic, &latin)) // Mixed scripts
         .filter(|id| should_report(id, &config, &trailing)) // Check trailing pattern
         .map(|id| Diagnostic {
-            code: DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            code,
             message: format!(
                 "Identifier '{}' contains mixed Latin and Cyrillic characters",
                 id.text
             ),
-            severity: Severity::Warning,
+            severity: ctx.severity(code),
             range: id.range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         })
         .collect()

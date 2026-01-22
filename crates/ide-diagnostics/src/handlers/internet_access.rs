@@ -70,7 +70,7 @@
 
 use cfg_types::{ExprId, IdConversion};
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::hir::{Expr, Literal};
 use ide_db::TextRange;
 
@@ -104,7 +104,9 @@ const NEW_EXPRESSION_PATTERNS: &[&str] = &[
 /// Scans all method bodies and module-level code for NEW expressions
 /// that create internet access types (HTTP, FTP, Mail, etc.).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::InternetAccess) {
+    let code = DiagnosticCode::InternetAccess;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -113,7 +115,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check method bodies
     for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body_for_internet_access(body, source_map, &mut diagnostics);
+        check_body_for_internet_access(body, source_map, code, ctx, &mut diagnostics);
     }
 
     // Check module-level code
@@ -121,6 +123,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         check_body_for_internet_access(
             &lower_result.body,
             &lower_result.source_map,
+            code,
+            ctx,
             &mut diagnostics,
         );
     }
@@ -129,13 +133,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn create_diagnostic(range: TextRange) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::InternetAccess,
+        code,
         message: "Internet access detected (security review required)".to_string(),
         range,
-        severity: Severity::Warning,
-        tags: vec![],
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
@@ -147,6 +155,8 @@ fn create_diagnostic(range: TextRange) -> Diagnostic {
 fn check_body_for_internet_access(
     body: &hir_def::Body,
     source_map: &hir_def::body::BodySourceMap,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
@@ -174,7 +184,7 @@ fn check_body_for_internet_access(
 
             if detected {
                 if let Some(range) = source_map.expr_range(expr_id) {
-                    diagnostics.push(create_diagnostic(range));
+                    diagnostics.push(create_diagnostic(range, code, ctx));
                 }
             }
         }

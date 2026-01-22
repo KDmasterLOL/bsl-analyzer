@@ -40,7 +40,7 @@
 //! Allow consecutive commas without spaces between them.
 //! Default: `false`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
 
@@ -215,6 +215,8 @@ fn check_left_space(
     index: usize,
     token: &SyntaxToken,
     _config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     // First token in file - no left space check
     if index == 0 {
@@ -247,11 +249,11 @@ fn check_left_space(
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissingSpace,
+        code,
         message: format!("Missing space to the left of '{}'", token.text()),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range: token.text_range(),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -262,6 +264,8 @@ fn check_right_space(
     index: usize,
     token: &SyntaxToken,
     config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     // Special case: unary +/- detection
     if !config.check_space_to_right_of_unary
@@ -306,11 +310,11 @@ fn check_right_space(
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissingSpace,
+        code,
         message: format!("Missing space to the right of '{}'", token.text()),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range: token.text_range(),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -321,9 +325,11 @@ fn check_left_right_space(
     index: usize,
     token: &SyntaxToken,
     config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    let missing_left = check_left_space(tokens, index, token, config).is_some();
-    let missing_right = check_right_space(tokens, index, token, config).is_some();
+    let missing_left = check_left_space(tokens, index, token, config, code, ctx).is_some();
+    let missing_right = check_right_space(tokens, index, token, config, code, ctx).is_some();
 
     if !missing_left && !missing_right {
         return None;
@@ -338,19 +344,20 @@ fn check_left_right_space(
     };
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissingSpace,
+        code,
         message,
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range: token.text_range(),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MissingSpace::check").entered();
+    let code = DiagnosticCode::MissingSpace;
 
-    if ctx.config.is_disabled(DiagnosticCode::MissingSpace) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -371,21 +378,21 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Check left-only space requirements
         if should_check_left(token, &config) {
-            if let Some(diag) = check_left_space(&tokens, index, token, &config) {
+            if let Some(diag) = check_left_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
         // Check right-only space requirements
         if should_check_right(token, &config) {
-            if let Some(diag) = check_right_space(&tokens, index, token, &config) {
+            if let Some(diag) = check_right_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
         // Check both left and right space requirements
         if should_check_left_right(token, &config) {
-            if let Some(diag) = check_left_right_space(&tokens, index, token, &config) {
+            if let Some(diag) = check_left_right_space(&tokens, index, token, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }

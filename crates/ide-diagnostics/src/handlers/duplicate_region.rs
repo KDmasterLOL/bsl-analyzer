@@ -62,7 +62,7 @@
 //!
 //! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::base_db::RegionInfo;
 use ide_db::TextRange;
 use std::collections::HashMap;
@@ -70,14 +70,16 @@ use std::collections::HashMap;
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicateRegion::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::DuplicateRegion) {
+    let code = DiagnosticCode::DuplicateRegion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
     // Use Salsa-cached query (LRU=256) - shared with non_standard_region
     let regions = ctx.module_level_regions();
 
-    let diagnostics = report_duplicates(&regions);
+    let diagnostics = report_duplicates(&regions, code, ctx);
 
     tracing::debug!(count = diagnostics.len(), "DuplicateRegion diagnostics found");
     diagnostics
@@ -126,7 +128,11 @@ fn get_canonical_name(name: &str) -> String {
     }
 }
 
-fn report_duplicates(regions: &[RegionInfo]) -> Vec<Diagnostic> {
+fn report_duplicates(
+    regions: &[RegionInfo],
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
     let mut groups: HashMap<String, Vec<(String, TextRange)>> = HashMap::new();
 
     // Group regions by canonical name
@@ -143,11 +149,11 @@ fn report_duplicates(regions: &[RegionInfo]) -> Vec<Diagnostic> {
             let (first_name, first_range) = &group[0];
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DuplicateRegion,
+                code,
                 message: format!("Нужно удалить дубли раздела \"{}\"", first_name),
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range: *first_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

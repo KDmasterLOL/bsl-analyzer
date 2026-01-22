@@ -57,7 +57,7 @@
 //! This diagnostic uses AST (not HIR) because it checks structural properties only.
 //! AST descendant traversal is simpler than HIR arena traversal for pattern matching.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
 
 /// Check a single syntax node for nested ternary operators (node-based API).
@@ -70,7 +70,9 @@ use syntax::{SyntaxKind, SyntaxNode};
 /// 2. **ELSIF_CLAUSE** - Reports ternary operators in ELSIF conditions
 /// 3. **TERNARY_EXPR** - Reports nested ternary operators within another ternary
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
-    if ctx.config.is_disabled(DiagnosticCode::NestedTernaryOperator) {
+    let code = DiagnosticCode::NestedTernaryOperator;
+
+    if ctx.is_disabled_with_metadata(code) {
         return;
     }
 
@@ -78,20 +80,20 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         // Case 1: Ternary in IF condition
         SyntaxKind::IF_STMT => {
             if let Some(condition) = find_if_condition(node) {
-                find_and_report_ternaries(&condition, acc);
+                find_and_report_ternaries(&condition, code, ctx, acc);
             }
         }
         // Case 2: Ternary in ELSIF condition
         SyntaxKind::ELSIF_CLAUSE => {
             if let Some(condition) = find_elsif_condition(node) {
-                find_and_report_ternaries(&condition, acc);
+                find_and_report_ternaries(&condition, code, ctx, acc);
             }
         }
         // Case 3: Nested ternary within another ternary
         SyntaxKind::TERNARY_EXPR => {
             for nested in node.descendants().skip(1) {
                 if nested.kind() == SyntaxKind::TERNARY_EXPR {
-                    acc.push(make_diagnostic(&nested));
+                    acc.push(make_diagnostic(&nested, code, ctx));
                 }
             }
         }
@@ -106,7 +108,9 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NestedTernaryOperator::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::NestedTernaryOperator) {
+    let code = DiagnosticCode::NestedTernaryOperator;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -140,22 +144,31 @@ fn find_elsif_condition(elsif_clause: &SyntaxNode) -> Option<SyntaxNode> {
 /// Find and report all ternary operators within an expression tree.
 ///
 /// Used to detect ternary operators in IF/ELSIF conditions.
-fn find_and_report_ternaries(condition: &SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
+fn find_and_report_ternaries(
+    condition: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for node in condition.descendants() {
         if node.kind() == SyntaxKind::TERNARY_EXPR {
-            diagnostics.push(make_diagnostic(&node));
+            diagnostics.push(make_diagnostic(&node, code, ctx));
         }
     }
 }
 
 /// Create a diagnostic for a nested ternary operator.
-fn make_diagnostic(node: &SyntaxNode) -> Diagnostic {
+fn make_diagnostic(
+    node: &SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::NestedTernaryOperator,
+        code,
         message: "Не рекомендуется использовать вложенный тернарный оператор".to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: node.text_range(),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

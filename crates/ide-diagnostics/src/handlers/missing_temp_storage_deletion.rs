@@ -62,7 +62,7 @@
 //! - Uses STRUCTURAL AST EQUALITY for parameter comparison (not string matching)
 //! - This allows matching `Результат.АдресРезультата` correctly
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::ast::{self, AstNode};
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -83,8 +83,9 @@ use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
 ///    - Create diagnostic if no matching deletion found
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MissingTempStorageDeletion::check").entered();
+    let code = DiagnosticCode::MissingTempStorageDeletion;
 
-    if ctx.config.is_disabled(DiagnosticCode::MissingTempStorageDeletion) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -118,7 +119,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     );
 
                     // Found GetFromTempStorage call
-                    if let Some(diag) = check_temp_storage_usage(token) {
+                    if let Some(diag) = check_temp_storage_usage(token, code, ctx) {
                         diagnostics.push(diag);
                     }
                 }
@@ -145,7 +146,11 @@ fn is_delete_from_temp_storage(name: &str) -> bool {
 /// Check temporary storage usage for a GetFromTempStorage call.
 ///
 /// Returns diagnostic if no matching DeleteFromTempStorage is found after this call.
-fn check_temp_storage_usage(call_token: &SyntaxToken) -> Option<Diagnostic> {
+fn check_temp_storage_usage(
+    call_token: &SyntaxToken,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     // Extract address parameter (full EXPR node for structural comparison)
     let address_param = extract_address_parameter(call_token)?;
 
@@ -172,11 +177,11 @@ fn check_temp_storage_usage(call_token: &SyntaxToken) -> Option<Diagnostic> {
     let call_range = get_call_expression_range(call_token);
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissingTempStorageDeletion,
+        code,
         message: "Нужно добавить удаление данных из временного хранилища после использования, вызвав \"УдалитьИзВременногоХранилища\"".to_string(),
-        severity: Severity::Critical,
+        severity: ctx.severity(code),
         range: call_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

@@ -30,7 +30,7 @@
 //! - `badWords`: Regular expression pattern for forbidden words (default: "")
 //! - `findInComments`: Check comments as well (default: true)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::RegexBuilder;
 use syntax::SyntaxNode;
@@ -59,8 +59,9 @@ impl Config {
 /// This is called from collect_text_diagnostics() for each node in single AST pass.
 /// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    let code = DiagnosticCode::BadWords;
     // Check if disabled
-    if ctx.config.is_disabled(DiagnosticCode::BadWords) {
+    if ctx.is_disabled_with_metadata(code) {
         return;
     }
 
@@ -95,9 +96,9 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
         acc.push(Diagnostic {
             code: DiagnosticCode::BadWords,
             message: format!("Использование запрещённого слова '{}'", mat.as_str()),
-            severity: Severity::Warning,
+            severity: ctx.severity(code),
             range: TextRange::new(match_start.into(), match_end.into()),
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }
@@ -105,8 +106,10 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
 
 /// Main entry point for BadWords diagnostic
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::BadWords;
+
     // Check if disabled
-    if ctx.config.is_disabled(DiagnosticCode::BadWords) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -146,9 +149,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::BadWords,
                 message: format!("Использование запрещённого слова '{}'", mat.as_str()),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: TextRange::new(start.into(), end.into()),
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

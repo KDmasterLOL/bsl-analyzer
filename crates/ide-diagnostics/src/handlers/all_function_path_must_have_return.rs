@@ -60,7 +60,7 @@
 //! This HIR-based implementation replaces the AST-based version to leverage
 //! Salsa caching and the rust-analyzer architecture pattern.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::MethodId;
 use ide_db::TextRange;
 
@@ -75,7 +75,9 @@ pub fn from_hir(
 ) -> Option<Diagnostic> {
     // Note: AllFunctionPathMustHaveReturn is the diagnostic code used in bsl-language-server
     // MissingReturn is the internal HIR diagnostic name
-    if ctx.config.is_disabled(DiagnosticCode::AllFunctionPathMustHaveReturn) {
+    let code = DiagnosticCode::AllFunctionPathMustHaveReturn;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -96,11 +98,11 @@ pub fn from_hir(
 
     // Confirmed: some paths missing return
     Some(Diagnostic {
-        code: DiagnosticCode::AllFunctionPathMustHaveReturn,
+        code,
         message: message_ru(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

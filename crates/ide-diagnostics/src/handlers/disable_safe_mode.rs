@@ -58,7 +58,7 @@
 //! - DisableSafeModeDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - disable_safe_mode.rs (bsl-language-server-rust) - Rust reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -70,18 +70,20 @@ pub fn from_hir(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     // Check if the diagnostic is disabled
-    if ctx.config.is_disabled(DiagnosticCode::DisableSafeMode) {
+    let code = DiagnosticCode::DisableSafeMode;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let message = get_message(method_name);
 
     Some(Diagnostic {
-        code: DiagnosticCode::DisableSafeMode,
+        code,
         message,
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -107,6 +109,7 @@ fn get_message(method_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use crate::Severity;
 
     #[test]
     fn test_set_safe_mode_false() {
@@ -120,7 +123,7 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
 
         assert_eq!(safe_mode_diags.len(), 1);
-        assert_eq!(safe_mode_diags[0].severity, Severity::Warning);
+        assert_eq!(safe_mode_diags[0].severity, Severity::Major); // VULNERABILITY + MAJOR maps to Major
     }
 
     #[test]

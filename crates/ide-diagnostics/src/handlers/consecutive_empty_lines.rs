@@ -8,7 +8,7 @@
 //! ## Configuration
 //! - `allowedEmptyLinesCount` (Integer, default: 1) - Maximum allowed consecutive empty lines
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::LineIndex;
 
@@ -18,7 +18,9 @@ const DEFAULT_ALLOWED_EMPTY_LINES: usize = 1;
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("ConsecutiveEmptyLines::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::ConsecutiveEmptyLines) {
+    let code = DiagnosticCode::ConsecutiveEmptyLines;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -37,7 +39,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Get line index (cached, using helper method for streaming mode compatibility)
     let line_index = ctx.line_index();
 
-    scan_consecutive_empty_lines(&file_text, &line_index, allowed_empty_lines)
+    scan_consecutive_empty_lines(&file_text, &line_index, allowed_empty_lines, code, ctx)
 }
 
 /// Scan for consecutive empty lines using LineIndex.
@@ -45,6 +47,8 @@ fn scan_consecutive_empty_lines(
     text: &str,
     line_index: &LineIndex,
     allowed: usize,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let num_lines = line_index.len_lines();
@@ -83,6 +87,8 @@ fn scan_consecutive_empty_lines(
                         line - 1,
                         consecutive_empty,
                         allowed,
+                        code,
+                        ctx,
                     ));
                 }
             }
@@ -100,6 +106,8 @@ fn scan_consecutive_empty_lines(
                 num_lines - 1,
                 consecutive_empty,
                 allowed,
+                code,
+                ctx,
             ));
         }
     }
@@ -116,6 +124,8 @@ fn create_diagnostic(
     end_line: u32,
     count: usize,
     allowed: usize,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Diagnostic {
     let start_byte = line_index.line_start(start_line);
     let end_byte = line_index.line_start(end_line);
@@ -123,20 +133,19 @@ fn create_diagnostic(
     let message = format!("Найдено {} подряд идущих пустых строк (максимум: {})", count, allowed);
 
     Diagnostic {
-        code: DiagnosticCode::ConsecutiveEmptyLines,
+        code,
         message,
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range: TextRange::new(start_byte, end_byte),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{check, scan_consecutive_empty_lines};
+    use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
-    use line_index::LineIndex;
 
     #[test]
     fn test_empty_file() {
@@ -170,16 +179,14 @@ mod tests {
     #[test]
     fn test_single_newline_file() {
         let text = "\n";
-        let line_index = LineIndex::new(text);
-        let diagnostics = scan_consecutive_empty_lines(text, &line_index, 1);
+        let diagnostics = check_ast_diagnostic(text, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for single newline");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/ConsecutiveEmptyLinesDiagnostic.bsl");
-        let line_index = LineIndex::new(code);
-        let diagnostics = scan_consecutive_empty_lines(code, &line_index, 1);
+        let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 9, "Expected 9 diagnostics, got {}", diagnostics.len());
 

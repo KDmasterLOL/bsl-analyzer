@@ -22,7 +22,7 @@
 //! - **Java:** bsl-language-server/ExcessiveAutoTestCheckDiagnostic.java
 //! - **Rust:** bsl-language-server-rust/rules/excessive_auto_test_check.rs
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;
 use std::sync::OnceLock;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
@@ -113,7 +113,9 @@ fn check_if_statement_optimized(
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ExcessiveAutoTestCheck) {
+    let code = DiagnosticCode::ExcessiveAutoTestCheck;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -147,11 +149,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for if_node in if_stmts {
         if let Some(range) = check_if_statement_optimized(&if_node, &return_stmts_by_parent) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::ExcessiveAutoTestCheck,
+                code,
                 message: "Excessive check for deprecated 'АвтоТест' parameter".to_string(),
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

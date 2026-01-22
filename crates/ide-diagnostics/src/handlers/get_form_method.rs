@@ -53,7 +53,7 @@
 //! Source: bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/GetFormMethodDiagnostic.java
 //! Uses AbstractFindMethodDiagnostic pattern - checks both global and object method calls.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -64,19 +64,21 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::GetFormMethod) {
+    let code = DiagnosticCode::GetFormMethod;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::GetFormMethod,
+        code,
         message: format!(
             "Использование метода '{}' приводит к ошибкам. Используйте 'ОткрытьФорму()' / 'OpenForm()' вместо него",
             method_name
         ),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

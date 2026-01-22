@@ -41,7 +41,7 @@
 //! - DeprecatedTypeManagedFormDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - deprecated_type_managed_form.rs (bsl-language-server-rust) - Rust reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -49,18 +49,20 @@ use ide_db::TextRange;
 /// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedTypeManagedForm` is encountered.
 pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     // Check if the diagnostic is disabled
-    if ctx.config.is_disabled(DiagnosticCode::DeprecatedTypeManagedForm) {
+    let code = DiagnosticCode::DeprecatedTypeManagedForm;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let message = get_message(type_name);
 
     Some(Diagnostic {
-        code: DiagnosticCode::DeprecatedTypeManagedForm,
+        code,
         message,
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -82,6 +84,7 @@ fn get_message(arg_value: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use crate::Severity;
 
     #[test]
     fn test_deprecated_type_russian() {
@@ -99,7 +102,7 @@ mod tests {
             .collect();
 
         assert_eq!(deprecated_diags.len(), 1);
-        assert_eq!(deprecated_diags[0].severity, Severity::Information);
+        assert_eq!(deprecated_diags[0].severity, Severity::Hint); // CodeSmell + Info -> Hint
         assert!(deprecated_diags[0].message.contains("УправляемаяФорма"));
     }
 

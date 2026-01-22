@@ -45,7 +45,7 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 use ide_db::TextRange;
 
@@ -53,7 +53,9 @@ use ide_db::TextRange;
 ///
 /// Uses HIR-based documentation API (`method.docs()`) instead of ad-hoc comment parsing.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MissingReturnedValueDescription) {
+    let code = DiagnosticCode::MissingReturnedValueDescription;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -64,14 +66,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check all procedures
     for method_id in &module_data.procedures {
-        if let Some(diag) = check_procedure_hir(ctx, *method_id) {
+        if let Some(diag) = check_procedure_hir(ctx, *method_id, code) {
             diagnostics.push(diag);
         }
     }
 
     // Check all functions
     for method_id in &module_data.functions {
-        if let Some(diag) = check_function_hir(ctx, *method_id) {
+        if let Some(diag) = check_function_hir(ctx, *method_id, code) {
             diagnostics.push(diag);
         }
     }
@@ -83,6 +85,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn check_function_hir(
     ctx: &DiagnosticsContext,
     method_id: hir_def::MethodId,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     // Get item tree via ctx (works in both LSP and streaming mode)
     let tree = ctx.item_tree();
@@ -112,6 +115,8 @@ fn check_function_hir(
             return Some(create_diagnostic(
                 name_range,
                 "Добавьте описание возвращаемого значения функции",
+                code,
+                ctx,
             ));
         }
     };
@@ -126,6 +131,8 @@ fn check_function_hir(
         return Some(create_diagnostic(
             name_range,
             "Добавьте описание возвращаемого значения функции",
+            code,
+            ctx,
         ));
     }
 
@@ -159,7 +166,7 @@ fn check_function_hir(
                 "Необходимо добавить описание типов \"{}\" возвращаемого значения",
                 types_list
             );
-            return Some(create_diagnostic(name_range, &message));
+            return Some(create_diagnostic(name_range, &message, code, ctx));
         }
     }
 
@@ -170,6 +177,7 @@ fn check_function_hir(
 fn check_procedure_hir(
     ctx: &DiagnosticsContext,
     method_id: hir_def::MethodId,
+    code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     // Get item tree via ctx (works in both LSP and streaming mode)
     let tree = ctx.item_tree();
@@ -189,6 +197,8 @@ fn check_procedure_hir(
         return Some(create_diagnostic(
             name_range,
             "Удалите описание возвращаемого значения для процедуры",
+            code,
+            ctx,
         ));
     }
 
@@ -198,13 +208,18 @@ fn check_procedure_hir(
 /// Create a diagnostic with the given message.
 ///
 /// The diagnostic range is set to the method name (identifier only).
-fn create_diagnostic(range: TextRange, message: &str) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    message: &str,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::MissingReturnedValueDescription,
+        code,
         message: message.to_string(),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

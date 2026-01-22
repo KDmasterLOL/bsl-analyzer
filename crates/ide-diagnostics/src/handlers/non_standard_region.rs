@@ -34,13 +34,15 @@
 //! - Regions.java (bsl-language-server) - standard regions mapping
 
 use crate::utils::standard_regions;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::ModuleType;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NonStandardRegion::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::NonStandardRegion) {
+    let code = DiagnosticCode::NonStandardRegion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -66,11 +68,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for region in regions.iter() {
         if !standard_regions::is_standard_region(module_type, &region.name) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::NonStandardRegion,
+                code,
                 message: format!("Нужно удалить нестандартный раздел \"{}\"", region.name),
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range: region.range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

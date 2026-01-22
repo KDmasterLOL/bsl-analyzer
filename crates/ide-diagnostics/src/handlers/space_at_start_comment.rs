@@ -13,7 +13,7 @@
 //! COMMENT tokens. This avoids false positives on // inside strings (lexer distinguishes them).
 //! Cannot use per-node check_node() API because comments are tokens, not nodes.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{NodeOrToken, SyntaxKind};
@@ -80,7 +80,9 @@ fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String])
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("SpaceAtStartComment::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::SpaceAtStartComment) {
+    let code = DiagnosticCode::SpaceAtStartComment;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -102,11 +104,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 // Check if comment is bad
                 if !is_good_comment(text, use_strict, &comments_annotation) {
                     diagnostics.push(Diagnostic {
-                        code: DiagnosticCode::SpaceAtStartComment,
+                        code,
                         message: "Comment should have space after //".to_string(),
-                        severity: Severity::Information,
+                        severity: ctx.severity(code),
                         range: token.text_range(),
-                        tags: vec![],
+                        tags: ctx.tags(code),
                         fixes: vec![],
                     });
                 }

@@ -32,23 +32,25 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR ModuleVarDecl.
 ///
 /// Called from lib.rs when iterating over module_vars with is_export == true.
 pub fn from_hir(_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ExportVariables) {
+    let code = DiagnosticCode::ExportVariables;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::ExportVariables,
+        code,
         message: "It is recommended not to use global variables. They often might cause issues that cannot be easily located".to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

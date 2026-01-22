@@ -7,12 +7,14 @@
 //! - **Enabled by default:** Yes (but does nothing without configuration)
 //! - **Severity:** MAJOR → Warning
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 use rustc_hash::FxHashSet;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ReservedParameterNames) {
+    let code = DiagnosticCode::ReservedParameterNames;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -28,11 +30,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_params(&proc.params, &reserved_words, &mut diagnostics);
+                check_params(&proc.params, &reserved_words, code, ctx, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_params(&func.params, &reserved_words, &mut diagnostics);
+                check_params(&func.params, &reserved_words, code, ctx, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -53,20 +55,22 @@ fn get_reserved_words(ctx: &DiagnosticsContext) -> FxHashSet<String> {
 fn check_params(
     params: &[hir_def::item_tree::Param],
     reserved_words: &FxHashSet<String>,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for param in params {
         let name_lower = param.name.as_str().to_lowercase();
         if reserved_words.contains(&name_lower) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::ReservedParameterNames,
+                code,
                 message: format!(
                     "Переименуйте параметр '{}' так, чтобы он не совпадал с зарезервированным словом.",
                     param.name.as_str()
                 ),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: param.name_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

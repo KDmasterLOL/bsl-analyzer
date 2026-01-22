@@ -40,12 +40,14 @@
 //!
 //! Uses RegionTree from HIR for efficient region lookup.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CodeOutOfRegion) {
+    let code = DiagnosticCode::CodeOutOfRegion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -56,7 +58,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let region_tree = ctx.region_tree();
 
     let mut diagnostics = Vec::new();
-    check_node(&root, &region_tree, &mut diagnostics);
+    check_node(&root, &region_tree, code, ctx, &mut diagnostics);
     diagnostics
 }
 
@@ -81,13 +83,19 @@ fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
     }
 }
 
-fn check_node(node: &SyntaxNode, region_tree: &RegionTree, diagnostics: &mut Vec<Diagnostic>) {
+fn check_node(
+    node: &SyntaxNode,
+    region_tree: &RegionTree,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     for child in node.children() {
         if matches!(
             child.kind(),
             SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_ELSE_CLAUSE | SyntaxKind::PRE_ELSIF_CLAUSE
         ) {
-            check_node(&child, region_tree, diagnostics);
+            check_node(&child, region_tree, code, ctx, diagnostics);
             continue;
         }
 
@@ -130,15 +138,15 @@ fn check_node(node: &SyntaxNode, region_tree: &RegionTree, diagnostics: &mut Vec
             );
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::CodeOutOfRegion,
+                code,
                 message: format!(
                     "{} находится вне области (#Область/#Region). \
                      Весь код модуля должен быть организован в области для лучшей структуры.",
                     element_type
                 ),
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

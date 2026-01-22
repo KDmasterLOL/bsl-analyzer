@@ -19,7 +19,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
 │ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│ 118 diagnostics│   │ Code actions  │    │ RootDatabase  │
+│ 144 diagnostics│   │ Code actions  │    │ RootDatabase  │
 └───────────────┘    └───────────────┘    └───────────────┘
                               │
                               ▼
@@ -56,7 +56,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
 |------|--------|------------|
 | **Анализ** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
 | **Семантика** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 118 диагностик, code actions, LSP API |
+| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 144 диагностики, code actions, LSP API |
 | **SDBL** | sdbl-hir | Query language HIR + type inference |
 | **Dataflow** | cfg, cfg-types, dataflow | CFG, reaching definitions, liveness |
 | **Metadata** | bsl-metadata, bsl-platform | 1C configuration, platform types |
@@ -130,6 +130,17 @@ ide-diagnostics/lib.rs → match BodyDiagnostic { ... } → handlers/*
 ```
 
 Преимущества: 1 traversal вместо N, автоматическое кеширование Salsa.
+
+### DiagnosticMetadata Architecture
+
+Metadata-driven система для всех 144 диагностик (100% coverage):
+- **Zero-cost abstraction**: compile-time const metadata + runtime config merging
+- **Центральный registry**: все severity/tags/minutesToFix в `metadata_registry.rs`
+- **Runtime overrides**: JSON config может переопределить severity/type/tags
+- **Автоматический LSP mapping**: DiagnosticType + SeverityLevel → LSP Severity
+- **Совместимость с Java**: 1:1 соответствие с @DiagnosticMetadata annotations
+
+Вместо hardcoded значений handlers используют `ctx.severity(code)` и `ctx.tags(code)`.
 
 ### Metadata (bsl-metadata)
 

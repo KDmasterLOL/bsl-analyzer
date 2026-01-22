@@ -41,14 +41,15 @@
 
 use cfg_types::IdConversion;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, Name, Stmt, StmtId};
 
 const MONITORED_PROCEDURES: &[&str] =
     &["передзаписью", "beforewrite", "призаписи", "onwrite", "передудалением", "beforedelete"];
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::DataExchangeLoading) {
+    let code = DiagnosticCode::DataExchangeLoading;
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -87,9 +88,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                             message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
                                       Необходимо добавить проверку для предотвращения выполнения логики при обмене данными"
                                 .to_string(),
-                            severity: Severity::Critical,
+                            severity: ctx.severity(code),
                             range: proc.name_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }

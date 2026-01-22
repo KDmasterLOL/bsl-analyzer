@@ -42,23 +42,25 @@
 //! - ExternalAppStartingDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - external_app_starting.rs (bsl-language-server-rust) - Rust reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when ExternalAppStarting diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ExternalAppStarting) {
+    let code = DiagnosticCode::ExternalAppStarting;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::ExternalAppStarting,
+        code,
         message: "External application launch detected".to_string(),
         range,
-        severity: Severity::Warning,
-        tags: vec![],
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

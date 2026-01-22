@@ -43,7 +43,7 @@
 //! - Java: `diagnosticStorage.addDiagnostic(expression)` - entire expression
 //! - Rust: Same - entire expression range
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Default maximum if condition complexity
@@ -58,7 +58,9 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IfConditionComplexity) {
+    let code = DiagnosticCode::IfConditionComplexity;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -79,14 +81,14 @@ pub fn from_hir(
     let _ = max_complexity_default; // Silence unused warning
 
     Some(Diagnostic {
-        code: DiagnosticCode::IfConditionComplexity,
+        code,
         message: format!(
             "Условие имеет сложность {} (максимум {}). Упростите условие или вынесите части в переменные.",
             complexity, max_complexity
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -152,7 +154,7 @@ mod tests {
         // Should detect - complexity = 4 (3 ops: AND, OR, AND = 3, complexity = 3+1 = 4)
         assert_eq!(if_diags.len(), 1);
         assert_eq!(if_diags[0].code, DiagnosticCode::IfConditionComplexity);
-        assert_eq!(if_diags[0].severity, Severity::Warning);
+        assert_eq!(if_diags[0].severity, Severity::Information); // CodeSmell + Minor -> Information
         assert!(if_diags[0].message.contains("сложность 4"));
         assert!(if_diags[0].message.contains("максимум 3"));
     }

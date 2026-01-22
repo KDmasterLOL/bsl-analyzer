@@ -43,23 +43,25 @@
 //! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
 //! - Java implementation: bsl-language-server/diagnostics/ExecuteExternalCodeDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::ExecuteExternalCode` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::ExecuteExternalCode) {
+    let code = DiagnosticCode::ExecuteExternalCode;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::ExecuteExternalCode,
+        code,
         message: "It is forbidden to execute external code on the server".to_string(),
-        severity: Severity::Critical,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

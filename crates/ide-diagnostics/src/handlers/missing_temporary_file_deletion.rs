@@ -66,7 +66,7 @@
 //! Ported from:
 //! - MissingTemporaryFileDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::Regex;
 use syntax::ast::{self, AstNode};
@@ -123,8 +123,9 @@ impl Config {
 ///    - Create diagnostic if no deletion found
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MissingTemporaryFileDeletion::check").entered();
+    let code = DiagnosticCode::MissingTemporaryFileDeletion;
 
-    if ctx.config.is_disabled(DiagnosticCode::MissingTemporaryFileDeletion) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -163,7 +164,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 if !prev_is_dot && is_get_temp_filename(token.text()) {
                     tracing::trace!(token_text = %token.text(), "Found GetTempFileName call");
                     // Found GetTempFileName call
-                    if let Some(diag) = check_temp_file_usage(token, &config) {
+                    if let Some(diag) = check_temp_file_usage(token, &config, code, ctx) {
                         diagnostics.push(diag);
                     }
                 }
@@ -187,7 +188,12 @@ fn is_get_temp_filename(name: &str) -> bool {
 /// - GetTempFileName called without assignment (inline usage) - ALWAYS error
 /// - Variable is assigned but not deleted
 /// - Returns None only if deletion is found
-fn check_temp_file_usage(call_token: &SyntaxToken, config: &Config) -> Option<Diagnostic> {
+fn check_temp_file_usage(
+    call_token: &SyntaxToken,
+    config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     // Extract variable name from assignment
     let var_name = match extract_variable_from_assignment(call_token) {
         Some(v) => v,
@@ -202,11 +208,11 @@ fn check_temp_file_usage(call_token: &SyntaxToken, config: &Config) -> Option<Di
             let call_range = get_call_expression_range(call_token);
 
             return Some(Diagnostic {
-                code: DiagnosticCode::MissingTemporaryFileDeletion,
+                code,
                 message: "Нужно добавить удаление временного файла после использования".to_string(),
-                severity: Severity::Major,
+                severity: ctx.severity(code),
                 range: call_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
@@ -246,14 +252,14 @@ fn check_temp_file_usage(call_token: &SyntaxToken, config: &Config) -> Option<Di
     let call_range = get_call_expression_range(call_token);
 
     Some(Diagnostic {
-        code: DiagnosticCode::MissingTemporaryFileDeletion,
+        code,
         message: format!(
             "Нужно добавить удаление временного файла '{}' после использования",
             var_name
         ),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range: call_range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

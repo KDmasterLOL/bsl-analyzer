@@ -42,7 +42,7 @@
 //!
 //! Adapted to use Rowan SyntaxNode traversal.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
 
 /// Main entry point for CodeBlockBeforeSub diagnostic.
@@ -50,7 +50,9 @@ use syntax::{SyntaxKind, SyntaxNode};
 /// Detects executable code blocks before the first procedure/function declaration.
 /// Reports ONE diagnostic covering all code blocks (from first to last).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CodeBlockBeforeSub) {
+    let code = DiagnosticCode::CodeBlockBeforeSub;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -62,7 +64,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     for child in root.children() {
         if is_subroutine(&child) {
             if !code_blocks_before_sub.is_empty() {
-                return vec![create_diagnostic(&code_blocks_before_sub)];
+                return vec![create_diagnostic(&code_blocks_before_sub, code, ctx)];
             }
             break;
         }
@@ -151,7 +153,11 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
 /// Combines ranges from first block to last block (inclusive).
 /// For preprocessor regions, adjusts the range to start from the first executable code inside,
 /// matching Java's behavior.
-fn create_diagnostic(code_blocks: &[SyntaxNode]) -> Diagnostic {
+fn create_diagnostic(
+    code_blocks: &[SyntaxNode],
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     use ide_db::TextRange;
 
     let first = code_blocks.first().unwrap();
@@ -171,11 +177,11 @@ fn create_diagnostic(code_blocks: &[SyntaxNode]) -> Diagnostic {
     let range = TextRange::new(start_offset, end_offset);
 
     Diagnostic {
-        code: DiagnosticCode::CodeBlockBeforeSub,
+        code,
         message: "Обнаружен блок кода перед объявлением процедур и функций".to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

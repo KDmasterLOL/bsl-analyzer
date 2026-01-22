@@ -4,7 +4,7 @@
 //!
 //! Ported from: CommonModuleInvalidTypeDiagnostic.java
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode, Severity};
+use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
 
@@ -14,8 +14,14 @@ use ide_db::TextRange;
 /// instead of loading configuration for each file.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
-    config: &crate::DiagnosticsConfig,
+    ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CommonModuleInvalidType;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
     // Only check CommonModules
     if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
         return Vec::new();
@@ -26,23 +32,23 @@ pub fn from_metadata(
         None => return Vec::new(),
     };
 
-    let is_valid = common_module_helpers::is_server(module, config.ordinary_app_support)
+    let is_valid = common_module_helpers::is_server(module, ctx.config.ordinary_app_support)
         || common_module_helpers::is_server_call(module)
-        || common_module_helpers::is_client(module, config.ordinary_app_support)
-        || common_module_helpers::is_client_server(module, config.ordinary_app_support);
+        || common_module_helpers::is_client(module, ctx.config.ordinary_app_support)
+        || common_module_helpers::is_client_server(module, ctx.config.ordinary_app_support);
 
     if is_valid {
         return Vec::new();
     }
 
     vec![Diagnostic {
-        code: DiagnosticCode::CommonModuleInvalidType,
+        code,
         message:
             "Общий модуль должен быть одного из типов: Server, ServerCall, Client, ClientServer"
                 .to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: TextRange::empty(0.into()),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }]
 }
@@ -65,8 +71,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::CommonModuleInvalidType);
@@ -91,8 +97,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 0);
     }
@@ -108,8 +114,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 0);
     }

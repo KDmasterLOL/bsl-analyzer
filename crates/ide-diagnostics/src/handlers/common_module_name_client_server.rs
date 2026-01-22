@@ -4,15 +4,21 @@
 //!
 //! Ported from: CommonModuleNameClientServerDiagnostic.java
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode, Severity};
+use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
 
 pub fn from_metadata(
     metadata: &ModuleMetadata,
-    config: &crate::DiagnosticsConfig,
+    ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CommonModuleNameClientServer;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
     if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
         return Vec::new();
     }
@@ -22,7 +28,7 @@ pub fn from_metadata(
         None => return Vec::new(),
     };
 
-    if !common_module_helpers::is_client_server(module, config.ordinary_app_support) {
+    if !common_module_helpers::is_client_server(module, ctx.config.ordinary_app_support) {
         return Vec::new();
     }
 
@@ -32,13 +38,13 @@ pub fn from_metadata(
     }
 
     vec![Diagnostic {
-        code: DiagnosticCode::CommonModuleNameClientServer,
+        code,
         message:
             "Имя клиент-серверного общего модуля должно содержать 'КлиентСервер' или 'ClientServer'"
                 .to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: TextRange::empty(0.into()),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }]
 }
@@ -67,8 +73,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -91,8 +97,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 0);
     }
 }

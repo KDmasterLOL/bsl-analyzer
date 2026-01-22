@@ -47,7 +47,7 @@
 //!
 //! Migrated from token-based to HIR-based approach.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::body::DeprecatedKind8312;
 use ide_db::TextRange;
 use std::collections::HashMap;
@@ -61,18 +61,20 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::DeprecatedAttributes8312) {
+    let code = DiagnosticCode::DeprecatedAttributes8312;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let (message, replacement) = get_message_and_replacement(name, &kind);
 
     Some(Diagnostic {
-        code: DiagnosticCode::DeprecatedAttributes8312,
+        code,
         message: format!("{} Используйте: {}", message, replacement),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

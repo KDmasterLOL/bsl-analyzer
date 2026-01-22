@@ -48,7 +48,7 @@
 //! - Simpler code - direct check on except array
 //! - Better error recovery - HIR handles parse errors gracefully
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::hir::Stmt;
 use hir_def::{IdConversion, StmtId};
 use syntax::SyntaxKind;
@@ -57,8 +57,10 @@ use syntax::SyntaxKind;
 ///
 /// HIR-based check for empty exception handlers in try-catch blocks.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::MissingCodeTryCatchEx;
+
     // 1. Early exit if disabled
-    if ctx.config.is_disabled(DiagnosticCode::MissingCodeTryCatchEx) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -73,7 +75,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // 3. Check method bodies
     for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body_for_empty_except(body, source_map, comment_as_code, ctx, &mut diagnostics);
+        check_body_for_empty_except(body, source_map, comment_as_code, code, ctx, &mut diagnostics);
     }
 
     // 4. Check module-level code
@@ -82,6 +84,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &lower_result.body,
             &lower_result.source_map,
             comment_as_code,
+            code,
             ctx,
             &mut diagnostics,
         );
@@ -98,12 +101,13 @@ fn check_body_for_empty_except(
     body: &hir_def::Body,
     source_map: &hir_def::body::BodySourceMap,
     comment_as_code: bool,
+    code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Recursively scan all statements
     for stmt_id in body.body_stmts() {
-        check_stmt_recursive(stmt_id, body, source_map, comment_as_code, ctx, diagnostics);
+        check_stmt_recursive(stmt_id, body, source_map, comment_as_code, code, ctx, diagnostics);
     }
 }
 
@@ -113,6 +117,7 @@ fn check_stmt_recursive(
     body: &hir_def::Body,
     source_map: &hir_def::body::BodySourceMap,
     comment_as_code: bool,
+    code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -144,7 +149,7 @@ fn check_stmt_recursive(
                                 // Has comments, skip diagnostic
                             } else {
                                 // No comments, report diagnostic
-                                report_diagnostic_at_except(&try_node, diagnostics);
+                                report_diagnostic_at_except(&try_node, code, ctx, diagnostics);
                             }
                         } else {
                             // No except clause found (shouldn't happen), skip
@@ -153,11 +158,11 @@ fn check_stmt_recursive(
                         // Couldn't find AST node, report diagnostic anyway
                         if let Some(range) = source_map.stmt_range(stmt_id) {
                             diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::MissingCodeTryCatchEx,
+                                code,
                                 message: "Отсутствует код в блоке исключения".to_string(),
-                                severity: Severity::Error,
+                                severity: ctx.severity(code),
                                 range,
-                                tags: vec![],
+                                tags: ctx.tags(code),
                                 fixes: vec![],
                             });
                         }
@@ -176,15 +181,15 @@ fn check_stmt_recursive(
                         .descendants()
                         .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
                     {
-                        report_diagnostic_at_except(&try_node, diagnostics);
+                        report_diagnostic_at_except(&try_node, code, ctx, diagnostics);
                     } else {
                         // Fallback: use stmt range
                         diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::MissingCodeTryCatchEx,
+                            code,
                             message: "Отсутствует код в блоке исключения".to_string(),
-                            severity: Severity::Error,
+                            severity: ctx.severity(code),
                             range: stmt_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -199,6 +204,7 @@ fn check_stmt_recursive(
                 body,
                 source_map,
                 comment_as_code,
+                code,
                 ctx,
                 diagnostics,
             );
@@ -211,6 +217,7 @@ fn check_stmt_recursive(
                 body,
                 source_map,
                 comment_as_code,
+                code,
                 ctx,
                 diagnostics,
             );
@@ -225,6 +232,7 @@ fn check_stmt_recursive(
                         body,
                         source_map,
                         comment_as_code,
+                        code,
                         ctx,
                         diagnostics,
                     );
@@ -236,6 +244,7 @@ fn check_stmt_recursive(
                             body,
                             source_map,
                             comment_as_code,
+                            code,
                             ctx,
                             diagnostics,
                         );
@@ -248,6 +257,7 @@ fn check_stmt_recursive(
                             body,
                             source_map,
                             comment_as_code,
+                            code,
                             ctx,
                             diagnostics,
                         );
@@ -261,6 +271,7 @@ fn check_stmt_recursive(
                         body,
                         source_map,
                         comment_as_code,
+                        code,
                         ctx,
                         diagnostics,
                     );
@@ -273,6 +284,7 @@ fn check_stmt_recursive(
                         body,
                         source_map,
                         comment_as_code,
+                        code,
                         ctx,
                         diagnostics,
                     );
@@ -291,7 +303,12 @@ fn has_comments_in_node(node: &syntax::SyntaxNode) -> bool {
 }
 
 /// Report diagnostic at EXCEPT keyword position (AST fallback for precise location).
-fn report_diagnostic_at_except(try_node: &syntax::SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
+fn report_diagnostic_at_except(
+    try_node: &syntax::SyntaxNode,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     // Find EXCEPT keyword
     if let Some(except_token) = try_node
         .children_with_tokens()
@@ -299,11 +316,11 @@ fn report_diagnostic_at_except(try_node: &syntax::SyntaxNode, diagnostics: &mut 
         .find(|tok| tok.kind() == SyntaxKind::KW_EXCEPT)
     {
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::MissingCodeTryCatchEx,
+            code,
             message: "Отсутствует код в блоке исключения".to_string(),
-            severity: Severity::Error,
+            severity: ctx.severity(code),
             range: except_token.text_range(),
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }

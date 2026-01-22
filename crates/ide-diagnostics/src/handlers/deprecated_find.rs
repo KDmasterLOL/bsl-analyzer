@@ -40,7 +40,7 @@
 //! - DeprecatedFindDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - deprecated_find.rs (bsl-language-server-rust) - Rust reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -48,18 +48,20 @@ use ide_db::TextRange;
 /// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedFind` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     // Check if the diagnostic is disabled
-    if ctx.config.is_disabled(DiagnosticCode::DeprecatedFind) {
+    let code = DiagnosticCode::DeprecatedFind;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let message = get_message(name);
 
     Some(Diagnostic {
-        code: DiagnosticCode::DeprecatedFind,
+        code,
         message,
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -77,6 +79,7 @@ fn get_message(method_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use crate::Severity;
 
     #[test]
     fn test_deprecated_russian() {

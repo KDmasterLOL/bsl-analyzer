@@ -38,7 +38,7 @@
 //! Allow magic numbers in array index access.
 //! Default: `true`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
@@ -48,7 +48,9 @@ use syntax::{SyntaxKind, SyntaxToken};
 /// Called from lib.rs dispatch when `BodyDiagnostic::MagicNumber` is encountered.
 /// Applies configuration filtering (authorizedNumbers).
 pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MagicNumber) {
+    let code = DiagnosticCode::MagicNumber;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -59,14 +61,14 @@ pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opti
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::MagicNumber,
+        code,
         message: format!(
             "Магическое число {}. Замените число на константу с понятным названием.",
             value
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -362,7 +364,9 @@ fn is_in_simple_assignment(token: &SyntaxToken) -> bool {
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MagicNumber::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::MagicNumber) {
+    let code = DiagnosticCode::MagicNumber;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -389,14 +393,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             }
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::MagicNumber,
+                code,
                 message: format!(
                     "Магическое число {}. Замените число на константу с понятным названием.",
                     number_str
                 ),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: token.text_range(),
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

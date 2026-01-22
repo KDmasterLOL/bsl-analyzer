@@ -19,11 +19,13 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::OrderOfParams) {
+    let code = DiagnosticCode::OrderOfParams;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -34,11 +36,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_method(&proc.params, &mut diagnostics);
+                check_method(&proc.params, code, ctx, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_method(&func.params, &mut diagnostics);
+                check_method(&func.params, code, ctx, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -47,7 +49,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_method(params: &[hir_def::item_tree::Param], diagnostics: &mut Vec<Diagnostic>) {
+fn check_method(
+    params: &[hir_def::item_tree::Param],
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     // Find first optional parameter
     let first_optional_idx = params.iter().position(|p| p.has_default);
     let Some(first_optional_idx) = first_optional_idx else {
@@ -58,14 +65,14 @@ fn check_method(params: &[hir_def::item_tree::Param], diagnostics: &mut Vec<Diag
     for param in params.iter().skip(first_optional_idx + 1) {
         if !param.has_default {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::OrderOfParams,
+                code,
                 message: format!(
                     "Переместите обязательный параметр '{}' перед необязательными",
                     param.name.as_str()
                 ),
-                severity: Severity::Major,
+                severity: ctx.severity(code),
                 range: param.name_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

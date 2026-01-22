@@ -402,4 +402,70 @@ impl<'a> DiagnosticsContext<'a> {
             method_name.clone(),
         ]))
     }
+
+    // ========================================================================
+    // Metadata-driven diagnostic helpers (Phase 4)
+    // ========================================================================
+
+    /// Get severity from metadata (with overrides).
+    ///
+    /// Returns Warning if no metadata is defined for this diagnostic yet.
+    pub fn severity(&self, code: crate::DiagnosticCode) -> crate::Severity {
+        self.config
+            .get_effective_metadata(code)
+            .map(|m| m.severity_value())
+            .unwrap_or(crate::Severity::Warning)
+    }
+
+    /// Get tags from metadata (with overrides).
+    ///
+    /// Maps MetadataTag to DiagnosticTag:
+    /// - Unused → Unnecessary
+    /// - Deprecated → Deprecated
+    /// - Others → no tag
+    pub fn tags(&self, code: crate::DiagnosticCode) -> Vec<crate::DiagnosticTag> {
+        self.config
+            .get_effective_metadata(code)
+            .map(|m| {
+                let tags = m.tags();
+                let mut result = Vec::new();
+                for tag in tags {
+                    match tag {
+                        crate::metadata::MetadataTag::Unused => {
+                            result.push(crate::DiagnosticTag::Unnecessary);
+                        }
+                        crate::metadata::MetadataTag::Deprecated => {
+                            result.push(crate::DiagnosticTag::Deprecated);
+                        }
+                        _ => {}
+                    }
+                }
+                result
+            })
+            .unwrap_or_default()
+    }
+
+    /// Check if diagnostic is disabled (respects activatedByDefault).
+    ///
+    /// A diagnostic is disabled if:
+    /// 1. Explicitly disabled via config, OR
+    /// 2. Has metadata with activatedByDefault=false AND not explicitly enabled
+    ///
+    /// This replaces the old DISABLED_BY_DEFAULT const check.
+    pub fn is_disabled_with_metadata(&self, code: crate::DiagnosticCode) -> bool {
+        if self.config.disabled.contains(&code) {
+            return true;
+        }
+
+        if let Some(metadata) = crate::metadata_registry::get_metadata(code) {
+            if !metadata.activated_by_default
+                && !self.config.enabled.contains(&code)
+                && !self.config.parameters.contains_key(&code)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
 }

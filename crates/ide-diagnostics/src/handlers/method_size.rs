@@ -39,7 +39,7 @@
 //! Uses LineIndex for O(1) line number lookups instead of scanning the entire
 //! file text for each method. LineIndex is built once O(n) at the start.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -60,7 +60,9 @@ impl Config {
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MethodSize::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::MethodSize) {
+    let code = DiagnosticCode::MethodSize;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -101,14 +103,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let name = name_token.as_ref().map(|t| t.text()).unwrap_or("Unknown");
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::MethodSize,
+                    code,
                     message: format!(
                         "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
                         name, size, config.max_method_size
                     ),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: name_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }
@@ -185,7 +187,7 @@ mod tests {
         // First diagnostic: Процедура201Строка at line 6 (0-indexed), cols 10-28
         assert_diagnostic_range(code, &diagnostics[0], 6, 10, 28);
         assert_eq!(diagnostics[0].code, DiagnosticCode::MethodSize);
-        assert_eq!(diagnostics[0].severity, Severity::Major);
+        assert_eq!(diagnostics[0].severity, Severity::Warning); // CodeSmell + Major -> Warning
         assert!(
             diagnostics[0].message.contains("Процедура201Строка"),
             "Message should contain method name, got: {}",

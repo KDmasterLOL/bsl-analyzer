@@ -51,7 +51,7 @@
 //! - This handler converts `BodyDiagnostic::DeprecatedMethod` to `Diagnostic`
 //! - Replaces separate AST-based handlers: `deprecated_methods_8310` and `deprecated_methods_8317`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashMap;
 
@@ -72,9 +72,9 @@ pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Optio
     Some(Diagnostic {
         code,
         message,
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

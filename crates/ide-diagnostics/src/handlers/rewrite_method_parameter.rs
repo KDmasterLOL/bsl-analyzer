@@ -79,7 +79,7 @@
 //! Ported from:
 //! - RewriteMethodParameterDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
 
@@ -106,7 +106,9 @@ pub fn from_hir(
     ident_range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::RewriteMethodParameter) {
+    let code = DiagnosticCode::RewriteMethodParameter;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -166,11 +168,11 @@ pub fn from_hir(
 
                 // Parameter overwritten without prior use!
                 return Some(Diagnostic {
-                    code: DiagnosticCode::RewriteMethodParameter,
+                    code,
                     message: format!("Переприсваивание параметра метода '{}'", param_name),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: ident_range, // Use identifier range for Java compatibility
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

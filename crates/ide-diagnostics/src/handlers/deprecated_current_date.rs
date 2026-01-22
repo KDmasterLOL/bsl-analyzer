@@ -41,7 +41,7 @@
 //! - DeprecatedCurrentDateDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - deprecated_current_date.rs (bsl-language-server-rust) - Rust reference
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -49,18 +49,20 @@ use ide_db::TextRange;
 /// Called from lib.rs dispatch when `BodyDiagnostic::DeprecatedCurrentDate` is encountered.
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     // Check if the diagnostic is disabled
-    if ctx.config.is_disabled(DiagnosticCode::DeprecatedCurrentDate) {
+    let code = DiagnosticCode::DeprecatedCurrentDate;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let message = get_message(name);
 
     Some(Diagnostic {
-        code: DiagnosticCode::DeprecatedCurrentDate,
+        code,
         message,
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -78,6 +80,7 @@ fn get_message(method_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use crate::Severity;
 
     #[test]
     fn test_deprecated_russian() {
@@ -93,7 +96,7 @@ mod tests {
             .collect();
 
         assert_eq!(deprecated_diags.len(), 1);
-        assert_eq!(deprecated_diags[0].severity, Severity::Error);
+        assert_eq!(deprecated_diags[0].severity, Severity::Major); // ERROR + MAJOR maps to Major
         assert!(deprecated_diags[0].message.contains("ТекущаяДатаСеанса"));
     }
 

@@ -57,7 +57,7 @@
 //! - Cleaner code - no token-level parsing
 //! - Better error recovery - HIR handles parse errors gracefully
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::hir::{Expr, Stmt};
 use hir_def::{ExprId, IdConversion};
 use ide_db::TextRange;
@@ -67,7 +67,9 @@ use std::collections::HashSet;
 ///
 /// Processes each method and module-level code independently to maintain proper scoping.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IsInRoleMethod) {
+    let code = DiagnosticCode::IsInRoleMethod;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -82,6 +84,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics: Vec::new(),
             body,
             source_map,
+            code,
+            ctx,
         };
 
         // Two-pass approach within each method:
@@ -102,6 +106,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics: Vec::new(),
             body: &lower_result.body,
             source_map: &lower_result.source_map,
+            code,
+            ctx,
         };
 
         checker.collect_variables();
@@ -120,6 +126,8 @@ struct IsInRoleChecker<'a> {
     diagnostics: Vec<Diagnostic>,
     body: &'a hir_def::Body,
     source_map: &'a hir_def::body::BodySourceMap,
+    code: DiagnosticCode,
+    ctx: &'a DiagnosticsContext<'a>,
 }
 
 impl<'a> IsInRoleChecker<'a> {
@@ -189,7 +197,7 @@ impl<'a> IsInRoleChecker<'a> {
         // Check for direct IsInRole() calls
         if self.is_is_in_role_call(expr_id) && !has_protection {
             if let Some(range) = self.source_map.expr_range(expr_id) {
-                self.diagnostics.push(create_diagnostic(range));
+                self.diagnostics.push(create_diagnostic(range, self.code, self.ctx));
             }
         }
 
@@ -198,7 +206,7 @@ impl<'a> IsInRoleChecker<'a> {
             let var_name = name.as_str().to_lowercase();
             if self.is_in_role_vars.contains(&var_name) && !has_protection {
                 if let Some(range) = self.source_map.expr_range(expr_id) {
-                    self.diagnostics.push(create_diagnostic(range));
+                    self.diagnostics.push(create_diagnostic(range, self.code, self.ctx));
                 }
             }
         }
@@ -303,14 +311,18 @@ fn is_privileged_mode_method(name: &str) -> bool {
     matches!(lower.as_str(), "привилегированныйрежим" | "privilegedmode")
 }
 
-fn create_diagnostic(range: TextRange) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::IsInRoleMethod,
+        code,
         message: "Для проверки прав доступа в коде следует использовать метод ПравоДоступа"
             .to_string(),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

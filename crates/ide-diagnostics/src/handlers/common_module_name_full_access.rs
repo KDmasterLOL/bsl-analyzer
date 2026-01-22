@@ -5,7 +5,7 @@
 //! Ported from: CommonModuleNameFullAccessDiagnostic.java
 //! Type: SECURITY_HOTSPOT
 
-use crate::{Diagnostic, DiagnosticCode, Severity};
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
@@ -16,8 +16,14 @@ use ide_db::TextRange;
 /// instead of loading configuration for each file.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
-    _config: &crate::DiagnosticsConfig,
+    ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::CommonModuleNameFullAccess;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
     // Only check CommonModules
     if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
         return Vec::new();
@@ -38,13 +44,13 @@ pub fn from_metadata(
     }
 
     vec![Diagnostic {
-        code: DiagnosticCode::CommonModuleNameFullAccess,
+        code,
         message:
             "Имя привилегированного общего модуля должно содержать 'ПолныеПрава' или 'FullAccess'"
                 .to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range: TextRange::empty(0.into()),
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }]
 }
@@ -68,8 +74,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::CommonModuleNameFullAccess);
@@ -91,8 +97,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 0);
     }
@@ -111,8 +117,8 @@ mod tests {
             form: None,
         };
 
-        let config = DiagnosticsConfig::default();
-        let diagnostics = from_metadata(&metadata, &config);
+        let _config = DiagnosticsConfig::default();
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 0);
     }

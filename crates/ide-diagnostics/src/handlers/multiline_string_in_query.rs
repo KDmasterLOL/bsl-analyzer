@@ -27,7 +27,7 @@
 //! Diagnostics are collected during HIR lowering when processing string literals.
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use tracing::debug;
 
 /// Runs the MultilineStringInQuery diagnostic.
@@ -37,7 +37,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::MultilineStringInQuery) {
+    let code = DiagnosticCode::MultilineStringInQuery;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -60,6 +62,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         hir: &sdbl_hir::SdblHir,
         mapper: &SdblPositionMapper,
         query_text: &str,
+        code: DiagnosticCode,
+        ctx: &DiagnosticsContext,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         // Extract diagnostics from current query
@@ -68,11 +72,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::MultilineStringInQuery,
+                    code,
                     message: "Check if multiline literal is correct".to_string(),
-                    severity: Severity::Critical,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }
@@ -80,7 +84,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Recursively extract diagnostics from UNION subqueries
         for union in &hir.unions {
-            extract_diagnostics(&union.query, mapper, query_text, diagnostics);
+            extract_diagnostics(&union.query, mapper, query_text, code, ctx, diagnostics);
         }
     }
 
@@ -92,7 +96,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Extract diagnostics recursively from all queries (including UNION subqueries)
         for query in sdbl_package.queries() {
-            extract_diagnostics(&query.hir, &mapper, &query_info.query_text, &mut diagnostics);
+            extract_diagnostics(
+                &query.hir,
+                &mapper,
+                &query_info.query_text,
+                code,
+                ctx,
+                &mut diagnostics,
+            );
         }
     }
 

@@ -27,23 +27,25 @@
 //! ## Implementation
 //! Ported from SelfInsertionDiagnostic.java (bsl-language-server).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch.rs when `BodyDiagnostic::SelfInsertion` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::SelfInsertion) {
+    let code = DiagnosticCode::SelfInsertion;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::SelfInsertion,
+        code,
         message: "Удалите вставку коллекции в саму себя".to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

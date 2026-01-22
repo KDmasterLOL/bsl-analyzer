@@ -37,7 +37,7 @@
 //! Ported from:
 //! - ScheduledJobHandlerDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ScheduledJob, ScheduledJobHandler};
 use ide_db::hir_def::{ModuleId, Name};
@@ -57,8 +57,10 @@ use vfs::FileId;
 /// 4. For each job, perform validation checks
 /// 5. Check for duplicate handlers
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::ScheduledJobHandler;
+
     // 1. Check if disabled
-    if ctx.config.is_disabled(DiagnosticCode::ScheduledJobHandler) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -78,11 +80,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut handler_usage: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
     for job in configuration.scheduled_jobs() {
-        check_scheduled_job(ctx, job, &configuration, &mut diagnostics, &mut handler_usage);
+        check_scheduled_job(ctx, job, &configuration, code, &mut diagnostics, &mut handler_usage);
     }
 
     // 5. Check for duplicate handlers
-    check_duplicate_handlers(ctx, &handler_usage, &mut diagnostics);
+    check_duplicate_handlers(ctx, &handler_usage, code, &mut diagnostics);
 
     diagnostics
 }
@@ -104,12 +106,19 @@ fn check_scheduled_job(
     ctx: &DiagnosticsContext,
     job: &ScheduledJob,
     configuration: &bsl_metadata::Configuration,
+    code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
     handler_usage: &mut FxHashMap<String, Vec<String>>,
 ) {
     // CHECK 1: Empty handler
     if job.method_name().is_empty() {
-        diagnostics.push(create_diagnostic(ctx, DiagnosticType::EmptyHandler, job.name(), ""));
+        diagnostics.push(create_diagnostic(
+            ctx,
+            DiagnosticType::EmptyHandler,
+            job.name(),
+            "",
+            code,
+        ));
         return;
     }
 
@@ -122,6 +131,7 @@ fn check_scheduled_job(
                 DiagnosticType::MissingMethod,
                 job.name(),
                 job.method_name(),
+                code,
             ));
             return;
         }
@@ -143,6 +153,7 @@ fn check_scheduled_job(
                 DiagnosticType::MissingModule,
                 job.name(),
                 &handler.module_name,
+                code,
             ));
             return;
         }
@@ -155,12 +166,13 @@ fn check_scheduled_job(
             DiagnosticType::NonServerModule,
             job.name(),
             &handler.module_name,
+            code,
         ));
         return;
     }
 
     // CHECK 5, 6, 7: Method exists, exported, and valid for predefined
-    check_method(ctx, job, &handler, &full_handler_name, common_module, diagnostics);
+    check_method(ctx, job, &handler, &full_handler_name, common_module, code, diagnostics);
 }
 
 /// Validate method exists, is exported, and has valid parameters
@@ -170,6 +182,7 @@ fn check_method(
     handler: &ScheduledJobHandler,
     full_handler_name: &str,
     common_module: &bsl_metadata::CommonModule,
+    code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Resolve CommonModule file via VFS
@@ -194,6 +207,7 @@ fn check_method(
                 DiagnosticType::MissingMethod,
                 job.name(),
                 full_handler_name,
+                code,
             ));
         }
         Some(m) => {
@@ -204,6 +218,7 @@ fn check_method(
                     DiagnosticType::NonExportMethod,
                     job.name(),
                     full_handler_name,
+                    code,
                 ));
             }
 
@@ -214,6 +229,7 @@ fn check_method(
                     DiagnosticType::MethodWithParameters,
                     job.name(),
                     full_handler_name,
+                    code,
                 ));
             }
 
@@ -224,6 +240,7 @@ fn check_method(
                     DiagnosticType::EmptyMethod,
                     job.name(),
                     full_handler_name,
+                    code,
                 ));
             }
         }
@@ -247,6 +264,7 @@ fn is_empty_method(ctx: &DiagnosticsContext, module_id: ModuleId, local_id: u32)
 fn check_duplicate_handlers(
     ctx: &DiagnosticsContext,
     handler_usage: &FxHashMap<String, Vec<String>>,
+    code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for (handler_name, job_names) in handler_usage {
@@ -259,6 +277,7 @@ fn check_duplicate_handlers(
                 DiagnosticType::DuplicateHandler,
                 &jobs_list,
                 handler_name,
+                code,
             ));
         }
     }
@@ -286,6 +305,7 @@ fn create_diagnostic(
     diagnostic_type: DiagnosticType,
     job_name: &str,
     detail: &str,
+    code: DiagnosticCode,
 ) -> Diagnostic {
     let message = match diagnostic_type {
         DiagnosticType::EmptyHandler => {
@@ -348,11 +368,11 @@ fn create_diagnostic(
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 
     Diagnostic {
-        code: DiagnosticCode::ScheduledJobHandler,
+        code,
         message,
-        severity: Severity::Critical,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
@@ -400,7 +420,7 @@ fn find_common_module_file(
 mod tests {
     use super::*;
     use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
+    use crate::{DiagnosticsConfig, Severity};
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;

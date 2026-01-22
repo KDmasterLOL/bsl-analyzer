@@ -34,7 +34,7 @@
 //! Comma-separated list of authorized dates (without quotes).
 //! Default: `"00010101,00010101000000,000101010000"`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -445,7 +445,9 @@ fn is_in_simple_assignment(token: &SyntaxToken) -> bool {
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MagicDate::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::MagicDate) {
+    let code = DiagnosticCode::MagicDate;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -486,14 +488,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             // Create diagnostic
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::MagicDate,
+                code,
                 message: format!(
                     "Создайте переменную с понятным названием, присвойте ей значение \"{}\" и используйте эту константу вместо магической даты.",
                     date_str
                 ),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: token.text_range(),
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

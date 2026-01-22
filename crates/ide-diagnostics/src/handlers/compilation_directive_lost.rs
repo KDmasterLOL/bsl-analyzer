@@ -38,11 +38,13 @@
 //!
 //! Only applies to FormModule and CommandModule (not CommonModule).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CompilationDirectiveLost) {
+    let code = DiagnosticCode::CompilationDirectiveLost;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -64,32 +66,37 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Check procedures without compilation directives
     for (_, proc) in item_tree.procedures() {
         if proc.annotations.is_empty() {
-            diagnostics.push(make_diagnostic(&proc.name, proc.name_range));
+            diagnostics.push(make_diagnostic(&proc.name, proc.name_range, code, ctx));
         }
     }
 
     // Check functions without compilation directives
     for (_, func) in item_tree.functions() {
         if func.annotations.is_empty() {
-            diagnostics.push(make_diagnostic(&func.name, func.name_range));
+            diagnostics.push(make_diagnostic(&func.name, func.name_range, code, ctx));
         }
     }
 
     diagnostics
 }
 
-fn make_diagnostic(name: &hir_def::Name, range: TextRange) -> Diagnostic {
+fn make_diagnostic(
+    name: &hir_def::Name,
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::CompilationDirectiveLost,
+        code,
         message: format!(
             "Пропущена директива компиляции для '{}'. \
              В модулях форм и команд требуется указывать \
              &НаСервере, &НаКлиенте и т.д.",
             name
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

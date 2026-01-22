@@ -29,7 +29,7 @@
 //! ## Implementation
 //! Uses ItemTree for efficiency (cached by Salsa).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 
 const DEFAULT_MAX_PARAMS: i64 = 7;
@@ -49,7 +49,9 @@ impl Config {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::NumberOfParams) {
+    let code = DiagnosticCode::NumberOfParams;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -62,11 +64,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         match item {
             ModItem::Procedure(idx) => {
                 let proc = item_tree.procedure(*idx);
-                check_method(&proc.params, &config, &mut diagnostics);
+                check_method(&proc.params, &config, code, ctx, &mut diagnostics);
             }
             ModItem::Function(idx) => {
                 let func = item_tree.function(*idx);
-                check_method(&func.params, &config, &mut diagnostics);
+                check_method(&func.params, &config, code, ctx, &mut diagnostics);
             }
             ModItem::Variable(_) => {}
         }
@@ -78,6 +80,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn check_method(
     params: &[hir_def::item_tree::Param],
     config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let params_count = params.len();
@@ -86,14 +90,14 @@ fn check_method(
         // Report each excess parameter individually
         for param in params.iter().skip(config.max_params) {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::NumberOfParams,
+                code,
                 message: format!(
                     "Уменьшите количество параметров c {} до допустимого {}",
                     params_count, config.max_params
                 ),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: param.name_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

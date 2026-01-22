@@ -39,7 +39,7 @@
 
 use cfg_types::{BindingId, IdConversion};
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticTag, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::ModuleId;
 use ide_db::{RootDatabase, TextRange};
 
@@ -56,7 +56,9 @@ use ide_db::{RootDatabase, TextRange};
 /// - CFG shared across multiple analyses (built once per module)
 /// - Expected 3-5x speedup vs per-method queries
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::UnusedLocalVariable) {
+    let code = DiagnosticCode::UnusedLocalVariable;
+
+    if ctx.is_disabled_with_metadata(code) {
         return vec![];
     }
 
@@ -78,6 +80,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &module_bodies,
             &module_liveness,
             &module_cfgs,
+            code,
             ctx,
         ));
     }
@@ -86,7 +89,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
     if ctx.provider.is_none() {
         let module_id = hir_def::ModuleId::new(ctx.file_id);
-        diagnostics.extend(check_module_level_code(ctx.db, module_id, ctx));
+        diagnostics.extend(check_module_level_code(ctx.db, module_id, code, ctx));
     }
 
     diagnostics
@@ -102,7 +105,8 @@ fn check_method_with_module_liveness(
     module_bodies: &hir_def::ModuleBodies,
     module_liveness: &dataflow::liveness::ModuleLiveness,
     module_cfgs: &cfg::ModuleCfgs,
-    _ctx: &DiagnosticsContext,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -182,7 +186,12 @@ fn check_method_with_module_liveness(
                 if is_unused {
                     // Get source range for the variable name
                     if let Some(range) = source_map.binding_range(binding_id_opaque) {
-                        diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                        diagnostics.push(create_diagnostic(
+                            binding.name.as_str(),
+                            range,
+                            code,
+                            ctx,
+                        ));
                     }
                 }
             }
@@ -205,7 +214,7 @@ fn check_method_with_module_liveness(
 
             if is_unused {
                 if let Some(range) = source_map.binding_range(var_opaque) {
-                    diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                    diagnostics.push(create_diagnostic(binding.name.as_str(), range, code, ctx));
                 }
             }
         }
@@ -227,7 +236,7 @@ fn check_method_with_module_liveness(
 
             if is_unused {
                 if let Some(range) = source_map.binding_range(var_opaque) {
-                    diagnostics.push(create_diagnostic(binding.name.as_str(), range));
+                    diagnostics.push(create_diagnostic(binding.name.as_str(), range, code, ctx));
                 }
             }
         }
@@ -283,7 +292,7 @@ fn check_method_with_module_liveness(
         };
 
         if !is_live_anywhere {
-            diagnostics.push(create_diagnostic(&original_name, range));
+            diagnostics.push(create_diagnostic(&original_name, range, code, ctx));
         }
     }
 
@@ -297,6 +306,7 @@ fn check_method_with_module_liveness(
 fn check_module_level_code(
     db: &dyn RootDatabase,
     module_id: ModuleId,
+    code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -355,7 +365,7 @@ fn check_module_level_code(
         });
 
         if !is_live_anywhere {
-            diagnostics.push(create_diagnostic(&original_name, range));
+            diagnostics.push(create_diagnostic(&original_name, range, code, ctx));
         }
     }
 
@@ -363,13 +373,18 @@ fn check_module_level_code(
 }
 
 /// Create diagnostic for an unused variable.
-fn create_diagnostic(name: &str, range: TextRange) -> Diagnostic {
+fn create_diagnostic(
+    name: &str,
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::UnusedLocalVariable,
+        code,
         message: format!("Переменная \"{}\" объявлена, но не используется", name),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![DiagnosticTag::Unnecessary],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
@@ -381,10 +396,11 @@ fn create_diagnostic(name: &str, range: TextRange) -> Diagnostic {
 /// The NEW detection path is via `check()` function above.
 #[allow(dead_code)]
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::UnusedLocalVariable) {
+    let code = DiagnosticCode::UnusedLocalVariable;
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
-    Some(create_diagnostic(name, range))
+    Some(create_diagnostic(name, range, code, ctx))
 }
 
 #[cfg(test)]

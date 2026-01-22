@@ -42,11 +42,13 @@
 
 use cfg_types::{ExprId, IdConversion};
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{Body, BodySourceMap, Expr, Name};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::NestedConstructorsInStructureDeclaration) {
+    let code = DiagnosticCode::NestedConstructorsInStructureDeclaration;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -57,12 +59,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check module-level code (code outside procedures/functions)
     if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(&module_code.body, &module_code.source_map, &mut diagnostics);
+        check_body(&module_code.body, &module_code.source_map, code, ctx, &mut diagnostics);
     }
 
     // Check all method bodies (procedures and functions)
     for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &mut diagnostics);
+        check_body(body, source_map, code, ctx, &mut diagnostics);
     }
 
     // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
@@ -74,7 +76,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Check a single Body for nested constructors in structure declarations.
 ///
 /// HIR-based approach: iterates over expressions and checks New expressions semantically.
-fn check_body(body: &Body, source_map: &BodySourceMap, diagnostics: &mut Vec<Diagnostic>) {
+fn check_body(
+    body: &Body,
+    source_map: &BodySourceMap,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     // Walk all expressions in the body
     for (expr_id, expr) in body.exprs_iter() {
         // Only check New expressions
@@ -110,12 +118,12 @@ fn check_body(body: &Body, source_map: &BodySourceMap, diagnostics: &mut Vec<Dia
         };
 
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::NestedConstructorsInStructureDeclaration,
+            code,
             message: "Не используйте конструкторы с параметрами при объявлении структуры"
                 .to_string(),
-            severity: Severity::Warning,
+            severity: ctx.severity(code),
             range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }

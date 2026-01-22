@@ -54,7 +54,7 @@
 //! Ported from:
 //! - MissingCommonModuleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{Name, PathResolution};
 use syntax::TextRange;
 
@@ -76,7 +76,9 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::MissingCommonModuleMethod) {
+    let code = DiagnosticCode::MissingCommonModuleMethod;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -99,7 +101,7 @@ pub fn from_hir(
         }
         PathResolution::Unresolved(_) => {
             // Could not resolve - method or module doesn't exist, or method not exported
-            Some(create_diagnostic_from_hir(range, method, module))
+            Some(create_diagnostic_from_hir(range, method, module, code, ctx))
         }
         _ => None,
     }
@@ -113,15 +115,17 @@ fn create_diagnostic_from_hir(
     range: TextRange,
     method_name: &str,
     module_name: &str,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Diagnostic {
     let message = format!("Метод {} общего модуля {} не существует", method_name, module_name);
 
     Diagnostic {
-        code: DiagnosticCode::MissingCommonModuleMethod,
+        code,
         message,
-        severity: Severity::Blocker,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

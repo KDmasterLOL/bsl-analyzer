@@ -5,7 +5,7 @@
 //!
 //! Java equivalent: `SameMetadataObjectAndChildNamesDiagnostic.java`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::ModuleMetadata;
 use ide_db::TextRange;
 
@@ -30,7 +30,13 @@ fn is_supported_module_type(module_type: bsl_metadata::ModuleType) -> bool {
 /// 4. Register dimensions → name should not match register name
 /// 5. Register resources → name should not match register name
 /// 6. Register attributes → name should not match register name
-pub fn from_metadata(metadata: &ModuleMetadata, _config: &DiagnosticsConfig) -> Vec<Diagnostic> {
+pub fn from_metadata(metadata: &ModuleMetadata, ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::SameMetadataObjectAndChildNames;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
     if !is_supported_module_type(metadata.module_type) {
         return Vec::new();
     }
@@ -39,12 +45,18 @@ pub fn from_metadata(metadata: &ModuleMetadata, _config: &DiagnosticsConfig) -> 
 
     // Check MetadataObject (Catalog, Document, etc.)
     if let Some(ref mdo) = metadata.mdo {
-        collect_mdo_diagnostics(&mdo.name, mdo.as_ref(), &mut diagnostics);
+        collect_mdo_diagnostics(&mdo.name, mdo.as_ref(), code, ctx, &mut diagnostics);
     }
 
     // Check Register
     if let Some(ref register) = metadata.register {
-        collect_register_diagnostics(register.name(), register.as_ref(), &mut diagnostics);
+        collect_register_diagnostics(
+            register.name(),
+            register.as_ref(),
+            code,
+            ctx,
+            &mut diagnostics,
+        );
     }
 
     diagnostics
@@ -54,6 +66,8 @@ pub fn from_metadata(metadata: &ModuleMetadata, _config: &DiagnosticsConfig) -> 
 fn collect_mdo_diagnostics(
     parent_name: &str,
     mdo: &bsl_metadata::MetadataObject,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let parent_name_lower = parent_name.to_lowercase();
@@ -61,7 +75,7 @@ fn collect_mdo_diagnostics(
     // Check attributes
     for attr in &mdo.attributes {
         if attr.name.to_lowercase() == parent_name_lower {
-            diagnostics.push(create_diagnostic(&attr.name, parent_name));
+            diagnostics.push(create_diagnostic(&attr.name, parent_name, code, ctx));
         }
     }
 
@@ -72,13 +86,13 @@ fn collect_mdo_diagnostics(
 
         // Tabular section name should not match parent name
         if ts_name_lower == parent_name_lower {
-            diagnostics.push(create_diagnostic(ts_name, parent_name));
+            diagnostics.push(create_diagnostic(ts_name, parent_name, code, ctx));
         }
 
         // Tabular section attributes should not match tabular section name
         for ts_attr in ts.attributes() {
             if ts_attr.name().to_lowercase() == ts_name_lower {
-                diagnostics.push(create_diagnostic(ts_attr.name(), ts_name));
+                diagnostics.push(create_diagnostic(ts_attr.name(), ts_name, code, ctx));
             }
         }
     }
@@ -88,6 +102,8 @@ fn collect_mdo_diagnostics(
 fn collect_register_diagnostics(
     parent_name: &str,
     register: &bsl_metadata::Register,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let parent_name_lower = parent_name.to_lowercase();
@@ -95,36 +111,41 @@ fn collect_register_diagnostics(
     // Check dimensions
     for dim in register.dimensions() {
         if dim.name().to_lowercase() == parent_name_lower {
-            diagnostics.push(create_diagnostic(dim.name(), parent_name));
+            diagnostics.push(create_diagnostic(dim.name(), parent_name, code, ctx));
         }
     }
 
     // Check resources
     for resource in register.resources() {
         if resource.name().to_lowercase() == parent_name_lower {
-            diagnostics.push(create_diagnostic(resource.name(), parent_name));
+            diagnostics.push(create_diagnostic(resource.name(), parent_name, code, ctx));
         }
     }
 
     // Check attributes
     for attr in register.attributes() {
         if attr.name().to_lowercase() == parent_name_lower {
-            diagnostics.push(create_diagnostic(attr.name(), parent_name));
+            diagnostics.push(create_diagnostic(attr.name(), parent_name, code, ctx));
         }
     }
 }
 
 /// Create a diagnostic for a name conflict.
-fn create_diagnostic(child_name: &str, parent_name: &str) -> Diagnostic {
+fn create_diagnostic(
+    child_name: &str,
+    parent_name: &str,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::SameMetadataObjectAndChildNames,
+        code,
         message: format!(
             "Измените имя '{}', чтобы оно не совпадало с родительским '{}'",
             child_name, parent_name
         ),
         range: TextRange::default(),
-        severity: Severity::Critical,
-        tags: Vec::new(),
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
         fixes: Vec::new(),
     }
 }
@@ -157,10 +178,6 @@ mod tests {
         }
     }
 
-    fn default_config() -> DiagnosticsConfig {
-        DiagnosticsConfig::default()
-    }
-
     #[test]
     fn test_catalog_with_matching_attribute() {
         let mut catalog =
@@ -172,7 +189,7 @@ mod tests {
         });
 
         let metadata = make_metadata_with_mdo(catalog);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Номенклатура"));
@@ -189,7 +206,7 @@ mod tests {
         });
 
         let metadata = make_metadata_with_mdo(catalog);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert!(diagnostics.is_empty());
     }
@@ -203,7 +220,7 @@ mod tests {
         catalog.add_tabular_section(ts);
 
         let metadata = make_metadata_with_mdo(catalog);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Номенклатура"));
@@ -223,7 +240,7 @@ mod tests {
         catalog.add_tabular_section(ts);
 
         let metadata = make_metadata_with_mdo(catalog);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Штрихкоды"));
@@ -238,7 +255,7 @@ mod tests {
             .build();
 
         let metadata = make_metadata_with_register(register);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Товары"));
@@ -253,7 +270,7 @@ mod tests {
             .build();
 
         let metadata = make_metadata_with_register(register);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("Остатки"));
@@ -269,7 +286,7 @@ mod tests {
             .build();
 
         let metadata = make_metadata_with_register(register);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert!(diagnostics.is_empty());
     }
@@ -285,7 +302,7 @@ mod tests {
         });
 
         let metadata = make_metadata_with_mdo(catalog);
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert_eq!(diagnostics.len(), 1);
     }
@@ -304,7 +321,7 @@ mod tests {
             form: None,
         };
 
-        let diagnostics = from_metadata(&metadata, &default_config());
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
 
         assert!(diagnostics.is_empty());
     }

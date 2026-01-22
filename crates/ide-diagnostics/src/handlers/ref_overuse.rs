@@ -21,7 +21,7 @@
 //! Uses SDBL HIR with diagnostics collected during lowering.
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
 
@@ -32,7 +32,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::RefOveruse) {
+    let code = DiagnosticCode::RefOveruse;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -63,11 +65,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::RefOveruse,
+                    code,
                     message: "Избавьтесь от получения поля \"Ссылка\" в запросе.".to_string(),
-                    severity: Severity::Warning,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }
@@ -87,7 +89,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
-    use crate::{DiagnosticCode, Severity};
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_ref_overuse_field_ref_in_middle() {
@@ -105,7 +107,6 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for T.Ссылка.Field pattern");
         assert_eq!(diagnostics[0].code, DiagnosticCode::RefOveruse);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
     }
 
     #[test]

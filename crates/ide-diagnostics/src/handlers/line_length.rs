@@ -23,7 +23,7 @@
 //! - `checkMethodDescription` (Boolean, default: true) - Include method description comments in check
 //! - `excludeTrailingComments` (Boolean, default: false) - Exclude comments on same line as code
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::{LineIndex, TextSize};
 use std::collections::HashSet;
@@ -87,8 +87,9 @@ struct LineInfo {
 /// Main entry point for LineLength diagnostic.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("LineLength::check").entered();
+    let code = DiagnosticCode::LineLength;
 
-    if ctx.config.is_disabled(DiagnosticCode::LineLength) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -124,8 +125,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     process_comments(&root, file_text, &line_index, &mut line_infos, &method_desc_lines, &config);
 
     // Generate diagnostics
-    let diagnostics =
-        generate_diagnostics(&line_infos, &line_index, file_text, config.max_line_length);
+    let diagnostics = generate_diagnostics(
+        &line_infos,
+        &line_index,
+        file_text,
+        config.max_line_length,
+        code,
+        ctx,
+    );
 
     tracing::debug!(count = diagnostics.len(), "LineLength diagnostics found");
 
@@ -335,6 +342,8 @@ fn generate_diagnostics(
     line_index: &LineIndex,
     file_text: &str,
     max_line_length: usize,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -367,14 +376,14 @@ fn generate_diagnostics(
             let range = TextRange::new(line_start, line_start + TextSize::from(byte_offset as u32));
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::LineLength,
+                code,
                 message: format!(
                     "Длина строки {} превышает максимальную {}",
                     info.max_char_pos, max_line_length
                 ),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

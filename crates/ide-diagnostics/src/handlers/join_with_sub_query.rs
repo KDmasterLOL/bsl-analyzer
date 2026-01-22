@@ -32,7 +32,7 @@
 //! - JoinWithSubQueryDiagnostic.java (bsl-language-server)
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
 
@@ -43,7 +43,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::JoinWithSubQuery) {
+    let code = DiagnosticCode::JoinWithSubQuery;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -74,13 +76,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let bsl_range = mapper.map_range(*range, &query_info.query_text);
 
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::JoinWithSubQuery,
+                    code,
                     message: "Don't use a join with sub queries. \
                               Joins with subqueries cause severe performance issues."
                         .to_string(),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: bsl_range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

@@ -5,20 +5,22 @@
 //!
 //! Calls with argument `Ложь`/`False` are NOT flagged (disabling privileged mode is safe).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::SetPrivilegedMode) {
+    let code = DiagnosticCode::SetPrivilegedMode;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::SetPrivilegedMode,
+        code,
         message: "Проверьте установку привилегированного режима".to_string(),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

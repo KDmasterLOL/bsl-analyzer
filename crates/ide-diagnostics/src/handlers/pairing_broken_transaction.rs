@@ -36,7 +36,7 @@
 //! - PairingBrokenTransactionDiagnostic.java (bsl-language-server) - logic reference
 //! - Enhanced with CFG-based path analysis for higher precision
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg::{CfgVertex, ControlFlowGraph, NodeIndex};
 use cfg_types::{ExprId, IdConversion, StmtId};
 use hir_def::hir::{Expr, Stmt};
@@ -70,7 +70,9 @@ struct TransactionIssue {
 
 /// Collect PairingBrokenTransaction diagnostics using CFG-based path analysis.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::PairingBrokenTransaction) {
+    let code = DiagnosticCode::PairingBrokenTransaction;
+
+    if ctx.is_disabled_with_metadata(code) {
         return vec![];
     }
 
@@ -105,7 +107,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             max_level,
         );
         for issue in issues {
-            diagnostics.push(create_diagnostic(issue));
+            diagnostics.push(create_diagnostic(issue, code, ctx));
         }
 
         // Check Begin-Rollback pairing
@@ -117,7 +119,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             max_level,
         );
         for issue in issues {
-            diagnostics.push(create_diagnostic(issue));
+            diagnostics.push(create_diagnostic(issue, code, ctx));
         }
     }
 
@@ -365,16 +367,20 @@ fn get_transaction_type(name: &str) -> Option<TransactionType> {
 }
 
 /// Create a diagnostic for broken transaction pairing.
-fn create_diagnostic(issue: TransactionIssue) -> Diagnostic {
+fn create_diagnostic(
+    issue: TransactionIssue,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::PairingBrokenTransaction,
+        code,
         message: format!(
             "Нарушена парность использования метода '{}' и '{}'",
             issue.pair_method, issue.method_name
         ),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range: issue.range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

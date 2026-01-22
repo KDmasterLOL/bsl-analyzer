@@ -14,7 +14,7 @@
 //!
 //! Ported from: RedundantAccessToObjectDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ModuleType, ReturnValueReuse};
 use hir_def::RedundantAccessKind;
@@ -33,7 +33,9 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::RedundantAccessToObject) {
+    let code = DiagnosticCode::RedundantAccessToObject;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
@@ -51,7 +53,7 @@ pub fn from_hir(
             if !should_check {
                 return None;
             }
-            Some(create_diagnostic(range))
+            Some(create_diagnostic(range, code, ctx))
         }
         RedundantAccessKind::TwoLevel { module } => {
             // Validate for CommonModule: module name must match current module
@@ -69,7 +71,7 @@ pub fn from_hir(
             if !module.eq_ignore_ascii_case(cm.name()) {
                 return None;
             }
-            Some(create_diagnostic(range))
+            Some(create_diagnostic(range, code, ctx))
         }
         RedundantAccessKind::ThreeLevel { mdo_type, mdo_name } => {
             // Validate for ManagerModule: mdo_type and mdo_name must match
@@ -90,18 +92,22 @@ pub fn from_hir(
             if !mdo_name.eq_ignore_ascii_case(&mdo.name) {
                 return None;
             }
-            Some(create_diagnostic(range))
+            Some(create_diagnostic(range, code, ctx))
         }
     }
 }
 
-fn create_diagnostic(range: TextRange) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::RedundantAccessToObject,
+        code,
         message: "Избыточное обращение к объекту".into(),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

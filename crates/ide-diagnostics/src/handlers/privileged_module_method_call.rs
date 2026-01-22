@@ -24,7 +24,7 @@
 
 use bsl_metadata::traits::MdObject;
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::body::ExternalRef;
 use hir_def::{ModuleId, PathResolution};
 use rustc_hash::FxHashSet;
@@ -32,7 +32,9 @@ use rustc_hash::FxHashSet;
 const DEFAULT_VALIDATE_NESTED_CALLS: bool = true;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::PrivilegedModuleMethodCall) {
+    let code = DiagnosticCode::PrivilegedModuleMethodCall;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -93,14 +95,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             let resolution = ctx.resolve_qualified_path(receiver, method);
             if matches!(resolution, PathResolution::Method(_)) {
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::PrivilegedModuleMethodCall,
+                    code,
                     message: format!(
                         "Проверьте обращение к методу {} привилегированного модуля",
                         method.as_str()
                     ),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: *range,
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
             }

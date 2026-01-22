@@ -64,7 +64,7 @@
 //! - Cleaner code (structured HIR vs raw AST)
 //! - Reusability (same calculation for code lens)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{self, item_tree::ModItem};
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,9 @@ impl Config {
 ///
 /// Uses HIR-based complexity calculation for better performance and reusability.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CyclomaticComplexity) {
+    let code = DiagnosticCode::CyclomaticComplexity;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -124,15 +126,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
                     if complexity > config.complexity_threshold {
                         diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::CyclomaticComplexity,
+                            code,
                             message: format!(
                                 "Процедура '{}' имеет цикломатическую сложность {} (максимум: {}). \
                                  Рассмотрите возможность упрощения или разбиения на более мелкие функции",
                                 proc.name, complexity, config.complexity_threshold
                             ),
-                            severity: Severity::Critical,
+                            severity: ctx.severity(code),
                             range: proc.name_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -147,15 +149,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
                     if complexity > config.complexity_threshold {
                         diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::CyclomaticComplexity,
+                            code,
                             message: format!(
                                 "Функция '{}' имеет цикломатическую сложность {} (максимум: {}). \
                                  Рассмотрите возможность упрощения или разбиения на более мелкие функции",
                                 func.name, complexity, config.complexity_threshold
                             ),
-                            severity: Severity::Critical,
+                            severity: ctx.severity(code),
                             range: func.name_range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -176,15 +178,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 if let Some(first_stmt_id) = module_code.body.body_stmts().next() {
                     if let Some(range) = module_code.source_map.stmt_range(first_stmt_id) {
                         diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::CyclomaticComplexity,
+                            code,
                             message: format!(
                                 "Тело модуля имеет цикломатическую сложность {} (максимум: {}). \
                                  Рассмотрите возможность упрощения или переноса логики в функции",
                                 complexity, config.complexity_threshold
                             ),
-                            severity: Severity::Critical,
+                            severity: ctx.severity(code),
                             range,
-                            tags: vec![],
+                            tags: ctx.tags(code),
                             fixes: vec![],
                         });
                     }
@@ -212,6 +214,7 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::Severity;
     use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};

@@ -1,17 +1,19 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::TernaryOperatorUsage) {
+    let code = DiagnosticCode::TernaryOperatorUsage;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::TernaryOperatorUsage,
+        code,
         message: "Используйте конструкцию Если-Иначе вместо тернарного оператора".to_string(),
-        severity: Severity::Hint,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -30,7 +32,10 @@ mod tests {
     #[test]
     fn test_from_java_fixture() {
         let code = include_str!("../../fixtures/TernaryOperatorUsageDiagnostic.bsl");
-        let diagnostics = check_hir_diagnostic_with_config(code, config_with_ternary_enabled());
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
+                crate::diagnostics(ctx)
+            });
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
@@ -50,7 +55,10 @@ mod tests {
         let code = r#"Процедура Тест()
     Результат = ?(Условие, Истина, Ложь);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic_with_config(code, config_with_ternary_enabled());
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
+                crate::diagnostics(ctx)
+            });
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
@@ -62,7 +70,10 @@ mod tests {
         let code = r#"Процедура Тест()
     Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic_with_config(code, config_with_ternary_enabled());
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
+                crate::diagnostics(ctx)
+            });
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
@@ -75,7 +86,10 @@ mod tests {
     Результат = ?(Условие, Истина, Ложь);
 КонецПроцедуры"#;
         // Use default config (not all_enabled) to test that diagnostic is disabled by default
-        let diagnostics = check_hir_diagnostic_with_config(code, DiagnosticsConfig::default());
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, DiagnosticsConfig::default(), |ctx| {
+                crate::diagnostics(ctx)
+            });
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 

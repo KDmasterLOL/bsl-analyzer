@@ -1,19 +1,21 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::TempFilesDir) {
+    let code = DiagnosticCode::TempFilesDir;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     let message = get_message(name);
 
     Some(Diagnostic {
-        code: DiagnosticCode::TempFilesDir,
+        code,
         message,
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }
@@ -31,6 +33,7 @@ fn get_message(method_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::*;
+    use crate::Severity;
 
     #[test]
     fn test_temp_files_dir_russian() {

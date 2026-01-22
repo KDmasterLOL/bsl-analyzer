@@ -25,7 +25,7 @@
 //! ## Configuration
 //! - `declaredLanguages` (String, default: `"ru"`) - comma-separated list of required languages
 
-use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode};
 
@@ -234,7 +234,9 @@ fn is_variable_used_in_template(var_name: &str, nstr_node: &SyntaxNode) -> bool 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MultilingualStringUsingWithTemplate::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::MultilingualStringUsingWithTemplate) {
+    let code = DiagnosticCode::MultilingualStringUsingWithTemplate;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -284,14 +286,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             None => {
                 // НСтр() with empty arguments in template context - error
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::MultilingualStringUsingWithTemplate,
+                    code,
                     message: format!(
                         "Добавьте строки для языков: [{}]",
                         config.declared_languages.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: call_expr.text_range(),
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
                 continue;
@@ -305,14 +307,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             None => {
                 // Empty arguments in template context
                 diagnostics.push(Diagnostic {
-                    code: DiagnosticCode::MultilingualStringUsingWithTemplate,
+                    code,
                     message: format!(
                         "Добавьте строки для языков: [{}]",
                         config.declared_languages.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
-                    severity: Severity::Major,
+                    severity: ctx.severity(code),
                     range: call_expr.text_range(),
-                    tags: vec![],
+                    tags: ctx.tags(code),
                     fixes: vec![],
                 });
                 continue;
@@ -347,11 +349,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             let missing_str = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::MultilingualStringUsingWithTemplate,
+                code,
                 message: format!("Добавьте строки для языков: [{}]", missing_str),
-                severity: Severity::Major,
+                severity: ctx.severity(code),
                 range: call_expr.text_range(),
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

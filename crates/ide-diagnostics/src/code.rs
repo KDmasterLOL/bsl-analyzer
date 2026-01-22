@@ -1,11 +1,11 @@
 //! Diagnostic codes matching bsl-language-server.
 
-use strum::{Display, EnumString, IntoStaticStr};
+use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
 /// Diagnostic code - matches bsl-language-server codes.
 ///
-/// Uses strum for automatic as_str/from_str generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr)]
+/// Uses strum for automatic as_str/from_str generation and iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr, EnumIter)]
 pub enum DiagnosticCode {
     // Tier 1: Simple (syntax-only)
     ParseError,

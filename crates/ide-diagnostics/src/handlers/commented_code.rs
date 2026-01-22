@@ -41,7 +41,7 @@
 //!
 //! Migrated to text-based API using Rowan tokens instead of text processing.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -78,7 +78,8 @@ struct CommentGroup {
 /// This is a file-level text-based diagnostic called from collect_text_diagnostics().
 /// Pattern: Similar to SpaceAtStartComment - works with comment tokens.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CommentedCode) {
+    let code = DiagnosticCode::CommentedCode;
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -104,7 +105,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 code: DiagnosticCode::CommentedCode,
                 message: "Commented code should be removed".to_string(),
                 range: group.range,
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 tags: Vec::new(),
                 fixes: Vec::new(),
             });

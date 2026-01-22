@@ -70,7 +70,7 @@
 //! - code_after_async_call.rs (bsl-language-server-rust) - PRIMARY
 //! - CodeAfterAsyncCallDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
@@ -79,19 +79,21 @@ pub fn from_hir(
     range: TextRange,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CodeAfterAsyncCall) {
+    let code = DiagnosticCode::CodeAfterAsyncCall;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::CodeAfterAsyncCall,
+        code,
         message: format!(
             "После вызова асинхронного метода '{}' есть строки кода. Код выполнится немедленно, не дожидаясь завершения асинхронной операции",
             method_name
         ),
-        severity: Severity::Warning,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

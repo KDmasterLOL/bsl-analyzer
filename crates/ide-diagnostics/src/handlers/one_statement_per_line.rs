@@ -19,23 +19,25 @@
 //! - Statements containing preprocessor directives
 //! - Statements with parse errors
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch.rs when `BodyDiagnostic::OneStatementPerLine` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::OneStatementPerLine) {
+    let code = DiagnosticCode::OneStatementPerLine;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::OneStatementPerLine,
+        code,
         message: "Several statements in one line".to_string(),
-        severity: Severity::Warning, // Java: MINOR
+        severity: ctx.severity(code), // Java: MINOR
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

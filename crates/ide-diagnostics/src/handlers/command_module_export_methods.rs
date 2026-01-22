@@ -17,11 +17,13 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::CommandModuleExportMethods) {
+    let code = DiagnosticCode::CommandModuleExportMethods;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -39,27 +41,27 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Check exported procedures
     for (_, proc) in item_tree.procedures() {
         if proc.is_export {
-            diagnostics.push(make_diagnostic(proc.name_range));
+            diagnostics.push(make_diagnostic(proc.name_range, code, ctx));
         }
     }
 
     // Check exported functions
     for (_, func) in item_tree.functions() {
         if func.is_export {
-            diagnostics.push(make_diagnostic(func.name_range));
+            diagnostics.push(make_diagnostic(func.name_range, code, ctx));
         }
     }
 
     diagnostics
 }
 
-fn make_diagnostic(range: TextRange) -> Diagnostic {
+fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
     Diagnostic {
-        code: DiagnosticCode::CommandModuleExportMethods,
+        code,
         message: "Экспортные методы в модулях команд не имеют смысла".to_string(),
-        severity: Severity::Information,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }

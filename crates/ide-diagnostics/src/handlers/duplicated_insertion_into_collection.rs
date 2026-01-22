@@ -36,7 +36,7 @@
 //! This diagnostic uses HIR-based post-analysis for structural expression comparison.
 //! Instead of regex-based text normalization, it compares HIR expression trees directly.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap};
 use hir_def::hir::{Expr, Literal, Stmt};
 use hir_def::{ExprId, IdConversion, Name, StmtId};
@@ -52,24 +52,33 @@ use std::hash::{Hash, Hasher};
 pub fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
-    config: &DiagnosticsConfig,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicatedInsertionIntoCollection::check_body").entered();
 
-    if config.is_disabled(DiagnosticCode::DuplicatedInsertionIntoCollection) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    let allow_add = config
-        .get_bool(DiagnosticCode::DuplicatedInsertionIntoCollection, "isAllowedMethodADD")
-        .unwrap_or(true);
+    let allow_add = ctx.config.get_bool(code, "isAllowedMethodADD").unwrap_or(true);
 
     let mut tracker = InsertionTracker::new(body);
     let mut diagnostics = Vec::new();
 
     let body_stmts: Vec<StmtId> = body.body_stmts().collect();
-    check_stmt_list(body, source_map, &body_stmts, &mut tracker, &mut diagnostics, 0, allow_add);
-    tracker.report_duplicates(&mut diagnostics, 0);
+    check_stmt_list(
+        body,
+        source_map,
+        &body_stmts,
+        &mut tracker,
+        &mut diagnostics,
+        0,
+        allow_add,
+        code,
+        ctx,
+    );
+    tracker.report_duplicates(&mut diagnostics, 0, code, ctx);
 
     tracing::debug!(count = diagnostics.len(), "diagnostics found");
     diagnostics
@@ -511,7 +520,13 @@ impl<'a> InsertionTracker<'a> {
     }
 
     /// Report duplicates for a given scope depth.
-    fn report_duplicates(&mut self, diagnostics: &mut Vec<Diagnostic>, scope_depth: usize) {
+    fn report_duplicates(
+        &mut self,
+        diagnostics: &mut Vec<Diagnostic>,
+        scope_depth: usize,
+        code: DiagnosticCode,
+        ctx: &DiagnosticsContext,
+    ) {
         for insertions in self.insertions.values() {
             let scope_insertions: Vec<_> =
                 insertions.iter().filter(|ins| ins.scope_depth == scope_depth).collect();
@@ -541,14 +556,14 @@ impl<'a> InsertionTracker<'a> {
                                 .join(", ");
 
                             diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::DuplicatedInsertionIntoCollection,
+                                code,
                                 message: format!(
                                     "Проверьте повторную вставку {} в коллекцию {}",
                                     args_display, collection_display
                                 ),
-                                severity: Severity::Warning,
+                                severity: ctx.severity(code),
                                 range: second_insertion.range,
-                                tags: vec![],
+                                tags: ctx.tags(code),
                                 fixes: vec![],
                             });
                         }
@@ -596,6 +611,7 @@ fn is_bsl_keyword_or_literal(word: &str) -> bool {
 }
 
 /// Check a list of statements for insertions.
+#[allow(clippy::too_many_arguments)]
 fn check_stmt_list(
     body: &Body,
     source_map: &BodySourceMap,
@@ -604,13 +620,26 @@ fn check_stmt_list(
     diagnostics: &mut Vec<Diagnostic>,
     scope_depth: usize,
     allow_add: bool,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     for stmt_id in stmts {
-        check_stmt(body, source_map, *stmt_id, tracker, diagnostics, scope_depth, allow_add);
+        check_stmt(
+            body,
+            source_map,
+            *stmt_id,
+            tracker,
+            diagnostics,
+            scope_depth,
+            allow_add,
+            code,
+            ctx,
+        );
     }
 }
 
 /// Check a single statement for insertions.
+#[allow(clippy::too_many_arguments)]
 fn check_stmt(
     body: &Body,
     source_map: &BodySourceMap,
@@ -619,6 +648,8 @@ fn check_stmt(
     diagnostics: &mut Vec<Diagnostic>,
     scope_depth: usize,
     allow_add: bool,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) {
     let stmt_range = source_map.stmt_range(stmt_id);
 
@@ -676,8 +707,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
 
             // Check elsif branches
             for (_, branch_stmts) in if_stmt.elsif_branches.iter() {
@@ -691,8 +724,10 @@ fn check_stmt(
                     diagnostics,
                     scope_depth + 1,
                     allow_add,
+                    code,
+                    ctx,
                 );
-                tracker.report_duplicates(diagnostics, scope_depth + 1);
+                tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
             }
 
             // Check else branch
@@ -707,8 +742,10 @@ fn check_stmt(
                     diagnostics,
                     scope_depth + 1,
                     allow_add,
+                    code,
+                    ctx,
                 );
-                tracker.report_duplicates(diagnostics, scope_depth + 1);
+                tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
             }
         }
 
@@ -724,8 +761,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
             tracker.last_local_breaker = saved_local_breaker;
         }
 
@@ -741,8 +780,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
             tracker.last_local_breaker = saved_local_breaker;
         }
 
@@ -758,8 +799,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
             tracker.last_local_breaker = saved_local_breaker;
         }
 
@@ -774,8 +817,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
 
             let except_stmts: Vec<StmtId> =
                 except.iter().map(|&idx| StmtId::from_idx(idx)).collect();
@@ -787,8 +832,10 @@ fn check_stmt(
                 diagnostics,
                 scope_depth + 1,
                 allow_add,
+                code,
+                ctx,
             );
-            tracker.report_duplicates(diagnostics, scope_depth + 1);
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
         }
 
         // Other statements don't need special handling
@@ -905,8 +952,9 @@ fn check_expr_for_side_effects(
 /// It tracks insertion patterns and detects when the same value is inserted multiple times.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicatedInsertionIntoCollection::check").entered();
+    let code = DiagnosticCode::DuplicatedInsertionIntoCollection;
 
-    if ctx.config.is_disabled(DiagnosticCode::DuplicatedInsertionIntoCollection) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -916,7 +964,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Check each method body for duplicated insertions
     for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        diagnostics.extend(check_body(body, source_map, ctx.config));
+        diagnostics.extend(check_body(body, source_map, code, ctx));
     }
 
     diagnostics

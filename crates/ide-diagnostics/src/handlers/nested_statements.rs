@@ -60,7 +60,7 @@
 //! This diagnostic uses AST (not HIR) because it checks structural properties only.
 //! AST tree traversal is simpler and more efficient for this use case.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
@@ -84,7 +84,9 @@ impl Config {
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("NestedStatements::check").entered();
 
-    if ctx.config.is_disabled(DiagnosticCode::NestedStatements) {
+    let code = DiagnosticCode::NestedStatements;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -93,7 +95,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
-    traverse_recursive(&root, 0, config.max_allowed_level, &mut diagnostics);
+    traverse_recursive(&root, 0, config.max_allowed_level, code, ctx, &mut diagnostics);
 
     tracing::debug!(count = diagnostics.len(), "NestedStatements diagnostics found");
 
@@ -120,6 +122,8 @@ fn traverse_recursive(
     node: &SyntaxNode,
     current_depth: usize,
     max_level: usize,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let is_nesting = is_nesting_statement(node.kind());
@@ -128,7 +132,8 @@ fn traverse_recursive(
     // Recursively check all children, tracking if any contain nesting statements
     let mut has_nested_child = false;
     for child in node.children() {
-        let child_has_nesting = traverse_recursive(&child, new_depth, max_level, diagnostics);
+        let child_has_nesting =
+            traverse_recursive(&child, new_depth, max_level, code, ctx, diagnostics);
         has_nested_child = has_nested_child || child_has_nesting;
     }
 
@@ -136,11 +141,11 @@ fn traverse_recursive(
     if is_nesting && !has_nested_child && new_depth > max_level {
         let keyword_range = get_first_keyword_range(node);
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::NestedStatements,
+            code,
             message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
-            severity: Severity::Critical,
+            severity: ctx.severity(code),
             range: keyword_range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }

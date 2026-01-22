@@ -57,7 +57,7 @@
 //! Ported from:
 //! - MissingEventSubscriptionHandlerDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use ide_db::hir_def::{ModuleId, Name};
@@ -81,8 +81,10 @@ use vfs::FileId;
 ///    - Method exists in module
 ///    - Method is exported
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::MissingEventSubscriptionHandler;
+
     // 1. Check if disabled
-    if ctx.config.is_disabled(DiagnosticCode::MissingEventSubscriptionHandler) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -100,7 +102,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 4. Process all event subscriptions
     let mut diagnostics = Vec::new();
     for event_sub in configuration.event_subscriptions() {
-        check_event_subscription(ctx, event_sub, &configuration, &mut diagnostics);
+        check_event_subscription(ctx, event_sub, &configuration, code, &mut diagnostics);
     }
 
     diagnostics
@@ -123,6 +125,7 @@ fn check_event_subscription(
     ctx: &DiagnosticsContext,
     event_sub: &EventSubscription,
     configuration: &bsl_metadata::Configuration,
+    code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // CHECK 1: Empty handler
@@ -132,6 +135,7 @@ fn check_event_subscription(
             DiagnosticType::EmptyHandler,
             event_sub.name(),
             "",
+            code,
         ));
         return;
     }
@@ -145,6 +149,7 @@ fn check_event_subscription(
                 DiagnosticType::IncorrectFormat,
                 event_sub.name(),
                 event_sub.handler_string(),
+                code,
             ));
             return;
         }
@@ -161,6 +166,7 @@ fn check_event_subscription(
                 DiagnosticType::MissingModule,
                 event_sub.name(),
                 &handler.module_name,
+                code,
             ));
             return;
         }
@@ -173,12 +179,13 @@ fn check_event_subscription(
             DiagnosticType::ShouldBeServer,
             event_sub.name(),
             &handler.module_name,
+            code,
         ));
         // Continue - check method anyway (may report multiple issues)
     }
 
     // CHECK 5 & 6: Method exists and exported
-    check_method(ctx, event_sub, &handler, common_module, diagnostics);
+    check_method(ctx, event_sub, &handler, common_module, code, diagnostics);
 }
 
 /// Validate method exists and is exported
@@ -187,6 +194,7 @@ fn check_method(
     event_sub: &EventSubscription,
     handler: &EventSubscriptionHandler,
     common_module: &bsl_metadata::CommonModule,
+    code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Resolve CommonModule file via VFS
@@ -211,6 +219,7 @@ fn check_method(
                 DiagnosticType::MissingMethod,
                 event_sub.name(),
                 &format!("{}.{}", handler.module_name, handler.method_name),
+                code,
             ));
         }
         Some(m) if !m.is_export => {
@@ -220,6 +229,7 @@ fn check_method(
                 DiagnosticType::NonExportMethod,
                 event_sub.name(),
                 &format!("{}.{}", handler.module_name, handler.method_name),
+                code,
             ));
         }
         Some(_) => {
@@ -248,6 +258,7 @@ fn create_diagnostic(
     diagnostic_type: DiagnosticType,
     event_sub_name: &str,
     detail: &str,
+    code: DiagnosticCode,
 ) -> Diagnostic {
     let message = match diagnostic_type {
         DiagnosticType::EmptyHandler => {
@@ -295,11 +306,11 @@ fn create_diagnostic(
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 
     Diagnostic {
-        code: DiagnosticCode::MissingEventSubscriptionHandler,
+        code,
         message,
-        severity: Severity::Blocker,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
@@ -350,7 +361,7 @@ fn find_common_module_file(
 mod tests {
     use super::*;
     use crate::test_utils::assert_diagnostic_range;
-    use crate::DiagnosticsConfig;
+    use crate::{DiagnosticsConfig, Severity};
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;

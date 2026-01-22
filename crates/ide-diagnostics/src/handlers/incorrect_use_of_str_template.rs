@@ -62,7 +62,7 @@
 
 use cfg_types::IdConversion;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{
     hir::{Expr, Literal, Stmt},
     ExprId, MethodId, ModuleId, StmtId,
@@ -82,7 +82,9 @@ use ide_db::TextRange;
 ///   - Handles multiple definitions if all resolve to same value
 ///   - Depth limit: 10 levels for cycle protection
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IncorrectUseOfStrTemplate) {
+    let code = DiagnosticCode::IncorrectUseOfStrTemplate;
+
+    if ctx.is_disabled_with_metadata(code) {
         return vec![];
     }
 
@@ -155,16 +157,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         // Get source range for diagnostic
                         if let Some(range) = source_map.expr_range(template_expr_id) {
                             diagnostics.push(Diagnostic {
-                                code: DiagnosticCode::IncorrectUseOfStrTemplate,
+                                code,
                                 message: format!(
                                     "Template '{}' requires {} parameters but {} provided",
                                     template_string.chars().take(50).collect::<String>(),
                                     count_required_params(&template_string),
                                     param_count
                                 ),
-                                severity: Severity::Error,
+                                severity: ctx.severity(code),
                                 range,
-                                tags: vec![],
+                                tags: ctx.tags(code),
                                 fixes: vec![],
                             });
                         }
@@ -390,16 +392,18 @@ fn count_required_params(template_string: &str) -> usize {
 ///
 /// Called from lib.rs dispatch when IncorrectUseOfStrTemplate diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::IncorrectUseOfStrTemplate) {
+    let code = DiagnosticCode::IncorrectUseOfStrTemplate;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
     Some(Diagnostic {
-        code: DiagnosticCode::IncorrectUseOfStrTemplate,
+        code,
         message: "Incorrect use of StrTemplate".to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

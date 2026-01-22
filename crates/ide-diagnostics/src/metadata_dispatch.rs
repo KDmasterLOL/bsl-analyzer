@@ -23,35 +23,25 @@ pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     let metadata = ctx.module_metadata();
     let metadata_ref = metadata.as_ref();
 
-    diagnostics
-        .extend(handlers::common_module_invalid_type::from_metadata(metadata_ref, ctx.config));
+    diagnostics.extend(handlers::common_module_invalid_type::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::common_module_name_client::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::common_module_name_global::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::common_module_name_cached::from_metadata(metadata_ref, ctx));
 
     diagnostics
-        .extend(handlers::common_module_name_client::from_metadata(metadata_ref, ctx.config));
+        .extend(handlers::common_module_name_client_server::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::common_module_name_full_access::from_metadata(metadata_ref, ctx));
 
     diagnostics
-        .extend(handlers::common_module_name_global::from_metadata(metadata_ref, ctx.config));
+        .extend(handlers::common_module_name_global_client::from_metadata(metadata_ref, ctx));
 
-    diagnostics
-        .extend(handlers::common_module_name_cached::from_metadata(metadata_ref, ctx.config));
+    diagnostics.extend(handlers::common_module_name_server_call::from_metadata(metadata_ref, ctx));
 
-    diagnostics.extend(handlers::common_module_name_client_server::from_metadata(
-        metadata_ref,
-        ctx.config,
-    ));
-
-    diagnostics
-        .extend(handlers::common_module_name_full_access::from_metadata(metadata_ref, ctx.config));
-
-    diagnostics.extend(handlers::common_module_name_global_client::from_metadata(
-        metadata_ref,
-        ctx.config,
-    ));
-
-    diagnostics
-        .extend(handlers::common_module_name_server_call::from_metadata(metadata_ref, ctx.config));
-
-    diagnostics.extend(handlers::common_module_name_words::from_metadata(metadata_ref, ctx.config));
+    diagnostics.extend(handlers::common_module_name_words::from_metadata(metadata_ref, ctx));
 
     for var in module_bodies.module_vars() {
         if var.is_export {
@@ -61,20 +51,12 @@ pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         }
     }
 
-    diagnostics.extend(handlers::same_metadata_object_and_child_names::from_metadata(
-        metadata_ref,
-        ctx.config,
-    ));
-
-    let file_text = ctx.file_text();
-    diagnostics.extend(handlers::deny_incomplete_values::from_metadata(
-        metadata_ref,
-        ctx.config,
-        &file_text,
-    ));
-
     diagnostics
-        .extend(handlers::metadata_object_name_length::from_metadata(metadata_ref, ctx.config));
+        .extend(handlers::same_metadata_object_and_child_names::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::deny_incomplete_values::from_metadata(metadata_ref, ctx));
+
+    diagnostics.extend(handlers::metadata_object_name_length::from_metadata(metadata_ref, ctx));
 
     diagnostics
 }

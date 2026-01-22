@@ -19,22 +19,24 @@
 //! КонецФункции
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::FunctionShouldHaveReturn` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::FunctionShouldHaveReturn) {
+    let code = DiagnosticCode::FunctionShouldHaveReturn;
+
+    if ctx.is_disabled_with_metadata(code) {
         return None;
     }
     Some(Diagnostic {
-        code: DiagnosticCode::FunctionShouldHaveReturn,
+        code,
         message: "Функция должна содержать хотя бы один оператор Возврат".to_string(),
-        severity: Severity::Major,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     })
 }

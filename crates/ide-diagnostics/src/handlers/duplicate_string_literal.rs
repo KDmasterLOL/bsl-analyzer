@@ -49,15 +49,16 @@
 //!
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashMap;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicateStringLiteral::check").entered();
+    let code = DiagnosticCode::DuplicateStringLiteral;
 
-    if ctx.config.is_disabled(DiagnosticCode::DuplicateStringLiteral) {
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -71,7 +72,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for scope in scopes {
         let groups = collect_strings(&scope, &config);
-        diagnostics.extend(report_duplicates(groups, &config));
+        diagnostics.extend(report_duplicates(groups, &config, code, ctx));
     }
 
     tracing::debug!(count = diagnostics.len(), "DuplicateStringLiteral diagnostics found");
@@ -182,6 +183,8 @@ fn collect_strings(
 fn report_duplicates(
     groups: HashMap<String, Vec<(String, TextRange)>>,
     config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -195,11 +198,11 @@ fn report_duplicates(
             );
 
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DuplicateStringLiteral,
+                code,
                 message,
-                severity: Severity::Information,
+                severity: ctx.severity(code),
                 range: *first_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

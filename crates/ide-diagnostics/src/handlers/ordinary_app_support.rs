@@ -28,11 +28,13 @@
 //!
 //! Ported from OrdinaryAppSupportDiagnostic.java (bsl-language-server)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::OrdinaryAppSupport) {
+    let code = DiagnosticCode::OrdinaryAppSupport;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -54,26 +56,26 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     if !configuration.use_managed_form_in_ordinary_application() {
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::OrdinaryAppSupport,
+            code,
             message: "Установите свойство \"Использовать управляемые формы в обычном приложении\" \
                       в Истина"
                 .to_string(),
-            severity: Severity::Major,
+            severity: ctx.severity(code),
             range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }
 
     if configuration.use_ordinary_form_in_managed_application() {
         diagnostics.push(Diagnostic {
-            code: DiagnosticCode::OrdinaryAppSupport,
+            code,
             message: "Установите свойство \"Использовать обычные формы в управляемом приложении\" \
                       в Ложь"
                 .to_string(),
-            severity: Severity::Major,
+            severity: ctx.severity(code),
             range,
-            tags: vec![],
+            tags: ctx.tags(code),
             fixes: vec![],
         });
     }
@@ -175,7 +177,6 @@ mod tests {
 
         for diagnostic in &diagnostics {
             assert_diagnostic_range(&file_content, diagnostic, 0, 0, 14);
-            assert_eq!(diagnostic.severity, Severity::Major);
             assert_eq!(diagnostic.code, DiagnosticCode::OrdinaryAppSupport);
         }
     }

@@ -25,7 +25,7 @@
 //! - Parse errors are already available in `SdblQueryInfo.query_ast`
 //! - Method `SdblQueryInfo.is_valid()` returns `false` when parse errors exist
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
 use tracing::debug;
 
@@ -38,7 +38,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
 
-    if ctx.config.is_disabled(DiagnosticCode::QueryParseError) {
+    let code = DiagnosticCode::QueryParseError;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -55,11 +57,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         if has_error_nodes {
             diagnostics.push(Diagnostic {
-                code: DiagnosticCode::QueryParseError,
+                code,
                 message: "Query text must be correct".to_string(),
-                severity: Severity::Warning,
+                severity: ctx.severity(code),
                 range: query_info.bsl_literal_range,
-                tags: vec![],
+                tags: ctx.tags(code),
                 fixes: vec![],
             });
         }

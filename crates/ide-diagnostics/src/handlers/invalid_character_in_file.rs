@@ -27,7 +27,7 @@
 //! ### Illegal Space:
 //! - U+00A0 (160) - Non-breaking space
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Severity};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::SyntaxKind;
 
@@ -47,7 +47,12 @@ enum InvalidCharType {
     IllegalSpace,
 }
 
-fn create_diagnostic(range: TextRange, char_type: InvalidCharType) -> Diagnostic {
+fn create_diagnostic(
+    range: TextRange,
+    char_type: InvalidCharType,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Diagnostic {
     let message = match char_type {
         InvalidCharType::IllegalDash => "Correct character to \"-\"",
         InvalidCharType::IllegalSpace => {
@@ -56,11 +61,11 @@ fn create_diagnostic(range: TextRange, char_type: InvalidCharType) -> Diagnostic
     };
 
     Diagnostic {
-        code: DiagnosticCode::InvalidCharacterInFile,
+        code,
         message: message.to_string(),
-        severity: Severity::Error,
+        severity: ctx.severity(code),
         range,
-        tags: vec![],
+        tags: ctx.tags(code),
         fixes: vec![],
     }
 }
@@ -68,7 +73,9 @@ fn create_diagnostic(range: TextRange, char_type: InvalidCharType) -> Diagnostic
 /// Main entry point for InvalidCharacterInFile diagnostic (file-level text-based).
 /// This diagnostic scans all STRING, COMMENT, and ERROR tokens for illegal characters.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if ctx.config.is_disabled(DiagnosticCode::InvalidCharacterInFile) {
+    let code = DiagnosticCode::InvalidCharacterInFile;
+
+    if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
@@ -105,7 +112,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         InvalidCharType::IllegalDash
                     };
 
-                    diagnostics.push(create_diagnostic(token.text_range(), char_type));
+                    diagnostics.push(create_diagnostic(token.text_range(), char_type, code, ctx));
                 }
             }
         }
