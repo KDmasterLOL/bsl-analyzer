@@ -757,6 +757,7 @@ pub fn check_diagnostics_in_form(
     let config = Rc::new(crate::DiagnosticsConfig::default());
 
     // TODO: Temporarily disabled - FormTestProvider needs to be updated to match AnalysisProvider trait
+    #[allow(unexpected_cfgs)]
     #[cfg(feature = "disabled-form-test-helper")]
     // Create provider that returns our custom metadata
     struct FormTestProvider {

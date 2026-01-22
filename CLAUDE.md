@@ -1,432 +1,152 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working with bsl-analyzer codebase.
 
 ## Project Overview
 
-BSL Analyzer is a high-performance Language Server for BSL (1C:Enterprise) written in Rust. The project follows rust-analyzer architecture and aims for 4x faster analysis and 4x lower memory usage compared to bsl-language-server (Java) while maintaining 100% compatibility.
+**BSL Analyzer** - High-performance LSP for BSL (1C:Enterprise) in Rust. Target: drop-in replacement for bsl-language-server with 5x speed, 2.7x less memory.
 
-**Target:** Drop-in replacement for bsl-language-server with SonarQube integration.
+**Performance (doc3: 121 MB, 6,540 files):** 11.2s vs 58.9s Java (5.3x faster), 1.4 GB vs 3.8 GB memory (2.7x less)
 
-**Performance (Real Data):**
+See `docs/planning/PERFORMANCE_REAL_DATA.md` for benchmarks.
 
-**✅ Real project doc3 (121 MB, 6,540 BSL files):**
-
-- **Full analysis**: **11.2 seconds** (vs 58.9 seconds in Java) — **5.3x faster** ⚡
-- **CPU efficiency**: 59.3s user time (vs 337.1s) — **5.7x less CPU** 🚀
-- **I/O efficiency**: 2.8s system time (vs 28.8s) — **10.3x less I/O** 💾
-- **Throughput**: 585 files/sec (vs 111 files/sec) — **5.3x higher** 📈
-- **Peak memory**: **1,426 MB** (vs 3,822 MB) — **2.7x less** 💪
-
-**Extrapolation for 4GB project (~33x larger):**
-
-- **Full analysis**: **~6 minutes** (vs ~32 minutes in Java) — **5-6x faster**
-- **Peak memory**: **~46 GB** (vs ~123 GB) — **2.7x less**
-
-See `docs/planning/PERFORMANCE_REAL_DATA.md` for detailed benchmark data and methodology.
-
-**Benchmark project:** `~/src/doc3` (121 MB, 6,540 BSL files)
-
-## Common Commands
-
-### Building and Testing
+## Quick Reference
 
 ```bash
-# Build the project
-cargo build
-
-# Build release version
+# Build & Test
 cargo build --release
-
-# Run all tests
 cargo test --all
-
-# Run tests for a specific crate
-cargo test -p parser
-cargo test -p lexer
-cargo test -p syntax
-
-# Update snapshot tests (after reviewing changes)
-UPDATE_EXPECT=1 cargo test
-```
-
-### Code Quality
-
-```bash
-# Format code (required before commit)
-cargo fmt --all
-
-# Check formatting without applying
-cargo fmt --all -- --check
-
-# Run clippy (must pass with no warnings)
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Quick validation
-cargo check
+# Development
+./scripts/setup-hooks.sh          # Install pre-commit hooks (fmt + clippy)
+UPDATE_EXPECT=1 cargo test        # Update snapshot tests
+
+# Debugging
+BSL_LOG=debug cargo run           # Enable debug logs
+BSL_PROFILE=* cargo run           # Enable profiling
 ```
 
-### Development Workflow
-
-```bash
-# Install pre-commit hooks (runs fmt and clippy automatically)
-./scripts/setup-hooks.sh
-
-# Check GitLab CI status
-./scripts/ci-status.sh
-```
-
-### Logging and Profiling
-
-The project uses the `tracing` ecosystem for structured logging and profiling:
-
-```bash
-# Enable debug logs for specific module
-BSL_LOG=parser=debug cargo run
-
-# Enable all debug logs
-BSL_LOG=debug cargo run
-
-# Enable trace-level logs
-BSL_LOG=trace cargo run
-
-# Enable profiling for all operations
-BSL_PROFILE=* cargo run
-
-# Profile specific operations with filters
-BSL_PROFILE=parse|analyze cargo run
-
-# Write logs to file
-BSL_LOG_FILE=/tmp/bsl.log BSL_LOG=debug cargo run
-
-# Combine options
-BSL_LOG=debug BSL_PROFILE=* BSL_LOG_FILE=/tmp/bsl.log cargo run
-```
-
-## Architecture Overview
-
-The project uses a layered architecture inspired by rust-analyzer:
+## Architecture
 
 ```
 bsl-analyzer (LSP Server)
-    └── ide (High-level API)
-        ├── ide-diagnostics (118 diagnostics implemented)
-        ├── ide-assists (Code actions)
-        └── ide-db (Database + Salsa)
-            └── hir / hir-def / hir-ty (Semantic analysis)
-                ├── cfg + dataflow (Control Flow Graph, reaching definitions)
-                ├── sdbl-hir (SDBL query language HIR)
-                └── syntax (AST with Rowan)
-                    └── parser (Event-based)
-                        └── lexer (logos-based)
+  └── ide (High-level API)
+      ├── ide-diagnostics (144/181 diagnostics, 79%)
+      ├── ide-assists (Code actions)
+      └── ide-db (Salsa database)
+          └── hir / hir-def / hir-ty (Semantic analysis)
+              ├── cfg + dataflow (CFG, reaching defs)
+              ├── sdbl-hir (Query language HIR)
+              └── syntax (Rowan CST/AST)
+                  └── parser (Event-based) → lexer (logos)
 ```
 
-### Key Architectural Components
+### Key Components
 
-**Incremental Computation (Salsa 0.25.2):**
+**Salsa 0.25.2** - Incremental computation, automatic cache invalidation, LRU eviction (128-512 files)
 
-- **Status:** ✅ Integrated
-- Uses Salsa framework for incremental computation
-- All queries are cached and invalidated automatically
-- **Key features:**
-  - Automatic cache invalidation based on dependencies
-  - LRU eviction (only 128-512 most recent files in memory)
-  - Durability levels: HIGH for metadata (rarely change), LOW for source code
-  - Thread-safe parallel computation with Rayon
+**Rowan** - Immutable CST, full-fidelity parsing, typed AST wrappers
 
-**Red-Green Trees (Rowan):**
+**DiagnosticMetadata** - Zero-cost metadata system (144 const definitions, 100% coverage):
+- Compile-time const metadata + runtime JSON overrides
+- `ctx.severity(code)`, `ctx.tags(code)` instead of hardcoded values
+- Automatic LSP severity mapping from type+severity
+- 100% compatible with Java `@DiagnosticMetadata`
 
-- Immutable CST (Concrete Syntax Tree) representation
-- Full-fidelity parsing (preserves all tokens including whitespace)
-- Efficient memory sharing between versions
-- Typed AST wrappers over untyped CST
+**HIR Diagnostics** - Collected during HIR lowering, cached by Salsa, see `docs/architecture/ARCHITECTURE.md`
 
-**Event-Based Parser:**
+**Metadata** - `bsl-metadata` crate: Configuration, CommonModule, XML parsing, Salsa integration
 
-- Parser generates events, not AST directly
-- Enables error recovery
-- Events are consumed by SyntaxTreeBuilder to create Rowan tree
-
-**Diagnostic System:**
-
-- Each diagnostic is a separate module in `ide-diagnostics/src/handlers/`
-- Uniform interface via `DiagnosticContext`
-- Full compatibility with bsl-language-server codes
-- **118 diagnostics implemented** (of 181 total planned)
-
-**HIR-based Diagnostics (rust-analyzer pattern):**
-
-- Diagnostics are collected as a byproduct of HIR lowering
-- `BodyDiagnostic` enum in `hir-def/body.rs` — collected during AST→HIR transformation
-- Each diagnostic stays in its own handler file with `from_hir()` function
-- Salsa caching via `module_bodies()` query — diagnostics recomputed only when file changes
-- See `docs/architecture/ARCHITECTURE.md` for detailed architecture
-
-**Metadata Infrastructure:**
-
-- **Status:** ✅ Implemented (`bsl-metadata` crate)
-- Configuration, CommonModule, Register, EventSubscription structures
-- XML loader for Designer format
-- Salsa integration for caching
-
-**Dataflow Analysis:**
-
-- **Status:** ✅ Implemented (`cfg`, `dataflow` crates)
-- `file_dependencies_query` for module dependencies
-- Reaching definitions, liveness analysis
-
-**Control Flow Graph (CFG):**
-
-- **Status:** ✅ Implemented (`cfg` crate)
-- CFG construction from Rowan AST
-- Used for flow-sensitive diagnostics
+**Dataflow** - `cfg` + `dataflow` crates: CFG construction, reaching definitions, liveness analysis
 
 ### Crate Structure
 
-- **bsl-analyzer** - Main LSP server binary
-- **lexer** - Tokenization using logos (80+ BSL, 150+ SDBL tokens)
-- **parser** - BSL/SDBL grammar with error recovery
-- **syntax** - CST/AST using Rowan (120+ SyntaxKind variants)
-- **hir** / **hir-def** / **hir-ty** - High-level IR, semantic analysis, type inference
-- **sdbl-hir** - SDBL query language HIR + type inference
-- **ide** - High-level API coordinating all subsystems
-- **ide-db** - RootDatabase with Salsa integration
-- **ide-diagnostics** - 118 diagnostics implemented (of 181 planned)
-- **ide-assists** - Code actions and refactorings
-- **base-db** - Source database with Salsa
-- **vfs** / **vfs-notify** - Virtual file system + file watching
-- **bsl-metadata** - 1C metadata (Configuration, CommonModule, etc.)
-- **bsl-platform** - Platform types (Строка, Число, Массив)
-- **cfg** / **dataflow** - Control Flow Graph, reaching definitions, liveness
-- **project-model** - Project configuration (.bsl-analyzer.json support)
-- **line-index** / **intern** / **stdx** / **paths** - Utilities
-- **test-fixture** / **test-utils** - Testing infrastructure
+| Layer | Crates | Purpose |
+|-------|--------|---------|
+| **Analysis** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
+| **Semantic** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
+| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | Database, 144 diagnostics, code actions |
+| **SDBL** | sdbl-hir | Query language HIR + type inference |
+| **Dataflow** | cfg, dataflow | CFG, reaching defs, liveness |
+| **Metadata** | bsl-metadata, bsl-platform | Configuration, platform types |
+| **Infra** | base-db, vfs, project-model | Salsa, VFS, config |
 
-## Critical Development Rules
+## Development Rules
 
-### 1. Always Check Library Documentation First
+### 1. Use Library Docs First
+Before using external crates: `resolve-library-id` → `query-docs` (Context7 MCP). Key libs: rowan, salsa, logos, lsp-types.
 
-Before using any external crate, consult its current documentation using the Context7 MCP tool:
+### 2. LSP for Navigation
+**Use:** hover (types), goToDefinition, findReferences, documentSymbol, workspaceSymbol, call hierarchy
+**Don't use:** when you know exact path (use Read), text search (Grep), patterns (Glob)
 
-- Use `resolve-library-id` to find the library
-- Use `query-docs` to get up-to-date documentation
-- Key libraries: `rowan`, `salsa`, `logos`, `lsp-types`, `lsp-server`
+### 3. Reference Sources
+- `~/src/lsp/rust-analyzer/` - Architecture patterns
+- `~/src/lsp/bsl-language-server/` - Compatibility target
+- `~/src/lsp/bsl-parser/` - BSL/SDBL grammar
+- See `docs/planning/SOURCES.md`
 
-### 2. Use LSP for Navigation and Code Intelligence
-
-The `LSP` tool provides Rust language server integration for efficient code navigation. Use it when:
-
-**When to use LSP:**
-
-- **Exploring unfamiliar code** - Use `hover` to understand types, traits, and function signatures
-- **Finding definitions** - Use `goToDefinition` to jump to symbol declarations instead of manual searching
-- **Understanding API usage** - Use `findReferences` to see how a type or function is used across the codebase
-- **Getting code structure** - Use `documentSymbol` to see all functions, structs, enums in a file
-- **Finding symbols by name** - Use `workspaceSymbol` to locate types/functions across the entire project
-- **Understanding call chains** - Use `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` to trace function calls
-
-**When NOT to use LSP:**
-
-- When you already know the exact file path and line number (use `Read` instead)
-- For simple text search (use `Grep` instead)
-- For file pattern matching (use `Glob` instead)
-- When exploring multiple files in parallel (LSP is better for focused navigation)
-
-**Examples:**
-
-```
-# Check what a function returns
-LSP: operation=hover, line=378, character=10
-
-# Find where a struct is defined
-LSP: operation=goToDefinition, line=37, character=20
-
-# See all usages of a function
-LSP: operation=findReferences, line=100, character=15
-
-# Get overview of file structure
-LSP: operation=documentSymbol, line=1, character=1
-```
-
-### 3. Reference Source Projects
-
-When implementing features, reference these source projects (see `docs/planning/SOURCES.md`):
-
-- **rust-analyzer** (`~/src/lsp/rust-analyzer/`) - Architecture patterns, Rowan/Salsa usage
-- **bsl-language-server** (`~/src/lsp/bsl-language-server/`) - Compatibility target (diagnostics, config, metadata)
-- **bsl-parser** (`~/src/lsp/bsl-parser/`) - BSL/SDBL grammar (ANTLR4)
-- **tree-sitter-bsl** (`~/src/lsp/tree-sitter-bsl/`) - Operator precedence, test cases
-- **bsl-language-server-rust** (`~/src/lsp/bsl-language-server-rust/`) - Existing Rust components (diagnostics, metadata)
-- **salsa** (`~/src/lsp/salsa/`) - Incremental computation framework (v0.25.2)
-
-### 4. Logging: Use tracing, Never println
-
-**Required:**
-
+### 4. Logging: tracing only
 ```rust
-use tracing::{trace, debug, info, warn, error};
-
-// Structured logging with fields
-info!("parsing started");
-debug!(file_id = ?file_id, "parsing file");
-
-// Spans for profiling
-pub fn parse_file(input: &str) -> Parse {
-    let _span = tracing::info_span!("parse_file", len = input.len()).entered();
-    // ... logic
-}
+use tracing::{debug, info, warn, error};
+let _span = tracing::info_span!("parse_file", len = input.len()).entered();
 ```
+**Forbidden:** `println!`, `eprintln!`, `dbg!` (except CLI output in binaries)
 
-**Forbidden:**
+### 5. Self-Documenting Code
+**Allowed comments:** non-obvious logic, SAFETY, issue refs, doc comments (`///`)
+**Forbidden:** duplicating code, obvious statements, commented-out code
 
-```rust
-println!("Debug: {:?}", value);  // ❌ Never use for debugging
-eprintln!("Error: {}", error);   // ❌ Never use
-dbg!(value);                     // ❌ Never use
-```
-
-**Exception:** `println!` is acceptable only for CLI output in binary crates, not for debugging.
-
-### 5. Code Must Be Self-Documenting
-
-Minimize comments. Use expressive names, extract functions, and use type system instead.
-
-**Allowed comments:**
-
-- Explaining non-obvious logic (BSL language quirks, compatibility notes)
-- SAFETY comments for unsafe code
-- References to issues/specs
-- Doc comments (`///`) for public API
-
-**Forbidden comments:**
-
-- Duplicating what code does
-- Obvious statements
-- Commented-out code
-- Decorative separators
-
-### 6. Tests Are Mandatory
-
+### 6. Tests Mandatory
 - All new functionality requires tests
-- Never break existing tests without understanding why
-- If tests fail, fix the code or update tests with justification
 - Use snapshot tests (`expect-test`) for parser/AST
-- Copy test fixtures from source projects into our repo (no external paths)
+- Copy fixtures into repo (no external paths)
 
-**Testing diagnostics with Java fixtures:**
-
-When porting diagnostics from bsl-language-server (Java), use the same test fixtures and verify that diagnostic positions match exactly:
-
+**Test diagnostics with helpers:**
 ```rust
-// ✅ CORRECT: use helper methods with line/column positions
 assert_diagnostic_range_multiline(&code, &diagnostics[0], 3, 0, 5, 13);
 assert_diagnostic_range(&code, &diagnostics[0], 5, 1, 6);  // single line
-
-// ❌ FORBIDDEN: magic numbers for TextRange (byte offsets)
-assert_eq!(diagnostics[0].range, TextRange::new(42.into(), 156.into()));
+check_hir_diagnostic(code)  // run HIR diagnostics
 ```
 
-**Available helpers** (`crates/ide-diagnostics/src/test_utils.rs`):
-
-- `assert_diagnostic_range_multiline(code, diag, start_line, start_col, end_line, end_col)`
-- `assert_diagnostic_range(code, diag, line, start_col, end_col)` — single line
-- `check_hir_diagnostic(code)` — run HIR diagnostics on test code
-
-**Why:** Java tests specify line/column positions. Using helpers ensures we match Java behavior exactly and makes tests readable.
-
-### 7. No Warnings Allowed
-
+### 7. No Warnings
 ```bash
-# Must pass with no warnings before commit
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings  # Must pass
 ```
+Use `#[allow(...)]` only with explanation.
 
-Use `#[allow(...)]` only with explanation comment.
-
-### 8. Self-Contained Project
-
-All test files must be copied into this repository. Never use absolute paths to external projects:
-
-**Correct:**
-
-```rust
-let input = include_str!("fixtures/Module.bsl");
-```
-
-**Wrong:**
-
-```rust
-let path = "~/src/lsp/bsl-parser/...";  // ❌
-```
+### 8. Self-Contained
+All test files in repo. Never use absolute paths: `include_str!("fixtures/Module.bsl")` ✅
 
 ## BSL Language Specifics
 
-**Bilingual Keywords:**
+- **Bilingual:** `Процедура` = `Procedure`, case-insensitive
+- **Preprocessor:** `#Если`, `#Область`, `#Использовать`
+- **Annotations:** `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`
 
-- BSL supports both Russian and English keywords
-- Example: `Процедура` = `Procedure`, `Функция` = `Function`
-- Case-insensitive: `ПРОЦЕДУРА`, `процедура`, `Процедура` are all valid
-- Preprocessor symbols are also case-insensitive
+## Status & Files
 
-**Preprocessor Directives:**
+**Completed:** Lexer, Parser, Syntax, HIR, SDBL, Metadata, Dataflow, 144/181 diagnostics (79%), DiagnosticMetadata architecture
 
-- `#Если`, `#ИначеЕсли`, `#Иначе`, `#КонецЕсли`
-- `#Область` / `#КонецОбласти` (regions)
-- `#Использовать` (imports)
+**Next:** Remaining 37 diagnostics, LSP server integration, IDE features
 
-**Annotations:**
+**Key Files:**
+- `docs/architecture/ARCHITECTURE.md` - Architecture details
+- `docs/architecture/SOURCES.md` - Source projects
+- `docs/contributing/DEVELOPMENT_RULES.md` - Guidelines
+- `docs/METADATA_COMPATIBILITY.md` - Metadata compatibility
 
-- Method annotations: `&НаКлиенте`, `&НаСервере`, `&НаКлиентеНаСервере`
-- Compiler directives: `&До`, `&После`, `&Вместо`
+## Compatibility
 
-## Current Development Status
-
-**Completed:**
-
-- ✅ Lexer (80+ BSL, 150+ SDBL tokens)
-- ✅ Parser for BSL/SDBL with error recovery
-- ✅ Syntax trees (Rowan CST, typed AST wrappers)
-- ✅ Base Infrastructure (VFS, Salsa 0.25.2)
-- ✅ HIR / hir-def / hir-ty (ItemTree, SymbolTree, type inference)
-- ✅ SDBL HIR (`sdbl-hir` crate with type inference)
-- ✅ Metadata Infrastructure (`bsl-metadata`, `bsl-platform` crates)
-- ✅ Dataflow Analysis (`cfg`, `dataflow` crates)
-- ✅ 118 diagnostics implemented
-- ✅ Tracing infrastructure (BSL_LOG, BSL_PROFILE, BSL_LOG_FILE)
-- ✅ CI/CD with GitLab
-
-**Next Steps:**
-
-- Remaining 80 diagnostics (of 181 total)
-- LSP Server integration
-- IDE features (hover, completion, etc.)
-
-See `docs/planning/ROADMAP.md` for details.
-
-## Important Files
-
-**Architecture & Planning:**
-
-- **docs/architecture/ARCHITECTURE.md** - Detailed architecture documentation
-- **docs/architecture/SOURCES.md** - Source projects reference
-
-**Development:**
-
-- **docs/contributing/DEVELOPMENT_RULES.md** - Development guidelines
-- **docs/contributing/CONTRIBUTING.md** - Contribution process
-- **docs/contributing/LOGGING.md** - Logging and profiling guide
-
-## Compatibility Requirements
-
-Must maintain 100% compatibility with bsl-language-server:
-
-- Same diagnostic codes
-- Same severity levels
-- Same configuration format (`.bsl-analyzer.json`, also supports `.bsl-language-server.json` for compatibility)
-- Same parameters for diagnostics
+100% compatible with bsl-language-server:
+- Same diagnostic codes, severity levels
+- Same config format (`.bsl-analyzer.json` or `.bsl-language-server.json`)
+- Same parameters
 
 ## Общие правила
-- Можно менять код если пользователь дал согласие с твоими выводами или планами. Иначе менять код запрещено!
-- Если какой-то пакет, который ты хочешь использовать, отсутствует в системе, попроси пользователя его доставить. Только если пользователь отказал в установке, подбирай альтернативы!
-- Используй паттерны чистой архитектуры и чистого кода. Единая точка истины. Не дублируй код.
-- Неиспользуемый код нужно удалять
+
+- Менять код только с согласия пользователя
+- Запрашивать установку пакетов, не искать альтернативы самостоятельно
+- Чистая архитектура, единая точка истины, не дублировать код
+- Удалять неиспользуемый код
