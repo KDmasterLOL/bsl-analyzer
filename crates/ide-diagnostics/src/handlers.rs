@@ -139,6 +139,7 @@ pub mod space_at_start_comment;
 pub mod style_element_constructors;
 pub mod temp_files_dir;
 pub mod ternary_operator_usage;
+pub mod timeouts_in_external_resources;
 pub mod too_many_returns;
 pub mod unreachable_code;
 pub mod unused_local_variable;

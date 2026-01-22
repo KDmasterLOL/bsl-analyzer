@@ -208,6 +208,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::pairing_broken_transaction::check,
     ));
     diagnostics.extend(run_diagnostic(
+        "TimeoutsInExternalResources",
+        ctx,
+        handlers::timeouts_in_external_resources::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "SeveralCompilerDirectives",
         ctx,
         handlers::several_compiler_directives::check,

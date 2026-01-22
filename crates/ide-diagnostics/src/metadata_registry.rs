@@ -192,6 +192,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&SAME_METADATA_OBJECT_AND_CHILD_NAMES)
         }
         DiagnosticCode::UnusedLocalVariable => Some(&UNUSED_LOCAL_VARIABLE),
+        DiagnosticCode::TimeoutsInExternalResources => Some(&TIMEOUTS_IN_EXTERNAL_RESOURCES),
     }
 }
 
@@ -2215,6 +2216,28 @@ const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = DiagnosticM
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// TimeoutsInExternalResources diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   minutesToFix = 5,
+///   tags = { UNPREDICTABLE, STANDARD }
+/// )
+const TIMEOUTS_IN_EXTERNAL_RESOURCES: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Unpredictable, MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
