@@ -121,7 +121,8 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_diagnostic_range(code, &diagnostics[0], 14, 71, 77);
         assert_eq!(diagnostics[0].code, DiagnosticCode::NumberOfParams);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        // CodeSmell + Minor → Information (per metadata mapping)
+        assert_eq!(diagnostics[0].severity, Severity::Information);
     }
 
     #[test]

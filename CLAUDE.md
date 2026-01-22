@@ -82,10 +82,16 @@ Before using external crates: `resolve-library-id` → `query-docs` (Context7 MC
 **Don't use:** when you know exact path (use Read), text search (Grep), patterns (Glob)
 
 ### 3. Reference Sources
-- `~/src/lsp/rust-analyzer/` - Architecture patterns
-- `~/src/lsp/bsl-language-server/` - Compatibility target
-- `~/src/lsp/bsl-parser/` - BSL/SDBL grammar
-- See `docs/planning/SOURCES.md`
+**Primary reference:**
+- `~/src/lsp/rust-analyzer/` - Architecture patterns, diagnostics infrastructure, call hierarchy, search/usages
+
+**BSL specifics:**
+- `~/src/lsp/bsl-parser/` - BSL/SDBL grammar (ANTLR4)
+- `~/src/lsp/bsl-language-server/` - Diagnostic compatibility (codes, messages, config format only)
+
+**Priority:** rust-analyzer > bsl-parser > bsl-language-server
+
+See `docs/architecture/SOURCES.md` for details
 
 ### 4. Logging: tracing only
 ```rust
@@ -110,11 +116,16 @@ assert_diagnostic_range(&code, &diagnostics[0], 5, 1, 6);  // single line
 check_hir_diagnostic(code)  // run HIR diagnostics
 ```
 
-### 7. No Warnings
+### 7. No Warnings, No Bypassing Hooks
 ```bash
 cargo clippy --all-targets --all-features -- -D warnings  # Must pass
 ```
 Use `#[allow(...)]` only with explanation.
+
+**FORBIDDEN:** `git commit --no-verify` or `git push --no-verify`
+- Pre-commit hooks are protection against bad code/text in git
+- If hooks fail, FIX THE ISSUES, don't bypass them
+- Bypassing hooks is NEVER acceptable
 
 ### 8. Self-Contained
 All test files in repo. Never use absolute paths: `include_str!("fixtures/Module.bsl")` ✅
@@ -137,12 +148,21 @@ All test files in repo. Never use absolute paths: `include_str!("fixtures/Module
 - `docs/contributing/DEVELOPMENT_RULES.md` - Guidelines
 - `docs/METADATA_COMPATIBILITY.md` - Metadata compatibility
 
-## Compatibility
+## Compatibility & Architecture
 
-100% compatible with bsl-language-server:
-- Same diagnostic codes, severity levels
+**User-facing compatibility** with bsl-language-server (Java):
+- 100% compatible diagnostic codes, messages, severity levels
 - Same config format (`.bsl-analyzer.json` or `.bsl-language-server.json`)
-- Same parameters
+- Same diagnostic parameters and metadata
+
+**Architecture advantages** over Java implementation:
+- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON (vs Java annotations only)
+- ✅ **HIR-based diagnostics:** Collected during lowering, Salsa-cached (vs separate AST passes)
+- ✅ **Text-based single pass:** One traversal for all text diagnostics (vs N separate passes)
+- ✅ **Dataflow analysis:** CFG + liveness for intra-procedural checks (Java has limited CFG)
+- 🚧 **CallGraph (planned):** Inter-procedural analysis infrastructure inspired by rust-analyzer
+
+**Reference architecture:** rust-analyzer (not Java) for all new infrastructure
 
 ## Общие правила
 

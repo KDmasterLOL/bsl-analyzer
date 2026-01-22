@@ -93,6 +93,9 @@ pub fn from_metadata(
 #[allow(unexpected_cfgs)]
 mod tests {
     #[cfg(feature = "disabled-form-test-helper")]
+    use bsl_metadata::FormType;
+
+    #[cfg(feature = "disabled-form-test-helper")]
     use crate::test_utils::check_diagnostics_in_form;
 
     #[cfg(feature = "disabled-form-test-helper")]

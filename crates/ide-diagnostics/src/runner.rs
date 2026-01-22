@@ -217,6 +217,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::several_compiler_directives::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "TransferringParametersBetweenClientAndServer",
+        ctx,
+        handlers::transferring_parameters_between_client_and_server::check,
+    ));
 
     diagnostics
 }

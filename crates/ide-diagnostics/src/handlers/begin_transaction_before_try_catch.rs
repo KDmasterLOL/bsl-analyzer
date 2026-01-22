@@ -104,7 +104,11 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "BeginTransaction immediately before Try should be valid");
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
+            .collect();
+        assert_eq!(diags.len(), 0, "BeginTransaction immediately before Try should be valid");
     }
 
     #[test]
@@ -174,7 +178,11 @@ mod tests {
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(diagnostics.len(), 0, "Qualified call should be ignored");
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
+            .collect();
+        assert_eq!(diags.len(), 0, "Qualified call should be ignored");
     }
 
     #[test]
@@ -185,8 +193,12 @@ mod tests {
 EndProcedure"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "English BeginTransaction should be detected");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
+            .collect();
+        assert_eq!(diags.len(), 1, "English BeginTransaction should be detected");
+        assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
     }
 
     #[test]
@@ -197,8 +209,12 @@ EndProcedure"#;
 КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(diagnostics.len(), 1, "Case-insensitive matching should work");
-        assert_eq!(diagnostics[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
+            .collect();
+        assert_eq!(diags.len(), 1, "Case-insensitive matching should work");
+        assert_eq!(diags[0].code, DiagnosticCode::BeginTransactionBeforeTryCatch);
     }
 
     #[test]

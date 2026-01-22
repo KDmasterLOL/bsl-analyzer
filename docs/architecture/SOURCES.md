@@ -32,27 +32,38 @@ Rust Language Server от команды rust-lang. Используем как 
 ### 2. bsl-language-server (Java)
 
 **Путь:** `~/src/lsp/bsl-language-server/`
-**Роль:** Целевая совместимость
+**Роль:** Compatibility reference (user-facing API only)
 
-Java Language Server для BSL. Обеспечиваем 100% совместимость с:
+Java Language Server для BSL. Обеспечиваем 100% совместимость **только по API**:
 
-- 181 диагностикой (коды, сообщения, severity)
-- Конфигурацией (.bsl-analyzer.json)
+- 181 диагностика (коды, сообщения, severity, параметры)
+- Конфигурация (.bsl-analyzer.json)
 - LSP capabilities
-- Форматом отчётов (JSON, SARIF, Generic Issue)
+- Формат отчётов (JSON, SARIF, Generic Issue)
+
+**⚠️ Архитектура НЕ берется из Java:**
+- ❌ Не копируем ReferenceIndex (устарел, slow)
+- ❌ Не копируем AST-based диагностики (N проходов)
+- ✅ Используем rust-analyzer patterns: CallGraph, text-search + semantic resolution, HIR-based
 
 **Ключевые файлы:**
 
-- `src/main/java/.../diagnostics/` - 181 диагностика
-- `src/test/resources/diagnostics/` - тестовые данные
-- `docs/diagnostics/` - документация диагностик
+- `src/test/resources/diagnostics/` - тестовые данные (копировать verbatim)
+- `docs/diagnostics/` - документация (для совместимости сообщений)
+- `src/main/java/.../diagnostics/metadata/` - метаданные (@DiagnosticMetadata)
 - `src/main/java/.../configuration/` - формат конфигурации
 
 **Что брать:**
 
-- Список диагностик и их параметры
-- Тестовые данные для миграции тестов
-- Документацию для совместимости
+- Тестовые fixtures (*.bsl файлы) - копировать точно
+- Параметры диагностик и их default values
+- Описания и сообщения (для совместимости)
+
+**Что НЕ брать:**
+
+- Архитектурные решения (используем rust-analyzer)
+- Паттерны реализации диагностик
+- Инфраструктуру (ReferenceIndex, SymbolTree visitor patterns)
 
 ---
 
@@ -217,8 +228,15 @@ time ./target/release/bsl-analyzer analyze --source-dir ~/src/doc3 --reporters c
 
 ### Диагностики
 
-1. **bsl-language-server/diagnostics/** - референс реализации (181)
-2. **bsl-language-server/test/resources/diagnostics/** - тестовые данные
+**Архитектура:**
+1. **rust-analyzer/crates/ide-diagnostics/** - infrastructure patterns (text-based single pass, HIR-based collection)
+2. **rust-analyzer/crates/ide-db/search.rs** - text search + semantic resolution для call tracking
+3. **rust-analyzer/crates/ide/call_hierarchy.rs** - incoming/outgoing calls для inter-procedural анализа
+
+**Compatibility:**
+1. **bsl-language-server/test/resources/diagnostics/** - тестовые fixtures (копировать verbatim)
+2. **bsl-language-server/docs/diagnostics/** - описания (для совместимости сообщений)
+3. **bsl-language-server/diagnostics/** - параметры и metadata (API compatibility only)
 
 ### Salsa (Инкрементальные вычисления)
 
@@ -234,17 +252,18 @@ time ./target/release/bsl-analyzer analyze --source-dir ~/src/doc3 --reporters c
 
 ### LSP
 
-1. **bsl-language-server** - capabilities, handlers
-2. **rust-analyzer** - архитектура сервера
+1. **rust-analyzer/crates/rust-analyzer/** - архитектура сервера, main loop, handlers
+2. **bsl-language-server** - capabilities compatibility (для совместимости клиентов)
 
 ---
 
 ## Статистика проектов
 
-| Проект              | Язык       | Диагностик | LOC   | Особенности                          |
-| ------------------- | ---------- | ---------- | ----- | ------------------------------------ |
-| rust-analyzer       | Rust       | 54         | 1.5M+ | Образец архитектуры                  |
-| bsl-language-server | Java       | 181        | 50K+  | Целевая совместимость                |
-| bsl-parser          | Java/ANTLR | -          | 15K+  | Полная грамматика BSL+SDBL           |
-| tree-sitter-bsl     | JS/C       | -          | 2K+   | Грамматика BSL (без SDBL)            |
-| salsa               | Rust       | -          | 50K+  | Инкрементальные вычисления (v0.25.2) |
+| Проект              | Язык       | Диагностик | LOC   | Роль в проекте                            |
+| ------------------- | ---------- | ---------- | ----- | ----------------------------------------- |
+| rust-analyzer       | Rust       | 54         | 1.5M+ | **Primary reference** (architecture)      |
+| bsl-language-server | Java       | 181        | 50K+  | Compatibility (API/config/tests only)     |
+| bsl-parser          | Java/ANTLR | -          | 15K+  | BSL/SDBL grammar reference                |
+| tree-sitter-bsl     | JS/C       | -          | 2K+   | Alternative BSL grammar (без SDBL)        |
+| salsa               | Rust       | -          | 50K+  | Incremental computation framework         |
+| **bsl-analyzer**    | **Rust**   | **144**    | 60K+  | **Advanced diagnostics architecture** 🚀  |

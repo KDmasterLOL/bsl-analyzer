@@ -183,6 +183,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::ServerSideExportFormMethod => Some(&SERVER_SIDE_EXPORT_FORM_METHOD),
         DiagnosticCode::SetPermissionsForNewObjects => Some(&SET_PERMISSIONS_FOR_NEW_OBJECTS),
         DiagnosticCode::SetPrivilegedMode => Some(&SET_PRIVILEGED_MODE),
+        DiagnosticCode::TransferringParametersBetweenClientAndServer => {
+            Some(&TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER)
+        }
 
         // Additional diagnostics
         DiagnosticCode::DataExchangeLoading => Some(&DATA_EXCHANGE_LOADING),
@@ -3064,6 +3067,29 @@ const SET_PRIVILEGED_MODE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// TransferringParametersBetweenClientAndServer diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   minutesToFix = 2,
+///   tags = { BADPRACTICE, PERFORMANCE, STANDARD },
+///   scope = BSL
+/// )
+const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Performance, MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

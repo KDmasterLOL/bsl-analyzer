@@ -439,7 +439,10 @@ pub(super) fn lower_stmt_list_with_unreachable(
                     // Store as pending (will be consumed by Try or reported as error)
                     pending_begin_transaction = Some(child.clone());
                 }
-            } else if child.kind() != SyntaxKind::TRY_STMT {
+            } else if child.kind() == SyntaxKind::TRY_STMT {
+                // Try statement after BeginTransaction → Valid pattern, consume pending
+                pending_begin_transaction = None;
+            } else if pending_begin_transaction.is_some() {
                 // Any other statement (not Try, not BeginTransaction) while pending → ERROR
                 if let Some(pending_node) = pending_begin_transaction.take() {
                     let extended_range =

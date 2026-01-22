@@ -126,7 +126,8 @@ mod tests {
         // Verify all are on correct code
         for diag in &diagnostics {
             assert_eq!(diag.code, DiagnosticCode::LogicalOrInJoinQuerySection);
-            assert_eq!(diag.severity, Severity::Major);
+            // CodeSmell + Major → Warning (per metadata mapping)
+            assert_eq!(diag.severity, Severity::Warning);
             assert!(diag.message.contains("OR"));
         }
 

@@ -259,7 +259,8 @@ mod tests {
 
         // Verify diagnostic details
         assert_eq!(diagnostics[0].code, DiagnosticCode::CyclomaticComplexity);
-        assert_eq!(diagnostics[0].severity, Severity::Critical);
+        // CodeSmell + Critical → Warning (per metadata mapping)
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
 
         // Verify the actual complexity value is mentioned in the message
         assert!(

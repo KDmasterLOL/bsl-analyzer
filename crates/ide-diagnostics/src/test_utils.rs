@@ -218,6 +218,62 @@ pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
 }
 
+/// Run diagnostics on test code with CommonModule fixtures.
+///
+/// Allows testing diagnostics that require CommonModule resolution by creating
+/// proper file structure with CommonModules/ directory.
+///
+/// # Arguments
+/// * `fixture_text` - Multi-file fixture with CommonModules structure
+///
+/// # Returns
+/// All diagnostics found in the last file (assumed to be the test file)
+///
+/// # Example
+/// ```ignore
+/// let fixture = r#"
+/// //- /CommonModules/ПервыйОбщийМодуль/Module.bsl
+/// Процедура Метод() Экспорт
+/// КонецПроцедуры
+///
+/// //- /test.bsl
+/// Процедура Тест()
+///     ПервыйОбщийМодуль.Метод();
+/// КонецПроцедуры
+/// "#;
+/// let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
+/// ```
+pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic> {
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use test_fixture::Fixture;
+
+    let fixture = Fixture::parse(fixture_text);
+    let mut db = RootDatabaseImpl::new();
+
+    // Set up source root
+    let mut file_set = vfs::FileSet::default();
+    for (file_id, file) in &fixture.files {
+        file_set.insert(*file_id, file.path.clone());
+        db.set_file_text(*file_id, &file.content);
+    }
+
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+
+    for file_id in fixture.files.keys() {
+        db.set_file_source_root(*file_id, SourceRootId(0));
+    }
+
+    // Get last file as test file (convention: test file is last)
+    let test_file = *fixture.files.keys().last().expect("Fixture should have at least one file");
+
+    let config = crate::DiagnosticsConfig::all_enabled();
+    let ctx = crate::DiagnosticsContext::new(&db, &config, test_file);
+
+    crate::diagnostics(&ctx)
+}
+
 /// Run diagnostics on SDBL test code.
 ///
 /// Convenience function for SDBL-based diagnostics.
@@ -743,7 +799,9 @@ pub fn check_diagnostics_in_form(
     // Create form metadata
     let form = Form::new("FormElement".to_string(), form_type, Uuid::nil());
 
-    // Create module metadata
+    // Create module metadata (used by disabled FormTestProvider)
+    #[allow(unexpected_cfgs, unused_variables)]
+    #[cfg(feature = "disabled-form-test-helper")]
     let metadata = Arc::new(ModuleMetadata {
         module_type: bsl_metadata::ModuleType::FormModule,
         execution_context: None,
@@ -756,7 +814,7 @@ pub fn check_diagnostics_in_form(
     let config = Rc::new(crate::DiagnosticsConfig::default());
 
     // TODO: Temporarily disabled - FormTestProvider needs to be updated to match AnalysisProvider trait
-    #[allow(unexpected_cfgs)]
+    #[allow(unexpected_cfgs, dead_code)]
     #[cfg(feature = "disabled-form-test-helper")]
     // Create provider that returns our custom metadata
     struct FormTestProvider {
@@ -835,23 +893,78 @@ pub fn check_diagnostics_in_form(
             self.db.module_reaching_definitions(input)
         }
 
-        fn reaching_definitions(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<dataflow::reaching_defs::ReachingDefinitions> {
-            use ide_db::RootDatabase;
-            self.db.reaching_definitions(file_id)
+        fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
+            None
         }
 
-        fn file_dependencies(&self, file_id: vfs::FileId) -> Arc<dataflow::FileDependencies> {
+        fn file_source_root_id(&self, file_id: vfs::FileId) -> SourceRootId {
+            use ide_db::base_db::SourceDatabase;
+            self.db.file_source_root_input(file_id).source_root_id(&self.db)
+        }
+
+        fn module_level_regions(&self, file_id: vfs::FileId) -> Arc<Vec<base_db::RegionInfo>> {
+            use base_db::RootQueryDb;
+            self.db.module_level_regions(file_id)
+        }
+
+        fn sdbl_hir_in_file(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<Vec<(hir_def::SdblExprId, Arc<sdbl_hir::SdblPackage>)>> {
             use ide_db::RootDatabase;
-            self.db.file_dependencies(file_id)
+            self.db.sdbl_hir_in_file(file_id)
+        }
+
+        fn all_sdbl_in_file(
+            &self,
+            file_id: vfs::FileId,
+        ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+            use ide_db::RootDatabase;
+            self.db.all_sdbl_in_file(file_id)
+        }
+
+        fn module_data(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleData> {
+            use hir_def::DefDatabase;
+            self.db.module_data(module_id)
+        }
+
+        fn method_docs(
+            &self,
+            method_id: hir_def::MethodId,
+        ) -> Option<Arc<hir_def::docs::MethodDocs>> {
+            use hir_def::DefDatabase;
+            self.db.method_docs(method_id)
+        }
+
+        fn module_cfgs(&self, file_id: vfs::FileId) -> Arc<cfg::ModuleCfgs> {
+            use ide_db::base_db::FileIdInput;
+            use ide_db::RootDatabase;
+            let input = FileIdInput::new(&self.db, file_id);
+            self.db.module_cfgs(input)
+        }
+
+        fn resolve_vfs_path(
+            &self,
+            source_root_id: SourceRootId,
+            path: &vfs::VfsPath,
+        ) -> Option<vfs::FileId> {
+            use ide_db::base_db::SourceDatabase;
+            self.db.resolve_vfs_path(source_root_id, path)
         }
 
         fn line_index(&self, file_id: vfs::FileId) -> Arc<line_index::LineIndex> {
-            use ide_db::base_db::SourceDatabase;
-            let input = self.db.file_text_input(file_id);
-            input.line_index(&self.db)
+            use ide_db::base_db::FileIdInput;
+            use ide_db::RootDatabase;
+            let input = FileIdInput::new(&self.db, file_id);
+            self.db.line_index(input)
+        }
+
+        fn reaching_definitions(
+            &self,
+            method_id: hir_def::MethodId,
+        ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+            use ide_db::RootDatabase;
+            self.db.reaching_definitions(method_id)
         }
     }
 
@@ -901,12 +1014,15 @@ mod tests {
 
     #[test]
     fn test_range_to_line_col_utf8() {
-        let text = "Привет мир"; // Cyrillic
-        let range = TextRange::new(3.into(), 15.into());
+        let text = "Привет мир"; // Cyrillic (2 bytes per char)
+                                 // "Привет мир" = П(0-1) р(2-3) и(4-5) в(6-7) е(8-9) т(10-11) пробел(12) м(13-14) и(15-16) р(17-18)
+                                 // Characters: П(0), р(1), и(2), в(3), е(4), т(5), пробел(6), м(7), и(8), р(9)
+                                 // Range from char 3 ("в") to char 9 ("р") → bytes 6 to 17
+        let range = TextRange::new(6.into(), 17.into());
         let (start_line, start_col, end_line, end_col) = range_to_line_col(text, range);
         assert_eq!(start_line, 0);
-        assert_eq!(start_col, 3); // Character position
+        assert_eq!(start_col, 3); // Character position (в)
         assert_eq!(end_line, 0);
-        assert_eq!(end_col, 9); // Character position (3 + 6)
+        assert_eq!(end_col, 9); // Character position (р)
     }
 }

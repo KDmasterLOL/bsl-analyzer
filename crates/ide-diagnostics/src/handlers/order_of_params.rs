@@ -94,7 +94,8 @@ mod tests {
         // Required after optional: Четыре, Пять, Шесть
         assert_eq!(diagnostics.len(), 3);
         assert_eq!(diagnostics[0].code, DiagnosticCode::OrderOfParams);
-        assert_eq!(diagnostics[0].severity, Severity::Major);
+        // CodeSmell + Major → Warning (per metadata mapping)
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
         assert!(diagnostics[0].message.contains("Четыре"));
         assert!(diagnostics[1].message.contains("Пять"));
         assert!(diagnostics[2].message.contains("Шесть"));

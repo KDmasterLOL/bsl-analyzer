@@ -114,7 +114,8 @@ mod tests {
         // Verify all are correct type and severity
         for diag in &diagnostics {
             assert_eq!(diag.code, DiagnosticCode::JoinWithSubQuery);
-            assert_eq!(diag.severity, Severity::Major);
+            // CodeSmell + Major → Warning (per metadata mapping)
+            assert_eq!(diag.severity, Severity::Warning);
         }
     }
 

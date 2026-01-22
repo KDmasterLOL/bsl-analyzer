@@ -122,7 +122,8 @@ mod tests {
         // With max=3, only "Шесть" is excess (the 4th optional)
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, DiagnosticCode::NumberOfOptionalParams);
-        assert_eq!(diagnostics[0].severity, Severity::Warning);
+        // CodeSmell + Minor → Information (per metadata mapping)
+        assert_eq!(diagnostics[0].severity, Severity::Information);
         // Шесть = 6 is on line 8 (0-indexed)
         assert_diagnostic_range(code, &diagnostics[0], 8, 86, 91);
     }

@@ -146,6 +146,7 @@ pub enum DiagnosticCode {
     ServerSideExportFormMethod,
     SetPermissionsForNewObjects,
     SetPrivilegedMode,
+    TransferringParametersBetweenClientAndServer,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,
