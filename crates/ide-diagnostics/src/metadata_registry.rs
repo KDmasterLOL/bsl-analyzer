@@ -178,6 +178,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryParseError => Some(&QUERY_PARSE_ERROR),
         DiagnosticCode::QueryToMissingMetadata => Some(&QUERY_TO_MISSING_METADATA),
         DiagnosticCode::RefOveruse => Some(&REF_OVERUSE),
+        DiagnosticCode::UnionAll => Some(&UNION_ALL),
         DiagnosticCode::ScheduledJobHandler => Some(&SCHEDULED_JOB_HANDLER),
         DiagnosticCode::ServerCallsInFormEvents => Some(&SERVER_CALLS_IN_FORM_EVENTS),
         DiagnosticCode::ServerSideExportFormMethod => Some(&SERVER_SIDE_EXPORT_FORM_METHOD),
@@ -2972,6 +2973,29 @@ const REF_OVERUSE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Sql, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UnionAll diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MINOR,
+///   minutesToFix = 5,
+///   tags = { STANDARD, SQL, PERFORMANCE },
+///   scope = BSL
+/// )
+const UNION_ALL: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Performance],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

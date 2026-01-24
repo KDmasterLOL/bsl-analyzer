@@ -175,6 +175,26 @@ pub fn lower_sdbl_to_hir(
                     "ВСЕ",
                     crate::source_map::TokenCategory::Modifier,
                 );
+            } else {
+                let union_range = union_clause
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|it| it.into_token())
+                    .find(|t| {
+                        if t.kind() == syntax::SyntaxKind::IDENT {
+                            let text = t.text();
+                            text.eq_ignore_ascii_case("UNION")
+                                || text.eq_ignore_ascii_case("ОБЪЕДИНИТЬ")
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|t| t.text_range())
+                    .unwrap_or_else(|| union_clause.syntax().text_range());
+
+                ctx.diagnostics.push(crate::diagnostics::SdblDiagnostic::UnionWithoutAll {
+                    range: union_range,
+                });
             }
 
             // Lower the UNION query

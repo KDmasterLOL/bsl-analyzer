@@ -162,6 +162,7 @@ pub enum DiagnosticCode {
     QueryParseError,
     QueryToMissingMetadata,
     RefOveruse,
+    UnionAll,
 }
 
 impl DiagnosticCode {

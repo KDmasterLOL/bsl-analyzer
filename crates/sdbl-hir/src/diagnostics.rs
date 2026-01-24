@@ -203,6 +203,17 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// UNION without ALL keyword (performance issue).
+    ///
+    /// BSL-LS diagnostic code: UnionAll
+    ///
+    /// Using UNION without ALL causes deduplication of identical rows,
+    /// which is unnecessary overhead when duplicate rows cannot exist.
+    UnionWithoutAll {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -329,6 +340,11 @@ impl SdblDiagnostic {
             Self::RefOveruse { .. } => {
                 "Избавьтесь от получения поля \"Ссылка\" в запросе.".to_string()
             }
+            Self::UnionWithoutAll { .. } => {
+                "Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к \
+                 излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ"
+                    .to_string()
+            }
         }
     }
 
@@ -354,6 +370,7 @@ impl SdblDiagnostic {
             Self::MultilineString { range } => *range,
             Self::QueryNestedFieldsByDot { range } => *range,
             Self::RefOveruse { range } => *range,
+            Self::UnionWithoutAll { range } => *range,
         }
     }
 
@@ -382,6 +399,7 @@ impl SdblDiagnostic {
             Self::MultilineString { .. } => false, // Warning - likely incorrect quoting
             Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
             Self::RefOveruse { .. } => false,      // Warning - performance issue
+            Self::UnionWithoutAll { .. } => false, // Warning - performance issue
         }
     }
 }
