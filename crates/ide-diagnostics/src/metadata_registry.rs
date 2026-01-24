@@ -199,6 +199,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TimeoutsInExternalResources => Some(&TIMEOUTS_IN_EXTERNAL_RESOURCES),
         DiagnosticCode::TryNumber => Some(&TRY_NUMBER),
         DiagnosticCode::Typo => Some(&TYPO),
+        DiagnosticCode::UnknownPreprocessorSymbol => Some(&UNKNOWN_PREPROCESSOR_SYMBOL),
     }
 }
 
@@ -2266,6 +2267,28 @@ const TRY_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UnknownPreprocessorSymbol diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   minutesToFix = 5,
+///   tags = { STANDARD, ERROR }
+/// )
+const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Error],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

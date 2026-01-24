@@ -146,6 +146,6 @@ pub mod try_number;
 pub mod typo;
 pub mod unary_plus_in_concatenation;
 pub mod union_all;
+pub mod unknown_preprocessor_symbol;
 pub mod unreachable_code;
 pub mod unused_local_variable;
-// TODO: Add all 181 handlers

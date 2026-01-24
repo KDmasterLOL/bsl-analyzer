@@ -127,6 +127,11 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::latin_and_cyrillic_symbol_in_word::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UnknownPreprocessorSymbol",
+        ctx,
+        handlers::unknown_preprocessor_symbol::check,
+    ));
 
     diagnostics
 }

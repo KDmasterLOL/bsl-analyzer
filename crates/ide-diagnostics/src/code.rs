@@ -118,6 +118,7 @@ pub enum DiagnosticCode {
     WrongUseOfRollbackTransactionMethod,
     TimeoutsInExternalResources,
     TryNumber,
+    UnknownPreprocessorSymbol,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,
