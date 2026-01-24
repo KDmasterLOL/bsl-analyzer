@@ -64,6 +64,7 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for node in root.descendants() {
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
+        handlers::typo::check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics

@@ -31,6 +31,8 @@ smol_str.workspace = true
 line-index.workspace = true
 fixedbitset.workspace = true
 strum.workspace = true
+spellbook.workspace = true
+text-size.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

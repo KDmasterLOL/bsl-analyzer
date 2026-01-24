@@ -197,6 +197,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnusedLocalVariable => Some(&UNUSED_LOCAL_VARIABLE),
         DiagnosticCode::TimeoutsInExternalResources => Some(&TIMEOUTS_IN_EXTERNAL_RESOURCES),
         DiagnosticCode::TryNumber => Some(&TRY_NUMBER),
+        DiagnosticCode::Typo => Some(&TYPO),
     }
 }
 
@@ -3229,6 +3230,28 @@ const UNUSED_LOCAL_VARIABLE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Brainoverload, MetadataTag::Badpractice, MetadataTag::Unused],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// Typo diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = INFO,
+///   minutesToFix = 1,
+///   tags = { BADPRACTICE }
+/// )
+const TYPO: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

@@ -51,6 +51,7 @@ pub enum DiagnosticCode {
     MultilingualStringUsingWithTemplate,
     NestedConstructorsInStructureDeclaration,
     NestedFunctionInParameters,
+    Typo,
 
     // Tier 2: Medium (requires symbol table)
     AllFunctionPathMustHaveReturn,
