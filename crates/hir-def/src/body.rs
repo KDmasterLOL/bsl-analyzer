@@ -643,6 +643,12 @@ pub enum BodyDiagnostic {
     /// Too many return statements in a method/function.
     /// Detected when method has more return statements than configured threshold.
     TooManyReturns { method_name: String, method_name_range: TextRange, returns: Vec<TextRange> },
+
+    /// Unary plus in concatenation (accidental double plus: `"str" + + expr`).
+    /// Detected when binary plus operator has unary plus on right operand (not a numeric literal).
+    /// This is usually a typo - platform will try to convert right operand to number, causing runtime error.
+    /// Examples: `"str" + + "str2"` (error), `"str" + + 5` (valid), `"str" + + variable` (error).
+    UnaryPlusInConcatenation { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -831,6 +837,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::TempFilesDir { range, .. } => *range,
             BodyDiagnostic::TernaryOperatorUsage { range } => *range,
             BodyDiagnostic::TooManyReturns { method_name_range, .. } => *method_name_range,
+            BodyDiagnostic::UnaryPlusInConcatenation { range } => *range,
         }
     }
 }

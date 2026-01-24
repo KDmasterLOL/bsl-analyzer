@@ -144,6 +144,7 @@ pub mod too_many_returns;
 pub mod transferring_parameters_between_client_and_server;
 pub mod try_number;
 pub mod typo;
+pub mod unary_plus_in_concatenation;
 pub mod unreachable_code;
 pub mod unused_local_variable;
 // TODO: Add all 181 handlers

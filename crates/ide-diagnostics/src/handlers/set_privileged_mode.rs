@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../../fixtures/SetPrivilegedModeDiagnostic.bsl");
+        let code = include_str!("../../test_data/SetPrivilegedModeDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::SetPrivilegedMode).collect();

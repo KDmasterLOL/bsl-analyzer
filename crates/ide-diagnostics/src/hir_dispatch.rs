@@ -207,5 +207,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::TooManyReturns { method_name, method_name_range, returns } => {
             handlers::too_many_returns::from_hir(method_name, *method_name_range, returns, ctx)
         }
+        BodyDiagnostic::UnaryPlusInConcatenation { range } => {
+            handlers::unary_plus_in_concatenation::from_hir(*range, ctx)
+        }
     }
 }

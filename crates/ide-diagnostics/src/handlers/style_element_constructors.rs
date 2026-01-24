@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../../fixtures/StyleElementConstructorsDiagnostic.bsl");
+        let code = include_str!("../../test_data/StyleElementConstructorsDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()

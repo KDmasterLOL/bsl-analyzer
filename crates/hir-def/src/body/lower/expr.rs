@@ -225,6 +225,46 @@ fn lower_binary_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     };
     let rhs = lower_expr_node(ctx, &rhs_node);
 
+    if matches!(op, BinaryOp::Add) {
+        let mut current = rhs_node.clone();
+        let mut unary_plus_token = None;
+
+        while current.kind() == SyntaxKind::EXPR {
+            if let Some(plus_tok) = current
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .find(|tok| matches!(tok.kind(), SyntaxKind::PLUS))
+            {
+                unary_plus_token = Some(plus_tok);
+                break;
+            }
+
+            if let Some(child) = current.children().next() {
+                current = child;
+            } else {
+                break;
+            }
+        }
+
+        if let Some(unary_plus_tok) = unary_plus_token {
+            let has_numeric_literal = current
+                .descendants()
+                .find(|n| n.kind() == SyntaxKind::LITERAL)
+                .map(|lit| {
+                    lit.children_with_tokens()
+                        .filter_map(|el| el.into_token())
+                        .any(|tok| matches!(tok.kind(), SyntaxKind::DECIMAL | SyntaxKind::FLOAT))
+                })
+                .unwrap_or(false);
+
+            if !has_numeric_literal {
+                ctx.emit(BodyDiagnostic::UnaryPlusInConcatenation {
+                    range: unary_plus_tok.text_range(),
+                });
+            }
+        }
+    }
+
     Expr::BinaryOp { lhs, rhs, op }
 }
 

@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn test_set_permissions_for_new_objects() {
         let fixtures_dir =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/set_permissions_for_new_objects");
+            concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
         // Use ASCII at start for correct byte range check
         let code = "//test - ManagedApplicationModule";
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_not_managed_application_module() {
         let fixtures_dir =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/set_permissions_for_new_objects");
+            concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
         // Setup database with VFS
         let mut db = RootDatabaseImpl::new();
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_custom_allowed_roles() {
         let fixtures_dir =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/set_permissions_for_new_objects");
+            concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/set_permissions_for_new_objects");
 
         // Setup database with VFS
         let mut db = RootDatabaseImpl::new();

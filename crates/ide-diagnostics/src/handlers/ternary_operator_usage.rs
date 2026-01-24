@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../../fixtures/TernaryOperatorUsageDiagnostic.bsl");
+        let code = include_str!("../../test_data/TernaryOperatorUsageDiagnostic.bsl");
         let diagnostics =
             check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
                 crate::diagnostics(ctx)
