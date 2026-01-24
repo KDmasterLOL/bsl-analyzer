@@ -1,10 +1,10 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 144/144 diagnostics defined (100%)
+//! Progress: 145/145 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
-//! - 52 Tier 2 diagnostics (semantic analysis)
+//! - 53 Tier 2 diagnostics (semantic analysis)
 //! - 42 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
@@ -196,6 +196,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         }
         DiagnosticCode::UnusedLocalVariable => Some(&UNUSED_LOCAL_VARIABLE),
         DiagnosticCode::TimeoutsInExternalResources => Some(&TIMEOUTS_IN_EXTERNAL_RESOURCES),
+        DiagnosticCode::TryNumber => Some(&TRY_NUMBER),
     }
 }
 
@@ -2241,6 +2242,28 @@ const TIMEOUTS_IN_EXTERNAL_RESOURCES: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Unpredictable, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// TryNumber diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   minutesToFix = 2,
+///   tags = { STANDARD }
+/// )
+const TRY_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

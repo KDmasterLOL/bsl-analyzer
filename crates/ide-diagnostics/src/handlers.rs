@@ -142,6 +142,7 @@ pub mod ternary_operator_usage;
 pub mod timeouts_in_external_resources;
 pub mod too_many_returns;
 pub mod transferring_parameters_between_client_and_server;
+pub mod try_number;
 pub mod unreachable_code;
 pub mod unused_local_variable;
 // TODO: Add all 181 handlers

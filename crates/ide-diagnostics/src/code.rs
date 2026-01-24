@@ -116,6 +116,7 @@ pub enum DiagnosticCode {
     PairingBrokenTransaction,
     WrongUseOfRollbackTransactionMethod,
     TimeoutsInExternalResources,
+    TryNumber,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

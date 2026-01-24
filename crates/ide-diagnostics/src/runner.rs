@@ -212,6 +212,7 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::timeouts_in_external_resources::check,
     ));
+    diagnostics.extend(run_diagnostic("TryNumber", ctx, handlers::try_number::check));
     diagnostics.extend(run_diagnostic(
         "SeveralCompilerDirectives",
         ctx,
