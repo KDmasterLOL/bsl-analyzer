@@ -142,6 +142,31 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtIdx, complexity: &mut u32) {
             count_expr_complexity(body, *handler, complexity);
         }
 
+        // Preprocessor conditional: similar to If for complexity
+        Stmt::PreprocIf(preproc) => {
+            *complexity += 1; // #Если
+
+            for &s in preproc.then_branch.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+
+            // Each #ИначеЕсли +1
+            for (_condition_range, _directive_range, elsif_body) in preproc.elsif_branches.iter() {
+                *complexity += 1;
+                for &s in elsif_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+
+            // #Иначе +1
+            if let Some(ref else_body) = preproc.else_branch {
+                *complexity += 1;
+                for &s in else_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+        }
+
         _ => {}
     }
 }

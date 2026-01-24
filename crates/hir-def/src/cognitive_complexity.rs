@@ -176,6 +176,33 @@ fn count_stmt_complexity(body: &Body, stmt_id: StmtIdx, complexity: &mut u32, ne
             count_expr_complexity(body, *handler, complexity);
         }
 
+        // Preprocessor conditional: similar to If for complexity purposes
+        Stmt::PreprocIf(preproc) => {
+            // Structural increment: +1 + nesting
+            *complexity += 1 + nesting;
+
+            // Then branch
+            for &child_stmt in preproc.then_branch.iter() {
+                count_stmt_complexity(body, child_stmt, complexity, nesting + 1);
+            }
+
+            // Elsif branches: +1 each (hybrid)
+            for (_condition_range, _directive_range, elsif_body) in preproc.elsif_branches.iter() {
+                *complexity += 1;
+                for &child_stmt in elsif_body.iter() {
+                    count_stmt_complexity(body, child_stmt, complexity, nesting + 2);
+                }
+            }
+
+            // Else branch: +1 (hybrid)
+            if let Some(ref else_body) = preproc.else_branch {
+                *complexity += 1;
+                for &child_stmt in else_body.iter() {
+                    count_stmt_complexity(body, child_stmt, complexity, nesting + 2);
+                }
+            }
+        }
+
         // No complexity for these
         Stmt::VarDecl { .. } | Stmt::Break | Stmt::Continue | Stmt::Label(_) => {}
     }

@@ -222,6 +222,7 @@ impl CfgBuilder {
             Stmt::Return { .. } => self.walk_return_statement_hir(stmt_id, body),
             Stmt::Raise { .. } => self.walk_raise_statement_hir(stmt_id, body),
             Stmt::If(_) => self.walk_if_statement_hir(stmt_id, body),
+            Stmt::PreprocIf(_) => self.walk_preproc_if_statement_hir(stmt_id, body),
             Stmt::While { .. } => self.walk_while_statement_hir(stmt_id, body),
             Stmt::For { .. } => self.walk_for_statement_hir(stmt_id, body),
             Stmt::ForEach { .. } => self.walk_foreach_statement_hir(stmt_id, body),
@@ -591,12 +592,24 @@ impl CfgBuilder {
 
     /// Check if a block is reachable (has incoming edges or is entry point)
     fn is_block_reachable(&self, block: NodeIndex) -> bool {
-        // A block is reachable if:
-        // 1. It has incoming edges, OR
-        // 2. It's the entry point
         let has_incoming = self.cfg.incoming_edges(block).next().is_some();
         let is_entry = self.cfg.entry_point() == Some(block);
         has_incoming || is_entry
+    }
+
+    /// Check if a block has at least one live (non-dead-code) incoming edge.
+    ///
+    /// This is used to determine if control flow should continue from a branch:
+    /// - After return/raise/break/continue/goto, current_block is a dead_block
+    /// - dead_block only has AdjacentCode incoming edge (dead code marker)
+    /// - We should NOT connect dead_block to merge block
+    fn block_has_live_incoming(&self, block: NodeIndex) -> bool {
+        // Entry point is always live
+        if self.cfg.entry_point() == Some(block) {
+            return true;
+        }
+        // Check if any incoming edge is live (not AdjacentCode)
+        self.cfg.incoming_edges(block).any(|(_, edge_type)| !edge_type.is_dead_code_edge())
     }
 
     /// Walk a HIR if statement (Phase 6.2)
@@ -637,11 +650,16 @@ impl CfgBuilder {
                 self.walk_statement_hir(then_stmt_id, body);
             }
 
-            // Save then exit and check if reachable
+            // Connect then branch to merge:
+            // - Direct edge if branch is reachable (has live incoming edges)
+            // - AdjacentCode (phantom) edge if branch terminates (for backward traversal in unreachable detection)
             let then_exit = self.current_block;
             if let Some(exit) = then_exit {
-                if self.is_block_reachable(exit) {
+                if self.block_has_live_incoming(exit) {
                     let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                } else {
+                    // Phantom edge for backward traversal (unreachable code detection)
+                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                 }
             }
 
@@ -667,11 +685,14 @@ impl CfgBuilder {
                     self.walk_statement_hir(elsif_stmt_id, body);
                 }
 
-                // Save elsif exit
+                // Connect elsif branch to merge:
+                // - Direct if reachable, AdjacentCode (phantom) if terminated
                 let elsif_exit = self.current_block;
                 if let Some(exit) = elsif_exit {
-                    if self.is_block_reachable(exit) {
+                    if self.block_has_live_incoming(exit) {
                         let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                    } else {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                     }
                 }
 
@@ -691,11 +712,147 @@ impl CfgBuilder {
                     self.walk_statement_hir(else_stmt_id, body);
                 }
 
-                // Connect else exit to merge
+                // Connect else exit to merge:
+                // - Direct if reachable, AdjacentCode (phantom) if terminated
                 let else_exit = self.current_block;
                 if let Some(exit) = else_exit {
-                    if self.is_block_reachable(exit) {
+                    if self.block_has_live_incoming(exit) {
                         let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                    } else {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
+                    }
+                }
+            } else {
+                // No else - false branch of last conditional goes to merge
+                let _ = self.cfg.add_edge(current_cond, merge_block, CfgEdgeType::FalseBranch);
+            }
+
+            // Continue with merge block
+            self.current_block = Some(merge_block);
+        }
+    }
+
+    /// Walk a HIR preprocessor #Если statement (Phase 6.4)
+    ///
+    /// Similar to walk_if_statement_hir but uses PreprocConditionVertex.
+    /// Preprocessor conditions are symbolic (not runtime-evaluable), so we use TextRange.
+    ///
+    /// Algorithm:
+    /// 1. Create PreprocConditionVertex for #Если condition
+    /// 2. Connect current block → preprocessor conditional
+    /// 3. Walk then_branch (Box<[StmtIdx]>)
+    /// 4. For each #ИначеЕсли: create another PreprocConditionVertex, chain it
+    /// 5. Walk #Иначе branch if present
+    /// 6. Create merge block
+    /// 7. Connect all branch exits → merge
+    fn walk_preproc_if_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
+        use crate::vertex::PreprocConditionVertex;
+
+        if let Stmt::PreprocIf(preproc_if) = body.stmt_idx(stmt_id) {
+            // Create preprocessor conditional vertex
+            let cond_vertex = self.cfg.add_vertex(CfgVertex::PreprocCondition(
+                PreprocConditionVertex::with_ranges(
+                    preproc_if.condition_range,
+                    preproc_if.directive_range,
+                    preproc_if.full_range,
+                ),
+            ));
+
+            // Connect current block to conditional
+            if let Some(current) = self.current_block {
+                let _ = self.cfg.add_edge(current, cond_vertex, CfgEdgeType::Direct);
+            }
+
+            // Create merge block (will be used after all branches)
+            let merge_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+
+            // Walk THEN branch
+            let then_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+            let _ = self.cfg.add_edge(cond_vertex, then_block, CfgEdgeType::TrueBranch);
+            self.current_block = Some(then_block);
+
+            for &then_stmt_id in preproc_if.then_branch.iter() {
+                self.walk_statement_hir(then_stmt_id, body);
+            }
+
+            // Connect then branch to merge:
+            // - Direct if reachable, AdjacentCode (phantom) if terminated
+            let then_exit = self.current_block;
+            if let Some(exit) = then_exit {
+                if self.block_has_live_incoming(exit) {
+                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
+                }
+            }
+
+            // Process #ИначеЕсли clauses
+            let mut current_cond = cond_vertex;
+
+            for (elsif_condition_range, elsif_directive_range, elsif_body) in
+                preproc_if.elsif_branches.iter()
+            {
+                // Create elsif preprocessor conditional
+                let elsif_cond = self.cfg.add_vertex(CfgVertex::PreprocCondition(
+                    PreprocConditionVertex::with_directive_range(
+                        *elsif_condition_range,
+                        *elsif_directive_range,
+                    ),
+                ));
+
+                // Connect previous cond FALSE → this elsif cond
+                let _ = self.cfg.add_edge(current_cond, elsif_cond, CfgEdgeType::FalseBranch);
+
+                // Walk elsif body
+                let elsif_block =
+                    self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+                let _ = self.cfg.add_edge(elsif_cond, elsif_block, CfgEdgeType::TrueBranch);
+                self.current_block = Some(elsif_block);
+
+                for &elsif_stmt_id in elsif_body.iter() {
+                    self.walk_statement_hir(elsif_stmt_id, body);
+                }
+
+                // Connect elsif branch to merge:
+                // - Direct if reachable, AdjacentCode (phantom) if terminated
+                let elsif_exit = self.current_block;
+                if let Some(exit) = elsif_exit {
+                    if self.block_has_live_incoming(exit) {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                    } else {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
+                    }
+                }
+
+                current_cond = elsif_cond;
+            }
+
+            // Process #Иначе clause if present
+            if let Some(ref else_stmts) = preproc_if.else_branch {
+                // Create else block
+                let else_block =
+                    self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+                let _ = self.cfg.add_edge(current_cond, else_block, CfgEdgeType::FalseBranch);
+                self.current_block = Some(else_block);
+
+                #[cfg(test)]
+                eprintln!("  PreprocIf else_branch: {} statements", else_stmts.len());
+
+                // Walk else body
+                for &else_stmt_id in else_stmts.iter() {
+                    #[cfg(test)]
+                    eprintln!("    walking else stmt {:?}", else_stmt_id);
+                    self.walk_statement_hir(else_stmt_id, body);
+                }
+
+                // Connect else exit to merge:
+                // - Direct if reachable, AdjacentCode (phantom) if terminated
+                let else_exit = self.current_block;
+                if let Some(exit) = else_exit {
+                    if self.block_has_live_incoming(exit) {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                    } else {
+                        let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                     }
                 }
             } else {
@@ -798,9 +955,13 @@ impl CfgBuilder {
                 ExprId::from_idx(*condition),
             )));
 
-            // Connect current block to loop
+            // Connect current block to loop if it's reachable
             if let Some(current) = self.current_block {
-                let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                if self.block_has_live_incoming(current) {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::AdjacentCode);
+                }
             }
 
             // Create loop body block
@@ -846,13 +1007,18 @@ impl CfgBuilder {
 
         if let Stmt::For { var, from: _, to: _, body: loop_body } = body.stmt_idx(stmt_id) {
             // Create for loop vertex - convert typed to opaque
-            let loop_vertex = self
-                .cfg
-                .add_vertex(CfgVertex::ForLoop(ForLoopVertex::new(BindingId::from_idx(*var))));
+            let loop_vertex = self.cfg.add_vertex(CfgVertex::ForLoop(ForLoopVertex::with_stmt_id(
+                BindingId::from_idx(*var),
+                StmtId::from_idx(stmt_id),
+            )));
 
-            // Connect current block to loop
+            // Connect current block to loop if it's reachable
             if let Some(current) = self.current_block {
-                let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                if self.block_has_live_incoming(current) {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::AdjacentCode);
+                }
             }
 
             // Create loop body block
@@ -894,14 +1060,21 @@ impl CfgBuilder {
 
         if let Stmt::ForEach { var, collection, body: loop_body } = body.stmt_idx(stmt_id) {
             // Create foreach loop vertex - convert typed to opaque
-            let loop_vertex = self.cfg.add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::new(
-                BindingId::from_idx(*var),
-                ExprId::from_idx(*collection),
-            )));
+            let loop_vertex =
+                self.cfg.add_vertex(CfgVertex::ForEachLoop(ForEachLoopVertex::with_stmt_id(
+                    BindingId::from_idx(*var),
+                    ExprId::from_idx(*collection),
+                    StmtId::from_idx(stmt_id),
+                )));
 
-            // Connect current block to loop
+            // Connect current block to loop if it's reachable
+            // After return/raise/etc., current_block is dead - use AdjacentCode edge
             if let Some(current) = self.current_block {
-                let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                if self.block_has_live_incoming(current) {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(current, loop_vertex, CfgEdgeType::AdjacentCode);
+                }
             }
 
             // Create loop body block

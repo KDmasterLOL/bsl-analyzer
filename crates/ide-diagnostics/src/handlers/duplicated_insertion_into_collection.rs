@@ -838,6 +838,60 @@ fn check_stmt(
             tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
         }
 
+        Stmt::PreprocIf(preproc) => {
+            // Check then branch
+            let then_stmts: Vec<StmtId> =
+                preproc.then_branch.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+            check_stmt_list(
+                body,
+                source_map,
+                &then_stmts,
+                tracker,
+                diagnostics,
+                scope_depth + 1,
+                allow_add,
+                code,
+                ctx,
+            );
+            tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
+
+            // Check elsif branches
+            for (_range, _directive_range, elsif_body) in preproc.elsif_branches.iter() {
+                let elsif_stmts: Vec<StmtId> =
+                    elsif_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+                check_stmt_list(
+                    body,
+                    source_map,
+                    &elsif_stmts,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    allow_add,
+                    code,
+                    ctx,
+                );
+                tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
+            }
+
+            // Check else branch
+            if let Some(ref else_body) = preproc.else_branch {
+                let else_stmts: Vec<StmtId> =
+                    else_body.iter().map(|&idx| StmtId::from_idx(idx)).collect();
+                check_stmt_list(
+                    body,
+                    source_map,
+                    &else_stmts,
+                    tracker,
+                    diagnostics,
+                    scope_depth + 1,
+                    allow_add,
+                    code,
+                    ctx,
+                );
+                tracker.report_duplicates(diagnostics, scope_depth + 1, code, ctx);
+            }
+        }
+
         // Other statements don't need special handling
         Stmt::VarDecl { .. }
         | Stmt::Goto(_)

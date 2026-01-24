@@ -154,6 +154,31 @@ pub struct IfStmt {
     pub else_branch: Option<Box<[StmtIdx]>>,
 }
 
+/// Preprocessor conditional statement data (#Если/#ИначеЕсли/#Иначе/#КонецЕсли).
+///
+/// Similar to `IfStmt` but for compile-time conditionals.
+/// Condition is stored as `TextRange` (not `ExprIdx`) because preprocessor
+/// expressions are symbolic (e.g., `Сервер И НЕ Клиент`), not runtime values.
+///
+/// Both branches must be analyzed for BSL because the same file can run
+/// in different contexts (Server/Client/etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::type_complexity)]
+pub struct PreprocIfStmt {
+    /// Range of the condition expression (for diagnostics).
+    pub condition_range: text_size::TextRange,
+    /// Range of the full `#Если ... Тогда` directive (for unreachable code range).
+    pub directive_range: text_size::TextRange,
+    /// Range of the full `#Если ... #КонецЕсли` block.
+    pub full_range: text_size::TextRange,
+    /// Statements in #Если branch.
+    pub then_branch: Box<[StmtIdx]>,
+    /// #ИначеЕсли branches: (condition_range, directive_range, statements).
+    pub elsif_branches: Box<[(text_size::TextRange, text_size::TextRange, Box<[StmtIdx]>)]>,
+    /// #Иначе branch (if present).
+    pub else_branch: Option<Box<[StmtIdx]>>,
+}
+
 /// HIR statement.
 ///
 /// Represents an executable construct in BSL code.
@@ -170,6 +195,10 @@ pub enum Stmt {
 
     /// If statement (boxed to reduce enum size).
     If(Box<IfStmt>),
+
+    /// Preprocessor conditional (#Если/#ИначеЕсли/#Иначе/#КонецЕсли).
+    /// Boxed to reduce enum size.
+    PreprocIf(Box<PreprocIfStmt>),
 
     /// While loop (Пока condition Цикл ... КонецЦикла).
     While { condition: ExprIdx, body: Box<[StmtIdx]> },

@@ -777,14 +777,27 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
             if unreachable_start.is_some() {
                 unreachable_end = Some(node.text_range());
             }
-            preproc::process_preproc_if(&mut ctx, &node);
+            // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
+            if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
+                let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
+                stmts.push(stmt_id);
+            }
+            // Check if all branches terminate
+            if unreachable_start.is_none() && preproc::preproc_if_all_branches_terminate(&node) {
+                unreachable_start = Some(node.text_range());
+            }
             continue;
         }
         if node.kind() == SyntaxKind::PRE_REGION_DIR {
             if unreachable_start.is_some() {
                 unreachable_end = Some(node.text_range());
             }
-            preproc::process_preproc_region(&mut ctx, &node);
+            // Lower statements from region (adds them to body)
+            let (region_stmts, region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
+            stmts.extend(region_stmts);
+            if unreachable_start.is_none() && region_terminates {
+                unreachable_start = Some(node.text_range());
+            }
             continue;
         }
 
@@ -873,14 +886,27 @@ pub fn lower_module_code_with_line_index(
             if unreachable_start.is_some() {
                 unreachable_end = Some(node.text_range());
             }
-            preproc::process_preproc_if(&mut ctx, &node);
+            // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
+            if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
+                let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
+                stmts.push(stmt_id);
+            }
+            // Check if all branches terminate
+            if unreachable_start.is_none() && preproc::preproc_if_all_branches_terminate(&node) {
+                unreachable_start = Some(node.text_range());
+            }
             continue;
         }
         if node.kind() == SyntaxKind::PRE_REGION_DIR {
             if unreachable_start.is_some() {
                 unreachable_end = Some(node.text_range());
             }
-            preproc::process_preproc_region(&mut ctx, &node);
+            // Lower statements from region (adds them to body)
+            let (region_stmts, region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
+            stmts.extend(region_stmts);
+            if unreachable_start.is_none() && region_terminates {
+                unreachable_start = Some(node.text_range());
+            }
             continue;
         }
 

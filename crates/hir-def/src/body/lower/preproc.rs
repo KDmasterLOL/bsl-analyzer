@@ -7,39 +7,297 @@ use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
+use crate::hir::{PreprocIfStmt, Stmt, StmtIdx};
 
 use super::control_flow::{
     if_all_branches_terminate, is_control_flow_terminator, is_statement_node, stmt_list_terminates,
 };
-use super::stmt::{lower_stmt, lower_stmt_list_with_unreachable};
+use super::stmt::lower_stmt;
 use super::LoweringCtx;
 
-/// Process preprocessor `#Если` directive, analyzing each branch for unreachable code.
-pub(crate) fn process_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) {
-    // Process the main branch (content after condition, before elsif/else/endif)
-    process_preproc_branch_content(ctx, node);
+/// Lower preprocessor `#Если` directive to `Stmt::PreprocIf`.
+///
+/// Creates HIR representation that preserves preprocessor structure for CFG analysis.
+/// Also detects unreachable code within preprocessor branches.
+///
+/// Note: Unlike normal code blocks, preprocessor content doesn't have a STMT_LIST wrapper.
+/// Statements are direct children of PRE_IF_DIR/PRE_ELSIF_CLAUSE/PRE_ELSE_CLAUSE.
+pub(crate) fn lower_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
+    // Get condition range (PRE_EXPR)
+    let condition_range = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::PRE_EXPR)
+        .map(|n| n.text_range())
+        .unwrap_or_else(|| node.text_range());
 
-    // Process ElsIf clauses
+    // Get directive range (full #Если ... Тогда line)
+    let directive_range = get_directive_header_range(node);
+
+    // Then branch - statements are direct children of PRE_IF_DIR
+    // (not wrapped in STMT_LIST like normal code blocks)
+    let then_branch = lower_preproc_branch_stmts(ctx, node);
+
+    // Elsif branches
+    let mut elsif_branches = Vec::new();
     for elsif in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSIF_CLAUSE) {
-        process_preproc_branch_content(ctx, &elsif);
+        let elsif_cond_range = elsif
+            .children()
+            .find(|n| n.kind() == SyntaxKind::PRE_EXPR)
+            .map(|n| n.text_range())
+            .unwrap_or_else(|| elsif.text_range());
+
+        let elsif_directive_range = get_directive_header_range(&elsif);
+        let elsif_body = lower_preproc_branch_stmts(ctx, &elsif);
+        elsif_branches.push((
+            elsif_cond_range,
+            elsif_directive_range,
+            elsif_body.into_boxed_slice(),
+        ));
     }
 
-    // Process Else clause
-    for else_clause in node.children().filter(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE) {
-        process_preproc_branch_content(ctx, &else_clause);
+    // Else branch
+    let else_branch = node
+        .children()
+        .find(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE)
+        .map(|else_node| lower_preproc_branch_stmts(ctx, &else_node).into_boxed_slice());
+
+    Some(Stmt::PreprocIf(Box::new(PreprocIfStmt {
+        condition_range,
+        directive_range,
+        full_range: node.text_range(),
+        then_branch: then_branch.into_boxed_slice(),
+        elsif_branches: elsif_branches.into_boxed_slice(),
+        else_branch,
+    })))
+}
+
+/// Get the range of the directive header (e.g., `#Если Клиент Тогда` or `#ИначеЕсли Сервер Тогда`).
+///
+/// This finds the first newline in the node and returns the range up to it,
+/// or the whole node range if no newline found.
+fn get_directive_header_range(node: &SyntaxNode) -> TextRange {
+    let text = node.text().to_string();
+    if let Some(newline_pos) = text.find('\n') {
+        let start = node.text_range().start();
+        TextRange::new(start, start + text_size::TextSize::from(newline_pos as u32))
+    } else {
+        node.text_range()
     }
 }
 
-/// Process preprocessor `#Область` directive, analyzing content for unreachable code.
-pub(crate) fn process_preproc_region(ctx: &mut LoweringCtx, node: &SyntaxNode) {
-    // Check if region is empty
-    if is_empty_region(node) {
-        if let Some(name) = get_region_name(node) {
-            ctx.emit(BodyDiagnostic::EmptyRegion { name, range: node.text_range() });
+/// Lower statements from a `#Область` directive.
+///
+/// Unlike `#Если`, `#Область` is transparent for control flow - statements inside
+/// are lowered and added to the parent body. The region boundary doesn't affect
+/// statement sequencing.
+///
+/// Returns the lowered statements and whether the region terminates (ends with return/raise).
+pub(crate) fn lower_region_stmts(
+    ctx: &mut LoweringCtx,
+    region_node: &SyntaxNode,
+) -> (Vec<StmtIdx>, bool) {
+    // Check if region is empty (for EmptyRegion diagnostic)
+    if is_empty_region(region_node) {
+        if let Some(name) = get_region_name(region_node) {
+            ctx.emit(BodyDiagnostic::EmptyRegion { name, range: region_node.text_range() });
         }
     }
 
-    process_preproc_branch_content(ctx, node);
+    let mut stmts: Vec<StmtIdx> = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
+    for child in region_node.children() {
+        // Handle nested preprocessor directives
+        if child.kind() == SyntaxKind::PRE_IF_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            }
+            if let Some(stmt) = lower_preproc_if(ctx, &child) {
+                let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
+                stmts.push(stmt_id);
+            }
+            if unreachable_start.is_none() && preproc_if_all_branches_terminate(&child) {
+                unreachable_start = Some(child.text_range());
+            }
+            continue;
+        }
+
+        // Handle nested regions (recursively)
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            }
+            let (nested_stmts, nested_terminates) = lower_region_stmts(ctx, &child);
+            stmts.extend(nested_stmts);
+            if unreachable_start.is_none() && nested_terminates {
+                unreachable_start = Some(child.text_range());
+            }
+            continue;
+        }
+
+        // Skip non-statement nodes
+        if !is_statement_node(&child) {
+            continue;
+        }
+
+        // If in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(child.text_range());
+            if let Some(stmt_id) = lower_stmt(ctx, &child) {
+                stmts.push(stmt_id);
+            }
+            continue;
+        }
+
+        // Lower the statement
+        if let Some(stmt_id) = lower_stmt(ctx, &child) {
+            stmts.push(stmt_id);
+
+            // Check if this statement terminates control flow
+            if is_control_flow_terminator(&child)
+                || (child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child))
+            {
+                unreachable_start = Some(child.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic if found
+    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
+        if let Some(first_unreachable) = find_first_unreachable_in_region(region_node, start) {
+            let range = TextRange::new(first_unreachable.start(), end.end());
+            ctx.emit(BodyDiagnostic::UnreachableCode { range });
+        }
+    }
+
+    // Determine if region terminates (last statement is a terminator)
+    let terminates = preproc_region_terminates(region_node);
+
+    (stmts, terminates)
+}
+
+/// Find the first unreachable statement in a region.
+fn find_first_unreachable_in_region(
+    region_node: &SyntaxNode,
+    after_range: TextRange,
+) -> Option<TextRange> {
+    for child in region_node.children() {
+        let child_start = child.text_range().start();
+        if child_start > after_range.end()
+            && (is_statement_node(&child)
+                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
+        {
+            return Some(child.text_range());
+        }
+    }
+    None
+}
+
+/// Lower statements from a preprocessor branch node.
+///
+/// Preprocessor content doesn't use STMT_LIST - statements are direct children.
+/// This function iterates over children, lowers statements, and detects unreachable code.
+fn lower_preproc_branch_stmts(
+    ctx: &mut LoweringCtx,
+    branch_node: &SyntaxNode,
+) -> Vec<crate::hir::StmtIdx> {
+    use crate::hir::StmtIdx;
+
+    let mut stmts: Vec<StmtIdx> = Vec::new();
+    let mut unreachable_start: Option<TextRange> = None;
+    let mut unreachable_end: Option<TextRange> = None;
+
+    for child in branch_node.children() {
+        // Skip preprocessor-specific nodes (condition, nested clauses)
+        match child.kind() {
+            SyntaxKind::PRE_EXPR | SyntaxKind::PRE_ELSIF_CLAUSE | SyntaxKind::PRE_ELSE_CLAUSE => {
+                continue
+            }
+            _ => {}
+        }
+
+        // Handle nested preprocessor directives
+        if child.kind() == SyntaxKind::PRE_IF_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            }
+            if let Some(stmt) = lower_preproc_if(ctx, &child) {
+                let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
+                stmts.push(stmt_id);
+            }
+            if unreachable_start.is_none() && preproc_if_all_branches_terminate(&child) {
+                unreachable_start = Some(child.text_range());
+            }
+            continue;
+        }
+
+        if child.kind() == SyntaxKind::PRE_REGION_DIR {
+            if unreachable_start.is_some() {
+                unreachable_end = Some(child.text_range());
+            }
+            // Lower statements from region (adds them to body)
+            let (region_stmts, region_terminates) = lower_region_stmts(ctx, &child);
+            stmts.extend(region_stmts);
+            if unreachable_start.is_none() && region_terminates {
+                unreachable_start = Some(child.text_range());
+            }
+            continue;
+        }
+
+        // Skip non-statement nodes
+        if !is_statement_node(&child) {
+            continue;
+        }
+
+        // If in unreachable mode, extend the range
+        if unreachable_start.is_some() {
+            unreachable_end = Some(child.text_range());
+            if let Some(stmt_id) = lower_stmt(ctx, &child) {
+                stmts.push(stmt_id);
+            }
+            continue;
+        }
+
+        // Lower the statement
+        if let Some(stmt_id) = lower_stmt(ctx, &child) {
+            stmts.push(stmt_id);
+
+            // Check if this statement terminates control flow
+            if is_control_flow_terminator(&child)
+                || (child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child))
+            {
+                unreachable_start = Some(child.text_range());
+            }
+        }
+    }
+
+    // Emit unreachable code diagnostic if found
+    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
+        if let Some(first_unreachable) = find_first_unreachable_in_branch(branch_node, start) {
+            let range = TextRange::new(first_unreachable.start(), end.end());
+            ctx.emit(BodyDiagnostic::UnreachableCode { range });
+        }
+    }
+
+    stmts
+}
+
+/// Find the first unreachable statement in a preprocessor branch.
+fn find_first_unreachable_in_branch(
+    branch_node: &SyntaxNode,
+    after_range: TextRange,
+) -> Option<TextRange> {
+    for child in branch_node.children() {
+        let child_start = child.text_range().start();
+        if child_start > after_range.end()
+            && (is_statement_node(&child)
+                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
+        {
+            return Some(child.text_range());
+        }
+    }
+    None
 }
 
 /// Get region name from PRE_REGION_DIR node.
@@ -86,92 +344,6 @@ fn is_meaningful_content(node: &SyntaxNode) -> bool {
             | SyntaxKind::ADD_HANDLER_STMT
             | SyntaxKind::REMOVE_HANDLER_STMT
     )
-}
-
-/// Process content within a preprocessor branch (or region).
-///
-/// Looks for statements and nested preprocessor directives, tracking unreachable code.
-fn process_preproc_branch_content(ctx: &mut LoweringCtx, node: &SyntaxNode) {
-    let mut unreachable_start: Option<TextRange> = None;
-    let mut unreachable_end: Option<TextRange> = None;
-
-    for child in node.children() {
-        // Handle nested preprocessor directives
-        if child.kind() == SyntaxKind::PRE_IF_DIR {
-            // Check if this preprocessor directive is unreachable
-            if unreachable_start.is_some() {
-                unreachable_end = Some(child.text_range());
-            } else {
-                // Process the preprocessor directive
-                process_preproc_if(ctx, &child);
-                // Check if all branches of this preprocessor terminate
-                if preproc_if_all_branches_terminate(&child) {
-                    unreachable_start = Some(child.text_range());
-                }
-            }
-            continue;
-        }
-        if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(child.text_range());
-            }
-            process_preproc_region(ctx, &child);
-            continue;
-        }
-
-        // Handle statement lists within the branch
-        if child.kind() == SyntaxKind::STMT_LIST {
-            // Process the statement list for unreachable code
-            lower_stmt_list_with_unreachable(ctx, &child, true);
-            // Check if stmt_list terminates - propagate unreachable state
-            if unreachable_start.is_none() && stmt_list_terminates(&child) {
-                unreachable_start = Some(child.text_range());
-            }
-            continue;
-        }
-
-        // Handle individual statements (might appear directly in preprocessor content)
-        if is_statement_node(&child) {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(child.text_range());
-                lower_stmt(ctx, &child);
-                continue;
-            }
-
-            lower_stmt(ctx, &child);
-
-            if is_control_flow_terminator(&child)
-                || (child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child))
-            {
-                unreachable_start = Some(child.text_range());
-            }
-        }
-    }
-
-    // Emit unreachable code diagnostic for this branch
-    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
-        if let Some(first_unreachable) = find_first_unreachable_in_preproc(node, start) {
-            let range = TextRange::new(first_unreachable.start(), end.end());
-            ctx.emit(BodyDiagnostic::UnreachableCode { range });
-        }
-    }
-}
-
-/// Find the first unreachable node in preprocessor content.
-fn find_first_unreachable_in_preproc(
-    node: &SyntaxNode,
-    after_range: TextRange,
-) -> Option<TextRange> {
-    for child in node.children() {
-        let child_start = child.text_range().start();
-        if child_start > after_range.end()
-            && (is_statement_node(&child)
-                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
-        {
-            return Some(child.text_range());
-        }
-    }
-    None
 }
 
 /// Check if a preprocessor #Если directive has all branches terminating.

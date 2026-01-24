@@ -352,6 +352,7 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
+    diagnostics.extend(run_diagnostic("UnreachableCode", ctx, handlers::unreachable_code::check));
     diagnostics.extend(run_diagnostic(
         "UnusedLocalVariable",
         ctx,

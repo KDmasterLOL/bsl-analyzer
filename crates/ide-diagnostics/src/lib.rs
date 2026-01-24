@@ -85,5 +85,56 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 8. Metadata-based diagnostics (using module_metadata from HIR)
     result.extend(collect_metadata_diagnostics(ctx));
 
+    // 9. Deduplicate diagnostics with overlapping ranges for the same code
+    deduplicate_diagnostics(&mut result);
+
     result
+}
+
+/// Remove duplicate diagnostics with the same code and overlapping/contained ranges.
+///
+/// Some diagnostics like UnreachableCode can be detected by multiple sources
+/// (HIR lowering and CFG analysis). This function merges overlapping diagnostics
+/// by keeping the diagnostic with the larger range when ranges overlap.
+///
+/// Only applies to specific diagnostic codes that are known to have duplicates.
+fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
+    // Codes that need deduplication due to multiple detection sources
+    let dedupe_codes = [DiagnosticCode::UnreachableCode];
+
+    // Separate diagnostics into those that need deduplication and those that don't
+    let (mut to_dedupe, mut keep): (Vec<_>, Vec<_>) =
+        diagnostics.drain(..).partition(|d| dedupe_codes.contains(&d.code));
+
+    // Deduplicate the relevant diagnostics
+    if !to_dedupe.is_empty() {
+        // Sort by range start, then by range length (descending) to prefer larger ranges
+        to_dedupe.sort_by(|a, b| {
+            a.range.start().cmp(&b.range.start()).then_with(|| b.range.len().cmp(&a.range.len()))
+        });
+
+        // Remove diagnostics whose range is contained in or overlaps with a previous one
+        let mut deduped: Vec<Diagnostic> = Vec::with_capacity(to_dedupe.len());
+        for diag in to_dedupe {
+            let dominated = deduped.iter().any(|existing| {
+                // Check if diag's range is fully contained in existing's range
+                existing.range.contains_range(diag.range)
+                    // Or if they significantly overlap (same start or end)
+                    || (existing.range.start() == diag.range.start()
+                        || existing.range.end() == diag.range.end())
+                        && ranges_overlap(existing.range, diag.range)
+            });
+            if !dominated {
+                deduped.push(diag);
+            }
+        }
+        keep.extend(deduped);
+    }
+
+    *diagnostics = keep;
+}
+
+/// Check if two ranges overlap (have common region).
+fn ranges_overlap(a: ide_db::TextRange, b: ide_db::TextRange) -> bool {
+    a.start() < b.end() && b.start() < a.end()
 }

@@ -527,6 +527,11 @@ impl Transfer<Liveness> for LivenessTransfer {
                 // Event handler statements - may use variables but ignore for now
                 // TODO: handle event handler expressions
             }
+
+            Stmt::PreprocIf(_) => {
+                // Preprocessor conditional: bodies are in separate basic blocks
+                // Transfer function will be called for each block separately
+            }
         }
 
         in_state
@@ -623,6 +628,10 @@ impl Transfer<Liveness> for LivenessTransfer {
             }
 
             Stmt::AddHandler { .. } | Stmt::RemoveHandler { .. } => {}
+
+            Stmt::PreprocIf(_) => {
+                // Preprocessor conditional: bodies are in separate basic blocks
+            }
         }
     }
 

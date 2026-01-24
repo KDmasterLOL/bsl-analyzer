@@ -19,10 +19,7 @@ use super::diagnostics::{
     is_global_begin_transaction_call, is_global_commit_transaction_call, is_inside_try_body,
 };
 use super::expr::{exprs_are_equal, lower_expr_node};
-use super::preproc::{
-    preproc_if_all_branches_terminate, preproc_region_terminates, process_preproc_if,
-    process_preproc_region,
-};
+use super::preproc::{lower_preproc_if, lower_region_stmts, preproc_if_all_branches_terminate};
 use super::LoweringCtx;
 
 /// Find the range for IF/THEN header (from IF to THEN keyword).
@@ -367,17 +364,22 @@ pub(super) fn lower_stmt_list_with_unreachable(
     let is_top_level = !is_inside_try_body(stmt_list);
 
     for child in stmt_list.children() {
-        // Handle preprocessor directives - process content recursively
+        // Handle preprocessor directives - lower to Stmt::PreprocIf for CFG
         if child.kind() == SyntaxKind::PRE_IF_DIR {
             // Check if this directive is unreachable
             if unreachable_start.is_some() {
                 unreachable_end = Some(child.text_range());
-            } else {
-                process_preproc_if(ctx, &child);
-                // Check if all branches terminate - subsequent code is unreachable
-                if preproc_if_all_branches_terminate(&child) {
-                    unreachable_start = Some(child.text_range());
-                }
+            }
+
+            // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
+            if let Some(stmt) = lower_preproc_if(ctx, &child) {
+                let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
+                stmts.push(stmt_id);
+            }
+
+            // Check if all branches terminate - subsequent code is unreachable
+            if unreachable_start.is_none() && preproc_if_all_branches_terminate(&child) {
+                unreachable_start = Some(child.text_range());
             }
             continue;
         }
@@ -385,12 +387,13 @@ pub(super) fn lower_stmt_list_with_unreachable(
             // Check if this region is unreachable
             if unreachable_start.is_some() {
                 unreachable_end = Some(child.text_range());
-            } else {
-                process_preproc_region(ctx, &child);
-                // Check if region terminates - propagate unreachable state
-                if preproc_region_terminates(&child) {
-                    unreachable_start = Some(child.text_range());
-                }
+            }
+            // Lower statements from region (adds them to body)
+            let (region_stmts, region_terminates) = lower_region_stmts(ctx, &child);
+            stmts.extend(region_stmts);
+            // Check if region terminates - propagate unreachable state
+            if unreachable_start.is_none() && region_terminates {
+                unreachable_start = Some(child.text_range());
             }
             continue;
         }

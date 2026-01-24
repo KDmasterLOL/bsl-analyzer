@@ -47,7 +47,7 @@ pub use edge::CfgEdgeType;
 pub use graph::ControlFlowGraph;
 pub use vertex::{
     BasicBlockVertex, CfgVertex, ConditionalVertex, ForEachLoopVertex, ForLoopVertex, LabelVertex,
-    TryExceptVertex, WhileLoopVertex,
+    PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
 };
 
 // Re-export petgraph types used in public API

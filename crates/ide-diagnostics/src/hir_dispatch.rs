@@ -53,8 +53,9 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UnusedVariable { name, range } => {
             handlers::unused_local_variable::from_hir(name, *range, ctx)
         }
-        BodyDiagnostic::UnreachableCode { range } => {
-            handlers::unreachable_code::from_hir(*range, ctx)
+        BodyDiagnostic::UnreachableCode { range: _ } => {
+            // Skip HIR-based detection - using CFG-based detection in unreachable_code::check()
+            None
         }
         BodyDiagnostic::MissingReturn { range } => {
             handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)

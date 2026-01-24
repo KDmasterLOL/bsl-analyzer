@@ -32,6 +32,7 @@
 
 use cfg_types::{BindingId, ExprId, StmtId};
 use hir_def::Name;
+use syntax::TextRange;
 
 /// Vertex in the control flow graph
 ///
@@ -66,6 +67,10 @@ pub enum CfgVertex {
     /// Maps to LabelVertex.java
     Label(LabelVertex),
 
+    /// Preprocessor conditional (#Если/#ИначеЕсли)
+    /// Maps to PreprocessorConditionVertex.java
+    PreprocCondition(PreprocConditionVertex),
+
     /// Exit point of the method
     /// Maps to ExitVertex.java
     Exit,
@@ -95,6 +100,7 @@ impl CfgVertex {
             CfgVertex::ForEachLoop(_) => "ForEachLoop",
             CfgVertex::TryExcept(_) => "TryExcept",
             CfgVertex::Label(_) => "Label",
+            CfgVertex::PreprocCondition(_) => "PreprocCondition",
             CfgVertex::Exit => "Exit",
         }
     }
@@ -108,6 +114,7 @@ impl CfgVertex {
                 | CfgVertex::ForLoop(_)
                 | CfgVertex::ForEachLoop(_)
                 | CfgVertex::TryExcept(_)
+                | CfgVertex::PreprocCondition(_)
         )
     }
 
@@ -178,6 +185,45 @@ impl ConditionalVertex {
     }
 }
 
+/// Preprocessor conditional vertex (#Если/#ИначеЕсли)
+///
+/// Maps to PreprocessorConditionVertex.java
+///
+/// Unlike ConditionalVertex, preprocessor conditions are symbolic expressions
+/// (e.g., `Сервер И НЕ Клиент`) that are not runtime-evaluable.
+/// We store TextRange instead of ExprId for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreprocConditionVertex {
+    /// Range of the condition expression (for diagnostics)
+    pub condition_range: TextRange,
+    /// Range of the full directive (e.g., `#Если Клиент Тогда`)
+    pub directive_range: Option<TextRange>,
+    /// Range of the full `#Если ... #КонецЕсли` block
+    pub full_range: Option<TextRange>,
+}
+
+impl PreprocConditionVertex {
+    pub fn new(condition_range: TextRange) -> Self {
+        Self { condition_range, directive_range: None, full_range: None }
+    }
+
+    pub fn with_directive_range(condition_range: TextRange, directive_range: TextRange) -> Self {
+        Self { condition_range, directive_range: Some(directive_range), full_range: None }
+    }
+
+    pub fn with_ranges(
+        condition_range: TextRange,
+        directive_range: TextRange,
+        full_range: TextRange,
+    ) -> Self {
+        Self {
+            condition_range,
+            directive_range: Some(directive_range),
+            full_range: Some(full_range),
+        }
+    }
+}
+
 /// While loop vertex
 ///
 /// Maps to WhileLoopVertex.java
@@ -208,11 +254,17 @@ impl WhileLoopVertex {
 pub struct ForLoopVertex {
     /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
+    /// Statement ID of the for loop (for getting full range in diagnostics)
+    pub stmt_id: Option<StmtId>,
 }
 
 impl ForLoopVertex {
     pub fn new(loop_var: BindingId) -> Self {
-        Self { loop_var }
+        Self { loop_var, stmt_id: None }
+    }
+
+    pub fn with_stmt_id(loop_var: BindingId, stmt_id: StmtId) -> Self {
+        Self { loop_var, stmt_id: Some(stmt_id) }
     }
 }
 
@@ -225,11 +277,17 @@ pub struct ForEachLoopVertex {
     pub loop_var: BindingId,
     /// Collection expression to iterate over
     pub collection: ExprId,
+    /// Statement ID of the foreach loop (for getting full range in diagnostics)
+    pub stmt_id: Option<StmtId>,
 }
 
 impl ForEachLoopVertex {
     pub fn new(loop_var: BindingId, collection: ExprId) -> Self {
-        Self { loop_var, collection }
+        Self { loop_var, collection, stmt_id: None }
+    }
+
+    pub fn with_stmt_id(loop_var: BindingId, collection: ExprId, stmt_id: StmtId) -> Self {
+        Self { loop_var, collection, stmt_id: Some(stmt_id) }
     }
 }
 
