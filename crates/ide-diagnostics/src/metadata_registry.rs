@@ -214,6 +214,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingHardcodeSecretInformation => Some(&USING_HARDCODE_SECRET_INFORMATION),
         DiagnosticCode::UsingModalWindows => Some(&USING_MODAL_WINDOWS),
         DiagnosticCode::UsingObjectNotAvailableUnix => Some(&USING_OBJECT_NOT_AVAILABLE_UNIX),
+        DiagnosticCode::UsingServiceTag => Some(&USING_SERVICE_TAG),
     }
 }
 
@@ -3568,6 +3569,20 @@ const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Lockinos],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_SERVICE_TAG: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

@@ -61,6 +61,7 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::consecutive_empty_lines::check(ctx));
     diagnostics.extend(handlers::line_length::check(ctx));
     diagnostics.extend(handlers::commented_code::check(ctx));
+    diagnostics.extend(handlers::using_service_tag::check(ctx));
 
     for node in root.descendants() {
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);

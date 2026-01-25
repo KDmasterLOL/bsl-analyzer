@@ -166,3 +166,4 @@ pub mod using_hardcode_secret_information;
 pub mod using_like_in_query;
 pub mod using_modal_windows;
 pub mod using_object_not_available_unix;
+pub mod using_service_tag;

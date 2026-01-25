@@ -131,6 +131,7 @@ pub enum DiagnosticCode {
     UsingHardcodeSecretInformation,
     UsingModalWindows,
     UsingObjectNotAvailableUnix,
+    UsingServiceTag,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,
