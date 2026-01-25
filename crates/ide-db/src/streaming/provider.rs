@@ -169,6 +169,7 @@ impl AnalysisProvider for StreamingProvider {
                             mdo: None,
                             register: None,
                             form: None,
+                            http_service: None,
                         });
                     }
                 }

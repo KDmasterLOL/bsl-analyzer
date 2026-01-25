@@ -79,6 +79,9 @@ pub enum ModuleType {
     /// Command module
     #[serde(rename = "CommandModule")]
     CommandModule,
+    /// HTTP service module
+    #[serde(rename = "HTTPServiceModule")]
+    HTTPServiceModule,
     /// Unknown module type
     #[serde(other)]
     #[default]

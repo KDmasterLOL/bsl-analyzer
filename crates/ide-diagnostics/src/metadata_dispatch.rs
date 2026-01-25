@@ -61,5 +61,7 @@ pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     diagnostics
         .extend(handlers::wrong_data_path_for_form_elements::from_metadata(metadata_ref, ctx));
 
+    diagnostics.extend(handlers::wrong_http_service_handler::from_metadata(metadata_ref, ctx));
+
     diagnostics
 }

@@ -702,3 +702,94 @@ pub(crate) struct RightsXml {
     #[serde(rename = "independentRightsOfChildObjects", default)]
     pub independent_rights_of_child_objects: BoolValue,
 }
+
+// ============================================================================
+// HTTP Service
+// ============================================================================
+
+/// Root XML structure for HTTPService
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPServiceRoot {
+    #[serde(rename = "HTTPService")]
+    pub http_service: HTTPServiceXml,
+}
+
+/// HTTPService XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPServiceXml {
+    #[serde(rename = "Properties")]
+    pub properties: HTTPServiceProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    pub child_objects: Option<HTTPServiceChildObjects>,
+}
+
+/// HTTPService Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPServiceProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "RootURL", default)]
+    pub root_url: String,
+}
+
+/// HTTPService ChildObjects (URLTemplates)
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPServiceChildObjects {
+    #[serde(rename = "URLTemplate", default)]
+    pub url_templates: Vec<URLTemplateXml>,
+}
+
+/// URLTemplate XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct URLTemplateXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: URLTemplateProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    pub child_objects: Option<URLTemplateChildObjects>,
+}
+
+/// URLTemplate Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct URLTemplateProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "Template", default)]
+    pub template: String,
+}
+
+/// URLTemplate ChildObjects (Methods)
+#[derive(Debug, Deserialize)]
+pub(crate) struct URLTemplateChildObjects {
+    #[serde(rename = "Method", default)]
+    pub methods: Vec<HTTPMethodXml>,
+}
+
+/// HTTP Method XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPMethodXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: HTTPMethodProperties,
+}
+
+/// HTTP Method Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct HTTPMethodProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "HTTPMethod", default)]
+    pub http_method: String,
+
+    #[serde(rename = "Handler", default)]
+    pub handler: String,
+}

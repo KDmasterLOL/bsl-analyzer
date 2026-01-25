@@ -68,6 +68,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            http_service: None,
             form: None,
         };
 
@@ -94,6 +95,7 @@ mod tests {
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
+            http_service: None,
             form: None,
         };
 
@@ -111,6 +113,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: None,
+            http_service: None,
             form: None,
         };
 

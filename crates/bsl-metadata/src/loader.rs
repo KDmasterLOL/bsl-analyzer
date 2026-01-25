@@ -112,6 +112,9 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         MdoType::ExternalDataSource,
     )?;
 
+    // Load HTTPServices
+    load_http_services(&path.join("HTTPServices"), &mut config)?;
+
     tracing::info!(
         common_modules = config.common_modules().len(),
         metadata_objects = config.metadata_objects().len(),
@@ -120,6 +123,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         scheduled_jobs = config.scheduled_jobs().len(),
         roles = config.roles().len(),
         defined_types = config.defined_types().len(),
+        http_services = config.http_services().len(),
         "configuration loaded"
     );
 
@@ -802,6 +806,49 @@ fn load_defined_types(dir: &Path, config: &mut Configuration) -> Result<()> {
             );
 
             config.add_defined_type(defined_type);
+        }
+    }
+
+    Ok(())
+}
+
+/// Load HTTPServices from directory
+///
+/// Designer format structure:
+/// - XML: `HTTPServices/<Name>.xml` (next to folder)
+/// - Code: `HTTPServices/<Name>/Ext/Module.bsl` (inside Ext/)
+fn load_http_services(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_http_services", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let service_dir = entry.path();
+
+        // Look for directories (each HTTPService is a folder)
+        if service_dir.is_dir() {
+            if let Some(name) = service_dir.file_name().and_then(|n| n.to_str()) {
+                // XML is next to the folder
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let http_service = xml_parser::parse_http_service_xml(&xml, name)?;
+
+                    tracing::debug!(
+                        service_name = %http_service.name(),
+                        root_url = %http_service.root_url(),
+                        url_templates = http_service.url_templates().len(),
+                        "loaded HTTP service"
+                    );
+
+                    config.add_http_service(http_service);
+                }
+            }
         }
     }
 

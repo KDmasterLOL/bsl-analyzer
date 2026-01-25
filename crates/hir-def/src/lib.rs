@@ -596,6 +596,12 @@ pub struct ModuleMetadata {
     /// Contains form type (Managed/Ordinary) needed for ServerSideExportFormMethod diagnostic.
     /// Arc-wrapped for efficient sharing.
     pub form: Option<Arc<bsl_metadata::Form>>,
+
+    /// HTTP service metadata if this module is an HTTPServiceModule.
+    ///
+    /// Contains URL templates and methods for WrongHttpServiceHandler diagnostic.
+    /// Arc-wrapped for efficient sharing.
+    pub http_service: Option<Arc<bsl_metadata::HTTPService>>,
 }
 
 impl ModuleMetadata {
@@ -610,6 +616,7 @@ impl ModuleMetadata {
             mdo: None,
             register: None,
             form: None,
+            http_service: None,
         }
     }
 }

@@ -808,6 +808,7 @@ pub fn check_diagnostics_in_form(
         common_module: None,
         mdo: None,
         register: None,
+        http_service: None,
         form: Some(Arc::new(form)),
     });
 

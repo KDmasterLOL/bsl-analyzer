@@ -95,6 +95,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: None,
+            http_service: None,
             form: Some(Arc::new(form)),
         }
     }
@@ -191,6 +192,7 @@ mod tests {
             common_module: None,
             mdo: None,
             register: None,
+            http_service: None,
             form: None,
         };
 

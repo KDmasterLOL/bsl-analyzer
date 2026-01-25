@@ -220,6 +220,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingServiceTag => Some(&USING_SERVICE_TAG),
         DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
         DiagnosticCode::WrongDataPathForFormElements => Some(&WRONG_DATA_PATH_FOR_FORM_ELEMENTS),
+        DiagnosticCode::WrongHttpServiceHandler => Some(&WRONG_HTTP_SERVICE_HANDLER),
     }
 }
 
@@ -2376,6 +2377,28 @@ const WRONG_DATA_PATH_FOR_FORM_ELEMENTS: DiagnosticMetadata = DiagnosticMetadata
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// WrongHttpServiceHandler diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   minutesToFix = 10,
+///   tags = { SUSPICIOUS, ERROR }
+/// )
+const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::HTTPServiceModule],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious, MetadataTag::Error],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

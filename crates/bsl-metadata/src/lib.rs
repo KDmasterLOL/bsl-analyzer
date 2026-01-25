@@ -100,6 +100,7 @@ pub mod enums;
 pub mod error;
 pub mod event_subscription;
 pub mod form;
+pub mod http_service;
 pub mod loader;
 pub mod metadata_object;
 pub mod register;
@@ -119,6 +120,10 @@ pub use enums::{
 pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
 pub use form::{Form, FormElement};
+pub use http_service::{
+    HTTPService, HTTPServiceBuilder, HTTPServiceMethod, HTTPServiceMethodBuilder,
+    HTTPServiceURLTemplate, HTTPServiceURLTemplateBuilder,
+};
 pub use loader::load_from_directory;
 pub use metadata_object::{Attribute, AttributeType, MdoType, MetadataObject};
 pub use register::{

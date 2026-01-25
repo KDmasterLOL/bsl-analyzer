@@ -64,7 +64,7 @@ pub fn get_standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
                 Exact("ОбработчикиСобытий", "EventHandlers"),
             ]);
         }
-        ModuleType::CommandModule | ModuleType::SessionModule => {
+        ModuleType::CommandModule | ModuleType::SessionModule | ModuleType::HTTPServiceModule => {
             patterns.extend([Exact("ОбработчикиСобытий", "EventHandlers")]);
         }
         ModuleType::ExternalConnectionModule => {

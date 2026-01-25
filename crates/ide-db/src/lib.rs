@@ -771,6 +771,32 @@ pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::
     }
 }
 
+/// Find HTTP service by BSL module path.
+///
+/// Given an HTTPServiceModule path like:
+/// `HTTPServices/HTTPСервис1/Ext/Module.bsl`
+///
+/// Extracts the service name and looks it up in configuration.
+pub(crate) fn find_http_service_by_path(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<Arc<bsl_metadata::HTTPService>> {
+    let file_str = file_path.to_string_lossy();
+
+    // Extract HTTP service name from path: HTTPServices/<Name>/Ext/Module.bsl
+    let parts: Vec<&str> = file_str.split('/').collect();
+    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
+    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
+
+    // Find HTTPServices in path
+    let http_idx = parts.iter().position(|&p| p == "HTTPServices")?;
+
+    // Name should be the next element after HTTPServices
+    let name = parts.get(http_idx + 1)?;
+
+    configuration.find_http_service(name).map(|hs| Arc::new(hs.clone()))
+}
+
 #[salsa::db]
 impl metadata::MetadataDb for RootDatabaseImpl {}
 
