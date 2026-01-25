@@ -223,5 +223,6 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingFindElementByString { range } => {
             handlers::using_find_element_by_string::from_hir(*range, ctx)
         }
+        BodyDiagnostic::UsingGoto { range } => handlers::using_goto::from_hir(*range, ctx),
     }
 }

@@ -670,6 +670,11 @@ pub enum BodyDiagnostic {
     /// Detected when calling НайтиПоНаименованию/FindByDescription, НайтиПоКоду/FindByCode,
     /// НайтиПоНомеру/FindByNumber with string or number literal as first argument.
     UsingFindElementByString { range: TextRange },
+
+    /// Usage of Goto/Перейти statement.
+    /// Goto is unstructured control flow that makes code less readable.
+    /// Should use structured control flow instead (If, While, For, Continue, Break).
+    UsingGoto { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -863,6 +868,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingCancelParameter { range } => *range,
             BodyDiagnostic::UsingExternalCodeTools { range } => *range,
             BodyDiagnostic::UsingFindElementByString { range } => *range,
+            BodyDiagnostic::UsingGoto { range } => *range,
         }
     }
 }

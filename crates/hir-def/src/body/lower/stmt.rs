@@ -543,7 +543,7 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
         SyntaxKind::RAISE_STMT => lower_raise_stmt(ctx, node),
         SyntaxKind::BREAK_STMT => Some(Stmt::Break),
         SyntaxKind::CONTINUE_STMT => Some(Stmt::Continue),
-        SyntaxKind::GOTO_STMT => lower_goto_stmt(node),
+        SyntaxKind::GOTO_STMT => lower_goto_stmt(ctx, node),
         SyntaxKind::LABEL_STMT => lower_label_stmt(node),
         SyntaxKind::EXECUTE_STMT => lower_execute_stmt(ctx, node),
         SyntaxKind::ADD_HANDLER_STMT => lower_add_handler_stmt(ctx, node),
@@ -1065,11 +1065,14 @@ fn lower_raise_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 }
 
 /// Lower goto statement.
-fn lower_goto_stmt(node: &SyntaxNode) -> Option<Stmt> {
+fn lower_goto_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     let label_token = node
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .find(|tok| tok.kind() == SyntaxKind::IDENT)?;
+
+    let range = TextRange::new(node.text_range().start(), label_token.text_range().end());
+    ctx.emit(BodyDiagnostic::UsingGoto { range });
 
     Some(Stmt::Goto(Name::new(label_token.text())))
 }

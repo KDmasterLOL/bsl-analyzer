@@ -159,3 +159,4 @@ pub mod useless_ternary_operator;
 pub mod using_cancel_parameter;
 pub mod using_external_code_tools;
 pub mod using_find_element_by_string;
+pub mod using_goto;
