@@ -174,3 +174,4 @@ pub mod wrong_http_service_handler;
 pub mod wrong_use_function_proceed_with_call;
 pub mod wrong_use_of_rollback_transaction_method;
 pub mod wrong_web_service_handler;
+pub mod yo_letter_usage;

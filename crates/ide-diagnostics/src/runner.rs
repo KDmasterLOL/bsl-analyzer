@@ -138,6 +138,7 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::useless_ternary_operator::check,
     ));
+    diagnostics.extend(run_diagnostic("YoLetterUsage", ctx, handlers::yo_letter_usage::check));
 
     diagnostics
 }
