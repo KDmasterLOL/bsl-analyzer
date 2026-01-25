@@ -229,6 +229,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::transferring_parameters_between_client_and_server::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UnsafeSafeModeMethodCall",
+        ctx,
+        handlers::unsafe_safe_mode_method_call::check,
+    ));
 
     diagnostics
 }

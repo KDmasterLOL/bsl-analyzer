@@ -119,6 +119,7 @@ pub enum DiagnosticCode {
     TimeoutsInExternalResources,
     TryNumber,
     UnknownPreprocessorSymbol,
+    UnsafeSafeModeMethodCall,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

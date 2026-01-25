@@ -149,4 +149,5 @@ pub mod union_all;
 pub mod unknown_preprocessor_symbol;
 pub mod unreachable_code;
 pub mod unsafe_find_by_code;
+pub mod unsafe_safe_mode_method_call;
 pub mod unused_local_variable;

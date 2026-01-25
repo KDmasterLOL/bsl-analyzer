@@ -1,10 +1,10 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 145/145 diagnostics defined (100%)
+//! Progress: 146/146 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
-//! - 53 Tier 2 diagnostics (semantic analysis)
+//! - 54 Tier 2 diagnostics (semantic analysis)
 //! - 42 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
@@ -201,6 +201,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TryNumber => Some(&TRY_NUMBER),
         DiagnosticCode::Typo => Some(&TYPO),
         DiagnosticCode::UnknownPreprocessorSymbol => Some(&UNKNOWN_PREPROCESSOR_SYMBOL),
+        DiagnosticCode::UnsafeSafeModeMethodCall => Some(&UNSAFE_SAFE_MODE_METHOD_CALL),
     }
 }
 
@@ -2290,6 +2291,20 @@ const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_1,
+    tags: &[MetadataTag::Deprecated, MetadataTag::Error],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

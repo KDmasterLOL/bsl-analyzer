@@ -81,6 +81,7 @@ pub enum DiagnosticScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCompatibilityMode {
     Undefined,
+    CompatibilityMode8_3_1,
     CompatibilityMode8_3_3,
     CompatibilityMode8_3_6,
     CompatibilityMode8_3_10,
