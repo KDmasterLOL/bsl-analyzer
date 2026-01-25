@@ -255,6 +255,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::using_hardcode_network_address::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodePath",
+        ctx,
+        handlers::using_hardcode_path::check,
+    ));
 
     diagnostics
 }
