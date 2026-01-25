@@ -439,7 +439,7 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
                 docs.call_options = parse_simple_section(section_lines);
             }
             Section::Deprecated => {
-                docs.deprecation = parse_simple_section(section_lines).first().cloned();
+                docs.deprecation = parse_deprecated_section(&comments[*start], section_lines);
             }
         }
     }
@@ -477,9 +477,14 @@ fn is_call_options_keyword(lower_line: &str) -> bool {
     lower_line.contains("варианты вызова:") || lower_line.contains("call options:")
 }
 
-/// Check if line contains "Устарела:" / "Deprecated:" keyword.
+/// Check if line contains "Устарела" / "Deprecated" keyword.
+///
+/// Matches various formats:
+/// - "Устарела." / "Deprecated."
+/// - "Устарела:" / "Deprecated:"
+/// - "Устарела" / "Deprecated" (standalone)
 fn is_deprecated_keyword(lower_line: &str) -> bool {
-    lower_line.contains("устарела:") || lower_line.contains("deprecated:")
+    lower_line.contains("устарела") || lower_line.contains("deprecated")
 }
 
 /// Check if a line is a hyperlink reference.
@@ -739,6 +744,44 @@ fn parse_simple_section(lines: &[String]) -> Vec<String> {
     lines.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
 }
 
+/// Parse deprecated section.
+///
+/// Extracts deprecation info from the keyword line and following lines.
+/// Supports formats:
+/// - "Устарела." / "Deprecated." (just marker, empty info)
+/// - "Устарела. Используйте X" / "Deprecated. Use X" (info on same line)
+/// - "Устарела:\n Используйте X" (info on next line)
+fn parse_deprecated_section(keyword_line: &str, following_lines: &[String]) -> Option<String> {
+    let lower = keyword_line.to_lowercase();
+
+    // Find position after the keyword
+    let after_keyword = if let Some(pos) = lower.find("устарела") {
+        &keyword_line[pos + "устарела".len()..]
+    } else if let Some(pos) = lower.find("deprecated") {
+        &keyword_line[pos + "deprecated".len()..]
+    } else {
+        ""
+    };
+
+    // Remove leading punctuation and whitespace
+    let info_on_same_line = after_keyword
+        .trim_start_matches(|c: char| c == '.' || c == ':' || c.is_whitespace())
+        .trim();
+
+    if !info_on_same_line.is_empty() {
+        return Some(info_on_same_line.to_string());
+    }
+
+    // Check following lines
+    let following_info = parse_simple_section(following_lines);
+    if !following_info.is_empty() {
+        return Some(following_info.join("\n"));
+    }
+
+    // Just the marker, no additional info - still deprecated
+    Some(String::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +929,37 @@ mod tests {
             docs.deprecation,
             Some("Используйте НовыйМетод() вместо этого метода.".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_deprecated_with_dot() {
+        // Format used in bsl-language-server: "Устарела." with dot
+        let comments = vec!["Устарела.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.is_deprecated());
+        assert_eq!(docs.deprecation, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_parse_deprecated_with_dot_and_info() {
+        // Format: "Устарела. Используйте X" - info on same line
+        let comments = vec!["Устарела. Используйте НовыйМетод().".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.is_deprecated());
+        assert_eq!(docs.deprecation, Some("Используйте НовыйМетод().".to_string()));
+    }
+
+    #[test]
+    fn test_parse_deprecated_english() {
+        let comments = vec!["Deprecated.".to_string()];
+
+        let docs = parse_method_docs(&comments).unwrap();
+
+        assert!(docs.is_deprecated());
     }
 
     #[test]

@@ -703,6 +703,17 @@ pub enum BodyDiagnostic {
     /// 1. RollbackTransaction outside exception handler
     /// 2. RollbackTransaction not as first statement in exception handler
     WrongUseOfRollbackTransactionMethod { range: TextRange },
+
+    /// Candidate for deprecated method call check.
+    ///
+    /// Emitted during lowering for all method calls.
+    /// The from_hir() handler resolves the callee and checks if it's deprecated.
+    ///
+    /// Fields:
+    /// - `callee`: Name of the called method
+    /// - `module`: Optional module name for qualified calls (Module.Method)
+    /// - `range`: Source range of the method name being called
+    DeprecatedMethodCall { callee: String, module: Option<String>, range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -901,6 +912,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingThisForm { range } => *range,
             BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => *range,
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
+            BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
         }
     }
 }

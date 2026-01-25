@@ -536,8 +536,21 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         if is_deprecated_method(&name) {
             // Emit DeprecatedMethod diagnostic
             // Range covers the entire call expression including arguments
-            ctx.diagnostics
-                .push(BodyDiagnostic::DeprecatedMethod { name, range: node.text_range() });
+            ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethod {
+                name: name.clone(),
+                range: node.text_range(),
+            });
+        }
+
+        // Emit DeprecatedMethodCall candidate for local calls
+        // Skip if the name is a local variable or parameter (not a method call)
+        let name_lower = name.to_lowercase();
+        if !ctx.local_vars.contains_key(&name_lower) && !ctx.param_names.contains(&name_lower) {
+            ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
+                callee: name,
+                module: None,
+                range: actual_callee.text_range(),
+            });
         }
 
         // Check for modal window methods (UsingModalWindows diagnostic)
@@ -576,6 +589,13 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     receiver: crate::Name::new(module_name),
                     method: crate::Name::new(method_name_str),
                     range: actual_callee.text_range(),
+                });
+
+                // Emit DeprecatedMethodCall candidate for qualified calls
+                ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
+                    callee: method_name_str.to_string(),
+                    module: Some(module_name.to_string()),
+                    range: idents[1].text_range(),
                 });
             }
         }

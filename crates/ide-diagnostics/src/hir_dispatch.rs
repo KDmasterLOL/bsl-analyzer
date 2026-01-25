@@ -234,5 +234,14 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => {
             handlers::wrong_use_of_rollback_transaction_method::from_hir(*range, ctx)
         }
+        BodyDiagnostic::DeprecatedMethodCall { callee, module, range } => {
+            handlers::deprecated_method_call::from_hir(
+                callee,
+                module.as_deref(),
+                *range,
+                method_id,
+                ctx,
+            )
+        }
     }
 }

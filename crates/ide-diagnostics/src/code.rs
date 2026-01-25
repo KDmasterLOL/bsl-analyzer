@@ -105,6 +105,7 @@ pub enum DiagnosticCode {
     DeprecatedMethods8310,
     DeprecatedMethods8317,
     DeprecatedAttributes8312,
+    DeprecatedMethodCall,
     DisableSafeMode,
     ExecuteExternalCode,
     ExternalAppStarting,

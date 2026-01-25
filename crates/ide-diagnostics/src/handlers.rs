@@ -42,6 +42,7 @@ pub mod deprecated_current_date;
 pub mod deprecated_find;
 pub mod deprecated_message;
 pub mod deprecated_method;
+pub mod deprecated_method_call;
 // NOTE: Replaced with HIR-based deprecated_method diagnostic
 // pub mod deprecated_methods_8310;
 // pub mod deprecated_methods_8317;

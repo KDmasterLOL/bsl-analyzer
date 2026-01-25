@@ -130,6 +130,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::DeprecatedMethods8310 => Some(&DEPRECATED_METHODS_8310),
         DiagnosticCode::DeprecatedMethods8317 => Some(&DEPRECATED_METHODS_8317),
         DiagnosticCode::DeprecatedAttributes8312 => Some(&DEPRECATED_ATTRIBUTES_8312),
+        DiagnosticCode::DeprecatedMethodCall => Some(&DEPRECATED_METHOD_CALL),
         DiagnosticCode::DisableSafeMode => Some(&DISABLE_SAFE_MODE),
         DiagnosticCode::ExternalAppStarting => Some(&EXTERNAL_APP_STARTING),
         DiagnosticCode::OSUsersMethod => Some(&OS_USERS_METHOD),
@@ -2080,6 +2081,28 @@ const DEPRECATED_ATTRIBUTES_8312: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_12,
     tags: &[MetadataTag::Deprecated],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// DeprecatedMethodCall diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MINOR,
+///   minutesToFix = 3,
+///   tags = { DEPRECATED, DESIGN }
+/// )
+const DEPRECATED_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 3,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Deprecated, MetadataTag::Design],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
