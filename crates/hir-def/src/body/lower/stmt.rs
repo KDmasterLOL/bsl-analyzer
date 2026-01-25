@@ -590,6 +590,12 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     if let Some((ref name, range)) = target_name {
         let key = name.as_str().to_lowercase();
 
+        // Register as local variable for implicit variable declaration (BSL allows this).
+        // This is important for UsingExternalCodeTools to distinguish local vars from globals.
+        if !ctx.local_vars.contains_key(&key) && !ctx.param_names.contains(&key) {
+            ctx.register_local_var(name.clone(), range);
+        }
+
         // Emit potential CommonModuleAssign for later validation in from_hir().
         // This will be filtered by metadata check - only names matching CommonModule names
         // will produce actual diagnostics.

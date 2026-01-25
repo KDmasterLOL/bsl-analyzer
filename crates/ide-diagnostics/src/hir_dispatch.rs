@@ -217,5 +217,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingCancelParameter { range } => {
             handlers::using_cancel_parameter::from_hir(*range, ctx)
         }
+        BodyDiagnostic::UsingExternalCodeTools { range } => {
+            handlers::using_external_code_tools::from_hir(*range, ctx)
+        }
     }
 }

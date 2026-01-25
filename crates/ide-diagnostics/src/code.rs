@@ -124,6 +124,7 @@ pub enum DiagnosticCode {
     UsageWriteLogEvent,
     UseSystemInformation,
     UsingCancelParameter,
+    UsingExternalCodeTools,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

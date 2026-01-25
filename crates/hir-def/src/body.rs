@@ -660,6 +660,11 @@ pub enum BodyDiagnostic {
     /// Valid: `Отказ = Истина;` or `Отказ = Отказ ИЛИ Выражение;` or `Отказ = Выражение ИЛИ Отказ;`
     /// Invalid: `Отказ = Ложь;`, `Отказ = Метод();`, `Отказ = Отказ И Выражение;`
     UsingCancelParameter { range: TextRange },
+
+    /// Usage of external code execution tools (ExternalDataProcessors, ExternalReports, ConfigurationExtensions).
+    /// Detected when calling Create/Connect methods on these global objects.
+    /// Security risk: external code can execute arbitrary operations.
+    UsingExternalCodeTools { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -851,6 +856,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UnaryPlusInConcatenation { range } => *range,
             BodyDiagnostic::UseSystemInformation { range } => *range,
             BodyDiagnostic::UsingCancelParameter { range } => *range,
+            BodyDiagnostic::UsingExternalCodeTools { range } => *range,
         }
     }
 }

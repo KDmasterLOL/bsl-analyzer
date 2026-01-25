@@ -810,6 +810,40 @@ pub(crate) fn is_forbidden_form_event(method_name: &str) -> bool {
     FORBIDDEN_EVENT_SUFFIXES.iter().any(|suffix| name_lower.ends_with(suffix))
 }
 
+// =============================================================================
+// UsingExternalCodeTools detection
+// =============================================================================
+
+/// External code tools class names (case-insensitive).
+/// These are global context objects that allow executing external code.
+const EXTERNAL_CODE_TOOLS: &[&str] = &[
+    "внешниеобработки",
+    "externaldataprocessors",
+    "внешниеотчеты",
+    "externalreports",
+    "расширенияконфигурации",
+    "configurationextensions",
+];
+
+/// Dangerous method names for external code tools (case-insensitive).
+/// These methods create or connect external code, which is a security risk.
+const EXTERNAL_CODE_METHODS: &[&str] = &["создать", "create", "подключить", "connect"];
+
+/// Check if an identifier is an external code tools class name.
+/// Returns true for: ВнешниеОбработки, ExternalDataProcessors, ВнешниеОтчеты,
+/// ExternalReports, РасширенияКонфигурации, ConfigurationExtensions.
+pub(crate) fn is_external_code_tools_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    EXTERNAL_CODE_TOOLS.contains(&lower.as_str())
+}
+
+/// Check if a method name is a dangerous external code operation.
+/// Returns true for: Создать, Create, Подключить, Connect.
+pub(crate) fn is_external_code_tools_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    EXTERNAL_CODE_METHODS.contains(&lower.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

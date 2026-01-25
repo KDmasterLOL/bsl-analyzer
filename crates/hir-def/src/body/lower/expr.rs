@@ -582,6 +582,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 });
             }
         }
+
+        // Check for UsingExternalCodeTools diagnostic
+        // Pattern: ExternalCodeTools.Create() or ExternalCodeTools.Connect()
+        // where ExternalCodeTools is: ВнешниеОбработки, ExternalDataProcessors,
+        // ВнешниеОтчеты, ExternalReports, РасширенияКонфигурации, ConfigurationExtensions
+        check_using_external_code_tools(ctx, &actual_callee, &idents, node);
     }
 
     let callee = lower_expr_node(ctx, &callee_node);
@@ -1651,6 +1657,59 @@ fn is_form_data_to_value_method(name: &str) -> bool {
 fn is_get_form_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "получитьформу" | "getform")
+}
+
+/// Check for UsingExternalCodeTools diagnostic.
+///
+/// Detects calls to external code execution mechanisms:
+/// - ВнешниеОбработки / ExternalDataProcessors
+/// - ВнешниеОтчеты / ExternalReports
+/// - РасширенияКонфигурации / ConfigurationExtensions
+///
+/// When combined with dangerous methods:
+/// - Создать / Create
+/// - Подключить / Connect
+///
+/// Detection logic:
+/// 1. For simple two-level calls (idents.len() == 2):
+///    First ident must be external code tools, second must be dangerous method
+/// 2. For chained calls (e.g., ExternalReports.Connect().Create()):
+///    We check if any methodCall within the context calls a dangerous method
+///    on an external code tools object
+///
+/// Exclusions:
+/// - Qualified access like `Справочники.ВнешниеОбработки` (external code tools not at root)
+/// - Variable access like `Обработка.ExternalReports` (not direct global access)
+fn check_using_external_code_tools(
+    ctx: &mut LoweringCtx,
+    _actual_callee: &SyntaxNode,
+    idents: &[syntax::SyntaxToken],
+    call_node: &SyntaxNode,
+) {
+    use super::diagnostics::{is_external_code_tools_method, is_external_code_tools_name};
+
+    // Only check two-level calls: ExternalCodeTools.Method()
+    // For chained calls like ExternalReports.Connect().Create(), the inner call
+    // will be processed recursively during lowering, so we don't need special handling.
+    if idents.len() != 2 {
+        return;
+    }
+
+    let receiver_name = idents[0].text();
+    let method_name = idents[1].text();
+
+    // Check if receiver is an external code tools class AND not a local variable
+    let receiver_key = receiver_name.to_lowercase();
+    let is_local =
+        ctx.local_vars.contains_key(&receiver_key) || ctx.param_names.contains(&receiver_key);
+
+    if !is_local
+        && is_external_code_tools_name(receiver_name)
+        && is_external_code_tools_method(method_name)
+    {
+        ctx.diagnostics
+            .push(BodyDiagnostic::UsingExternalCodeTools { range: call_node.text_range() });
+    }
 }
 
 /// Check if method name is StrTemplate.

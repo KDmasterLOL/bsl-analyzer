@@ -1,10 +1,10 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 146/146 diagnostics defined (100%)
+//! Progress: 147/147 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
-//! - 54 Tier 2 diagnostics (semantic analysis)
+//! - 55 Tier 2 diagnostics (semantic analysis)
 //! - 42 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
@@ -206,6 +206,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsageWriteLogEvent => Some(&USAGE_WRITE_LOG_EVENT),
         DiagnosticCode::UseSystemInformation => Some(&USE_SYSTEM_INFORMATION),
         DiagnosticCode::UsingCancelParameter => Some(&USING_CANCEL_PARAMETER),
+        DiagnosticCode::UsingExternalCodeTools => Some(&USING_EXTERNAL_CODE_TOOLS),
     }
 }
 
@@ -3423,6 +3424,25 @@ const USING_CANCEL_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UsingExternalCodeTools diagnostic metadata.
+///
+/// Ported from Java: UsingExternalCodeToolsDiagnostic.java
+/// Detects usage of external code execution mechanisms (ExternalDataProcessors,
+/// ExternalReports, ConfigurationExtensions) with Create/Connect methods.
+const USING_EXTERNAL_CODE_TOOLS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Design],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
