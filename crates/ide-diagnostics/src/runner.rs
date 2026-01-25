@@ -239,6 +239,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::unused_local_method::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UsageWriteLogEvent",
+        ctx,
+        handlers::usage_write_log_event::check,
+    ));
 
     diagnostics
 }

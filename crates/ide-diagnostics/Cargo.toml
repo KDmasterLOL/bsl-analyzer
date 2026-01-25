@@ -24,6 +24,7 @@ itertools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bsl-metadata.workspace = true
+bsl-platform.workspace = true
 tracing.workspace = true
 regex.workspace = true
 once_cell.workspace = true

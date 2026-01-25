@@ -381,7 +381,7 @@ fn create_diagnostic(
 ) -> Diagnostic {
     Diagnostic {
         code,
-        message: format!("Переменная \"{}\" объявлена, но не используется", name),
+        message: format!("Удалите неиспользуемую переменную {}", name),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

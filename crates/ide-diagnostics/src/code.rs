@@ -120,6 +120,7 @@ pub enum DiagnosticCode {
     TryNumber,
     UnknownPreprocessorSymbol,
     UnsafeSafeModeMethodCall,
+    UsageWriteLogEvent,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

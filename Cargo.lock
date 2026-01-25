@@ -941,6 +941,7 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "bsl-metadata",
+ "bsl-platform",
  "cfg",
  "cfg-types",
  "dataflow",

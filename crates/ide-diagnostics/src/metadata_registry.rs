@@ -202,6 +202,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::Typo => Some(&TYPO),
         DiagnosticCode::UnknownPreprocessorSymbol => Some(&UNKNOWN_PREPROCESSOR_SYMBOL),
         DiagnosticCode::UnsafeSafeModeMethodCall => Some(&UNSAFE_SAFE_MODE_METHOD_CALL),
+        DiagnosticCode::UsageWriteLogEvent => Some(&USAGE_WRITE_LOG_EVENT),
     }
 }
 
@@ -3288,6 +3289,7 @@ const UNUSED_LOCAL_VARIABLE: DiagnosticMetadata = DiagnosticMetadata {
         bsl_metadata::ModuleType::ManagerModule,
         bsl_metadata::ModuleType::ValueManagerModule,
         bsl_metadata::ModuleType::SessionModule,
+        bsl_metadata::ModuleType::Unknown,
     ],
     minutes_to_fix: 1,
     activated_by_default: true,
@@ -3337,6 +3339,28 @@ const UNSAFE_FIND_BY_CODE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Design, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UsageWriteLogEvent diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = INFO,
+///   minutesToFix = 1,
+///   tags = { STANDARD, BADPRACTICE }
+/// )
+const USAGE_WRITE_LOG_EVENT: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
