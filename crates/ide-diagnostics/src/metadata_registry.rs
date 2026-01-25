@@ -110,6 +110,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::IfConditionComplexity => Some(&IF_CONDITION_COMPLEXITY),
         DiagnosticCode::MissingCodeTryCatchEx => Some(&MISSING_CODE_TRY_CATCH_EX),
         DiagnosticCode::MissingTemporaryFileDeletion => Some(&MISSING_TEMPORARY_FILE_DELETION),
+        DiagnosticCode::UseLessForEach => Some(&USE_LESS_FOR_EACH),
         DiagnosticCode::UsingGoto => Some(&USING_GOTO),
         DiagnosticCode::BeginTransactionBeforeTryCatch => Some(&BEGIN_TRANSACTION_BEFORE_TRY_CATCH),
         DiagnosticCode::CommitTransactionOutsideTryCatch => {
@@ -1630,6 +1631,28 @@ const MISSING_TEMPORARY_FILE_DELETION: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UseLessForEach diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   minutesToFix = 2,
+///   tags = { CLUMSY }
+/// )
+const USE_LESS_FOR_EACH: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Clumsy],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

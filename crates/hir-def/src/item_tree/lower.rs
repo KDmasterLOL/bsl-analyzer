@@ -14,7 +14,7 @@ use base_db::RootQueryDb;
 use std::sync::Arc;
 use syntax::{
     ast::{self, AstNode},
-    SyntaxKind,
+    SyntaxKind, SyntaxNode,
 };
 use tracing::{debug, trace};
 use vfs::FileId;
@@ -71,8 +71,11 @@ impl Ctx {
                     }
                 }
                 SyntaxKind::VAR_DEF => {
-                    if let Some(var) = ast::VarDef::cast(node.clone()) {
-                        self.lower_variable(&var);
+                    // Only collect module-level variables, not local variables inside procedures
+                    if !is_inside_method(&node) {
+                        if let Some(var) = ast::VarDef::cast(node.clone()) {
+                            self.lower_variable(&var);
+                        }
                     }
                 }
                 _ => {
@@ -243,6 +246,12 @@ impl Ctx {
             })
             .collect()
     }
+}
+
+/// Check if a node is inside a procedure or function definition.
+fn is_inside_method(node: &SyntaxNode) -> bool {
+    node.ancestors()
+        .any(|n| n.kind() == SyntaxKind::PROCEDURE_DEF || n.kind() == SyntaxKind::FUNCTION_DEF)
 }
 
 /// Calculate the text range covering all parameters (without parentheses).

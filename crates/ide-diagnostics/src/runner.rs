@@ -244,6 +244,7 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::usage_write_log_event::check,
     ));
+    diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
 
     diagnostics
 }
