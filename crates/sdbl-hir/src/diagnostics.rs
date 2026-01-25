@@ -214,6 +214,17 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Using LIKE operator in query (unpredictable results).
+    ///
+    /// BSL-LS diagnostic code: UsingLikeInQuery
+    ///
+    /// Most algorithms can avoid using LIKE operator.
+    /// Results may differ significantly depending on DBMS.
+    UsingLikeInQuery {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -238,6 +249,7 @@ impl SdblDiagnostic {
             Self::VirtualTableCallWithoutParameters { .. } => Some(174),
             Self::QueryNestedFieldsByDot { .. } => None, // Uses string code
             Self::RefOveruse { .. } => None,             // Uses string code
+            Self::UsingLikeInQuery { .. } => None,       // Uses string code
             _ => None, // Other diagnostics don't have BSL-LS codes
         }
     }
@@ -345,6 +357,9 @@ impl SdblDiagnostic {
                  излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ"
                     .to_string()
             }
+            Self::UsingLikeInQuery { .. } => {
+                "Измените выражение, чтобы не использовать 'ПОДОБНО'".to_string()
+            }
         }
     }
 
@@ -371,6 +386,7 @@ impl SdblDiagnostic {
             Self::QueryNestedFieldsByDot { range } => *range,
             Self::RefOveruse { range } => *range,
             Self::UnionWithoutAll { range } => *range,
+            Self::UsingLikeInQuery { range } => *range,
         }
     }
 
@@ -400,6 +416,7 @@ impl SdblDiagnostic {
             Self::QueryNestedFieldsByDot { .. } => false, // Warning - performance issue
             Self::RefOveruse { .. } => false,      // Warning - performance issue
             Self::UnionWithoutAll { .. } => false, // Warning - performance issue
+            Self::UsingLikeInQuery { .. } => false, // Warning - unpredictable results
         }
     }
 }

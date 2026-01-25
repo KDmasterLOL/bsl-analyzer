@@ -383,6 +383,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     ));
     diagnostics.extend(run_diagnostic("RefOveruse", ctx, handlers::ref_overuse::check));
     diagnostics.extend(run_diagnostic("UnionAll", ctx, handlers::union_all::check));
+    diagnostics.extend(run_diagnostic(
+        "UsingLikeInQuery",
+        ctx,
+        handlers::using_like_in_query::check,
+    ));
 
     diagnostics
 }

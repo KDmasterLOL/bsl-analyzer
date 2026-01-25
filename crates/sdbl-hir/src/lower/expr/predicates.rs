@@ -270,10 +270,11 @@ impl<'a> LoweringContext<'a> {
     /// or: `expr NOT LIKE pattern [ESCAPE char]`
     pub(super) fn lower_like_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         // Get the expression being tested (first child)
-        let mut children = node.children();
-        let expr = children
-            .next()
-            .map(|n| self.lower_expr(&n))
+        let mut children_iter = node.children();
+        let first_child = children_iter.next();
+        let expr = first_child
+            .as_ref()
+            .map(|n| self.lower_expr(n))
             .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
 
         // Check for NOT before LIKE
@@ -302,13 +303,15 @@ impl<'a> LoweringContext<'a> {
         );
 
         // Get pattern expression (next child)
-        let pattern = children
-            .next()
-            .map(|n| self.lower_expr(&n))
+        let pattern_child = children_iter.next();
+        let pattern = pattern_child
+            .as_ref()
+            .map(|n| self.lower_expr(n))
             .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
 
         // Optional escape character (if present, it's the next child)
-        let escape = children.next().map(|n| Box::new(self.lower_expr(&n)));
+        let escape_child = children_iter.next();
+        let escape = escape_child.as_ref().map(|n| Box::new(self.lower_expr(n)));
 
         // Record ESCAPE keyword if present
         if escape.is_some() {
@@ -319,6 +322,31 @@ impl<'a> LoweringContext<'a> {
                 crate::source_map::TokenCategory::SpecialKeyword,
             );
         }
+
+        // Compute tight range by finding the last non-whitespace token
+        // This excludes trailing spaces, comments, and newlines
+        let tight_range = {
+            let start = node.text_range().start();
+            // Find the last non-trivia token in the node
+            let end = node
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .filter(|t| {
+                    !matches!(
+                        t.kind(),
+                        syntax::SyntaxKind::WHITESPACE
+                            | syntax::SyntaxKind::NEWLINE
+                            | syntax::SyntaxKind::COMMENT
+                    )
+                })
+                .last()
+                .map(|t| t.text_range().end())
+                .unwrap_or_else(|| node.text_range().end());
+            syntax::TextRange::new(start, end)
+        };
+
+        self.diagnostics
+            .push(crate::diagnostics::SdblDiagnostic::UsingLikeInQuery { range: tight_range });
 
         ExprHir::Like {
             expr: Box::new(expr),

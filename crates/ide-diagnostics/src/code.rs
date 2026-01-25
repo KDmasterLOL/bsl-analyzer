@@ -175,6 +175,7 @@ pub enum DiagnosticCode {
     QueryToMissingMetadata,
     RefOveruse,
     UnionAll,
+    UsingLikeInQuery,
 }
 
 impl DiagnosticCode {

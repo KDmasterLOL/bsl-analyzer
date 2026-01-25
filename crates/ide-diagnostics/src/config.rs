@@ -142,6 +142,7 @@ impl DiagnosticsConfig {
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
             DiagnosticCode::UseSystemInformation,
+            DiagnosticCode::UsingLikeInQuery,
         ] {
             if let Some(meta) = metadata_registry::get_metadata(code) {
                 if !meta.activated_by_default {

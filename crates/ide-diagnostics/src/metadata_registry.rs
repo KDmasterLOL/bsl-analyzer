@@ -180,6 +180,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryToMissingMetadata => Some(&QUERY_TO_MISSING_METADATA),
         DiagnosticCode::RefOveruse => Some(&REF_OVERUSE),
         DiagnosticCode::UnionAll => Some(&UNION_ALL),
+        DiagnosticCode::UsingLikeInQuery => Some(&USING_LIKE_IN_QUERY),
         DiagnosticCode::ScheduledJobHandler => Some(&SCHEDULED_JOB_HANDLER),
         DiagnosticCode::ServerCallsInFormEvents => Some(&SERVER_CALLS_IN_FORM_EVENTS),
         DiagnosticCode::ServerSideExportFormMethod => Some(&SERVER_SIDE_EXPORT_FORM_METHOD),
@@ -3066,6 +3067,30 @@ const UNION_ALL: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UsingLikeInQuery diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = MAJOR,
+///   minutesToFix = 10,
+///   tags = { SQL, UNPREDICTABLE },
+///   scope = BSL,
+///   activatedByDefault = false
+/// )
+const USING_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: false,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Unpredictable],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
