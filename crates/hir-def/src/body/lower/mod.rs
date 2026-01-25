@@ -83,6 +83,10 @@ pub(crate) struct LoweringCtx {
     /// Used for RewriteMethodParameter diagnostic to detect overwrites of byValue params.
     pub(crate) by_value_params: FxHashMap<String, BindingIdx>,
 
+    /// Cancel parameter names (lowercase) - parameters named "Отказ" or "Cancel".
+    /// Used for UsingCancelParameter diagnostic.
+    pub(crate) cancel_params: FxHashSet<String>,
+
     /// Pending SDBL queries (before ExprIdx allocation).
     /// Stores (literal_range, query_info) to match by TextRange instead of String comparison.
     pub(crate) pending_sdbl: Vec<(syntax::TextRange, syntax::SdblQueryInfo)>,
@@ -160,6 +164,7 @@ impl LoweringCtx {
             param_names: FxHashSet::default(),
             by_ref_param_names: FxHashSet::default(),
             by_value_params: FxHashMap::default(),
+            cancel_params: FxHashSet::default(),
             pending_sdbl: Vec::new(),
             loop_depth: 0,
             query_vars: FxHashMap::default(),

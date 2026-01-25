@@ -654,6 +654,12 @@ pub enum BodyDiagnostic {
     /// Detected when New expression creates SystemInformation object.
     /// This is a security hotspot as it exposes system information.
     UseSystemInformation { range: TextRange },
+
+    /// Invalid assignment to Cancel/Отказ parameter.
+    /// Detected when Cancel parameter is assigned a value other than True or OR expression with Cancel.
+    /// Valid: `Отказ = Истина;` or `Отказ = Отказ ИЛИ Выражение;` or `Отказ = Выражение ИЛИ Отказ;`
+    /// Invalid: `Отказ = Ложь;`, `Отказ = Метод();`, `Отказ = Отказ И Выражение;`
+    UsingCancelParameter { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -844,6 +850,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::TooManyReturns { method_name_range, .. } => *method_name_range,
             BodyDiagnostic::UnaryPlusInConcatenation { range } => *range,
             BodyDiagnostic::UseSystemInformation { range } => *range,
+            BodyDiagnostic::UsingCancelParameter { range } => *range,
         }
     }
 }

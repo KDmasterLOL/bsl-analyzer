@@ -214,5 +214,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UseSystemInformation { range } => {
             handlers::use_system_information::from_hir(*range, ctx)
         }
+        BodyDiagnostic::UsingCancelParameter { range } => {
+            handlers::using_cancel_parameter::from_hir(*range, ctx)
+        }
     }
 }

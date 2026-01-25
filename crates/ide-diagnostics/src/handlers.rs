@@ -156,3 +156,4 @@ pub mod usage_write_log_event;
 pub mod use_system_information;
 pub mod useless_for_each;
 pub mod useless_ternary_operator;
+pub mod using_cancel_parameter;

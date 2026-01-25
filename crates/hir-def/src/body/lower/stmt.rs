@@ -331,6 +331,12 @@ fn lower_param(ctx: &mut LoweringCtx, param: &SyntaxNode) -> Option<BindingIdx> 
         ctx.by_value_params.insert(name_token.text().to_lowercase(), binding_id);
     }
 
+    // Track cancel parameters (Отказ/Cancel) for UsingCancelParameter diagnostic
+    let name_lower = name_token.text().to_lowercase();
+    if name_lower == "отказ" || name_lower == "cancel" {
+        ctx.cancel_params.insert(name_lower);
+    }
+
     Some(binding_id)
 }
 
@@ -624,6 +630,16 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         ctx.emit(BodyDiagnostic::SelfAssign { range: node.text_range() });
     }
 
+    // Check for UsingCancelParameter diagnostic
+    // Only if target is a cancel parameter (Отказ/Cancel)
+    if let Some((ref name, _)) = target_name {
+        let key = name.as_str().to_lowercase();
+        if ctx.cancel_params.contains(&key) && !is_valid_cancel_assignment(ctx, value, &key) {
+            let range = extend_range_with_semicolon(node, node.text_range());
+            ctx.emit(BodyDiagnostic::UsingCancelParameter { range });
+        }
+    }
+
     // Track Query/QueryBuilder/ReportBuilder assignments for CreateQueryInCycle diagnostic
     if let Some((target_name, _)) = target_name {
         use super::QueryVarType;
@@ -656,7 +672,6 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 /// Get the range of the target identifier in an assignment.
 /// Looks for the first IDENT token within the node.
 fn get_target_range(node: &SyntaxNode) -> TextRange {
-    // Find IDENT token in the target expression
     fn find_ident(node: &SyntaxNode) -> Option<TextRange> {
         for token in node.descendants_with_tokens() {
             if token.kind() == SyntaxKind::IDENT {
@@ -667,6 +682,56 @@ fn get_target_range(node: &SyntaxNode) -> TextRange {
     }
 
     find_ident(node).unwrap_or_else(|| node.text_range())
+}
+
+/// Check if assignment to cancel parameter is valid.
+///
+/// Valid assignments:
+/// - `Cancel = True` (literal true)
+/// - `Cancel = Cancel OR expr` or `Cancel = expr OR Cancel` (OR with self)
+/// - `Cancel = (expr) OR Cancel` (OR with self in parenthesized expr)
+///
+/// Invalid:
+/// - `Cancel = False`
+/// - `Cancel = MethodCall()`
+/// - `Cancel = Cancel AND expr` (AND instead of OR)
+fn is_valid_cancel_assignment(
+    ctx: &LoweringCtx,
+    value_expr: crate::hir::ExprIdx,
+    cancel_name: &str,
+) -> bool {
+    use crate::hir::{BinaryOp, Expr, Literal};
+
+    let value = ctx.body.expr_idx(value_expr);
+
+    match value {
+        Expr::Literal(Literal::Bool(true)) => true,
+        Expr::BinaryOp { lhs, rhs, op: BinaryOp::Or } => {
+            expr_contains_cancel(ctx, *lhs, cancel_name)
+                || expr_contains_cancel(ctx, *rhs, cancel_name)
+        }
+        _ => false,
+    }
+}
+
+/// Check if expression contains reference to cancel parameter (recursively).
+fn expr_contains_cancel(
+    ctx: &LoweringCtx,
+    expr_id: crate::hir::ExprIdx,
+    cancel_name: &str,
+) -> bool {
+    use crate::hir::Expr;
+
+    let expr = ctx.body.expr_idx(expr_id);
+    match expr {
+        Expr::Path(name) => name.as_str().to_lowercase() == cancel_name,
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains_cancel(ctx, *lhs, cancel_name)
+                || expr_contains_cancel(ctx, *rhs, cancel_name)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains_cancel(ctx, *expr, cancel_name),
+        _ => false,
+    }
 }
 
 /// Lower call statement.

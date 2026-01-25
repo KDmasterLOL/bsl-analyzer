@@ -205,6 +205,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnsafeSafeModeMethodCall => Some(&UNSAFE_SAFE_MODE_METHOD_CALL),
         DiagnosticCode::UsageWriteLogEvent => Some(&USAGE_WRITE_LOG_EVENT),
         DiagnosticCode::UseSystemInformation => Some(&USE_SYSTEM_INFORMATION),
+        DiagnosticCode::UsingCancelParameter => Some(&USING_CANCEL_PARAMETER),
     }
 }
 
@@ -3408,6 +3409,20 @@ const USE_SYSTEM_INFORMATION: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: false,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_CANCEL_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

@@ -123,6 +123,7 @@ pub enum DiagnosticCode {
     UnsafeSafeModeMethodCall,
     UsageWriteLogEvent,
     UseSystemInformation,
+    UsingCancelParameter,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,
