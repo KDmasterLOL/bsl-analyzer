@@ -384,6 +384,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::join_with_sub_query::check,
     ));
     diagnostics.extend(run_diagnostic(
+        "JoinWithVirtualTable",
+        ctx,
+        handlers::join_with_virtual_table::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "LogicalOrInJoinQuerySection",
         ctx,
         handlers::logical_or_in_join_query_section::check,

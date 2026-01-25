@@ -180,6 +180,7 @@ pub enum DiagnosticCode {
     FullOuterJoinQuery,
     IncorrectUseLikeInQuery,
     JoinWithSubQuery,
+    JoinWithVirtualTable,
     LogicalOrInJoinQuerySection,
     LogicalOrInTheWhereSectionOfQuery,
     MultilineStringInQuery,

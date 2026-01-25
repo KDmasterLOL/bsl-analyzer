@@ -2,7 +2,7 @@
 
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{FieldDef, Name, ResolvedTable, TableRef};
-use crate::standard_fields::is_virtual_table_name;
+use crate::standard_fields::{is_virtual_table_name, virtual_table_type};
 use crate::SdblType;
 use bsl_metadata::MdoType;
 use syntax::ast::AstNode;
@@ -31,7 +31,7 @@ impl<'a> LoweringContext<'a> {
         from.data_sources().map(|ds| self.lower_data_source_in_from(&ds)).collect()
     }
 
-    /// Lower a data source in FROM clause (checks for subquery with JOINs).
+    /// Lower a data source in FROM clause (checks for subquery/virtual table with JOINs).
     fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
         // Check if this FROM data source has JOINs after subquery
         // Example: FROM (SELECT ...) AS Sub LEFT JOIN T2 ...
@@ -40,6 +40,36 @@ impl<'a> LoweringContext<'a> {
                 self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
                     range: subquery.syntax().text_range(),
                 });
+            }
+        }
+
+        // Check if this FROM data source is a virtual table with JOINs
+        // Java: visitDataSources() checks dataSource has joinPart AND virtualTable
+        if let Some(table_ref) = ds.table_ref() {
+            if ds.join_clauses().next().is_some() {
+                let parts: Vec<String> = table_ref
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(|child| match child {
+                        syntax::NodeOrToken::Token(token)
+                            if token.kind() == syntax::SyntaxKind::IDENT =>
+                        {
+                            Some(token.text().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                if let Some(last_part) = parts.last() {
+                    if let Some(vt_type) = virtual_table_type(last_part) {
+                        let full_name = parts.join(".");
+                        self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
+                            table_name: full_name,
+                            virtual_table_type: vt_type.to_string(),
+                            range: table_ref.syntax().text_range(),
+                        });
+                    }
+                }
             }
         }
 

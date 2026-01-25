@@ -165,6 +165,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::FullOuterJoinQuery => Some(&FULL_OUTER_JOIN_QUERY),
         DiagnosticCode::IncorrectUseLikeInQuery => Some(&INCORRECT_USE_LIKE_IN_QUERY),
         DiagnosticCode::JoinWithSubQuery => Some(&JOIN_WITH_SUB_QUERY),
+        DiagnosticCode::JoinWithVirtualTable => Some(&JOIN_WITH_VIRTUAL_TABLE),
         DiagnosticCode::LogicalOrInJoinQuerySection => Some(&LOGICAL_OR_IN_JOIN_QUERY_SECTION),
         DiagnosticCode::LogicalOrInTheWhereSectionOfQuery => {
             Some(&LOGICAL_OR_IN_THE_WHERE_SECTION_OF_QUERY)
@@ -2939,6 +2940,29 @@ const INCORRECT_USE_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL
 /// )
 const JOIN_WITH_SUB_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Standard, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// JoinWithVirtualTable diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   minutesToFix = 10,
+///   tags = { SQL, STANDARD, PERFORMANCE },
+///   scope = BSL
+/// )
+const JOIN_WITH_VIRTUAL_TABLE: DiagnosticMetadata = DiagnosticMetadata {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,

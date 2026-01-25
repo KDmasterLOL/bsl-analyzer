@@ -129,7 +129,7 @@ impl<'a> LoweringContext<'a> {
                 self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
                     table_name: table.full_name.clone(),
                     virtual_table_type: vt_type.to_string(),
-                    range: join.syntax().text_range(),
+                    range: table.range,
                 });
             }
         }
