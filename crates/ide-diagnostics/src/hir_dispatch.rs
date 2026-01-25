@@ -228,5 +228,8 @@ pub fn dispatch_hir_diagnostic(
             handlers::using_modal_windows::from_hir(method_name, replacement, *range, ctx)
         }
         BodyDiagnostic::UsingThisForm { range } => handlers::using_this_form::from_hir(*range, ctx),
+        BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => {
+            handlers::wrong_use_function_proceed_with_call::from_hir(*range, ctx)
+        }
     }
 }

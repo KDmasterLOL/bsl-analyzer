@@ -132,6 +132,11 @@ pub(crate) struct LoweringCtx {
     /// Return statements in current method for TooManyReturns diagnostic.
     /// Stores TextRange of each return statement.
     pub(crate) return_statements: Vec<TextRange>,
+
+    /// Whether current method has &Вместо/&Instead annotation.
+    /// Used for WrongUseFunctionProceedWithCall diagnostic - ПродолжитьВызов is only allowed
+    /// in methods with &Вместо annotation.
+    pub(crate) is_instead_method: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -176,6 +181,7 @@ impl LoweringCtx {
             statements_by_line: FxHashMap::default(),
             current_method_name: None, // Will be set in lower_method_with_externals_and_line_index
             return_statements: Vec::new(),
+            is_instead_method: false, // Will be set in lower_method_with_externals_and_line_index
         }
     }
 
@@ -432,6 +438,25 @@ fn has_no_context_annotation_method(method_node: &SyntaxNode) -> bool {
     })
 }
 
+/// Check if method has &Вместо / &Around annotation.
+///
+/// For WrongUseFunctionProceedWithCall diagnostic - ПродолжитьВызов is only allowed
+/// in methods with &Вместо annotation.
+fn is_around_annotation_method(method_node: &SyntaxNode) -> bool {
+    let annotations: Vec<_> = method_node
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect();
+
+    annotations.iter().any(|ann| {
+        ann.descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|token| token.kind() == SyntaxKind::ANN_AROUND)
+    })
+}
+
 /// Check if function always returns the same primitive value.
 ///
 /// For FunctionReturnsSamePrimitive diagnostic.
@@ -526,6 +551,9 @@ pub fn lower_method_with_externals(
 
     // Check if method has "БезКонтекста" (NoContext) annotation
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
+
+    // Check if method has &Вместо / &Around annotation
+    ctx.is_instead_method = is_around_annotation_method(method_node);
 
     // Check for FunctionNameStartsWithGet diagnostic
     if is_function {
@@ -663,6 +691,9 @@ pub fn lower_method_with_externals_and_line_index(
 
     // Check if method has "БезКонтекста" (NoContext) annotation
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
+
+    // Check if method has &Вместо / &Around annotation
+    ctx.is_instead_method = is_around_annotation_method(method_node);
 
     // Extract method name once for all checks
     let name_token = method_node

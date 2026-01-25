@@ -133,6 +133,7 @@ pub enum DiagnosticCode {
     UsingObjectNotAvailableUnix,
     UsingServiceTag,
     UsingThisForm,
+    WrongUseFunctionProceedWithCall,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     WrongHttpServiceHandler,

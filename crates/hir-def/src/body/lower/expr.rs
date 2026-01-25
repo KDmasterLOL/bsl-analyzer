@@ -521,6 +521,13 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             });
         }
 
+        // Check for ProceedWithCall/ПродолжитьВызов outside &Вместо method
+        if is_proceed_with_call_method(&name_lower) && !ctx.is_instead_method {
+            ctx.diagnostics.push(BodyDiagnostic::WrongUseFunctionProceedWithCall {
+                range: actual_callee.text_range(),
+            });
+        }
+
         // Track StrTemplate call for later validation (after arg_list_node is available)
         if is_str_template_method(&name) {
             is_str_template_call = true;
@@ -1705,6 +1712,14 @@ fn is_form_data_to_value_method(name: &str) -> bool {
 fn is_get_form_method(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "получитьформу" | "getform")
+}
+
+/// Check if method name is ProceedWithCall / ПродолжитьВызов.
+///
+/// This function can only be called inside extension methods with &Вместо annotation.
+/// Calling it from methods with &До, &После or without extension annotation causes runtime error.
+fn is_proceed_with_call_method(name_lower: &str) -> bool {
+    matches!(name_lower, "продолжитьвызов" | "proceedwithcall")
 }
 
 /// Check for UsingExternalCodeTools diagnostic.

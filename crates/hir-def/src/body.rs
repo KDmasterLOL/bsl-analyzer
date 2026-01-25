@@ -692,6 +692,11 @@ pub enum BodyDiagnostic {
     /// Starting from 1C:Enterprise 8.3.3, should use ЭтотОбъект/ThisObject instead.
     /// Detected when ЭтаФорма/ThisForm is used as identifier (not as parameter).
     UsingThisForm { range: TextRange },
+
+    /// Wrong use of ПродолжитьВызов/ProceedWithCall function.
+    /// This function can only be called inside extension methods with &Вместо annotation.
+    /// Calling it from methods with &До, &После or without extension annotation causes runtime error.
+    WrongUseFunctionProceedWithCall { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -888,6 +893,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingGoto { range } => *range,
             BodyDiagnostic::UsingModalWindows { range, .. } => *range,
             BodyDiagnostic::UsingThisForm { range } => *range,
+            BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => *range,
         }
     }
 }

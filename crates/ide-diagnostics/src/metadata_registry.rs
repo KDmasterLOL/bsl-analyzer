@@ -221,6 +221,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
         DiagnosticCode::WrongDataPathForFormElements => Some(&WRONG_DATA_PATH_FOR_FORM_ELEMENTS),
         DiagnosticCode::WrongHttpServiceHandler => Some(&WRONG_HTTP_SERVICE_HANDLER),
+        DiagnosticCode::WrongUseFunctionProceedWithCall => {
+            Some(&WRONG_USE_FUNCTION_PROCEED_WITH_CALL)
+        }
     }
 }
 
@@ -2399,6 +2402,29 @@ const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Suspicious, MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// WrongUseFunctionProceedWithCall diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = BLOCKER,
+///   minutesToFix = 1,
+///   scope = BSL,
+///   tags = { ERROR, SUSPICIOUS }
+/// )
+const WRONG_USE_FUNCTION_PROCEED_WITH_CALL: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error, MetadataTag::Suspicious],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
