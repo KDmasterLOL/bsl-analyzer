@@ -519,6 +519,16 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             ctx.diagnostics
                 .push(BodyDiagnostic::DeprecatedMethod { name, range: node.text_range() });
         }
+
+        // Check for modal window methods (UsingModalWindows diagnostic)
+        use super::diagnostics::get_modal_method_replacement;
+        if let Some(replacement) = get_modal_method_replacement(&name_lower) {
+            ctx.diagnostics.push(BodyDiagnostic::UsingModalWindows {
+                method_name: actual_callee.text().to_string(),
+                replacement: replacement.to_string(),
+                range: node.text_range(),
+            });
+        }
     } else if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
         // Check for external app methods in qualified calls (obj.method())
         // Extract all IDENT tokens from FIELD_EXPR (use descendants to unwrap EXPR wrappers)

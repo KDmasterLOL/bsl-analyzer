@@ -19,7 +19,7 @@ BSL Analyzer построен по образцу rust-analyzer с адапта�
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
 │ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│ 144 diagnostics│   │ Code actions  │    │ RootDatabase  │
+│ 145 diagnostics│   │ Code actions  │    │ RootDatabase  │
 └───────────────┘    └───────────────┘    └───────────────┘
                               │
                               ▼

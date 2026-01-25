@@ -866,6 +866,59 @@ pub(crate) fn is_find_element_method(name: &str) -> bool {
         || FIND_BY_NUMBER.contains(&lower.as_str())
 }
 
+// =============================================================================
+// UsingModalWindows detection
+// =============================================================================
+
+/// Modal window method pairs: (modal_method, non_modal_replacement).
+/// All names are lowercase for case-insensitive matching.
+const MODAL_METHODS: &[(&str, &str, &str, &str)] = &[
+    // (russian_modal, english_modal, russian_replacement, english_replacement)
+    ("вопрос", "doquerybox", "ПоказатьВопрос", "ShowQueryBox"),
+    ("открытьформумодально", "openformmodal", "ОткрытьФорму", "OpenForm"),
+    ("открытьзначение", "openvalue", "ПоказатьЗначение", "ShowValue"),
+    ("предупреждение", "domessagebox", "ПоказатьПредупреждение", "ShowMessageBox"),
+    ("ввестидату", "inputdate", "ПоказатьВводДаты", "ShowInputDate"),
+    ("ввестизначение", "inputvalue", "ПоказатьВводЗначения", "ShowInputValue"),
+    ("ввестистроку", "inputstring", "ПоказатьВводСтроки", "ShowInputString"),
+    ("ввестичисло", "inputnumber", "ПоказатьВводЧисла", "ShowInputNumber"),
+    (
+        "установитьвнешнююкомпоненту",
+        "installaddin",
+        "НачатьУстановкуВнешнейКомпоненты",
+        "BeginInstallAddIn",
+    ),
+    (
+        "установитьрасширениеработысфайлами",
+        "installfilesystemextension",
+        "НачатьУстановкуРасширенияРаботыСФайлами",
+        "BeginInstallFileSystemExtension",
+    ),
+    (
+        "установитьрасширениеработыскриптографией",
+        "installcryptoextension",
+        "НачатьУстановкуРасширенияРаботыСКриптографией",
+        "BeginInstallCryptoExtension",
+    ),
+    ("поместитьфайл", "putfile", "НачатьПомещениеФайла", "BeginPutFile"),
+];
+
+/// Check if a method name is a modal window method.
+/// Returns Some(replacement) if modal, None otherwise.
+/// The replacement is returned in the same language as the original method name.
+pub(crate) fn get_modal_method_replacement(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    for &(ru, en, replacement_ru, replacement_en) in MODAL_METHODS {
+        if lower == ru {
+            return Some(replacement_ru);
+        }
+        if lower == en {
+            return Some(replacement_en);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

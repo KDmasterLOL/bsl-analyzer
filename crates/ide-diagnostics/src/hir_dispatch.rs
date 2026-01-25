@@ -224,5 +224,8 @@ pub fn dispatch_hir_diagnostic(
             handlers::using_find_element_by_string::from_hir(*range, ctx)
         }
         BodyDiagnostic::UsingGoto { range } => handlers::using_goto::from_hir(*range, ctx),
+        BodyDiagnostic::UsingModalWindows { method_name, replacement, range } => {
+            handlers::using_modal_windows::from_hir(method_name, replacement, *range, ctx)
+        }
     }
 }

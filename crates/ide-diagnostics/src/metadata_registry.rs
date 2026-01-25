@@ -1,10 +1,10 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 147/147 diagnostics defined (100%)
+//! Progress: 148/148 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
-//! - 55 Tier 2 diagnostics (semantic analysis)
+//! - 56 Tier 2 diagnostics (semantic analysis)
 //! - 42 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
@@ -212,6 +212,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingHardcodeNetworkAddress => Some(&USING_HARDCODE_NETWORK_ADDRESS),
         DiagnosticCode::UsingHardcodePath => Some(&USING_HARDCODE_PATH),
         DiagnosticCode::UsingHardcodeSecretInformation => Some(&USING_HARDCODE_SECRET_INFORMATION),
+        DiagnosticCode::UsingModalWindows => Some(&USING_MODAL_WINDOWS),
     }
 }
 
@@ -3527,6 +3528,30 @@ const USING_HARDCODE_SECRET_INFORMATION: DiagnosticMetadata = DiagnosticMetadata
     minutes_to_fix: 15,
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UsingModalWindows diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   scope = BSL,
+///   minutesToFix = 15,
+///   tags = { STANDARD },
+///   compatibilityMode = COMPATIBILITY_MODE_8_3_3
+/// )
+const USING_MODAL_WINDOWS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_3,
     tags: &[MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,

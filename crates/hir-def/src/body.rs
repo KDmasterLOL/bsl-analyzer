@@ -675,6 +675,18 @@ pub enum BodyDiagnostic {
     /// Goto is unstructured control flow that makes code less readable.
     /// Should use structured control flow instead (If, While, For, Continue, Break).
     UsingGoto { range: TextRange },
+
+    /// Usage of modal window methods (Вопрос, Предупреждение, ОткрытьФормуМодально, etc.).
+    /// Modal windows block execution and are not allowed when modality mode is disabled.
+    /// Detected when global modal method is called.
+    UsingModalWindows {
+        /// Name of the called modal method (original case).
+        method_name: String,
+        /// Name of the recommended non-modal replacement.
+        replacement: String,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -869,6 +881,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingExternalCodeTools { range } => *range,
             BodyDiagnostic::UsingFindElementByString { range } => *range,
             BodyDiagnostic::UsingGoto { range } => *range,
+            BodyDiagnostic::UsingModalWindows { range, .. } => *range,
         }
     }
 }
