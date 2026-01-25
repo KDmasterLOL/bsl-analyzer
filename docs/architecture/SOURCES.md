@@ -266,4 +266,4 @@ time ./target/release/bsl-analyzer analyze --source-dir ~/src/doc3 --reporters c
 | bsl-parser          | Java/ANTLR | -          | 15K+  | BSL/SDBL grammar reference                |
 | tree-sitter-bsl     | JS/C       | -          | 2K+   | Alternative BSL grammar (без SDBL)        |
 | salsa               | Rust       | -          | 50K+  | Incremental computation framework         |
-| **bsl-analyzer**    | **Rust**   | **144**    | 60K+  | **Advanced diagnostics architecture** 🚀  |
+| **bsl-analyzer**    | **Rust**   | **171**    | 60K+  | **Advanced diagnostics architecture** 🚀  |

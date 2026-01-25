@@ -8,7 +8,7 @@ The Rust implementation maintains 100% compatibility with bsl-language-server (J
 
 ## Verification Status
 
-**✅ 144/144 diagnostics have metadata definitions (100%)**
+**✅ 171/171 diagnostics have metadata definitions (100%)**
 
 ### Verified Diagnostic Categories
 
@@ -113,7 +113,7 @@ cargo test -p ide-diagnostics metadata_registry::tests
 ```
 
 Test coverage:
-- ✅ All diagnostics have metadata (144/144)
+- ✅ All diagnostics have metadata (171/171)
 - ✅ LSP severity mapping
 - ✅ Tags coverage
 - ✅ activatedByDefault consistency
@@ -162,4 +162,4 @@ This is the only known difference and does not affect compatibility.
 
 **✅ 100% Compatibility Achieved**
 
-All 144 DiagnosticCode variants have metadata definitions that match Java implementation.
+All 171 DiagnosticCode variants have metadata definitions that match Java implementation.
