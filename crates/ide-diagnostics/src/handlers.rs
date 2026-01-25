@@ -162,3 +162,4 @@ pub mod using_find_element_by_string;
 pub mod using_goto;
 pub mod using_hardcode_network_address;
 pub mod using_hardcode_path;
+pub mod using_hardcode_secret_information;

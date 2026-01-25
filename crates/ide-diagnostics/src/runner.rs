@@ -260,6 +260,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::using_hardcode_path::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodeSecretInformation",
+        ctx,
+        handlers::using_hardcode_secret_information::check,
+    ));
 
     diagnostics
 }
