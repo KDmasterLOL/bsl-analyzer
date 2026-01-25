@@ -1,11 +1,11 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 148/148 diagnostics defined (100%)
+//! Progress: 149/149 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
 //! - 56 Tier 2 diagnostics (semantic analysis)
-//! - 42 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
+//! - 43 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
 use crate::DiagnosticCode;
@@ -219,6 +219,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingObjectNotAvailableUnix => Some(&USING_OBJECT_NOT_AVAILABLE_UNIX),
         DiagnosticCode::UsingServiceTag => Some(&USING_SERVICE_TAG),
         DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
+        DiagnosticCode::WrongDataPathForFormElements => Some(&WRONG_DATA_PATH_FOR_FORM_ELEMENTS),
     }
 }
 
@@ -2350,8 +2351,35 @@ const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
 };
 
 // ============================================================================
-// Tier 3 + SDBL diagnostics (35 total)
+// Tier 3 + SDBL diagnostics (36 total)
 // ============================================================================
+
+/// WrongDataPathForFormElements diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   scope = BSL,
+///   modules = { FormModule, ManagedApplicationModule },
+///   minutesToFix = 5,
+///   tags = { UNPREDICTABLE }
+/// )
+const WRONG_DATA_PATH_FOR_FORM_ELEMENTS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::FormModule,
+        bsl_metadata::ModuleType::ManagedApplicationModule,
+    ],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// AssignAliasFieldsInQuery diagnostic metadata.
 ///
