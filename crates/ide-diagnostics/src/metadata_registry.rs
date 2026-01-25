@@ -213,6 +213,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingHardcodePath => Some(&USING_HARDCODE_PATH),
         DiagnosticCode::UsingHardcodeSecretInformation => Some(&USING_HARDCODE_SECRET_INFORMATION),
         DiagnosticCode::UsingModalWindows => Some(&USING_MODAL_WINDOWS),
+        DiagnosticCode::UsingObjectNotAvailableUnix => Some(&USING_OBJECT_NOT_AVAILABLE_UNIX),
     }
 }
 
@@ -3553,6 +3554,20 @@ const USING_MODAL_WINDOWS: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_3,
     tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Lockinos],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

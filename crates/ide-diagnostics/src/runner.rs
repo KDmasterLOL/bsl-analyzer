@@ -265,6 +265,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::using_hardcode_secret_information::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UsingObjectNotAvailableUnix",
+        ctx,
+        handlers::using_object_not_available_unix::check,
+    ));
 
     diagnostics
 }
