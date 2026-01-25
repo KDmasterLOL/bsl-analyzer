@@ -220,5 +220,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingExternalCodeTools { range } => {
             handlers::using_external_code_tools::from_hir(*range, ctx)
         }
+        BodyDiagnostic::UsingFindElementByString { range } => {
+            handlers::using_find_element_by_string::from_hir(*range, ctx)
+        }
     }
 }

@@ -665,6 +665,11 @@ pub enum BodyDiagnostic {
     /// Detected when calling Create/Connect methods on these global objects.
     /// Security risk: external code can execute arbitrary operations.
     UsingExternalCodeTools { range: TextRange },
+
+    /// Using FindByName, FindByCode, FindByNumber with literal argument.
+    /// Detected when calling НайтиПоНаименованию/FindByDescription, НайтиПоКоду/FindByCode,
+    /// НайтиПоНомеру/FindByNumber with string or number literal as first argument.
+    UsingFindElementByString { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -857,6 +862,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UseSystemInformation { range } => *range,
             BodyDiagnostic::UsingCancelParameter { range } => *range,
             BodyDiagnostic::UsingExternalCodeTools { range } => *range,
+            BodyDiagnostic::UsingFindElementByString { range } => *range,
         }
     }
 }

@@ -818,6 +818,31 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // Check for UsingFindElementByString: FindByDescription/FindByCode/FindByNumber with literal argument
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last()
+        {
+            use super::diagnostics::is_find_element_method;
+            if is_find_element_method(method_token.text()) {
+                // Check if first argument is literal (string or number) or no arguments
+                let has_literal_first_arg = check_find_element_first_arg(&args, ctx);
+                if has_literal_first_arg {
+                    // Range covers method name token and argument list
+                    let range = if let Some(ref arg_list) = arg_list_node {
+                        method_token.text_range().cover(arg_list.text_range())
+                    } else {
+                        method_token.text_range()
+                    };
+                    ctx.emit(BodyDiagnostic::UsingFindElementByString { range });
+                }
+            }
+        }
+    }
+
     // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
     // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
     if actual_callee.kind() == SyntaxKind::IDENT {
@@ -1853,4 +1878,20 @@ fn parse_manager_type(mdo_type: &str) -> Option<ManagerType> {
         }
         _ => None,
     }
+}
+
+/// Check if first argument of a FindElement method triggers UsingFindElementByString.
+///
+/// Returns true if:
+/// - No arguments provided (empty call like `НайтиПоНаименованию()`)
+/// - First argument is a string literal
+/// - First argument is a number literal
+fn check_find_element_first_arg(args: &[ExprIdx], ctx: &LoweringCtx) -> bool {
+    if args.is_empty() {
+        return true;
+    }
+
+    let first_arg = args[0];
+    let expr = ctx.body.expr_idx(first_arg);
+    matches!(expr, Expr::Literal(Literal::String(_)) | Expr::Literal(Literal::Number(_)))
 }

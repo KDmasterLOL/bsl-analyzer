@@ -207,6 +207,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UseSystemInformation => Some(&USE_SYSTEM_INFORMATION),
         DiagnosticCode::UsingCancelParameter => Some(&USING_CANCEL_PARAMETER),
         DiagnosticCode::UsingExternalCodeTools => Some(&USING_EXTERNAL_CODE_TOOLS),
+        DiagnosticCode::UsingFindElementByString => Some(&USING_FIND_ELEMENT_BY_STRING),
     }
 }
 
@@ -3443,6 +3444,20 @@ const USING_EXTERNAL_CODE_TOOLS: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Design],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice, MetadataTag::Performance],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

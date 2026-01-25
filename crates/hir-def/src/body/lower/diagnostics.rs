@@ -844,6 +844,28 @@ pub(crate) fn is_external_code_tools_method(name: &str) -> bool {
     EXTERNAL_CODE_METHODS.contains(&lower.as_str())
 }
 
+// =============================================================================
+// UsingFindElementByString detection
+// =============================================================================
+
+/// Method names for FindByDescription/НайтиПоНаименованию (case-insensitive).
+const FIND_BY_DESCRIPTION: &[&str] = &["найтипонаименованию", "findbydescription"];
+
+/// Method names for FindByCode/НайтиПоКоду (case-insensitive).
+const FIND_BY_CODE: &[&str] = &["найтипокоду", "findbycode"];
+
+/// Method names for FindByNumber/НайтиПоНомеру (case-insensitive).
+const FIND_BY_NUMBER: &[&str] = &["найтипономеру", "findbynumber"];
+
+/// Check if a method name is a FindElement method (FindByDescription, FindByCode, FindByNumber).
+/// Returns true if the method name matches one of the search methods (case-insensitive).
+pub(crate) fn is_find_element_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    FIND_BY_DESCRIPTION.contains(&lower.as_str())
+        || FIND_BY_CODE.contains(&lower.as_str())
+        || FIND_BY_NUMBER.contains(&lower.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -125,6 +125,7 @@ pub enum DiagnosticCode {
     UseSystemInformation,
     UsingCancelParameter,
     UsingExternalCodeTools,
+    UsingFindElementByString,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,
