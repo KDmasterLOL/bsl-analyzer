@@ -21,15 +21,8 @@ impl<'a> LoweringContext<'a> {
         );
 
         // Collect LogicalOrInWhere diagnostics
-        // Use descendants_with_tokens() to find ALL OR tokens recursively
-        for element in where_clause.syntax().descendants_with_tokens() {
-            if let Some(token) = element.as_token() {
-                if token.kind() == syntax::SyntaxKind::KW_OR {
-                    self.diagnostics
-                        .push(SdblDiagnostic::LogicalOrInWhere { range: token.text_range() });
-                }
-            }
-        }
+        // Skip nested subqueries - they will collect their own OR tokens
+        self.collect_or_tokens_excluding_subqueries(where_clause.syntax());
 
         // WHERE clause contains an expression as its child
         let expr_node = where_clause.syntax().children().find(|n| {
@@ -168,5 +161,33 @@ impl<'a> LoweringContext<'a> {
         }
 
         crate::hir::OrderByHir { items, range: order_clause.syntax().text_range() }
+    }
+
+    /// Collect OR tokens from a node, excluding nested subqueries.
+    ///
+    /// Nested subqueries have their own WHERE clauses which will collect their OR tokens
+    /// when the subquery is lowered separately.
+    fn collect_or_tokens_excluding_subqueries(&mut self, node: &syntax::SyntaxNode) {
+        for child in node.children_with_tokens() {
+            match child {
+                syntax::NodeOrToken::Token(token) => {
+                    if token.kind() == syntax::SyntaxKind::KW_OR {
+                        self.diagnostics
+                            .push(SdblDiagnostic::LogicalOrInWhere { range: token.text_range() });
+                    }
+                }
+                syntax::NodeOrToken::Node(child_node) => {
+                    // Skip nested subqueries - they will collect their own OR tokens
+                    if !matches!(
+                        child_node.kind(),
+                        syntax::SyntaxKind::SDBL_SUBQUERY
+                            | syntax::SyntaxKind::SDBL_SUBQUERY_EXPR
+                            | syntax::SyntaxKind::SDBL_SELECT_QUERY
+                    ) {
+                        self.collect_or_tokens_excluding_subqueries(&child_node);
+                    }
+                }
+            }
+        }
     }
 }

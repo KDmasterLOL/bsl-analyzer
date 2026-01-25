@@ -240,6 +240,28 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Using SELECT TOP/FIRST without ORDER BY clause.
+    ///
+    /// BSL-LS diagnostic code: SelectTopWithoutOrderBy
+    ///
+    /// Without ORDER BY, the result order is unpredictable and may vary between:
+    /// - Different DBMS implementations
+    /// - Different query executions on same DBMS
+    ///
+    /// Special cases:
+    /// - TOP 1 with WHERE clause is allowed (single row guaranteed)
+    /// - TOP in UNION is always an error (ORDER BY applies after UNION, not to parts)
+    SelectTopWithoutOrderBy {
+        /// TOP/FIRST value (e.g., 1, 10, etc.)
+        top_value: u32,
+        /// Whether this query is part of a UNION (always error in UNION).
+        in_union: bool,
+        /// Whether the query has a WHERE clause (TOP 1 + WHERE is allowed).
+        has_where: bool,
+        /// Source range of TOP/FIRST keyword.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -378,6 +400,9 @@ impl SdblDiagnostic {
             Self::IncorrectUseLikeInQuery { .. } => {
                 "Нужно исправить выражение в соответствии со стандартом".to_string()
             }
+            Self::SelectTopWithoutOrderBy { .. } => {
+                "Измените запрос, добавив сортировку".to_string()
+            }
         }
     }
 
@@ -406,6 +431,7 @@ impl SdblDiagnostic {
             Self::UnionWithoutAll { range } => *range,
             Self::UsingLikeInQuery { range } => *range,
             Self::IncorrectUseLikeInQuery { range } => *range,
+            Self::SelectTopWithoutOrderBy { range, .. } => *range,
         }
     }
 
@@ -437,6 +463,7 @@ impl SdblDiagnostic {
             Self::UnionWithoutAll { .. } => false, // Warning - performance issue
             Self::UsingLikeInQuery { .. } => false, // Warning - unpredictable results
             Self::IncorrectUseLikeInQuery { .. } => true, // Error - standard violation
+            Self::SelectTopWithoutOrderBy { .. } => false, // Code smell - unpredictable results
         }
     }
 }

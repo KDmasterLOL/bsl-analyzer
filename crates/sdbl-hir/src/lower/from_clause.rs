@@ -87,7 +87,11 @@ impl<'a> LoweringContext<'a> {
             let mut all_hirs = Vec::new();
             let mut all_fields = Vec::new();
 
-            for query in subquery.queries() {
+            // Determine if there are UNION siblings in this subquery
+            let queries: Vec<_> = subquery.queries().collect();
+            let has_union_siblings = queries.len() > 1;
+
+            for (idx, query) in queries.into_iter().enumerate() {
                 // NOTE: Diagnostic for JOINs inside subquery is handled by lower_query()
                 // which calls lower_from_clause() -> lower_data_source_in_from()
                 // No need to check here to avoid duplication
@@ -95,14 +99,15 @@ impl<'a> LoweringContext<'a> {
                 // Push scope frame for nested query (isolate FROM/JOIN tables)
                 self.scope.push_frame();
 
-                // Lower the nested query to HIR (nested queries are not UNION queries)
-                let nested_hir = self.lower_query(&query, false);
+                // Lower the nested query to HIR
+                // First query (idx=0) is the main query, rest are UNION queries
+                let nested_hir = self.lower_query(&query, idx > 0, has_union_siblings);
 
                 // Pop scope frame
                 self.scope.pop_frame();
 
-                // Collect diagnostics from nested query
-                self.diagnostics.extend(nested_hir.diagnostics.clone());
+                // NOTE: Don't copy nested query diagnostics to parent.
+                // all_diagnostics() recursively collects them from subquery HIR.
 
                 // Extract fields from SELECT for metadata (only from first query)
                 if all_fields.is_empty() {

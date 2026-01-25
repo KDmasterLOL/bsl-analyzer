@@ -188,6 +188,7 @@ pub enum DiagnosticCode {
     QueryParseError,
     QueryToMissingMetadata,
     RefOveruse,
+    SelectTopWithoutOrderBy,
     UnionAll,
     UsingLikeInQuery,
     VirtualTableCallWithoutParameters,

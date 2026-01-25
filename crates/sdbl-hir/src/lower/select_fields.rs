@@ -33,13 +33,14 @@ impl<'a> LoweringContext<'a> {
 
     /// Extract DISTINCT and TOP from query limitations.
     ///
-    /// Returns (distinct, top).
+    /// Returns (distinct, top_value, top_range).
     pub(super) fn extract_limitations(
         &mut self,
         query_node: &syntax::SyntaxNode,
-    ) -> (bool, Option<u32>) {
+    ) -> (bool, Option<u32>, Option<syntax::TextRange>) {
         let mut distinct = false;
         let mut top = None;
+        let mut top_range = None;
 
         // Find SDBL_LIMITATIONS child
         for child in query_node.children() {
@@ -63,7 +64,7 @@ impl<'a> LoweringContext<'a> {
                 // Find TOP clause
                 for top_child in child.children() {
                     if top_child.kind() == syntax::SyntaxKind::SDBL_TOP_CLAUSE {
-                        // Record TOP keyword
+                        // Record TOP keyword and capture its range
                         for element in top_child.descendants_with_tokens() {
                             if let Some(token) = element.as_token() {
                                 if token.kind() == syntax::SyntaxKind::IDENT {
@@ -73,6 +74,7 @@ impl<'a> LoweringContext<'a> {
                                             token,
                                             crate::source_map::TokenCategory::Modifier,
                                         );
+                                        top_range = Some(top_child.text_range());
                                     }
                                 }
                             }
@@ -96,7 +98,7 @@ impl<'a> LoweringContext<'a> {
             }
         }
 
-        (distinct, top)
+        (distinct, top, top_range)
     }
 
     /// Lower a selected field.

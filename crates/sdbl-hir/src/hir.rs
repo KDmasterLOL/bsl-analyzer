@@ -885,8 +885,140 @@ impl SdblPackage {
     }
 
     /// Iterate all diagnostics from all queries in the package.
+    ///
+    /// Recursively collects diagnostics from:
+    /// - Main query HIR
+    /// - Subqueries in WHERE IN expressions
+    /// - Subqueries in FROM clause
+    /// - Nested subqueries in expressions
     pub fn all_diagnostics(&self) -> impl Iterator<Item = &crate::diagnostics::SdblDiagnostic> {
-        self.queries.iter().flat_map(|q| q.hir.diagnostics.iter())
+        let mut all = Vec::new();
+        for q in &self.queries {
+            Self::collect_diagnostics_recursive(&q.hir, &mut all);
+        }
+        all.into_iter()
+    }
+
+    fn collect_diagnostics_recursive<'a>(
+        hir: &'a SdblHir,
+        diagnostics: &mut Vec<&'a crate::diagnostics::SdblDiagnostic>,
+    ) {
+        diagnostics.extend(hir.diagnostics.iter());
+
+        for field in &hir.select.fields {
+            Self::collect_expr_diagnostics(&field.expr, diagnostics);
+        }
+
+        for table in &hir.from {
+            for subquery in &table.subquery {
+                Self::collect_diagnostics_recursive(subquery, diagnostics);
+            }
+        }
+
+        for join in &hir.joins {
+            for subquery in &join.table.subquery {
+                Self::collect_diagnostics_recursive(subquery, diagnostics);
+            }
+            if let Some(ref cond) = join.condition {
+                Self::collect_expr_diagnostics(cond, diagnostics);
+            }
+        }
+
+        if let Some(ref where_expr) = hir.where_clause {
+            Self::collect_expr_diagnostics(where_expr, diagnostics);
+        }
+
+        if let Some(ref group_by) = hir.group_by {
+            for expr in &group_by.exprs {
+                Self::collect_expr_diagnostics(expr, diagnostics);
+            }
+        }
+
+        if let Some(ref having) = hir.having {
+            Self::collect_expr_diagnostics(having, diagnostics);
+        }
+
+        if let Some(ref order_by) = hir.order_by {
+            for item in &order_by.items {
+                Self::collect_expr_diagnostics(&item.expr, diagnostics);
+            }
+        }
+
+        for union in &hir.unions {
+            Self::collect_diagnostics_recursive(&union.query, diagnostics);
+        }
+    }
+
+    fn collect_expr_diagnostics<'a>(
+        expr: &'a ExprHir,
+        diagnostics: &mut Vec<&'a crate::diagnostics::SdblDiagnostic>,
+    ) {
+        match expr {
+            ExprHir::In { expr: inner, values, .. } => {
+                Self::collect_expr_diagnostics(inner, diagnostics);
+                match values {
+                    InValues::List(items) => {
+                        for item in items {
+                            Self::collect_expr_diagnostics(item, diagnostics);
+                        }
+                    }
+                    InValues::Subquery(sq) => {
+                        Self::collect_diagnostics_recursive(sq, diagnostics);
+                    }
+                }
+            }
+            ExprHir::Subquery { query, .. } => {
+                Self::collect_diagnostics_recursive(query, diagnostics);
+            }
+            ExprHir::BinaryOp { lhs, rhs, .. } => {
+                Self::collect_expr_diagnostics(lhs, diagnostics);
+                Self::collect_expr_diagnostics(rhs, diagnostics);
+            }
+            ExprHir::UnaryOp { expr: inner, .. } => {
+                Self::collect_expr_diagnostics(inner, diagnostics);
+            }
+            ExprHir::FunctionCall { args, .. } => {
+                for arg in args {
+                    Self::collect_expr_diagnostics(arg, diagnostics);
+                }
+            }
+            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+                if let Some(op) = operand {
+                    Self::collect_expr_diagnostics(op, diagnostics);
+                }
+                for clause in when_clauses {
+                    Self::collect_expr_diagnostics(&clause.condition, diagnostics);
+                    Self::collect_expr_diagnostics(&clause.result, diagnostics);
+                }
+                if let Some(else_e) = else_expr {
+                    Self::collect_expr_diagnostics(else_e, diagnostics);
+                }
+            }
+            ExprHir::Between { expr: inner, low, high, .. } => {
+                Self::collect_expr_diagnostics(inner, diagnostics);
+                Self::collect_expr_diagnostics(low, diagnostics);
+                Self::collect_expr_diagnostics(high, diagnostics);
+            }
+            ExprHir::Like { expr: inner, pattern, escape, .. } => {
+                Self::collect_expr_diagnostics(inner, diagnostics);
+                Self::collect_expr_diagnostics(pattern, diagnostics);
+                if let Some(esc) = escape {
+                    Self::collect_expr_diagnostics(esc, diagnostics);
+                }
+            }
+            ExprHir::IsNull { expr: inner, .. } => {
+                Self::collect_expr_diagnostics(inner, diagnostics);
+            }
+            ExprHir::Tuple { elements, .. } => {
+                for elem in elements {
+                    Self::collect_expr_diagnostics(elem, diagnostics);
+                }
+            }
+            ExprHir::ColumnRef { .. }
+            | ExprHir::Literal { .. }
+            | ExprHir::Parameter { .. }
+            | ExprHir::Missing { .. } => {}
+        }
     }
 
     /// Create an empty package (for error cases).

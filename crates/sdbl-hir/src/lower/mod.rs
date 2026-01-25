@@ -110,12 +110,15 @@ pub fn lower_sdbl_to_hir(
             continue;
         };
 
+        // Determine if there are UNION siblings
+        let has_union_siblings = subquery.union_clauses().next().is_some();
+
         // Lower main query first
         if let Some(main_query) = subquery.main_query() {
             // Push scope frame for main query (clears FROM/JOIN scope, keeps temp tables)
             ctx.scope.push_frame();
 
-            let query_hir = ctx.lower_query(&main_query, false);
+            let query_hir = ctx.lower_query(&main_query, false, has_union_siblings);
             // IMPORTANT: Use select_query.text_range() to include outer SELECT clause
             // when query has INTO clause (e.g., SELECT ... ПОМЕСТИТЬ ... ИЗ (subquery))
             let range = select_query.syntax().text_range();
@@ -202,7 +205,8 @@ pub fn lower_sdbl_to_hir(
                 // Push scope frame for UNION query (clears FROM/JOIN scope, keeps temp tables)
                 ctx.scope.push_frame();
 
-                let query_hir = ctx.lower_query(&union_query, true);
+                // UNION queries always have union siblings (by definition)
+                let query_hir = ctx.lower_query(&union_query, true, true);
                 let range = union_query.syntax().text_range();
 
                 tracing::debug!(
@@ -261,10 +265,12 @@ impl LoweringContext<'_> {
     /// # Arguments
     /// * `query` - The query AST node to lower
     /// * `is_union` - Whether this query is part of a UNION clause (skips alias diagnostics)
+    /// * `has_union_siblings` - Whether this query has UNION siblings (for SelectTopWithoutOrderBy)
     pub(crate) fn lower_query(
         &mut self,
         query: &syntax::ast::SdblQuery,
         is_union: bool,
+        has_union_siblings: bool,
     ) -> SdblHir {
         // Record SELECT keyword
         self.record_keyword_by_text(
@@ -293,7 +299,7 @@ impl LoweringContext<'_> {
         }
 
         // 4. Extract DISTINCT and TOP from limitations
-        let (distinct, top) = self.extract_limitations(query.syntax());
+        let (distinct, top, top_range) = self.extract_limitations(query.syntax());
 
         // 5. Lower SELECT clause (uses scope for name resolution)
         // Skip alias diagnostics for UNION queries (check for errors is done per-field)
@@ -310,6 +316,26 @@ impl LoweringContext<'_> {
 
         // 9. Lower INTO clause (temporary table)
         let into_table = self.lower_into_clause(query.syntax());
+
+        // 10. Check SELECT TOP without ORDER BY
+        if let (Some(top_value), Some(range)) = (top, top_range) {
+            let has_order_by = order_by.is_some();
+            let has_where = where_clause.is_some();
+
+            // Always emit diagnostic if:
+            // - This is part of UNION (TOP in UNION is always problematic)
+            // - OR there's no ORDER BY clause
+            if has_union_siblings || !has_order_by {
+                self.diagnostics.push(
+                    crate::diagnostics::SdblDiagnostic::SelectTopWithoutOrderBy {
+                        top_value,
+                        in_union: has_union_siblings,
+                        has_where,
+                        range,
+                    },
+                );
+            }
+        }
 
         let range = query.syntax().text_range();
 
@@ -329,16 +355,16 @@ impl LoweringContext<'_> {
             range,
         };
 
-        // 10. Check JOINs for unprotected fields (after complete HIR built)
+        // 11. Check JOINs for unprotected fields (after complete HIR built)
         self.check_joins_for_unprotected_fields(&hir);
 
-        // 11. Check SELECT fields for missing AS keyword (after complete HIR built)
+        // 12. Check SELECT fields for missing AS keyword (after complete HIR built)
         self.check_alias_without_as_keyword(&hir, is_union);
 
-        // 12. Check for nested field dereference by dot (N+1 query problem)
+        // 13. Check for nested field dereference by dot (N+1 query problem)
         self.check_nested_fields_by_dot(&hir);
 
-        // 13. Check for redundant .Ссылка (Reference) field access
+        // 14. Check for redundant .Ссылка (Reference) field access
         self.check_ref_overuse(&hir);
 
         // Merge diagnostics collected during post-lowering checks

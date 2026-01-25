@@ -20,6 +20,60 @@ fn is_column_ref_pattern(expr: &ExprHir) -> bool {
 }
 
 impl<'a> LoweringContext<'a> {
+    /// Lower a subquery in IN expression context.
+    ///
+    /// This properly lowers subqueries in WHERE ... IN (SELECT ...) to collect
+    /// diagnostics like SelectTopWithoutOrderBy.
+    fn lower_in_subquery(&mut self, node: &syntax::SyntaxNode) -> SdblHir {
+        use syntax::ast::AstNode;
+
+        // Try to find SDBL_SUBQUERY inside the expression
+        let subquery_node = if node.kind() == syntax::SyntaxKind::SDBL_SUBQUERY {
+            Some(node.clone())
+        } else {
+            node.descendants().find(|n| n.kind() == syntax::SyntaxKind::SDBL_SUBQUERY)
+        };
+
+        if let Some(sq_node) = subquery_node {
+            if let Some(subquery) = syntax::ast::SdblSubquery::cast(sq_node) {
+                let queries: Vec<_> = subquery.queries().collect();
+                let has_union_siblings = queries.len() > 1;
+
+                // Lower first query as main, collect diagnostics
+                if let Some(main_query) = queries.first() {
+                    self.scope.push_frame();
+                    let mut main_hir = self.lower_query(main_query, false, has_union_siblings);
+                    self.scope.pop_frame();
+
+                    // Lower remaining queries as UNION queries
+                    for union_query in queries.iter().skip(1) {
+                        self.scope.push_frame();
+                        let union_hir = self.lower_query(union_query, true, true);
+                        self.scope.pop_frame();
+                        main_hir.diagnostics.extend(union_hir.diagnostics);
+                    }
+
+                    return main_hir;
+                }
+            }
+        }
+
+        // Fallback: return empty HIR if we can't parse the subquery
+        SdblHir {
+            select: SelectHir { fields: Vec::new(), distinct: false, top: None },
+            into_table: None,
+            from: Vec::new(),
+            joins: Vec::new(),
+            where_clause: None,
+            group_by: None,
+            having: None,
+            order_by: None,
+            unions: Vec::new(),
+            diagnostics: Vec::new(),
+            range: node.text_range(),
+        }
+    }
+
     pub(super) fn lower_is_null_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         // Get the child expression (first child)
         let expr = node
@@ -117,21 +171,9 @@ impl<'a> LoweringContext<'a> {
                     | syntax::SyntaxKind::SDBL_SELECT_QUERY
                     | syntax::SyntaxKind::SDBL_SUBQUERY
             ) {
-                // TODO: Lower subquery properly using typed AST
-                // For now, create empty placeholder HIR
-                InValues::Subquery(Box::new(SdblHir {
-                    select: SelectHir { fields: Vec::new(), distinct: false, top: None },
-                    into_table: None,
-                    from: Vec::new(),
-                    joins: Vec::new(),
-                    where_clause: None,
-                    group_by: None,
-                    having: None,
-                    order_by: None,
-                    unions: Vec::new(),
-                    diagnostics: Vec::new(),
-                    range: child.text_range(),
-                }))
+                // Lower subquery properly to collect diagnostics
+                let subquery_hir = self.lower_in_subquery(&child);
+                InValues::Subquery(Box::new(subquery_hir))
             } else {
                 // Value list - collect all remaining expression children
                 let mut values = vec![self.lower_expr(&child)];

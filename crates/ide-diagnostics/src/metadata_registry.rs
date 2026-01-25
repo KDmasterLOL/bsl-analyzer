@@ -184,6 +184,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryParseError => Some(&QUERY_PARSE_ERROR),
         DiagnosticCode::QueryToMissingMetadata => Some(&QUERY_TO_MISSING_METADATA),
         DiagnosticCode::RefOveruse => Some(&REF_OVERUSE),
+        DiagnosticCode::SelectTopWithoutOrderBy => Some(&SELECT_TOP_WITHOUT_ORDER_BY),
         DiagnosticCode::UnionAll => Some(&UNION_ALL),
         DiagnosticCode::UsingLikeInQuery => Some(&USING_LIKE_IN_QUERY),
         DiagnosticCode::VirtualTableCallWithoutParameters => {
@@ -3295,6 +3296,29 @@ const REF_OVERUSE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Sql, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// SelectTopWithoutOrderBy diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   minutesToFix = 5,
+///   tags = { STANDARD, SQL, SUSPICIOUS },
+///   scope = BSL
+/// )
+const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Suspicious],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

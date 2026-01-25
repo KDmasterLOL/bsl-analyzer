@@ -133,6 +133,7 @@ pub mod reserved_parameter_names;
 pub mod rewrite_method_parameter;
 pub mod same_metadata_object_and_child_names;
 pub mod scheduled_job_handler;
+pub mod select_top_without_order_by;
 pub mod self_assign;
 pub mod self_insertion;
 pub mod semicolon_presence;

@@ -414,6 +414,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::query_to_missing_metadata::check,
     ));
     diagnostics.extend(run_diagnostic("RefOveruse", ctx, handlers::ref_overuse::check));
+    diagnostics.extend(run_diagnostic(
+        "SelectTopWithoutOrderBy",
+        ctx,
+        handlers::select_top_without_order_by::check,
+    ));
     diagnostics.extend(run_diagnostic("UnionAll", ctx, handlers::union_all::check));
     diagnostics.extend(run_diagnostic(
         "UsingLikeInQuery",
