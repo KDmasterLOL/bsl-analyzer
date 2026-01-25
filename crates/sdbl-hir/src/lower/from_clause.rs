@@ -199,6 +199,7 @@ impl<'a> LoweringContext<'a> {
         // Lower virtual table parameters if this is a virtual table
         // Virtual table params are expression children inside SDBL_TABLE_REF after L_PAREN
         // Example: РегистрНакопления.Расчеты.Обороты(&Начало, &Конец, , (A.B, C.D) В ...)
+        // Include ERROR nodes for empty parameter slots (e.g., "Остатки(, )")
         let virtual_table_params = if is_virtual {
             tracing::debug!(table_name = %full_name, "Lowering virtual table parameters");
 
@@ -221,6 +222,7 @@ impl<'a> LoweringContext<'a> {
                             | syntax::SyntaxKind::SDBL_PAREN_EXPR
                             | syntax::SyntaxKind::SDBL_TUPLE_EXPR
                             | syntax::SyntaxKind::SDBL_IN_EXPR
+                            | syntax::SyntaxKind::ERROR
                     )
                 })
                 .map(|expr| self.lower_expr(&expr))
@@ -228,6 +230,11 @@ impl<'a> LoweringContext<'a> {
         } else {
             Vec::new()
         };
+
+        // Check for VirtualTableCallWithoutParameters diagnostic
+        if is_virtual {
+            self.check_virtual_table_params(&full_name, &virtual_table_params, table_ref.syntax());
+        }
 
         TableRef {
             parts: parts.iter().map(|s| Name::from(s.as_str())).collect(),
@@ -778,5 +785,68 @@ impl<'a> LoweringContext<'a> {
             // For all other types, use standard conversion
             _ => SdblType::from_attribute_type(attr_type),
         }
+    }
+
+    /// Check virtual table parameters and emit diagnostic if missing.
+    ///
+    /// Errors on:
+    /// - Virtual table without parentheses: `СрезПоследних`
+    /// - Virtual table with empty parentheses: `Остатки()`
+    /// - Virtual table where all params after first (period) are empty: `Остатки(&Период, )`
+    ///
+    /// OK:
+    /// - `Остатки(Склад = &Параметр)` - has condition
+    /// - `Остатки(, Склад = &Параметр)` - empty period, but has condition
+    /// - `СрезПоследних(&Период)` - period param provided
+    fn check_virtual_table_params(
+        &mut self,
+        table_name: &str,
+        params: &[crate::hir::ExprHir],
+        table_ref_node: &syntax::SyntaxNode,
+    ) {
+        use crate::hir::ExprHir;
+
+        // Check if parentheses are present by looking for L_PAREN token
+        let has_parens = table_ref_node
+            .children_with_tokens()
+            .any(|child| matches!(child, syntax::NodeOrToken::Token(t) if t.kind() == syntax::SyntaxKind::L_PAREN));
+
+        let range = table_ref_node.text_range();
+
+        // No parentheses at all - error
+        if !has_parens {
+            self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
+                table_name: table_name.to_string(),
+                expected_params: vec!["Период".to_string(), "Условие".to_string()],
+                range,
+            });
+            return;
+        }
+
+        // Empty parentheses or all params empty - error
+        if params.is_empty() {
+            self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
+                table_name: table_name.to_string(),
+                expected_params: vec!["Период".to_string(), "Условие".to_string()],
+                range,
+            });
+            return;
+        }
+
+        // Java logic: skip first param (period), check remaining
+        // If there's more than one slot, at least one after first must be non-empty
+        if params.len() > 1 {
+            let has_non_empty_after_first =
+                params[1..].iter().any(|p| !matches!(p, ExprHir::Missing { .. }));
+
+            if !has_non_empty_after_first {
+                self.diagnostics.push(SdblDiagnostic::VirtualTableCallWithoutParameters {
+                    table_name: table_name.to_string(),
+                    expected_params: vec!["Условие".to_string()],
+                    range,
+                });
+            }
+        }
+        // Single param is OK for СрезПоследних(&Период)
     }
 }

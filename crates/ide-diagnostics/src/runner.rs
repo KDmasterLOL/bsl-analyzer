@@ -394,6 +394,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::using_like_in_query::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "VirtualTableCallWithoutParameters",
+        ctx,
+        handlers::virtual_table_call_without_parameters::check,
+    ));
 
     diagnostics
 }

@@ -181,6 +181,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::RefOveruse => Some(&REF_OVERUSE),
         DiagnosticCode::UnionAll => Some(&UNION_ALL),
         DiagnosticCode::UsingLikeInQuery => Some(&USING_LIKE_IN_QUERY),
+        DiagnosticCode::VirtualTableCallWithoutParameters => {
+            Some(&VIRTUAL_TABLE_CALL_WITHOUT_PARAMETERS)
+        }
         DiagnosticCode::ScheduledJobHandler => Some(&SCHEDULED_JOB_HANDLER),
         DiagnosticCode::ServerCallsInFormEvents => Some(&SERVER_CALLS_IN_FORM_EVENTS),
         DiagnosticCode::ServerSideExportFormMethod => Some(&SERVER_SIDE_EXPORT_FORM_METHOD),
@@ -3095,6 +3098,29 @@ const USING_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: false,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Sql, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// VirtualTableCallWithoutParameters diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = MAJOR,
+///   minutesToFix = 5,
+///   tags = { SQL, STANDARD, PERFORMANCE },
+///   scope = BSL
+/// )
+const VIRTUAL_TABLE_CALL_WITHOUT_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Standard, MetadataTag::Performance],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

@@ -180,6 +180,7 @@ pub enum DiagnosticCode {
     RefOveruse,
     UnionAll,
     UsingLikeInQuery,
+    VirtualTableCallWithoutParameters,
 }
 
 impl DiagnosticCode {
