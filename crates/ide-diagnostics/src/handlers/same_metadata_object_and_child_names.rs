@@ -164,6 +164,7 @@ mod tests {
             mdo: Some(Arc::new(mdo)),
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         }
     }
@@ -176,6 +177,7 @@ mod tests {
             mdo: None,
             register: Some(Arc::new(register)),
             http_service: None,
+            web_service: None,
             form: None,
         }
     }
@@ -321,6 +323,7 @@ mod tests {
             mdo: Some(Arc::new(catalog)),
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 

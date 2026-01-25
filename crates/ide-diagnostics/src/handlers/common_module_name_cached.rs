@@ -72,6 +72,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 
@@ -95,6 +96,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 
@@ -118,6 +120,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 

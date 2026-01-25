@@ -221,6 +221,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
         DiagnosticCode::WrongDataPathForFormElements => Some(&WRONG_DATA_PATH_FOR_FORM_ELEMENTS),
         DiagnosticCode::WrongHttpServiceHandler => Some(&WRONG_HTTP_SERVICE_HANDLER),
+        DiagnosticCode::WrongWebServiceHandler => Some(&WRONG_WEB_SERVICE_HANDLER),
         DiagnosticCode::WrongUseFunctionProceedWithCall => {
             Some(&WRONG_USE_FUNCTION_PROCEED_WITH_CALL)
         }
@@ -2398,6 +2399,28 @@ const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
     modules: &[bsl_metadata::ModuleType::HTTPServiceModule],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious, MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// WrongWebServiceHandler diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = CRITICAL,
+///   minutesToFix = 10,
+///   tags = { SUSPICIOUS, ERROR }
+/// )
+const WRONG_WEB_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::WebServiceModule],
     minutes_to_fix: 10,
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,

@@ -170,6 +170,7 @@ impl AnalysisProvider for StreamingProvider {
                             register: None,
                             form: None,
                             http_service: None,
+                            web_service: None,
                         });
                     }
                 }

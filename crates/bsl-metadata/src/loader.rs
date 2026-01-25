@@ -115,6 +115,9 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     // Load HTTPServices
     load_http_services(&path.join("HTTPServices"), &mut config)?;
 
+    // Load WebServices (SOAP)
+    load_web_services(&path.join("WebServices"), &mut config)?;
+
     tracing::info!(
         common_modules = config.common_modules().len(),
         metadata_objects = config.metadata_objects().len(),
@@ -124,6 +127,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
         roles = config.roles().len(),
         defined_types = config.defined_types().len(),
         http_services = config.http_services().len(),
+        web_services = config.web_services().len(),
         "configuration loaded"
     );
 
@@ -847,6 +851,49 @@ fn load_http_services(dir: &Path, config: &mut Configuration) -> Result<()> {
                     );
 
                     config.add_http_service(http_service);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load WebServices (SOAP) from directory
+///
+/// Designer format structure:
+/// - XML: `WebServices/<Name>.xml` (next to folder)
+/// - Code: `WebServices/<Name>/Ext/Module.bsl` (inside Ext/)
+fn load_web_services(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_web_services", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let service_dir = entry.path();
+
+        // Look for directories (each WebService is a folder)
+        if service_dir.is_dir() {
+            if let Some(name) = service_dir.file_name().and_then(|n| n.to_str()) {
+                // XML is next to the folder
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let web_service = xml_parser::parse_web_service_xml(&xml, name)?;
+
+                    tracing::debug!(
+                        service_name = %web_service.name(),
+                        namespace = %web_service.namespace(),
+                        operations = web_service.operations().len(),
+                        "loaded web service"
+                    );
+
+                    config.add_web_service(web_service);
                 }
             }
         }

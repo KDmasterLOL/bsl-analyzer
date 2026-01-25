@@ -173,3 +173,4 @@ pub mod wrong_data_path_for_form_elements;
 pub mod wrong_http_service_handler;
 pub mod wrong_use_function_proceed_with_call;
 pub mod wrong_use_of_rollback_transaction_method;
+pub mod wrong_web_service_handler;

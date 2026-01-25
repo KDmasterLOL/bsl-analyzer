@@ -797,6 +797,32 @@ pub(crate) fn find_http_service_by_path(
     configuration.find_http_service(name).map(|hs| Arc::new(hs.clone()))
 }
 
+/// Find Web service (SOAP) metadata by file path.
+///
+/// Given a WebServiceModule path like:
+/// `WebServices/WebСервис1/Ext/Module.bsl`
+///
+/// Extracts the service name and looks it up in configuration.
+pub(crate) fn find_web_service_by_path(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<Arc<bsl_metadata::WebService>> {
+    let file_str = file_path.to_string_lossy();
+
+    // Extract Web service name from path: WebServices/<Name>/Ext/Module.bsl
+    let parts: Vec<&str> = file_str.split('/').collect();
+    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
+    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
+
+    // Find WebServices in path
+    let ws_idx = parts.iter().position(|&p| p == "WebServices")?;
+
+    // Name should be the next element after WebServices
+    let name = parts.get(ws_idx + 1)?;
+
+    configuration.find_web_service(name).map(|ws| Arc::new(ws.clone()))
+}
+
 #[salsa::db]
 impl metadata::MetadataDb for RootDatabaseImpl {}
 

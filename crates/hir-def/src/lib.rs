@@ -602,6 +602,12 @@ pub struct ModuleMetadata {
     /// Contains URL templates and methods for WrongHttpServiceHandler diagnostic.
     /// Arc-wrapped for efficient sharing.
     pub http_service: Option<Arc<bsl_metadata::HTTPService>>,
+
+    /// Web service (SOAP) metadata if this module is a WebServiceModule.
+    ///
+    /// Contains operations for WrongWebServiceHandler diagnostic.
+    /// Arc-wrapped for efficient sharing.
+    pub web_service: Option<Arc<bsl_metadata::WebService>>,
 }
 
 impl ModuleMetadata {
@@ -617,6 +623,7 @@ impl ModuleMetadata {
             register: None,
             form: None,
             http_service: None,
+            web_service: None,
         }
     }
 }

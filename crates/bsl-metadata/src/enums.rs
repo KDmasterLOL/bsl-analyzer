@@ -82,6 +82,9 @@ pub enum ModuleType {
     /// HTTP service module
     #[serde(rename = "HTTPServiceModule")]
     HTTPServiceModule,
+    /// Web service module (SOAP)
+    #[serde(rename = "WEBServiceModule")]
+    WebServiceModule,
     /// Unknown module type
     #[serde(other)]
     #[default]

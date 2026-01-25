@@ -133,6 +133,7 @@ mod tests {
             register: None,
             http_service: Some(Arc::new(http_service)),
             form: None,
+            web_service: None,
         }
     }
 
@@ -260,6 +261,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 

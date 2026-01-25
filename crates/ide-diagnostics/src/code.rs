@@ -137,6 +137,7 @@ pub enum DiagnosticCode {
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     WrongHttpServiceHandler,
+    WrongWebServiceHandler,
     WrongDataPathForFormElements,
     PublicMethodsDescription,
     CachedPublic,

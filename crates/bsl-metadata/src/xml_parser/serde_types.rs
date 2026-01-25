@@ -793,3 +793,91 @@ pub(crate) struct HTTPMethodProperties {
     #[serde(rename = "Handler", default)]
     pub handler: String,
 }
+
+// ============================================================================
+// Web Service (SOAP)
+// ============================================================================
+
+/// Root XML structure for WebService (MetaDataObject wrapper)
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceRoot {
+    #[serde(rename = "WebService")]
+    pub web_service: WebServiceXml,
+}
+
+/// WebService XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: WebServiceProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    pub child_objects: Option<WebServiceChildObjects>,
+}
+
+/// WebService Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "Namespace", default)]
+    pub namespace: String,
+}
+
+/// WebService ChildObjects (Operations)
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceChildObjects {
+    #[serde(rename = "Operation", default)]
+    pub operations: Vec<WebServiceOperationXml>,
+}
+
+/// WebService Operation XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceOperationXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: WebServiceOperationProperties,
+
+    #[serde(rename = "ChildObjects", default)]
+    pub child_objects: Option<WebServiceOperationChildObjects>,
+}
+
+/// WebService Operation Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceOperationProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(rename = "ProcedureName", default)]
+    pub procedure_name: String,
+}
+
+/// WebService Operation ChildObjects (Parameters)
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceOperationChildObjects {
+    #[serde(rename = "Parameter", default)]
+    pub parameters: Vec<WebServiceParameterXml>,
+}
+
+/// WebService Parameter XML structure
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceParameterXml {
+    #[serde(rename = "@uuid")]
+    pub _uuid: String,
+
+    #[serde(rename = "Properties")]
+    pub properties: WebServiceParameterProperties,
+}
+
+/// WebService Parameter Properties
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebServiceParameterProperties {
+    #[serde(rename = "Name")]
+    pub name: String,
+}

@@ -12,6 +12,7 @@ use crate::register::Register;
 use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
 use crate::traits::{MdObject, Module};
+use crate::web_service::WebService;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -62,6 +63,10 @@ pub struct Configuration {
     #[serde(rename = "httpServices", default)]
     http_services: Vec<HTTPService>,
 
+    /// Web services (Web-сервисы / SOAP)
+    #[serde(rename = "webServices", default)]
+    web_services: Vec<WebService>,
+
     /// Cache: URI -> Module index mapping (not serialized)
     #[serde(skip)]
     uri_to_module: HashMap<String, usize>,
@@ -94,6 +99,10 @@ pub struct Configuration {
     #[serde(skip)]
     name_to_http_service: HashMap<String, usize>,
 
+    /// Cache: Name -> WebService index mapping (not serialized)
+    #[serde(skip)]
+    name_to_web_service: HashMap<String, usize>,
+
     /// Use managed forms in ordinary application
     #[serde(rename = "useManagedFormInOrdinaryApplication", default)]
     use_managed_form_in_ordinary_application: bool,
@@ -116,6 +125,7 @@ impl PartialEq for Configuration {
             && self.scheduled_jobs == other.scheduled_jobs
             && self.roles == other.roles
             && self.http_services == other.http_services
+            && self.web_services == other.web_services
             && self.use_managed_form_in_ordinary_application
                 == other.use_managed_form_in_ordinary_application
             && self.use_ordinary_form_in_managed_application
@@ -144,9 +154,11 @@ impl Configuration {
             name_to_scheduled_job: HashMap::new(),
             name_to_role: HashMap::new(),
             name_to_http_service: HashMap::new(),
+            name_to_web_service: HashMap::new(),
             use_managed_form_in_ordinary_application: false,
             use_ordinary_form_in_managed_application: false,
             http_services: Vec::new(),
+            web_services: Vec::new(),
         }
     }
 
@@ -176,6 +188,7 @@ impl Configuration {
         self.name_to_scheduled_job.clear();
         self.name_to_role.clear();
         self.name_to_http_service.clear();
+        self.name_to_web_service.clear();
 
         for (idx, module) in self.common_modules.iter().enumerate() {
             if let Some(uri) = module.uri() {
@@ -206,6 +219,10 @@ impl Configuration {
 
         for (idx, http_service) in self.http_services.iter().enumerate() {
             self.name_to_http_service.insert(http_service.name().to_lowercase(), idx);
+        }
+
+        for (idx, web_service) in self.web_services.iter().enumerate() {
+            self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
         }
     }
 
@@ -470,6 +487,24 @@ impl Configuration {
         let idx = self.http_services.len();
         self.name_to_http_service.insert(http_service.name().to_lowercase(), idx);
         self.http_services.push(http_service);
+    }
+
+    /// Get all web services (SOAP)
+    pub fn web_services(&self) -> &[WebService] {
+        &self.web_services
+    }
+
+    /// Find web service by name (case-insensitive)
+    pub fn find_web_service(&self, name: &str) -> Option<&WebService> {
+        let name_lower = name.to_lowercase();
+        self.name_to_web_service.get(&name_lower).and_then(|&idx| self.web_services.get(idx))
+    }
+
+    /// Add web service
+    pub(crate) fn add_web_service(&mut self, web_service: WebService) {
+        let idx = self.web_services.len();
+        self.name_to_web_service.insert(web_service.name().to_lowercase(), idx);
+        self.web_services.push(web_service);
     }
 }
 

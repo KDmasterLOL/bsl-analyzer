@@ -108,6 +108,7 @@ pub mod role;
 pub mod scheduled_job;
 pub mod tabular_section;
 pub mod traits;
+pub mod web_service;
 pub mod xml_parser;
 
 pub use common_module::{CommonModule, CommonModuleBuilder};
@@ -134,3 +135,7 @@ pub use role::{Role, RoleData};
 pub use scheduled_job::{ScheduledJob, ScheduledJobHandler};
 pub use tabular_section::{TabularSection, TabularSectionAttribute};
 pub use traits::{MdObject, Module};
+pub use web_service::{
+    WebService, WebServiceBuilder, WebServiceOperation, WebServiceOperationBuilder,
+    WebServiceParameter,
+};

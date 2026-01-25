@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../fixtures/SeveralCompilerDirectivesDiagnostic.bsl");
+        let code = include_str!("../../test_data/SeveralCompilerDirectivesDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, super::check);
 
         assert_eq!(diagnostics.len(), 5);

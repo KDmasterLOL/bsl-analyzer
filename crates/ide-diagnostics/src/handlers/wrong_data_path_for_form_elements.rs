@@ -96,6 +96,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: Some(Arc::new(form)),
         }
     }
@@ -193,6 +194,7 @@ mod tests {
             mdo: None,
             register: None,
             http_service: None,
+            web_service: None,
             form: None,
         };
 

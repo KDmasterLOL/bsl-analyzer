@@ -17,6 +17,7 @@ mod scheduled_job;
 mod serde_types;
 mod standard_attributes;
 mod type_parser;
+mod web_service;
 
 // Re-export public API
 pub use catalog::{
@@ -37,6 +38,7 @@ pub use register::{
 };
 pub use role::{parse_rights_xml, parse_role_xml};
 pub use scheduled_job::parse_scheduled_job_xml;
+pub use web_service::parse_web_service_xml;
 
 #[cfg(test)]
 mod tests {

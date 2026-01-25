@@ -76,6 +76,7 @@ pub fn module_metadata_query<'db>(
                 register: None,
                 form: None,
                 http_service: None,
+                web_service: None,
             });
         }
     };
@@ -104,6 +105,7 @@ pub fn module_metadata_query<'db>(
     let mut register = None;
     let mut form = None;
     let mut http_service = None;
+    let mut web_service = None;
 
     // Load metadata based on module type
     if let Some(config) = &configuration {
@@ -151,6 +153,10 @@ pub fn module_metadata_query<'db>(
                 // Find HTTP service by path
                 http_service = crate::find_http_service_by_path(config, &file_path);
             }
+            bsl_metadata::ModuleType::WebServiceModule => {
+                // Find Web service by path
+                web_service = crate::find_web_service_by_path(config, &file_path);
+            }
             _ => {}
         }
     }
@@ -168,6 +174,7 @@ pub fn module_metadata_query<'db>(
         register,
         form,
         http_service,
+        web_service,
     })
 }
 

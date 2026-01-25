@@ -155,6 +155,11 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         return Some(bsl_metadata::ModuleType::HTTPServiceModule);
     }
 
+    // WebServices/<Name>/Ext/Module.bsl
+    if parts.len() >= 4 && parts[0] == "WebServices" {
+        return Some(bsl_metadata::ModuleType::WebServiceModule);
+    }
+
     // <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl
     if parts.len() >= 6 && parts[2] == "Commands" && parts[5].ends_with("CommandModule.bsl") {
         return Some(bsl_metadata::ModuleType::CommandModule);
