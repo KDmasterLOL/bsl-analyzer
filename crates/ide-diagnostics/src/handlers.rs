@@ -154,3 +154,4 @@ pub mod unused_local_method;
 pub mod unused_local_variable;
 pub mod usage_write_log_event;
 pub mod useless_for_each;
+pub mod useless_ternary_operator;

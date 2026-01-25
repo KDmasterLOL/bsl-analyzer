@@ -132,6 +132,11 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::unknown_preprocessor_symbol::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UselessTernaryOperator",
+        ctx,
+        handlers::useless_ternary_operator::check,
+    ));
 
     diagnostics
 }
