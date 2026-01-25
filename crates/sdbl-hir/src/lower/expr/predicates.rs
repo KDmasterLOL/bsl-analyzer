@@ -6,6 +6,19 @@ use crate::types::SdblType;
 
 use crate::lower::context::LoweringContext;
 
+/// Check if expression is a column reference (not allowed as LIKE pattern).
+///
+/// Returns true if the expression is:
+/// - Direct column reference (ColumnRef)
+/// - Parenthesized column reference
+fn is_column_ref_pattern(expr: &ExprHir) -> bool {
+    match expr {
+        ExprHir::ColumnRef { .. } => true,
+        ExprHir::UnaryOp { expr: inner, .. } => is_column_ref_pattern(inner),
+        _ => false,
+    }
+}
+
 impl<'a> LoweringContext<'a> {
     pub(super) fn lower_is_null_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         // Get the child expression (first child)
@@ -347,6 +360,14 @@ impl<'a> LoweringContext<'a> {
 
         self.diagnostics
             .push(crate::diagnostics::SdblDiagnostic::UsingLikeInQuery { range: tight_range });
+
+        // Check if pattern is a column reference - this is incorrect usage
+        // Pattern must be: string literal, parameter, or function call
+        if is_column_ref_pattern(&pattern) {
+            self.diagnostics.push(crate::diagnostics::SdblDiagnostic::IncorrectUseLikeInQuery {
+                range: tight_range,
+            });
+        }
 
         ExprHir::Like {
             expr: Box::new(expr),

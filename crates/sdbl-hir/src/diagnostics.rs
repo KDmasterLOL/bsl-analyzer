@@ -225,6 +225,21 @@ pub enum SdblDiagnostic {
         /// Source range.
         range: TextRange,
     },
+
+    /// Incorrect use of LIKE operator - pattern must be a literal or parameter.
+    ///
+    /// BSL-LS diagnostic code: IncorrectUseLikeInQuery
+    ///
+    /// The pattern (right operand) of LIKE/ПОДОБНО must be:
+    /// - String literal ("pattern")
+    /// - Query parameter (&Parameter)
+    /// - Function call (SUBSTRING, etc.)
+    ///
+    /// Using column references causes unpredictable results on different DBMS.
+    IncorrectUseLikeInQuery {
+        /// Source range.
+        range: TextRange,
+    },
 }
 
 /// Reference to an unprotected field from JOIN.
@@ -360,6 +375,9 @@ impl SdblDiagnostic {
             Self::UsingLikeInQuery { .. } => {
                 "Измените выражение, чтобы не использовать 'ПОДОБНО'".to_string()
             }
+            Self::IncorrectUseLikeInQuery { .. } => {
+                "Нужно исправить выражение в соответствии со стандартом".to_string()
+            }
         }
     }
 
@@ -387,6 +405,7 @@ impl SdblDiagnostic {
             Self::RefOveruse { range } => *range,
             Self::UnionWithoutAll { range } => *range,
             Self::UsingLikeInQuery { range } => *range,
+            Self::IncorrectUseLikeInQuery { range } => *range,
         }
     }
 
@@ -417,6 +436,7 @@ impl SdblDiagnostic {
             Self::RefOveruse { .. } => false,      // Warning - performance issue
             Self::UnionWithoutAll { .. } => false, // Warning - performance issue
             Self::UsingLikeInQuery { .. } => false, // Warning - unpredictable results
+            Self::IncorrectUseLikeInQuery { .. } => true, // Error - standard violation
         }
     }
 }

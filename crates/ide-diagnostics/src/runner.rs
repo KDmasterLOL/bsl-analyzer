@@ -374,6 +374,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::full_outer_join_query::check,
     ));
     diagnostics.extend(run_diagnostic(
+        "IncorrectUseLikeInQuery",
+        ctx,
+        handlers::incorrect_use_like_in_query::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "JoinWithSubQuery",
         ctx,
         handlers::join_with_sub_query::check,

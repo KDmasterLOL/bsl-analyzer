@@ -178,6 +178,7 @@ pub enum DiagnosticCode {
     AssignAliasFieldsInQuery,
     FieldsFromJoinsWithoutIsNull,
     FullOuterJoinQuery,
+    IncorrectUseLikeInQuery,
     JoinWithSubQuery,
     LogicalOrInJoinQuerySection,
     LogicalOrInTheWhereSectionOfQuery,

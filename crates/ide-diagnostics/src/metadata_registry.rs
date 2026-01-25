@@ -163,6 +163,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::CommonModuleNameServerCall => Some(&COMMON_MODULE_NAME_SERVER_CALL),
         DiagnosticCode::CommonModuleNameWords => Some(&COMMON_MODULE_NAME_WORDS),
         DiagnosticCode::FullOuterJoinQuery => Some(&FULL_OUTER_JOIN_QUERY),
+        DiagnosticCode::IncorrectUseLikeInQuery => Some(&INCORRECT_USE_LIKE_IN_QUERY),
         DiagnosticCode::JoinWithSubQuery => Some(&JOIN_WITH_SUB_QUERY),
         DiagnosticCode::LogicalOrInJoinQuerySection => Some(&LOGICAL_OR_IN_JOIN_QUERY_SECTION),
         DiagnosticCode::LogicalOrInTheWhereSectionOfQuery => {
@@ -2900,6 +2901,29 @@ const FULL_OUTER_JOIN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Sql, MetadataTag::Standard, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// IncorrectUseLikeInQuery diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = MAJOR,
+///   minutesToFix = 10,
+///   tags = { STANDARD, SQL, UNPREDICTABLE },
+///   scope = BSL
+/// )
+const INCORRECT_USE_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Unpredictable],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
