@@ -1,13 +1,15 @@
-//! Catalog, Document, BusinessProcess, ChartOfCharacteristicTypes XML parser
+//! Catalog, Document, BusinessProcess, ChartOfCharacteristicTypes, ChartOfAccounts XML parser
 
+use crate::enums::CodeSeries;
 use crate::error::Result;
 use crate::metadata_object::{Attribute, MdoType, MetadataObject};
 use crate::tabular_section::{TabularSection, TabularSectionAttribute};
 
 use super::helpers::parse_uuid;
 use super::serde_types::{
-    AttributeXml, BusinessProcessRoot, CatalogRoot, ChartOfCharacteristicTypesRoot, DocumentRoot,
-    ExchangePlanRoot, MetadataObjectXml, TabularSectionXml, TaskRoot,
+    AttributeXml, BusinessProcessRoot, CatalogRoot, ChartOfAccountsRoot,
+    ChartOfCharacteristicTypesRoot, DocumentRoot, ExchangePlanRoot, MetadataObjectXml,
+    TabularSectionXml, TaskRoot,
 };
 use super::standard_attributes::{
     add_catalog_standard_attributes, add_information_register_standard_attributes_as_attrs,
@@ -79,6 +81,14 @@ pub fn parse_exchange_plan_xml(xml: &str) -> Result<MetadataObject> {
     parse_metadata_object(root.exchange_plan, MdoType::ExchangePlan)
 }
 
+/// Parse ChartOfAccounts XML from Designer format
+pub fn parse_chart_of_accounts_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_chart_of_accounts_xml").entered();
+
+    let root: ChartOfAccountsRoot = quick_xml::de::from_str(xml)?;
+    parse_metadata_object(root.chart_of_accounts, MdoType::ChartOfAccounts)
+}
+
 /// Internal helper to parse metadata object XML
 fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Result<MetadataObject> {
     let mut attributes = Vec::new();
@@ -124,7 +134,7 @@ fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Resul
         }
     }
 
-    let mut mdo = MetadataObject::new(mdo_type, obj_xml.properties.name);
+    let mut mdo = MetadataObject::new(mdo_type, obj_xml.properties.name.clone());
     for attr in attributes {
         mdo.add_attribute(attr);
     }
@@ -132,15 +142,35 @@ fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Resul
         mdo.add_tabular_section(ts);
     }
 
+    // Set CheckUnique and CodeSeries for relevant object types
+    mdo.set_check_unique(obj_xml.properties.check_unique.into());
+    if let Some(code_series_str) = &obj_xml.properties.code_series {
+        mdo.set_code_series(parse_code_series(code_series_str));
+    }
+
     tracing::debug!(
         mdo_name = %mdo.name,
         mdo_type = ?mdo.mdo_type,
         attributes = mdo.attributes.len(),
         tabular_sections = mdo.tabular_sections.len(),
+        check_unique = mdo.check_unique,
+        code_series = ?mdo.code_series,
         "parsed metadata object"
     );
 
     Ok(mdo)
+}
+
+/// Parse CodeSeries string from XML into enum
+fn parse_code_series(s: &str) -> CodeSeries {
+    match s {
+        "WholeCatalog" | "WholeCharacteristicKind" | "WholeChartOfAccounts" => {
+            CodeSeries::WholeCatalog
+        }
+        "WithinSubordination" => CodeSeries::WithinSubordination,
+        "WithinOwnerSubordination" | "WithinOwner" => CodeSeries::WithinOwnerSubordination,
+        _ => CodeSeries::Unknown,
+    }
 }
 
 /// Parse single attribute from XML

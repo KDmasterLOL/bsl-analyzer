@@ -347,6 +347,13 @@ pub(crate) struct ChartOfCharacteristicTypesRoot {
     pub chart_of_characteristic_types: MetadataObjectXml,
 }
 
+/// Root XML structure for ChartOfAccounts
+#[derive(Debug, Deserialize)]
+pub(crate) struct ChartOfAccountsRoot {
+    #[serde(rename = "ChartOfAccounts")]
+    pub chart_of_accounts: MetadataObjectXml,
+}
+
 /// Root XML structure for Task
 #[derive(Debug, Deserialize)]
 pub(crate) struct TaskRoot {
@@ -469,6 +476,12 @@ pub(crate) struct MetadataObjectProperties {
 
     #[serde(rename = "InformationRegisterPeriodicity", default)]
     pub periodicity: Option<String>,
+
+    #[serde(rename = "CheckUnique", default)]
+    pub check_unique: BoolValue,
+
+    #[serde(rename = "CodeSeries", default)]
+    pub code_series: Option<String>,
 }
 
 /// Owners XML structure

@@ -144,6 +144,8 @@ mod tests {
             children: vec![],
             enum_values: vec![],
             predefined_items: vec![],
+            check_unique: false,
+            code_series: bsl_metadata::CodeSeries::default(),
         };
         config.add_metadata_object(catalog);
 

@@ -145,6 +145,47 @@ impl FormType {
     }
 }
 
+/// Code series mode for Catalogs, ChartOfCharacteristicTypes, ChartOfAccounts
+///
+/// Determines how code uniqueness is enforced across the object hierarchy.
+///
+/// Java equivalent: `com.github._1c_syntax.bsl.mdo.support.CodeSeries`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CodeSeries {
+    /// Codes are unique across the entire catalog/chart
+    /// (WholeCatalog, WholeCharacteristicKind, WholeChartOfAccounts)
+    #[serde(
+        rename = "WholeCatalog",
+        alias = "WholeCharacteristicKind",
+        alias = "WholeChartOfAccounts"
+    )]
+    #[default]
+    WholeCatalog,
+
+    /// Codes are unique within subordination (parent hierarchy)
+    #[serde(rename = "WithinSubordination")]
+    WithinSubordination,
+
+    /// Codes are unique within owner
+    #[serde(rename = "WithinOwnerSubordination", alias = "WithinOwner")]
+    WithinOwnerSubordination,
+
+    /// Unknown code series
+    #[serde(other)]
+    Unknown,
+}
+
+impl CodeSeries {
+    /// Check if code series allows FindByCode to return unique results
+    ///
+    /// Returns `true` only for `WholeCatalog` (and equivalents like
+    /// `WholeCharacteristicKind`, `WholeChartOfAccounts`), which means
+    /// codes are unique across the entire object.
+    pub fn is_whole(&self) -> bool {
+        matches!(self, Self::WholeCatalog)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

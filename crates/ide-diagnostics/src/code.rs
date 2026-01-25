@@ -150,6 +150,7 @@ pub enum DiagnosticCode {
     SetPermissionsForNewObjects,
     SetPrivilegedMode,
     TransferringParametersBetweenClientAndServer,
+    UnsafeFindByCode,
 
     // SDBL Diagnostics
     AssignAliasFieldsInQuery,

@@ -282,6 +282,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         ctx,
         handlers::set_permissions_for_new_objects::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UnsafeFindByCode",
+        ctx,
+        handlers::unsafe_find_by_code::check,
+    ));
 
     diagnostics
 }

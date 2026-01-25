@@ -100,11 +100,7 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
     load_enums(&path.join("Enums"), &mut config)?;
     load_tasks(&path.join("Tasks"), &mut config)?;
-    load_simple_metadata_objects(
-        &path.join("ChartsOfAccounts"),
-        &mut config,
-        MdoType::ChartOfAccounts,
-    )?;
+    load_charts_of_accounts(&path.join("ChartsOfAccounts"), &mut config)?;
     load_simple_metadata_objects(
         &path.join("ChartsOfCalculationTypes"),
         &mut config,
@@ -497,6 +493,44 @@ fn load_charts_of_characteristic_types(dir: &Path, config: &mut Configuration) -
                         attributes = chart.attributes.len(),
                         tabular_sections = chart.tabular_sections.len(),
                         "loaded chart of characteristic types"
+                    );
+
+                    config.add_metadata_object(chart);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load ChartsOfAccounts from directory
+fn load_charts_of_accounts(dir: &Path, config: &mut Configuration) -> Result<()> {
+    let _span = tracing::debug_span!("load_charts_of_accounts", ?dir).entered();
+
+    if !dir.exists() {
+        tracing::debug!("directory does not exist, skipping");
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let chart_dir = entry.path();
+
+        if chart_dir.is_dir() {
+            if let Some(name) = chart_dir.file_name().and_then(|n| n.to_str()) {
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if xml_path.exists() {
+                    let xml = fs::read_to_string(&xml_path)?;
+                    let chart = xml_parser::parse_chart_of_accounts_xml(&xml)?;
+
+                    tracing::debug!(
+                        chart = %name,
+                        attributes = chart.attributes.len(),
+                        check_unique = chart.check_unique,
+                        code_series = ?chart.code_series,
+                        "loaded chart of accounts"
                     );
 
                     config.add_metadata_object(chart);

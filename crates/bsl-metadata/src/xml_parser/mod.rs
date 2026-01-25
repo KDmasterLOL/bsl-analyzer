@@ -19,8 +19,9 @@ mod type_parser;
 
 // Re-export public API
 pub use catalog::{
-    parse_business_process_xml, parse_catalog_xml, parse_chart_of_characteristic_types_xml,
-    parse_document_xml, parse_exchange_plan_xml, parse_task_xml,
+    parse_business_process_xml, parse_catalog_xml, parse_chart_of_accounts_xml,
+    parse_chart_of_characteristic_types_xml, parse_document_xml, parse_exchange_plan_xml,
+    parse_task_xml,
 };
 pub use common_module::parse_common_module_xml;
 pub use constant::parse_constant_xml;

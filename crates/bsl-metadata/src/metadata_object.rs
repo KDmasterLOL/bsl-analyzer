@@ -351,6 +351,12 @@ pub struct MetadataObject {
     /// Predefined items (for Catalog, Document, etc.)
     #[serde(default)]
     pub predefined_items: Vec<PredefinedItem>,
+    /// Check code uniqueness (for Catalog, ChartOfCharacteristicTypes, ChartOfAccounts)
+    #[serde(default)]
+    pub check_unique: bool,
+    /// Code series mode (for Catalog, ChartOfCharacteristicTypes, ChartOfAccounts)
+    #[serde(default)]
+    pub code_series: crate::enums::CodeSeries,
 }
 
 /// Metadata object attribute (custom field).
@@ -548,6 +554,8 @@ impl MetadataObject {
             children: Vec::new(),
             enum_values: Vec::new(),
             predefined_items: Vec::new(),
+            check_unique: false,
+            code_series: crate::enums::CodeSeries::default(),
         }
     }
 
@@ -566,6 +574,8 @@ impl MetadataObject {
             children,
             enum_values: Vec::new(),
             predefined_items: Vec::new(),
+            check_unique: false,
+            code_series: crate::enums::CodeSeries::default(),
         }
     }
 
@@ -585,6 +595,34 @@ impl MetadataObject {
             children: Vec::new(),
             enum_values: Vec::new(),
             predefined_items: Vec::new(),
+            check_unique: false,
+            code_series: crate::enums::CodeSeries::default(),
+        }
+    }
+
+    /// Set check_unique property
+    pub fn set_check_unique(&mut self, value: bool) {
+        self.check_unique = value;
+    }
+
+    /// Set code_series property
+    pub fn set_code_series(&mut self, value: crate::enums::CodeSeries) {
+        self.code_series = value;
+    }
+
+    /// Check if FindByCode is safe for this object
+    ///
+    /// Returns `true` if both conditions are met:
+    /// - check_unique is true
+    /// - code_series is WholeCatalog (or equivalent)
+    ///
+    /// For objects where these properties don't apply, returns `true`.
+    pub fn is_find_by_code_safe(&self) -> bool {
+        match self.mdo_type {
+            MdoType::Catalog | MdoType::ChartOfCharacteristicTypes | MdoType::ChartOfAccounts => {
+                self.check_unique && self.code_series.is_whole()
+            }
+            _ => true,
         }
     }
 

@@ -187,6 +187,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::TransferringParametersBetweenClientAndServer => {
             Some(&TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER)
         }
+        DiagnosticCode::UnsafeFindByCode => Some(&UNSAFE_FIND_BY_CODE),
 
         // Additional diagnostics
         DiagnosticCode::DataExchangeLoading => Some(&DATA_EXCHANGE_LOADING),
@@ -3299,6 +3300,28 @@ const TYPO: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UnsafeFindByCode diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   minutesToFix = 5,
+///   tags = { DESIGN, SUSPICIOUS }
+/// )
+const UNSAFE_FIND_BY_CODE: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Design, MetadataTag::Suspicious],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
