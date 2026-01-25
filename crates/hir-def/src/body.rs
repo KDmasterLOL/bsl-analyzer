@@ -697,6 +697,12 @@ pub enum BodyDiagnostic {
     /// This function can only be called inside extension methods with &Вместо annotation.
     /// Calling it from methods with &До, &После or without extension annotation causes runtime error.
     WrongUseFunctionProceedWithCall { range: TextRange },
+
+    /// Wrong use of RollbackTransaction/ОтменитьТранзакцию method.
+    /// Detects two violation patterns:
+    /// 1. RollbackTransaction outside exception handler
+    /// 2. RollbackTransaction not as first statement in exception handler
+    WrongUseOfRollbackTransactionMethod { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -894,6 +900,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingModalWindows { range, .. } => *range,
             BodyDiagnostic::UsingThisForm { range } => *range,
             BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => *range,
+            BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
         }
     }
 }

@@ -15,8 +15,10 @@ use super::control_flow::{
     is_statement_node,
 };
 use super::diagnostics::{
-    check_commit_transaction_in_try, check_duplicated_code_blocks, extend_range_with_semicolon,
-    is_global_begin_transaction_call, is_global_commit_transaction_call, is_inside_try_body,
+    check_commit_transaction_in_try, check_duplicated_code_blocks,
+    check_rollback_transaction_in_try, extend_range_with_semicolon,
+    is_global_begin_transaction_call, is_global_commit_transaction_call,
+    is_global_rollback_transaction_call, is_inside_try_body,
 };
 use super::expr::{exprs_are_equal, lower_expr_node};
 use super::preproc::{lower_preproc_if, lower_region_stmts, preproc_if_all_branches_terminate};
@@ -466,6 +468,14 @@ pub(super) fn lower_stmt_list_with_unreachable(
             if is_top_level && is_global_commit_transaction_call(&child) {
                 let extended_range = extend_range_with_semicolon(&child, child.text_range());
                 ctx.emit(BodyDiagnostic::CommitTransactionOutsideTryCatch {
+                    range: extended_range,
+                });
+            }
+
+            // WrongUseOfRollbackTransactionMethod: Check for RollbackTransaction outside try-catch
+            if is_top_level && is_global_rollback_transaction_call(&child) {
+                let extended_range = extend_range_with_semicolon(&child, child.text_range());
+                ctx.emit(BodyDiagnostic::WrongUseOfRollbackTransactionMethod {
                     range: extended_range,
                 });
             }
@@ -1036,6 +1046,14 @@ fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     for (commit_node, _violation) in violations {
         let extended_range = extend_range_with_semicolon(&commit_node, commit_node.text_range());
         ctx.emit(BodyDiagnostic::CommitTransactionOutsideTryCatch { range: extended_range });
+    }
+
+    // Check RollbackTransaction placement within this try-catch
+    let rollback_violations = check_rollback_transaction_in_try(node);
+    for rollback_node in rollback_violations {
+        let extended_range =
+            extend_range_with_semicolon(&rollback_node, rollback_node.text_range());
+        ctx.emit(BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range: extended_range });
     }
 
     let body = node

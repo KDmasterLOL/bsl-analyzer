@@ -231,5 +231,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => {
             handlers::wrong_use_function_proceed_with_call::from_hir(*range, ctx)
         }
+        BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => {
+            handlers::wrong_use_of_rollback_transaction_method::from_hir(*range, ctx)
+        }
     }
 }

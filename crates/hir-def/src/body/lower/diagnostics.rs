@@ -499,6 +499,81 @@ fn is_executable_stmt(node: &SyntaxNode) -> bool {
     )
 }
 
+/// Check if a statement is a global RollbackTransaction/ОтменитьТранзакцию call.
+///
+/// Returns true if the statement is a non-qualified call to RollbackTransaction/ОтменитьТранзакцию.
+/// Filters out:
+/// - Non-CALL_STMT nodes
+/// - Qualified calls like `Connector.RollbackTransaction()`
+pub(crate) fn is_global_rollback_transaction_call(node: &SyntaxNode) -> bool {
+    if node.kind() != SyntaxKind::CALL_STMT {
+        return false;
+    }
+
+    if node.descendants().any(|n| n.kind() == SyntaxKind::FIELD_EXPR) {
+        return false;
+    }
+
+    let ident = node
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT);
+
+    let Some(ident) = ident else {
+        return false;
+    };
+
+    is_global_function(ident.text(), "RollbackTransaction")
+}
+
+/// Check RollbackTransaction calls within a TRY_STMT for proper placement.
+///
+/// Returns a list of RollbackTransaction nodes that are NOT properly used:
+/// 1. Outside exception handler (should be in except block)
+/// 2. Not first statement in exception handler (must be first)
+pub(crate) fn check_rollback_transaction_in_try(try_stmt: &SyntaxNode) -> Vec<SyntaxNode> {
+    let mut violations = Vec::new();
+
+    let try_body = try_stmt.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+    let except_clause = try_stmt.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE);
+
+    if let Some(body) = &try_body {
+        for node in body.descendants() {
+            if is_global_rollback_transaction_call(&node) {
+                violations.push(node);
+            }
+        }
+    }
+
+    if let Some(except) = &except_clause {
+        let except_body = except.children().find(|n| n.kind() == SyntaxKind::STMT_LIST);
+
+        if let Some(body) = except_body {
+            let stmts: Vec<_> = body.children().filter(is_executable_stmt).collect();
+            let first_global_call_idx = stmts.iter().position(|s| {
+                s.kind() == SyntaxKind::CALL_STMT
+                    && !s.descendants().any(|n| n.kind() == SyntaxKind::FIELD_EXPR)
+            });
+
+            for node in except.descendants() {
+                if is_global_rollback_transaction_call(&node) {
+                    let rollback_idx =
+                        stmts.iter().position(|s| s.text_range() == node.text_range());
+                    if let Some(idx) = rollback_idx {
+                        if let Some(first_idx) = first_global_call_idx {
+                            if idx != first_idx {
+                                violations.push(node);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
 // =============================================================================
 // CodeAfterAsyncCall diagnostic support
 // =============================================================================
