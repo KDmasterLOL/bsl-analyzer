@@ -219,6 +219,8 @@ pub enum AnnotationKind {
     After,
     /// `&Вместо` or `&Instead` - extension method (instead of original)
     Instead,
+    /// `&ИзменениеИКонтроль` or `&ChangeAndValidate` - extension method
+    ChangeAndValidate,
 }
 
 /// Salsa tracked query for ItemTree construction.

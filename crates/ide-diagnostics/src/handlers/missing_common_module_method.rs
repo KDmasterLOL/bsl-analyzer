@@ -224,9 +224,18 @@ mod tests {
 "#;
 
         let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == crate::DiagnosticCode::MissingCommonModuleMethod)
+            .collect();
 
         // Shadowing is handled automatically, qualified calls trigger diagnostics
         // Exact count depends on analyze_qualified_call filtering
-        assert!(diagnostics.len() <= 1, "Expected at most 1 diagnostic (for ВторойОбщийМодуль)");
+        assert!(
+            diags.len() <= 1,
+            "Expected at most 1 diagnostic (for ВторойОбщийМодуль), got {} diagnostics: {:?}",
+            diags.len(),
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

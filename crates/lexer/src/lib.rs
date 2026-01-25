@@ -529,6 +529,26 @@ mod tests {
     }
 
     #[test]
+    fn test_extension_annotations() {
+        let tokens = tokenize("&Перед");
+        assert_eq!(tokens[0].kind, TokenKind::AnnBefore);
+
+        let tokens = tokenize("&После");
+        assert_eq!(tokens[0].kind, TokenKind::AnnAfter);
+
+        let tokens = tokenize("&Вместо");
+        assert_eq!(tokens[0].kind, TokenKind::AnnAround);
+
+        let tokens = tokenize("&ИзменениеИКонтроль");
+        assert_eq!(tokens[0].kind, TokenKind::AnnChangeAndValidate);
+
+        // With parameters
+        let tokens = tokenize("&Вместо(\"Метод\")");
+        assert_eq!(tokens[0].kind, TokenKind::AnnAround);
+        assert_eq!(tokens[1].kind, TokenKind::LParen);
+    }
+
+    #[test]
     fn test_logical_operators() {
         let tokens = tokenize("И ИЛИ НЕ");
         let non_whitespace: Vec<_> =

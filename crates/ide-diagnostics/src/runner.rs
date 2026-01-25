@@ -234,6 +234,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::unsafe_safe_mode_method_call::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "UnusedLocalMethod",
+        ctx,
+        handlers::unused_local_method::check,
+    ));
 
     diagnostics
 }

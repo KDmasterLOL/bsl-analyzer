@@ -224,11 +224,15 @@ impl Ctx {
                     | "AtServerNoContext"
                     | "&НаСервереБезКонтекста"
                     | "&AtServerNoContext" => AnnotationKind::AtServerNoContext,
-                    "До" | "Before" | "&До" | "&Before" => AnnotationKind::Before,
+                    "Перед" | "Before" | "&Перед" | "&Before" => AnnotationKind::Before,
                     "После" | "After" | "&После" | "&After" => AnnotationKind::After,
                     "Вместо" | "Instead" | "&Вместо" | "&Instead" => {
                         AnnotationKind::Instead
                     }
+                    "ИзменениеИКонтроль"
+                    | "ChangeAndValidate"
+                    | "&ИзменениеИКонтроль"
+                    | "&ChangeAndValidate" => AnnotationKind::ChangeAndValidate,
                     _ => {
                         debug!(text = %text, "unknown annotation kind, skipping");
                         return None;
@@ -685,5 +689,25 @@ EndFunction
         assert_eq!(var.name.as_str(), "СерверныйСчетчик");
         assert_eq!(var.annotations.len(), 1);
         assert!(matches!(var.annotations[0].kind, AnnotationKind::AtServer));
+    }
+
+    #[test]
+    fn test_extension_annotation_with_params() {
+        let tree = lower(
+            r#"&Вместо("ОригинальныйМетод")
+Процедура РасширениеМетода()
+КонецПроцедуры"#,
+        );
+
+        assert_eq!(tree.top_level_items().len(), 1);
+
+        let proc = tree.procedure(match tree.top_level_items()[0] {
+            ModItem::Procedure(idx) => idx,
+            _ => panic!("expected procedure"),
+        });
+
+        assert_eq!(proc.name.as_str(), "РасширениеМетода");
+        assert_eq!(proc.annotations.len(), 1);
+        assert!(matches!(proc.annotations[0].kind, AnnotationKind::Instead));
     }
 }

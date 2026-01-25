@@ -119,25 +119,13 @@ pub fn source_file(p: &mut Parser) {
                 // Parse annotated procedure/function as a single node
                 annotated_item(p);
             }
-            // Custom annotations (&До, &После и т.д.)
+            // Custom annotations (&До, &После, &Вместо и т.д.)
             Some(TokenKind::AnnBefore)
             | Some(TokenKind::AnnAfter)
             | Some(TokenKind::AnnAround)
             | Some(TokenKind::AnnChangeAndValidate)
             | Some(TokenKind::AnnCustom) => {
-                items::annotation(p);
-                // After annotation, can be more annotations or procedure/function
-                p.skip_trivia();
-                match p.current() {
-                    Some(TokenKind::KwAsync) => match p.nth(1) {
-                        Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                        Some(TokenKind::KwFunction) => items::function_def(p),
-                        _ => p.error(),
-                    },
-                    Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                    Some(TokenKind::KwFunction) => items::function_def(p),
-                    _ => p.error(),
-                }
+                annotated_item(p);
             }
             // Module-level statements (assignments, expressions, etc.)
             // This is common in BSL for module initialization code
