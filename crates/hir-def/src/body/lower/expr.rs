@@ -57,6 +57,19 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
         SyntaxKind::IDENT => {
             // Identifier - variable reference
             let text = node.text().to_string();
+
+            // Check for deprecated ЭтаФорма/ThisForm usage
+            use super::diagnostics::{
+                is_call_expr_callee, is_field_access_field, is_this_form_identifier,
+            };
+            if is_this_form_identifier(&text)
+                && !ctx.param_names.contains(&text.to_lowercase())
+                && !is_call_expr_callee(node)
+                && !is_field_access_field(node)
+            {
+                ctx.diagnostics.push(BodyDiagnostic::UsingThisForm { range });
+            }
+
             Expr::Path(Name::new(&text))
         }
         SyntaxKind::EXPR => {

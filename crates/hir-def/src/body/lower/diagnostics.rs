@@ -919,6 +919,49 @@ pub(crate) fn get_modal_method_replacement(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Check if an identifier is ЭтаФорма/ThisForm (case-insensitive).
+pub(crate) fn is_this_form_identifier(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "этаформа" || lower == "thisform"
+}
+
+/// Check if IDENT node is the callee of a CALL_EXPR.
+/// Returns true if node is used as a function/method name in a call expression.
+pub(crate) fn is_call_expr_callee(node: &SyntaxNode) -> bool {
+    if let Some(parent) = node.parent() {
+        let actual_parent =
+            if parent.kind() == SyntaxKind::EXPR { parent.parent() } else { Some(parent) };
+
+        if let Some(p) = actual_parent {
+            if p.kind() == SyntaxKind::CALL_EXPR {
+                if let Some(first_child) = p.children().next() {
+                    return first_child.text_range().contains_range(node.text_range());
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if IDENT node is a field access on another object (not the base).
+/// For example in `Structure.ЭтаФорма`, ЭтаФорма is a field, not the base.
+/// Returns true if node is used as a field name after DOT.
+pub(crate) fn is_field_access_field(node: &SyntaxNode) -> bool {
+    if let Some(parent) = node.parent() {
+        let actual_parent =
+            if parent.kind() == SyntaxKind::EXPR { parent.parent() } else { Some(parent) };
+
+        if let Some(p) = actual_parent {
+            if p.kind() == SyntaxKind::FIELD_EXPR {
+                if let Some(first_child) = p.children().next() {
+                    return !first_child.text_range().contains_range(node.text_range());
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -687,6 +687,11 @@ pub enum BodyDiagnostic {
         /// Range of the method name for the diagnostic.
         range: TextRange,
     },
+
+    /// Usage of deprecated ЭтаФорма/ThisForm property.
+    /// Starting from 1C:Enterprise 8.3.3, should use ЭтотОбъект/ThisObject instead.
+    /// Detected when ЭтаФорма/ThisForm is used as identifier (not as parameter).
+    UsingThisForm { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -882,6 +887,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingFindElementByString { range } => *range,
             BodyDiagnostic::UsingGoto { range } => *range,
             BodyDiagnostic::UsingModalWindows { range, .. } => *range,
+            BodyDiagnostic::UsingThisForm { range } => *range,
         }
     }
 }

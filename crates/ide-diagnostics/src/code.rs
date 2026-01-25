@@ -132,6 +132,7 @@ pub enum DiagnosticCode {
     UsingModalWindows,
     UsingObjectNotAvailableUnix,
     UsingServiceTag,
+    UsingThisForm,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

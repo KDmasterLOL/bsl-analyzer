@@ -215,6 +215,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingModalWindows => Some(&USING_MODAL_WINDOWS),
         DiagnosticCode::UsingObjectNotAvailableUnix => Some(&USING_OBJECT_NOT_AVAILABLE_UNIX),
         DiagnosticCode::UsingServiceTag => Some(&USING_SERVICE_TAG),
+        DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
     }
 }
 
@@ -3583,6 +3584,31 @@ const USING_SERVICE_TAG: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UsingThisForm diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MINOR,
+///   scope = BSL,
+///   modules = { FormModule },
+///   minutesToFix = 1,
+///   compatibilityMode = COMPATIBILITY_MODE_8_3_3,
+///   tags = { STANDARD, DEPRECATED }
+/// )
+const USING_THIS_FORM: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_3,
+    tags: &[MetadataTag::Standard, MetadataTag::Deprecated],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
