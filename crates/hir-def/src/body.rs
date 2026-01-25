@@ -649,6 +649,11 @@ pub enum BodyDiagnostic {
     /// This is usually a typo - platform will try to convert right operand to number, causing runtime error.
     /// Examples: `"str" + + "str2"` (error), `"str" + + 5` (valid), `"str" + + variable` (error).
     UnaryPlusInConcatenation { range: TextRange },
+
+    /// SystemInformation/СистемнаяИнформация constructor usage.
+    /// Detected when New expression creates SystemInformation object.
+    /// This is a security hotspot as it exposes system information.
+    UseSystemInformation { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -838,6 +843,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::TernaryOperatorUsage { range } => *range,
             BodyDiagnostic::TooManyReturns { method_name_range, .. } => *method_name_range,
             BodyDiagnostic::UnaryPlusInConcatenation { range } => *range,
+            BodyDiagnostic::UseSystemInformation { range } => *range,
         }
     }
 }

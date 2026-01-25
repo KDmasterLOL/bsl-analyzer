@@ -1355,6 +1355,20 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         });
     }
 
+    // Check for SystemInformation constructor (СистемнаяИнформация/SystemInfo)
+    // Two syntax forms: Новый СистемнаяИнформация and Новый("СистемнаяИнформация")
+    let is_system_info = if let Some(ref name) = type_name {
+        is_system_information_type(name.as_str())
+    } else {
+        extract_type_name_from_first_arg(node)
+            .map(|name| is_system_information_type(&name))
+            .unwrap_or(false)
+    };
+
+    if is_system_info {
+        ctx.diagnostics.push(BodyDiagnostic::UseSystemInformation { range: node.text_range() });
+    }
+
     // Arguments
     let args = node
         .children()
@@ -1505,6 +1519,12 @@ fn is_file_system_type(name: &str) -> bool {
 fn is_style_element_type(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "цвет" | "color" | "шрифт" | "font" | "рамка" | "border")
+}
+
+/// Check if type name is SystemInformation (СистемнаяИнформация/SystemInfo).
+fn is_system_information_type(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "системнаяинформация" | "systeminfo")
 }
 
 /// Extract type name from first string argument of Новый("ТипОбъекта", ...).

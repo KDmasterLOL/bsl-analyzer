@@ -204,6 +204,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnknownPreprocessorSymbol => Some(&UNKNOWN_PREPROCESSOR_SYMBOL),
         DiagnosticCode::UnsafeSafeModeMethodCall => Some(&UNSAFE_SAFE_MODE_METHOD_CALL),
         DiagnosticCode::UsageWriteLogEvent => Some(&USAGE_WRITE_LOG_EVENT),
+        DiagnosticCode::UseSystemInformation => Some(&USE_SYSTEM_INFORMATION),
     }
 }
 
@@ -3384,6 +3385,29 @@ const USAGE_WRITE_LOG_EVENT: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// UseSystemInformation diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = SECURITY_HOTSPOT,
+///   severity = CRITICAL,
+///   activatedByDefault = false,
+///   minutesToFix = 5,
+///   tags = { SUSPICIOUS }
+/// )
+const USE_SYSTEM_INFORMATION: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: false,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

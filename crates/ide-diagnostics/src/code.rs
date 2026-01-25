@@ -122,6 +122,7 @@ pub enum DiagnosticCode {
     UnknownPreprocessorSymbol,
     UnsafeSafeModeMethodCall,
     UsageWriteLogEvent,
+    UseSystemInformation,
 
     // Tier 3: Metadata (requires 1C configuration metadata)
     PublicMethodsDescription,

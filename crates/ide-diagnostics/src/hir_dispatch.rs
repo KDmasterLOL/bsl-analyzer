@@ -211,5 +211,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UnaryPlusInConcatenation { range } => {
             handlers::unary_plus_in_concatenation::from_hir(*range, ctx)
         }
+        BodyDiagnostic::UseSystemInformation { range } => {
+            handlers::use_system_information::from_hir(*range, ctx)
+        }
     }
 }

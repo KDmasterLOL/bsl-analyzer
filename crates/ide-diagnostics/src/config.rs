@@ -141,6 +141,7 @@ impl DiagnosticsConfig {
             DiagnosticCode::MissingTempStorageDeletion,
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
+            DiagnosticCode::UseSystemInformation,
         ] {
             if let Some(meta) = metadata_registry::get_metadata(code) {
                 if !meta.activated_by_default {
