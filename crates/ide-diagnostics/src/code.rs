@@ -157,6 +157,7 @@ pub enum DiagnosticCode {
     CommonModuleNameServerCall,
     CommonModuleNameWords,
     DenyIncompleteValues,
+    ForbiddenMetadataName,
     MetadataObjectNameLength,
     MissingCommonModuleMethod,
     MissingEventSubscriptionHandler,

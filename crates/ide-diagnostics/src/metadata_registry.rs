@@ -1,11 +1,11 @@
 //! Central registry for diagnostic metadata.
 //!
 //! Provides const metadata definitions for all diagnostics.
-//! Progress: 149/149 diagnostics defined (100%)
+//! Progress: 150/150 diagnostics defined (100%)
 //! - 11 DISABLED_BY_DEFAULT diagnostics
 //! - 39 Tier 1 diagnostics (syntax-only)
 //! - 56 Tier 2 diagnostics (semantic analysis)
-//! - 43 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
+//! - 44 Tier 3 + SDBL + Additional diagnostics (metadata-based + queries + special cases)
 
 use crate::metadata::*;
 use crate::DiagnosticCode;
@@ -19,6 +19,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::BadWords => Some(&BAD_WORDS),
         DiagnosticCode::CodeAfterAsyncCall => Some(&CODE_AFTER_ASYNC_CALL),
         DiagnosticCode::DenyIncompleteValues => Some(&DENY_INCOMPLETE_VALUES),
+        DiagnosticCode::ForbiddenMetadataName => Some(&FORBIDDEN_METADATA_NAME),
         DiagnosticCode::FieldsFromJoinsWithoutIsNull => Some(&FIELDS_FROM_JOINS_WITHOUT_IS_NULL),
         DiagnosticCode::FileSystemAccess => Some(&FILE_SYSTEM_ACCESS),
         DiagnosticCode::FunctionNameStartsWithGet => Some(&FUNCTION_NAME_STARTS_WITH_GET),
@@ -303,6 +304,36 @@ const DENY_INCOMPLETE_VALUES: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: false,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: true,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// ForbiddenMetadataName diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = ERROR,
+///   severity = BLOCKER,
+///   minutesToFix = 30,
+///   tags = { STANDARD, SQL, DESIGN },
+///   scope = BSL,
+///   modules = { ManagerModule, ObjectModule, ValueManagerModule, SessionModule },
+///   canLocateOnProject = true
+/// )
+const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::ValueManagerModule,
+        bsl_metadata::ModuleType::SessionModule,
+    ],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Design],
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

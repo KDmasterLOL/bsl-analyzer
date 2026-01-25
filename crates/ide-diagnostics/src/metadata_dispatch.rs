@@ -56,6 +56,8 @@ pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 
     diagnostics.extend(handlers::deny_incomplete_values::from_metadata(metadata_ref, ctx));
 
+    diagnostics.extend(handlers::forbidden_metadata_name::from_metadata(metadata_ref, ctx));
+
     diagnostics.extend(handlers::metadata_object_name_length::from_metadata(metadata_ref, ctx));
 
     diagnostics
