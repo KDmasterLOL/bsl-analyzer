@@ -300,6 +300,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         handlers::command_module_export_methods::check,
     ));
     diagnostics.extend(run_diagnostic(
+        "ExecuteExternalCodeInCommonModule",
+        ctx,
+        handlers::execute_external_code_in_common_module::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "CommonModuleMissingAPI",
         ctx,
         handlers::common_module_missing_api::check,

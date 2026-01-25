@@ -108,6 +108,7 @@ pub enum DiagnosticCode {
     DeprecatedMethodCall,
     DisableSafeMode,
     ExecuteExternalCode,
+    ExecuteExternalCodeInCommonModule,
     ExternalAppStarting,
     FileSystemAccess,
     OSUsersMethod,

@@ -199,6 +199,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         // Additional diagnostics
         DiagnosticCode::DataExchangeLoading => Some(&DATA_EXCHANGE_LOADING),
         DiagnosticCode::ExecuteExternalCode => Some(&EXECUTE_EXTERNAL_CODE),
+        DiagnosticCode::ExecuteExternalCodeInCommonModule => {
+            Some(&EXECUTE_EXTERNAL_CODE_IN_COMMON_MODULE)
+        }
         DiagnosticCode::RedundantAccessToObject => Some(&REDUNDANT_ACCESS_TO_OBJECT),
         DiagnosticCode::SameMetadataObjectAndChildNames => {
             Some(&SAME_METADATA_OBJECT_AND_CHILD_NAMES)
@@ -3474,6 +3477,23 @@ const EXECUTE_EXTERNAL_CODE: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Error, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// ExecuteExternalCodeInCommonModule diagnostic metadata.
+///
+/// Ported from Java: ExecuteExternalCodeInCommonModuleDiagnostic.java
+const EXECUTE_EXTERNAL_CODE_IN_COMMON_MODULE: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

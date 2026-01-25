@@ -58,6 +58,7 @@ pub mod empty_region;
 pub mod empty_statement;
 pub mod excessive_auto_test_check;
 pub mod execute_external_code;
+pub mod execute_external_code_in_common_module;
 pub mod export_variables;
 pub mod external_app_starting;
 pub mod extra_commas;
