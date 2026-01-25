@@ -26,6 +26,7 @@ mod control_flow;
 mod diagnostics;
 mod expr;
 mod magic_number;
+mod platform_helpers;
 mod preproc;
 mod stmt;
 mod utils;

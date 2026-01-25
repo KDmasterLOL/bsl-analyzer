@@ -13,6 +13,7 @@ use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
 
+use super::platform_helpers::{is_any_global_function, is_global_function};
 use super::LoweringCtx;
 
 // =============================================================================
@@ -156,29 +157,25 @@ pub(crate) fn is_deprecated_method(name: &str) -> bool {
 /// Check if a method name is deprecated ТекущаяДата() / CurrentDate().
 /// Returns true if the method is the deprecated current date function.
 pub(crate) fn is_deprecated_current_date(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "текущаядата" | "currentdate")
+    is_global_function(name, "CurrentDate")
 }
 
 /// Check if a method name is deprecated Найти() / Find().
 /// Returns true if the method is the deprecated global find function.
 pub(crate) fn is_deprecated_find(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "найти" | "find")
+    is_global_function(name, "Find")
 }
 
 /// Check if a method name is deprecated Сообщить() / Message().
 /// Returns true if the method is the deprecated global message function.
 pub(crate) fn is_deprecated_message(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "сообщить" | "message")
+    is_global_function(name, "Message")
 }
 
 /// Check if a method name is Тип() / Type().
 /// Returns true if the method is the type construction function.
 pub(crate) fn is_type_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "тип" | "type")
+    is_global_function(name, "Type")
 }
 
 /// Check if a type name is deprecated УправляемаяФорма / ManagedForm.
@@ -192,28 +189,19 @@ pub(crate) fn is_deprecated_managed_form(type_name: &str) -> bool {
 /// УстановитьОтключениеБезопасногоРежима / SetSafeModeDisabled.
 /// Returns true if the method controls safe mode.
 pub(crate) fn is_safe_mode_method(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "установитьбезопасныйрежим"
-            | "setsafemode"
-            | "установитьотключениебезопасногорежима"
-            | "setsafemodedisabled"
-    )
+    is_any_global_function(name, &["SetSafeMode", "SetSafeModeDisabled"])
 }
 
 /// Check if a method name is УстановитьПривилегированныйРежим / SetPrivilegedMode.
 /// Returns true if the method sets privileged mode.
 pub(crate) fn is_set_privileged_mode(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "установитьпривилегированныйрежим" | "setprivilegedmode")
+    is_global_function(name, "SetPrivilegedMode")
 }
 
 /// Check if a method name is КаталогВременныхФайлов / TempFilesDir.
 /// Returns true if the method is the temp files directory function.
 pub(crate) fn is_temp_files_dir(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(lower.as_str(), "каталогвременныхфайлов" | "tempfilesdir")
+    is_global_function(name, "TempFilesDir")
 }
 
 // =============================================================================
@@ -275,8 +263,7 @@ pub(crate) fn is_deprecated_attribute_8312(
 
 /// Check if a global method name is deprecated (8.3.12).
 pub(crate) fn is_deprecated_global_method_8312(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "очиститьжурналрегистрации" || lower == "cleareventlog"
+    is_global_function(name, "ClearEventLog")
 }
 
 // Helper functions (private)
@@ -379,8 +366,7 @@ pub(crate) fn is_global_begin_transaction_call(node: &SyntaxNode) -> bool {
         return false;
     };
 
-    let name = ident.text().to_lowercase();
-    name == "начатьтранзакцию" || name == "begintransaction"
+    is_global_function(ident.text(), "BeginTransaction")
 }
 
 /// Check if a node is inside a Try-Catch block body.
@@ -424,8 +410,7 @@ pub(crate) fn is_global_commit_transaction_call(node: &SyntaxNode) -> bool {
         return false;
     };
 
-    let name = ident.text().to_lowercase();
-    name == "зафиксироватьтранзакцию" || name == "committransaction"
+    is_global_function(ident.text(), "CommitTransaction")
 }
 
 /// Check CommitTransaction calls within a TRY_STMT body for proper placement.
@@ -518,72 +503,44 @@ fn is_executable_stmt(node: &SyntaxNode) -> bool {
 // CodeAfterAsyncCall diagnostic support
 // =============================================================================
 
-/// List of asynchronous methods that trigger CodeAfterAsyncCall diagnostic.
+/// List of asynchronous method English names for CodeAfterAsyncCall diagnostic.
 ///
-/// Contains 50 methods (25 Russian + 25 English):
-/// - Dialog methods: ShowQueryBox/ПоказатьВопрос, ShowValue/ПоказатьЗначение, etc.
-/// - Input methods: ShowInputNumber/ПоказатьВводЧисла, etc.
-/// - File operations: BeginPutFile/НачатьПомещениеФайла, etc.
-/// - Extension operations: BeginInstallAddIn/НачатьУстановкуВнешнейКомпоненты, etc.
-const ASYNC_METHODS: &[&str] = &[
-    // Russian names (25)
-    "показатьвопрос",
-    "показатьзначение",
-    "показатьпредупреждение",
-    "показатьвводдаты",
-    "показатьвводзначения",
-    "показатьвводстроки",
-    "показатьвводчисла",
-    "начатьустановкувнешнейкомпоненты",
-    "начатьустановкурасширенияработысфайлами",
-    "начатьустановкурасширенияработыскриптографией",
-    "начатьподключениерасширенияработыскриптографией",
-    "начатьподключениерасширенияработысфайлами",
-    "начатьпомещениефайла",
-    "начатькопированиефайла",
-    "начатьперемещениефайла",
-    "начатьпоискфайлов",
-    "начатьудалениефайлов",
-    "начатьсозданиекаталога",
-    "начатьполучениекаталогавременныхфайлов",
-    "начатьполучениекаталогадокументов",
-    "начатьполучениерабочегокаталогаданныхпользователя",
-    "начатьполучениефайлов",
-    "начатьпомещениефайлов",
-    "начатьзапросразрешенияпользователя",
-    "начатьзапускприложения",
-    // English names (25)
-    "showquerybox",
-    "showvalue",
-    "showmessagebox",
-    "showinputdate",
-    "showinputvalue",
-    "showinputstring",
-    "showinputnumber",
-    "begininstalladdin",
-    "begininstallfilesystemextension",
-    "begininstallcryptoextension",
-    "beginattachingcryptoextension",
-    "beginattachingfilesystemextension",
-    "beginputfile",
-    "begincopyingfile",
-    "beginmovingfile",
-    "beginfindingfiles",
-    "begindeletingfiles",
-    "begincreatingdirectory",
-    "begingettingtempfilesdir",
-    "begingettingdocumentsdir",
-    "begingettinguserdataworkdir",
-    "begingettingfiles",
-    "beginputtingfiles",
-    "beginrequestinguserpermission",
-    "beginrunningapplication",
+/// Contains 25 English names. Russian variants are matched via bsl-platform lookup.
+/// - Dialog methods: ShowQueryBox, ShowValue, ShowMessageBox, etc.
+/// - Input methods: ShowInputNumber, ShowInputDate, etc.
+/// - File operations: BeginPutFile, BeginCopyingFile, etc.
+/// - Extension operations: BeginInstallAddIn, etc.
+const ASYNC_ENGLISH_NAMES: &[&str] = &[
+    "ShowQueryBox",
+    "ShowValue",
+    "ShowMessageBox",
+    "ShowInputDate",
+    "ShowInputValue",
+    "ShowInputString",
+    "ShowInputNumber",
+    "BeginInstallAddIn",
+    "BeginInstallFileSystemExtension",
+    "BeginInstallCryptoExtension",
+    "BeginAttachingCryptoExtension",
+    "BeginAttachingFileSystemExtension",
+    "BeginPutFile",
+    "BeginCopyingFile",
+    "BeginMovingFile",
+    "BeginFindingFiles",
+    "BeginDeletingFiles",
+    "BeginCreatingDirectory",
+    "BeginGettingTempFilesDir",
+    "BeginGettingDocumentsDir",
+    "BeginGettingUserDataWorkDir",
+    "BeginGettingFiles",
+    "BeginPuttingFiles",
+    "BeginRequestingUserPermission",
+    "BeginRunningApplication",
 ];
 
-/// Check if a method name is an asynchronous method (case-insensitive).
+/// Check if a method name is an asynchronous method (case-insensitive, bilingual).
 fn is_async_method(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    ASYNC_METHODS.contains(&name_lower.as_str())
+    is_any_global_function(name, ASYNC_ENGLISH_NAMES)
 }
 
 /// Check for CodeAfterAsyncCall diagnostic in a method body.

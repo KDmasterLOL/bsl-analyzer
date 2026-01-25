@@ -28,6 +28,7 @@ tracing.workspace = true
 # cfg.workspace = true
 parser.workspace = true
 bsl-metadata.workspace = true
+bsl-platform.workspace = true
 line-index.workspace = true
 once_cell.workspace = true
 regex.workspace = true
