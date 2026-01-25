@@ -539,6 +539,7 @@ mod tests {
             params: Box::new([]),
             annotations: Box::new([Annotation {
                 kind: crate::item_tree::AnnotationKind::AtClient,
+                range: make_text_range(0, 10),
             }]),
             source_range: make_text_range(0, 10),
             name_range: make_text_range(0, 10),

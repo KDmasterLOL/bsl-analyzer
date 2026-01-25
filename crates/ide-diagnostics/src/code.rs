@@ -91,6 +91,7 @@ pub enum DiagnosticCode {
     CodeAfterAsyncCall,
     CommitTransactionOutsideTryCatch,
     CompilationDirectiveLost,
+    CompilationDirectiveNeedLess,
     CreateQueryInCycle,
     DataExchangeLoading,
     DeletingCollectionItem,

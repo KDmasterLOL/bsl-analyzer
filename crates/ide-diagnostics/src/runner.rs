@@ -285,6 +285,16 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
 
     diagnostics.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
     diagnostics.extend(run_diagnostic(
+        "CompilationDirectiveLost",
+        ctx,
+        handlers::compilation_directive_lost::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "CompilationDirectiveNeedLess",
+        ctx,
+        handlers::compilation_directive_need_less::check,
+    ));
+    diagnostics.extend(run_diagnostic(
         "CommandModuleExportMethods",
         ctx,
         handlers::command_module_export_methods::check,

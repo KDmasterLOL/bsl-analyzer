@@ -207,6 +207,7 @@ impl Ctx {
             .filter_map(|ann| {
                 let token = ann.kind_token()?;
                 let text = token.text();
+                let range = ann.syntax().text_range();
 
                 let kind = match text {
                     "НаКлиенте" | "AtClient" | "&НаКлиенте" | "&AtClient" => {
@@ -242,7 +243,7 @@ impl Ctx {
                     }
                 };
 
-                Some(Annotation { kind })
+                Some(Annotation { kind, range })
             })
             .collect()
     }

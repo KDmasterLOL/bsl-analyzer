@@ -117,6 +117,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH)
         }
         DiagnosticCode::CompilationDirectiveLost => Some(&COMPILATION_DIRECTIVE_LOST),
+        DiagnosticCode::CompilationDirectiveNeedLess => Some(&COMPILATION_DIRECTIVE_NEED_LESS),
         DiagnosticCode::CreateQueryInCycle => Some(&CREATE_QUERY_IN_CYCLE),
         DiagnosticCode::DeletingCollectionItem => Some(&DELETING_COLLECTION_ITEM),
         DiagnosticCode::SelfInsertion => Some(&SELF_INSERTION),
@@ -1764,6 +1765,44 @@ const COMPILATION_DIRECTIVE_LOST: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+/// CompilationDirectiveNeedLess diagnostic metadata.
+///
+/// Java: @DiagnosticMetadata(
+///   type = CODE_SMELL,
+///   severity = MAJOR,
+///   scope = BSL,
+///   modules = { ApplicationModule, CommonModule, ExternalConnectionModule,
+///               ManagedApplicationModule, ManagerModule, ObjectModule,
+///               OrdinaryApplicationModule, RecordSetModule, SessionModule,
+///               ValueManagerModule },
+///   minutesToFix = 1,
+///   tags = { CLUMSY, STANDARD, UNPREDICTABLE }
+/// )
+const COMPILATION_DIRECTIVE_NEED_LESS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::ApplicationModule,
+        bsl_metadata::ModuleType::CommonModule,
+        bsl_metadata::ModuleType::ExternalConnectionModule,
+        bsl_metadata::ModuleType::ManagedApplicationModule,
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::OrdinaryApplicationModule,
+        bsl_metadata::ModuleType::RecordSetModule,
+        bsl_metadata::ModuleType::SessionModule,
+        bsl_metadata::ModuleType::ValueManagerModule,
+    ],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Clumsy, MetadataTag::Standard, MetadataTag::Unpredictable],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",

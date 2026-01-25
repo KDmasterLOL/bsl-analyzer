@@ -28,6 +28,7 @@ pub mod common_module_name_global_client;
 pub mod common_module_name_server_call;
 pub mod common_module_name_words;
 pub mod compilation_directive_lost;
+pub mod compilation_directive_need_less;
 pub mod consecutive_empty_lines;
 pub mod create_query_in_cycle;
 pub mod cyclomatic_complexity;

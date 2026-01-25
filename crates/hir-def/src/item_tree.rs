@@ -198,6 +198,7 @@ pub struct Param {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Annotation {
     pub kind: AnnotationKind,
+    pub range: TextRange,
 }
 
 /// Kind of annotation.
@@ -311,8 +312,14 @@ mod tests {
 
     #[test]
     fn test_annotation_kinds() {
-        let ann1 = Annotation { kind: AnnotationKind::AtClient };
-        let ann2 = Annotation { kind: AnnotationKind::AtServer };
+        let ann1 = Annotation {
+            kind: AnnotationKind::AtClient,
+            range: TextRange::new(0.into(), 10.into()),
+        };
+        let ann2 = Annotation {
+            kind: AnnotationKind::AtServer,
+            range: TextRange::new(0.into(), 10.into()),
+        };
 
         assert_ne!(ann1.kind, ann2.kind);
     }
