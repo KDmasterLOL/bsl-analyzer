@@ -250,6 +250,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::usage_write_log_event::check,
     ));
     diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodeNetworkAddress",
+        ctx,
+        handlers::using_hardcode_network_address::check,
+    ));
 
     diagnostics
 }

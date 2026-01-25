@@ -208,6 +208,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingCancelParameter => Some(&USING_CANCEL_PARAMETER),
         DiagnosticCode::UsingExternalCodeTools => Some(&USING_EXTERNAL_CODE_TOOLS),
         DiagnosticCode::UsingFindElementByString => Some(&USING_FIND_ELEMENT_BY_STRING),
+        DiagnosticCode::UsingHardcodeNetworkAddress => Some(&USING_HARDCODE_NETWORK_ADDRESS),
     }
 }
 
@@ -3458,6 +3459,20 @@ const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = DiagnosticMetadata {
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Badpractice, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_HARDCODE_NETWORK_ADDRESS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::Vulnerability,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
