@@ -1000,6 +1000,103 @@ pub(crate) fn is_this_form_identifier(name: &str) -> bool {
     lower == "этаформа" || lower == "thisform"
 }
 
+// =============================================================================
+// UsingSynchronousCalls detection
+// =============================================================================
+
+/// Synchronous method pairs: (sync_method, async_replacement).
+/// All names are lowercase for case-insensitive matching.
+/// Format: (russian_sync, english_sync, russian_replacement, english_replacement)
+const SYNCHRONOUS_METHODS: &[(&str, &str, &str, &str)] = &[
+    ("вопрос", "doquerybox", "ПоказатьВопрос", "ShowQueryBox"),
+    ("открытьформумодально", "openformmodal", "ОткрытьФорму", "OpenForm"),
+    ("открытьзначение", "openvalue", "ПоказатьЗначение", "ShowValue"),
+    ("предупреждение", "domessagebox", "ПоказатьПредупреждение", "ShowMessageBox"),
+    ("ввестидату", "inputdate", "ПоказатьВводДаты", "ShowInputDate"),
+    ("ввестизначение", "inputvalue", "ПоказатьВводЗначения", "ShowInputValue"),
+    ("ввестистроку", "inputstring", "ПоказатьВводСтроки", "ShowInputString"),
+    ("ввестичисло", "inputnumber", "ПоказатьВводЧисла", "ShowInputNumber"),
+    (
+        "установитьвнешнююкомпоненту",
+        "installaddin",
+        "НачатьУстановкуВнешнейКомпоненты",
+        "BeginInstallAddIn",
+    ),
+    (
+        "установитьрасширениеработысфайлами",
+        "installfilesystemextension",
+        "НачатьУстановкуРасширенияРаботыСФайлами",
+        "BeginInstallFileSystemExtension",
+    ),
+    (
+        "установитьрасширениеработыскриптографией",
+        "installcryptoextension",
+        "НачатьУстановкуРасширенияРаботыСКриптографией",
+        "BeginInstallCryptoExtension",
+    ),
+    (
+        "подключитьрасширениеработыскриптографией",
+        "attachcryptoextension",
+        "НачатьПодключениеРасширенияРаботыСКриптографией",
+        "BeginAttachingCryptoExtension",
+    ),
+    (
+        "подключитьрасширениеработысфайлами",
+        "attachfilesystemextension",
+        "НачатьПодключениеРасширенияРаботыСФайлами",
+        "BeginAttachingFileSystemExtension",
+    ),
+    ("поместитьфайл", "putfile", "НачатьПомещениеФайла", "BeginPutFile"),
+    ("копироватьфайл", "filecopy", "НачатьКопированиеФайла", "BeginCopyingFile"),
+    ("переместитьфайл", "movefile", "НачатьПеремещениеФайла", "BeginMovingFile"),
+    ("найтифайлы", "findfiles", "НачатьПоискФайлов", "BeginFindingFiles"),
+    ("удалитьфайлы", "deletefiles", "НачатьУдалениеФайлов", "BeginDeletingFiles"),
+    ("создатькаталог", "createdirectory", "НачатьСозданиеКаталога", "BeginCreatingDirectory"),
+    (
+        "каталогвременныхфайлов",
+        "tempfilesdir",
+        "НачатьПолучениеКаталогаВременныхФайлов",
+        "BeginGettingTempFilesDir",
+    ),
+    (
+        "каталогдокументов",
+        "documentsdir",
+        "НачатьПолучениеКаталогаДокументов",
+        "BeginGettingDocumentsDir",
+    ),
+    (
+        "рабочийкаталогданныхпользователя",
+        "userdataworkdir",
+        "НачатьПолучениеРабочегоКаталогаДанныхПользователя",
+        "BeginGettingUserDataWorkDir",
+    ),
+    ("получитьфайлы", "getfiles", "НачатьПолучениеФайлов", "BeginGettingFiles"),
+    ("поместитьфайлы", "putfiles", "НачатьПомещениеФайлов", "BeginPuttingFiles"),
+    (
+        "запроситьразрешениепользователя",
+        "requestuserpermission",
+        "НачатьЗапросРазрешенияПользователя",
+        "BeginRequestingUserPermission",
+    ),
+    ("запуститьприложение", "runapp", "НачатьЗапускПриложения", "BeginRunningApplication"),
+];
+
+/// Check if a method name is a synchronous method.
+/// Returns Some(replacement) if synchronous, None otherwise.
+/// The replacement is returned in the same language as the original method name.
+pub(crate) fn get_synchronous_call_replacement(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    for &(ru, en, replacement_ru, replacement_en) in SYNCHRONOUS_METHODS {
+        if lower == ru {
+            return Some(replacement_ru);
+        }
+        if lower == en {
+            return Some(replacement_en);
+        }
+    }
+    None
+}
+
 /// Check if IDENT node is the callee of a CALL_EXPR.
 /// Returns true if node is used as a function/method name in a call expression.
 pub(crate) fn is_call_expr_callee(node: &SyntaxNode) -> bool {

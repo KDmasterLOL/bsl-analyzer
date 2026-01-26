@@ -137,6 +137,10 @@ pub(crate) struct LoweringCtx {
     /// Used for WrongUseFunctionProceedWithCall diagnostic - ПродолжитьВызов is only allowed
     /// in methods with &Вместо annotation.
     pub(crate) is_instead_method: bool,
+
+    /// Whether current method has server annotation (&НаСервере or &НаСервереБезКонтекста).
+    /// Used for UsingSynchronousCalls diagnostic - synchronous calls are skipped in server context.
+    pub(crate) is_server_method: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -182,6 +186,7 @@ impl LoweringCtx {
             current_method_name: None, // Will be set in lower_method_with_externals_and_line_index
             return_statements: Vec::new(),
             is_instead_method: false, // Will be set in lower_method_with_externals_and_line_index
+            is_server_method: false,  // Will be set in lower_method_with_externals
         }
     }
 
@@ -457,6 +462,27 @@ fn is_around_annotation_method(method_node: &SyntaxNode) -> bool {
     })
 }
 
+/// Check if method has server annotation (&НаСервере or &НаСервереБезКонтекста).
+///
+/// For UsingSynchronousCalls diagnostic - synchronous calls are allowed on server.
+/// Returns true if method has:
+/// - @НаСервере / @AtServer
+/// - @НаСервереБезКонтекста / @AtServerNoContext
+fn is_server_method(method_node: &SyntaxNode) -> bool {
+    let annotations: Vec<_> = method_node
+        .children()
+        .filter(|child| {
+            matches!(child.kind(), SyntaxKind::ANNOTATION | SyntaxKind::COMPILER_DIRECTIVE)
+        })
+        .collect();
+
+    annotations.iter().any(|ann| {
+        ann.descendants_with_tokens().filter_map(|el| el.into_token()).any(|token| {
+            matches!(token.kind(), SyntaxKind::ANN_AT_SERVER | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT)
+        })
+    })
+}
+
 /// Check if function always returns the same primitive value.
 ///
 /// For FunctionReturnsSamePrimitive diagnostic.
@@ -554,6 +580,9 @@ pub fn lower_method_with_externals(
 
     // Check if method has &Вместо / &Around annotation
     ctx.is_instead_method = is_around_annotation_method(method_node);
+
+    // Check if method is server-side (has server annotation)
+    ctx.is_server_method = is_server_method(method_node);
 
     // Check for FunctionNameStartsWithGet diagnostic
     if is_function {
@@ -694,6 +723,9 @@ pub fn lower_method_with_externals_and_line_index(
 
     // Check if method has &Вместо / &Around annotation
     ctx.is_instead_method = is_around_annotation_method(method_node);
+
+    // Check if method is server-side (has server annotation)
+    ctx.is_server_method = is_server_method(method_node);
 
     // Extract method name once for all checks
     let name_token = method_node

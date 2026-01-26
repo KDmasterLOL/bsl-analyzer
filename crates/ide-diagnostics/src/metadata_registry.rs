@@ -226,6 +226,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingHardcodeSecretInformation => Some(&USING_HARDCODE_SECRET_INFORMATION),
         DiagnosticCode::UsingModalWindows => Some(&USING_MODAL_WINDOWS),
         DiagnosticCode::UsingObjectNotAvailableUnix => Some(&USING_OBJECT_NOT_AVAILABLE_UNIX),
+        DiagnosticCode::UsingSynchronousCalls => Some(&USING_SYNCHRONOUS_CALLS),
         DiagnosticCode::UsingServiceTag => Some(&USING_SERVICE_TAG),
         DiagnosticCode::UsingThisForm => Some(&USING_THIS_FORM),
         DiagnosticCode::WrongDataPathForFormElements => Some(&WRONG_DATA_PATH_FOR_FORM_ELEMENTS),
@@ -3859,6 +3860,20 @@ const USING_HARDCODE_SECRET_INFORMATION: DiagnosticMetadata = DiagnosticMetadata
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_3
 /// )
 const USING_MODAL_WINDOWS: DiagnosticMetadata = DiagnosticMetadata {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_3,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const USING_SYNCHRONOUS_CALLS: DiagnosticMetadata = DiagnosticMetadata {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,

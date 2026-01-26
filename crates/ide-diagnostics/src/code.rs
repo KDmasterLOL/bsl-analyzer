@@ -134,6 +134,7 @@ pub enum DiagnosticCode {
     UsingHardcodeSecretInformation,
     UsingModalWindows,
     UsingObjectNotAvailableUnix,
+    UsingSynchronousCalls,
     UsingServiceTag,
     UsingThisForm,
     WrongUseFunctionProceedWithCall,

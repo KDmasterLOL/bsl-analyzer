@@ -688,6 +688,18 @@ pub enum BodyDiagnostic {
         range: TextRange,
     },
 
+    /// Usage of synchronous calls (Вопрос, КопироватьФайл, ЗапуститьПриложение, etc.).
+    /// Synchronous calls are blocking and not compatible with web client.
+    /// Detected when global synchronous method is called (not in server context).
+    UsingSynchronousCalls {
+        /// Name of the called synchronous method (original case).
+        method_name: String,
+        /// Name of the recommended asynchronous replacement.
+        replacement: String,
+        /// Range of the call expression for the diagnostic.
+        range: TextRange,
+    },
+
     /// Usage of deprecated ЭтаФорма/ThisForm property.
     /// Starting from 1C:Enterprise 8.3.3, should use ЭтотОбъект/ThisObject instead.
     /// Detected when ЭтаФорма/ThisForm is used as identifier (not as parameter).
@@ -909,6 +921,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingFindElementByString { range } => *range,
             BodyDiagnostic::UsingGoto { range } => *range,
             BodyDiagnostic::UsingModalWindows { range, .. } => *range,
+            BodyDiagnostic::UsingSynchronousCalls { range, .. } => *range,
             BodyDiagnostic::UsingThisForm { range } => *range,
             BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => *range,
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
