@@ -60,6 +60,35 @@ pub fn range_to_line_col(text: &str, range: TextRange) -> (u32, u32, u32, u32) {
     (start_line, start_col, end_line, end_col)
 }
 
+/// Assert that a diagnostic with specific message exists at a specific line.
+pub fn assert_diagnostic_message_at_line(
+    code: &str,
+    diagnostics: &[&Diagnostic],
+    expected_line: u32,
+    expected_message_part: &str,
+) {
+    let matching = diagnostics.iter().find(|d| {
+        let start: u32 = d.range.start().into();
+        let line = code[..start as usize].matches('\n').count() as u32;
+        line == expected_line && d.message.contains(expected_message_part)
+    });
+
+    assert!(
+        matching.is_some(),
+        "No diagnostic with message containing '{}' at line {}.\nDiagnostics at that line: {:?}",
+        expected_message_part,
+        expected_line,
+        diagnostics
+            .iter()
+            .filter(|d| {
+                let start: u32 = d.range.start().into();
+                code[..start as usize].matches('\n').count() as u32 == expected_line
+            })
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Assert that a diagnostic is at a specific position (single-line range).
 ///
 /// # Arguments

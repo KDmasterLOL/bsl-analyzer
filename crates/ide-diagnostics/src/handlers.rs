@@ -98,6 +98,7 @@ pub mod missed_required_parameter;
 pub mod missing_code_try_catch_ex;
 pub mod missing_common_module_method;
 pub mod missing_event_subscription_handler;
+pub mod missing_parameter_description;
 pub mod missing_returned_value_description;
 pub mod missing_space;
 pub mod missing_temp_storage_deletion;
