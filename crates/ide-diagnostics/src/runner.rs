@@ -350,6 +350,11 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         ctx,
         handlers::unsafe_find_by_code::check,
     ));
+    diagnostics.extend(run_diagnostic(
+        "MissingVariablesDescription",
+        ctx,
+        handlers::missing_variables_description::check,
+    ));
 
     diagnostics
 }
