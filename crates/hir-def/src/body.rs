@@ -726,6 +726,11 @@ pub enum BodyDiagnostic {
     /// - `module`: Optional module name for qualified calls (Module.Method)
     /// - `range`: Source range of the method name being called
     DeprecatedMethodCall { callee: String, module: Option<String>, range: TextRange },
+
+    /// Assignment to ЭтотОбъект/ThisObject property.
+    /// This is a read-only property and cannot be assigned.
+    /// Validated in from_hir() to check if module type is CommonModule or FormModule.
+    ThisObjectAssign { range: TextRange },
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -926,6 +931,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => *range,
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
             BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
+            BodyDiagnostic::ThisObjectAssign { range } => *range,
         }
     }
 }

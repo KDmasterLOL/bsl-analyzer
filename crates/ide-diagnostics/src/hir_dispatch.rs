@@ -246,5 +246,8 @@ pub fn dispatch_hir_diagnostic(
                 ctx,
             )
         }
+        BodyDiagnostic::ThisObjectAssign { range } => {
+            handlers::this_object_assign::from_hir(*range, ctx)
+        }
     }
 }

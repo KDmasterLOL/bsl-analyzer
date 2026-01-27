@@ -271,7 +271,7 @@ mod tests {
     fn test_fixture_local_call() {
         use crate::test_utils::assert_diagnostic_range;
 
-        let code = include_str!("fixtures/DeprecatedMethodCallDiagnostic.bsl");
+        let code = include_str!("../../test_data/DeprecatedMethodCallDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();

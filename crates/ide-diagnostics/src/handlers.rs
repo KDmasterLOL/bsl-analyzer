@@ -148,6 +148,7 @@ pub mod space_at_start_comment;
 pub mod style_element_constructors;
 pub mod temp_files_dir;
 pub mod ternary_operator_usage;
+pub mod this_object_assign;
 pub mod timeouts_in_external_resources;
 pub mod too_many_returns;
 pub mod transferring_parameters_between_client_and_server;

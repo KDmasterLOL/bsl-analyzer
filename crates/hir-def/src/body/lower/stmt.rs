@@ -614,6 +614,13 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             range,
         });
 
+        // Check for ThisObjectAssign diagnostic.
+        // ЭтотОбъект/ThisObject is read-only in CommonModule and FormModule.
+        let name_lower = key.as_str();
+        if name_lower == "этотобъект" || name_lower == "thisobject" {
+            ctx.emit(BodyDiagnostic::ThisObjectAssign { range });
+        }
+
         // Check for FunctionOutParameter diagnostic
         // Functions should not modify by-reference parameters
         if ctx.is_function && ctx.by_ref_param_names.contains(&key) {
