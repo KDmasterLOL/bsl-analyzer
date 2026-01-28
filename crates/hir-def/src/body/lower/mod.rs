@@ -141,6 +141,14 @@ pub(crate) struct LoweringCtx {
     /// Whether current method has server annotation (&НаСервере or &НаСервереБезКонтекста).
     /// Used for UsingSynchronousCalls diagnostic - synchronous calls are skipped in server context.
     pub(crate) is_server_method: bool,
+
+    /// Current nesting depth for control flow statements (IF, WHILE, FOR, TRY).
+    /// Used for NestedStatements diagnostic.
+    pub(crate) nesting_depth: u32,
+
+    /// Flag indicating if any child was a nesting statement.
+    /// Used for NestedStatements diagnostic to identify leaf statements.
+    pub(crate) had_nested_child: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -187,6 +195,8 @@ impl LoweringCtx {
             return_statements: Vec::new(),
             is_instead_method: false, // Will be set in lower_method_with_externals_and_line_index
             is_server_method: false,  // Will be set in lower_method_with_externals
+            nesting_depth: 0,
+            had_nested_child: false,
         }
     }
 

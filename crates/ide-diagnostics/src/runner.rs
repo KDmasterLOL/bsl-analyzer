@@ -510,7 +510,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // Method metrics (require line counting or AST depth)
     diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
-    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
+    // NestedStatements moved to HIR (BodyDiagnostic::NestedStatements)
 
     // Try-catch patterns
     // TryNumber moved to HIR (BodyDiagnostic::TryNumber)

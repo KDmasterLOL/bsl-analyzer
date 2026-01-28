@@ -204,6 +204,7 @@ mod tests {
     use super::check;
     use crate::test_utils::{
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        check_hir_diagnostic,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
 
@@ -274,5 +275,29 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1, "With maxAllowedLevel=6, only 7-level nesting triggers");
         assert_diagnostic_range(code, &diagnostics[0], 50, 6, 10);
+    }
+
+    #[test]
+    fn test_hir_detection() {
+        // Test that HIR-based detection works
+        let code = r#"
+Процедура Тест()
+    Если а Тогда
+        Если б Тогда
+            Если в Тогда
+                Если г Тогда
+                    Если д Тогда
+                    КонецЕсли;
+                КонецЕсли;
+            КонецЕсли;
+        КонецЕсли;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let nested: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
+
+        assert_eq!(nested.len(), 1, "HIR should detect 1 NestedStatements (depth 5)");
     }
 }
