@@ -515,12 +515,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // TryNumber moved to HIR (BodyDiagnostic::TryNumber)
     // MissingCodeTryCatchEx moved to collect_module_bodies_diagnostics (already uses module_bodies())
 
-    // Resource cleanup
-    diagnostics.extend(run_diagnostic(
-        "MissingTempStorageDeletion",
-        ctx,
-        handlers::missing_temp_storage_deletion::check,
-    ));
+    // MissingTempStorageDeletion moved to collect_dataflow_diagnostics (uses module_bodies)
     // MissingTemporaryFileDeletion moved to collect_dataflow_diagnostics (uses module_bodies + module_cfgs)
 
     // Hardcoded values
@@ -694,6 +689,11 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         "MissingTemporaryFileDeletion",
         ctx,
         handlers::missing_temporary_file_deletion::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "MissingTempStorageDeletion",
+        ctx,
+        handlers::missing_temp_storage_deletion::check,
     ));
 
     diagnostics

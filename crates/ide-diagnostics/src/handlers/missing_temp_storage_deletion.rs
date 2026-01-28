@@ -59,329 +59,156 @@
 //! - MissingTempStorageDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! Key difference from MissingTemporaryFileDeletion:
-//! - Uses STRUCTURAL AST EQUALITY for parameter comparison (not string matching)
+//! - Uses STRUCTURAL HIR EQUALITY for parameter comparison (not string matching)
 //! - This allows matching `Результат.АдресРезультата` correctly
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
-use syntax::ast::{self, AstNode};
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
+use hir_def::hir::{Expr, ExprIdx};
+use hir_def::{Body, BodySourceMap};
 
-/// Main entry point for MissingTempStorageDeletion diagnostic.
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+
+/// HIR-based entry point for MissingTempStorageDeletion diagnostic.
 ///
-/// Detects temporary storage data retrieved with GetFromTempStorage() that is not deleted.
+/// Uses Salsa-cached module_bodies instead of raw AST traversal.
 ///
 /// ## Algorithm
 ///
-/// 1. Collect all tokens once (O(n) optimization)
-/// 2. Find GetFromTempStorage calls using token pattern (IDENT + LPAREN without preceding DOT)
-/// 3. For each call:
-///    - Extract address parameter (full EXPR node for structural comparison)
-///    - Find enclosing scope (method body or file-level)
-///    - Search for DeleteFromTempStorage calls AFTER this call
-///    - Check if any deletion uses the SAME address (structural equality)
-///    - Create diagnostic if no matching deletion found
+/// For each method in the module:
+/// 1. Walk HIR expressions to find GetFromTempStorage() calls
+/// 2. Extract the address parameter (first argument)
+/// 3. Search for DeleteFromTempStorage() calls AFTER the get call
+/// 4. Check if any deletion uses the SAME address (structural HIR equality)
+/// 5. Create diagnostic if no matching deletion found
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("MissingTempStorageDeletion::check").entered();
     let code = DiagnosticCode::MissingTempStorageDeletion;
 
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    // ✅ OPTIMIZATION: Collect tokens ONCE (O(n) instead of O(n²))
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
+    let module_bodies = ctx.module_bodies();
     let mut diagnostics = Vec::new();
 
-    // Find all global GetFromTempStorage calls using token pattern
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
-
-            if next_is_lparen {
-                // Check if it's NOT a member access (Module.Method)
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
-
-                if !prev_is_dot && is_get_from_temp_storage(token.text()) {
-                    tracing::trace!(
-                        token_text = %token.text(),
-                        range = ?token.text_range(),
-                        "Found GetFromTempStorage call"
-                    );
-
-                    // Found GetFromTempStorage call
-                    if let Some(diag) = check_temp_storage_usage(token, code, ctx) {
-                        diagnostics.push(diag);
-                    }
-                }
-            }
-        }
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
+        diagnostics.extend(check_body(body, source_map, code, ctx));
     }
 
-    tracing::debug!(count = diagnostics.len(), "MissingTempStorageDeletion diagnostics found");
+    if let Some(module_result) = module_bodies.module_code_result() {
+        diagnostics.extend(check_body(&module_result.body, &module_result.source_map, code, ctx));
+    }
+
+    diagnostics.sort_by_key(|d| d.range.start());
     diagnostics
 }
 
-/// Check if token text is GetFromTempStorage (case-insensitive, bilingual)
+/// Check if name is GetFromTempStorage (case-insensitive, bilingual).
 fn is_get_from_temp_storage(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "получитьизвременногохранилища" || lower == "getfromtempstorage"
 }
 
-/// Check if token text is DeleteFromTempStorage (case-insensitive, bilingual)
+/// Check if name is DeleteFromTempStorage (case-insensitive, bilingual).
 fn is_delete_from_temp_storage(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "удалитьизвременногохранилища" || lower == "deletefromtempstorage"
 }
 
-/// Check temporary storage usage for a GetFromTempStorage call.
-///
-/// Returns diagnostic if no matching DeleteFromTempStorage is found after this call.
-fn check_temp_storage_usage(
-    call_token: &SyntaxToken,
+/// Check a single HIR body for MissingTempStorageDeletion.
+fn check_body(
+    body: &Body,
+    source_map: &BodySourceMap,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    // Extract address parameter (full EXPR node for structural comparison)
-    let address_param = extract_address_parameter(call_token)?;
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
 
-    tracing::trace!(
-        address_param = %address_param,
-        call_pos = ?call_token.text_range(),
-        "Extracted address parameter"
-    );
+    // Collect all GetFromTempStorage calls: (ExprId, first_arg ExprIdx, call range)
+    let mut get_calls: Vec<(ide_db::TextRange, ExprIdx)> = Vec::new();
 
-    // Find enclosing scope (method body or file-level)
-    let parent = call_token.parent()?;
-    let scope = find_enclosing_scope(parent)?;
-
-    // Search for deletion calls after this point
-    if has_deletion_call(&scope, call_token, &address_param) {
-        tracing::trace!("Found matching deletion call");
-        return None; // Data is deleted, no diagnostic
-    }
-
-    // No deletion found - create diagnostic
-    tracing::trace!("No deletion found, creating diagnostic");
-
-    // Range spans the full call expression
-    let call_range = get_call_expression_range(call_token);
-
-    Some(Diagnostic {
-        code,
-        message: "Нужно добавить удаление данных из временного хранилища после использования, вызвав \"УдалитьИзВременногоХранилища\"".to_string(),
-        severity: ctx.severity(code),
-        range: call_range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
-}
-
-/// Extract address parameter from GetFromTempStorage call.
-///
-/// Returns the full EXPR node of the first argument (address parameter).
-/// This is critical for structural comparison - we need the full AST subtree,
-/// not just the text, to correctly match `Результат.АдресРезультата`.
-fn extract_address_parameter(call_token: &SyntaxToken) -> Option<SyntaxNode> {
-    // The token is wrapped in IDENT node, and ARG_LIST is a sibling
-    // Structure: IDENT_node(IDENT_token) + ARG_LIST_node
-    // We need to go: token -> IDENT_node -> find ARG_LIST sibling
-
-    let ident_node = call_token.parent()?;
-
-    // Find ARG_LIST among siblings
-    for sibling in ident_node.siblings(syntax::Direction::Next) {
-        if sibling.kind() == SyntaxKind::ARG_LIST {
-            // Find first EXPR child (the address argument)
-            return sibling.children().find(|child| child.kind() == SyntaxKind::EXPR);
-        }
-    }
-
-    None
-}
-
-/// Find the enclosing scope (method body or file-level code).
-///
-/// Uses AST wrappers to find ProcedureDef or FunctionDef,
-/// then extracts the statement list body.
-/// If no method found, returns SOURCE_FILE for file-level code.
-fn find_enclosing_scope(node: SyntaxNode) -> Option<SyntaxNode> {
-    // Try method first
-    for ancestor in node.ancestors() {
-        if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
-            return proc.body().map(|b| b.syntax().clone());
-        }
-
-        if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
-            return func.body().map(|b| b.syntax().clone());
-        }
-
-        // File-level code
-        if ancestor.kind() == SyntaxKind::SOURCE_FILE {
-            return Some(ancestor);
-        }
-    }
-    None
-}
-
-/// Check if there's a deletion call for the address after the GetFromTempStorage call.
-///
-/// Searches for DeleteFromTempStorage calls AFTER the get call (by byte offset)
-/// that use the SAME address parameter (structural AST equality).
-///
-/// This is the CRITICAL difference from MissingTemporaryFileDeletion:
-/// - Uses structural AST comparison, not string matching
-/// - Allows matching `Результат.АдресРезультата` correctly
-fn has_deletion_call(
-    scope: &SyntaxNode,
-    get_call_token: &SyntaxToken,
-    address_param: &SyntaxNode,
-) -> bool {
-    let get_call_offset = get_call_token.text_range().end();
-
-    // Collect all tokens once for efficiency
-    let tokens: Vec<_> = scope.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-    // Find all DeleteFromTempStorage calls AFTER the get call
-    for (i, token) in tokens.iter().enumerate() {
-        // Must come AFTER get call (by byte offset)
-        if token.text_range().start() <= get_call_offset {
+    for (expr_id, expr) in body.exprs_iter() {
+        let Expr::Call { callee, args } = expr else { continue };
+        let Expr::Path(name) = body.expr_idx(*callee) else { continue };
+        if !is_get_from_temp_storage(name.as_str()) {
             continue;
         }
+        // Must have at least one argument (the address)
+        let Some(&first_arg) = args.first() else { continue };
+        let Some(range) = source_map.expr_range(expr_id) else { continue };
+        get_calls.push((range, first_arg));
+    }
 
-        if token.kind() == SyntaxKind::IDENT && is_delete_from_temp_storage(token.text()) {
-            // Check if it's a call (next token is LPAREN)
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+    // Collect all DeleteFromTempStorage calls: (range, first_arg ExprIdx)
+    let mut delete_calls: Vec<(ide_db::TextRange, ExprIdx)> = Vec::new();
 
-            // Check if it's NOT a member access (previous token is DOT)
-            let prev_is_dot = i
-                .checked_sub(1)
-                .and_then(|idx| tokens.get(idx))
-                .map(|t| t.kind() == SyntaxKind::DOT)
-                .unwrap_or(false);
+    for (expr_id, expr) in body.exprs_iter() {
+        let Expr::Call { callee, args } = expr else { continue };
+        let Expr::Path(name) = body.expr_idx(*callee) else { continue };
+        if !is_delete_from_temp_storage(name.as_str()) {
+            continue;
+        }
+        let Some(&first_arg) = args.first() else { continue };
+        let Some(range) = source_map.expr_range(expr_id) else { continue };
+        delete_calls.push((range, first_arg));
+    }
 
-            if !prev_is_dot && next_is_lparen {
-                // This is a global DeleteFromTempStorage call
-                if let Some(delete_param) = extract_address_parameter(token) {
-                    // CRITICAL: Structural AST equality check
-                    if nodes_equal(address_param, &delete_param) {
-                        tracing::trace!(
-                            delete_pos = ?token.text_range(),
-                            "Found matching DeleteFromTempStorage call"
-                        );
-                        return true; // Found match!
-                    }
-                }
-            }
+    // For each get call, check if there's a matching delete AFTER it
+    for (get_range, get_arg) in &get_calls {
+        let has_matching_delete = delete_calls.iter().any(|(del_range, del_arg)| {
+            del_range.start() > get_range.end()
+                && exprs_structurally_equal(body, *get_arg, *del_arg)
+        });
+
+        if !has_matching_delete {
+            diagnostics.push(Diagnostic {
+                code,
+                message: "Нужно добавить удаление данных из временного хранилища после использования, вызвав \"УдалитьИзВременногоХранилища\"".to_string(),
+                severity: ctx.severity(code),
+                range: *get_range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
         }
     }
 
-    false
+    diagnostics
 }
 
-/// Structural AST equality check for nodes.
+/// Structural equality of HIR expressions (case-insensitive for identifiers).
 ///
 /// This is the CRITICAL function that differentiates this diagnostic
-/// from MissingTemporaryFileDeletion.
-///
-/// Performs recursive structural comparison of two AST subtrees:
-/// - Node kinds must match
-/// - All children must match (recursively)
-/// - Token texts compared case-insensitively for IDENT
-/// - Token texts compared exactly for STRING
-///
-/// This allows matching complex expressions like:
+/// from MissingTemporaryFileDeletion. Allows matching complex expressions like:
 /// - `Результат.АдресРезультата` (member access)
-/// - `ПолучитьАдрес()` (method call)
 /// - Simple identifiers like `Адрес`
-fn nodes_equal(left: &SyntaxNode, right: &SyntaxNode) -> bool {
-    // Check node type
-    if left.kind() != right.kind() {
-        return false;
-    }
-
-    // Get all children (both nodes and tokens)
-    let left_children: Vec<_> = left.children_with_tokens().collect();
-    let right_children: Vec<_> = right.children_with_tokens().collect();
-
-    if left_children.len() != right_children.len() {
-        return false;
-    }
-
-    // Compare each child
-    for (l, r) in left_children.iter().zip(right_children.iter()) {
-        match (l, r) {
-            (NodeOrToken::Token(lt), NodeOrToken::Token(rt)) => {
-                if !tokens_equal(lt, rt) {
-                    return false;
-                }
-            }
-            (NodeOrToken::Node(ln), NodeOrToken::Node(rn)) => {
-                if !nodes_equal(ln, rn) {
-                    return false;
-                }
-            }
-            _ => return false, // Token vs Node mismatch
+fn exprs_structurally_equal(body: &Body, a: ExprIdx, b: ExprIdx) -> bool {
+    match (body.expr_idx(a), body.expr_idx(b)) {
+        (Expr::Path(n1), Expr::Path(n2)) => {
+            n1.as_str().to_lowercase() == n2.as_str().to_lowercase()
         }
-    }
-
-    true
-}
-
-/// Token equality check.
-///
-/// - STRING tokens: exact match
-/// - Other tokens (IDENT, keywords): case-insensitive match
-fn tokens_equal(left: &SyntaxToken, right: &SyntaxToken) -> bool {
-    if left.kind() != right.kind() {
-        return false;
-    }
-
-    // STRING tokens: exact match
-    if left.kind() == SyntaxKind::STRING {
-        return left.text() == right.text();
-    }
-
-    // Identifiers/keywords: case-insensitive (handle both ASCII and Cyrillic)
-    left.text().to_lowercase() == right.text().to_lowercase()
-}
-
-/// Get the range for the GetFromTempStorage call expression.
-///
-/// Spans from the method name to the closing paren.
-fn get_call_expression_range(call_token: &SyntaxToken) -> TextRange {
-    // Walk up to find the call expression (EXPR node containing the call with arguments)
-    // Return the first EXPR node whose parent is NOT an EXPR
-    let mut current = call_token.parent();
-
-    while let Some(node) = current {
-        if node.kind() == SyntaxKind::EXPR {
-            // Check if parent is also EXPR
-            if let Some(parent) = node.parent() {
-                if parent.kind() != SyntaxKind::EXPR {
-                    // Parent is not EXPR, so this is the outermost call expression
-                    return node.text_range();
-                }
-            } else {
-                // No parent, use this EXPR's range
-                return node.text_range();
-            }
+        (Expr::Field { base: b1, field: f1 }, Expr::Field { base: b2, field: f2 }) => {
+            f1.as_str().to_lowercase() == f2.as_str().to_lowercase()
+                && exprs_structurally_equal(body, *b1, *b2)
         }
-        current = node.parent();
+        (Expr::Call { callee: c1, args: a1 }, Expr::Call { callee: c2, args: a2 }) => {
+            a1.len() == a2.len()
+                && exprs_structurally_equal(body, *c1, *c2)
+                && a1.iter().zip(a2.iter()).all(|(x, y)| exprs_structurally_equal(body, *x, *y))
+        }
+        (
+            Expr::MethodCall { receiver: r1, method: m1, args: a1 },
+            Expr::MethodCall { receiver: r2, method: m2, args: a2 },
+        ) => {
+            m1.as_str().to_lowercase() == m2.as_str().to_lowercase()
+                && a1.len() == a2.len()
+                && exprs_structurally_equal(body, *r1, *r2)
+                && a1.iter().zip(a2.iter()).all(|(x, y)| exprs_structurally_equal(body, *x, *y))
+        }
+        (Expr::Index { base: b1, index: i1 }, Expr::Index { base: b2, index: i2 }) => {
+            exprs_structurally_equal(body, *b1, *b2) && exprs_structurally_equal(body, *i1, *i2)
+        }
+        (Expr::Literal(l1), Expr::Literal(l2)) => l1 == l2,
+        _ => false,
     }
-
-    // Fallback: just the token itself
-    call_token.text_range()
 }
 
 #[cfg(test)]
