@@ -508,8 +508,7 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // Method metrics (require line counting or AST depth)
-    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
+    // MethodSize moved to HIR (BodyDiagnostic::MethodSize)
     // NestedStatements moved to HIR (BodyDiagnostic::NestedStatements)
 
     // Try-catch patterns
