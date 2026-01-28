@@ -30,7 +30,7 @@
 //! - No parameters
 //! - Can be disabled via config
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use syntax::{SyntaxKind, SyntaxToken};
 
 /// Check if text contains Cyrillic characters
@@ -251,7 +251,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     severity: ctx.severity(code),
                     range,
                     tags: ctx.tags(code),
-                    fixes: vec![],
+                    fixes: vec![Fix {
+                        label: format!("Заменить на '{}'", canonical),
+                        edits: vec![TextEdit { range, new_text: canonical }],
+                    }],
                 });
             }
         }
