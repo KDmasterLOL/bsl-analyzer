@@ -4,7 +4,9 @@
 
 use syntax::{SyntaxKind, SyntaxNode};
 
-use crate::body::{Body, BodyDiagnostic, ExternalRef, ManagerType, RedundantAccessKind};
+use crate::body::{
+    Body, BodyDiagnostic, ExternalRef, MagicNumberContext, ManagerType, RedundantAccessKind,
+};
 use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
 use crate::{Name, QualifiedName};
 
@@ -137,6 +139,16 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             // Wrap in NotNan, fallback to 0.0 if somehow NaN (should never happen with parsed literals)
             let value = ordered_float::NotNan::new(value)
                 .unwrap_or_else(|_| ordered_float::NotNan::new(0.0).unwrap());
+
+            // Emit MagicNumber diagnostic candidate
+            // Actual filtering by authorizedNumbers and context happens in from_hir()
+            let context = determine_magic_number_context(&token);
+            ctx.emit(BodyDiagnostic::MagicNumber {
+                value: text.clone(),
+                range: token.text_range(),
+                context,
+            });
+
             Literal::Number(value)
         }
         SyntaxKind::STRING | SyntaxKind::STRING_START => {
@@ -1965,4 +1977,151 @@ fn check_find_element_first_arg(args: &[ExprIdx], ctx: &LoweringCtx) -> bool {
     let first_arg = args[0];
     let expr = ctx.body.expr_idx(first_arg);
     matches!(expr, Expr::Literal(Literal::String(_)) | Expr::Literal(Literal::Number(_)))
+}
+
+/// Determine MagicNumber context by walking AST parents.
+///
+/// Context determines if the magic number should be excluded based on:
+/// - Constructor type (excluded if in excludedConstructors list)
+/// - Structure/Map Insert() call
+/// - Array index access (excluded if allowMagicIndexes = true)
+/// - Default parameter value
+/// - Property assignment
+/// - Simple assignment
+fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberContext {
+    let mut node = token.parent();
+
+    // Track what contexts we've seen while walking up
+    let mut in_binary_expr = false;
+    let mut in_arg_list = false;
+    let mut in_ternary = false;
+    let mut in_call = false;
+    let mut in_assign = false;
+    let mut has_dot_in_assign = false;
+
+    while let Some(current) = node {
+        match current.kind() {
+            SyntaxKind::PARAM => {
+                // Default parameter value: Функция Метод(Значение = 566)
+                return MagicNumberContext::InDefaultParam;
+            }
+            SyntaxKind::INDEX_EXPR => {
+                // Array index access: Массив[20]
+                return MagicNumberContext::InArrayIndex;
+            }
+            SyntaxKind::NEW_EXPR => {
+                // Constructor: Новый ТипОбъекта(10, 2)
+                // Extract type name
+                if let Some(type_name) = current
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .find(|tok| tok.kind() == SyntaxKind::IDENT)
+                {
+                    let name = type_name.text().to_lowercase();
+                    // Check if it's a structure/map constructor
+                    if name.contains("структура")
+                        || name.contains("structure")
+                        || name.contains("соответствие")
+                        || name.contains("map")
+                    {
+                        return MagicNumberContext::InStructureConstructor;
+                    }
+                    // Return constructor context with type name for excludedConstructors check
+                    return MagicNumberContext::InConstructor { type_name: name };
+                }
+            }
+            SyntaxKind::BINARY_EXPR => {
+                in_binary_expr = true;
+            }
+            SyntaxKind::ARG_LIST => {
+                in_arg_list = true;
+            }
+            SyntaxKind::TERNARY_EXPR => {
+                in_ternary = true;
+            }
+            SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR => {
+                in_call = true;
+                // Check if this is Structure.Insert() or Map.Insert()
+                if let Some(method_name) = find_method_name_for_magic_number(&current) {
+                    let name = method_name.to_lowercase();
+                    if name == "вставить" || name == "insert" {
+                        return MagicNumberContext::InStructureInsert;
+                    }
+                }
+            }
+            SyntaxKind::ASSIGN_STMT => {
+                in_assign = true;
+                // Check if this is property assignment (has DOT)
+                has_dot_in_assign = current
+                    .children_with_tokens()
+                    .any(|el| el.as_token().is_some_and(|t| t.kind() == SyntaxKind::DOT));
+            }
+            SyntaxKind::RETURN_STMT => {
+                return MagicNumberContext::InReturn;
+            }
+            SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF => {
+                // Reached method boundary - stop walking
+                break;
+            }
+            _ => {}
+        }
+        node = current.parent();
+    }
+
+    // Determine context from accumulated flags
+    if in_assign {
+        if has_dot_in_assign && !in_arg_list {
+            // Property assignment: Структура.Поле = 20
+            return MagicNumberContext::InPropertyAssignment;
+        }
+        if !in_binary_expr && !in_arg_list {
+            // Simple assignment: День = 6
+            return MagicNumberContext::InSimpleAssignment;
+        }
+        if in_ternary && !in_binary_expr {
+            // Ternary branch in assignment: Result = ?(cond, 1, 2)
+            return MagicNumberContext::InTernaryBranch;
+        }
+    }
+
+    if in_call && in_arg_list && !in_binary_expr {
+        // Method call argument: .Добавить(2)
+        return MagicNumberContext::InMethodCall;
+    }
+
+    if in_binary_expr {
+        // Expression with operators: СекундВЧасе = 60 * 60
+        return MagicNumberContext::InExpression;
+    }
+
+    MagicNumberContext::Other
+}
+
+/// Find method name in a CALL_STMT or CALL_EXPR node for MagicNumber context.
+fn find_method_name_for_magic_number(node: &SyntaxNode) -> Option<String> {
+    // Look for FIELD_EXPR which contains the method call structure
+    for child in node.descendants() {
+        if child.kind() == SyntaxKind::FIELD_EXPR {
+            // In FIELD_EXPR, method name is the last IDENT token
+            return child
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| t.kind() == SyntaxKind::IDENT)
+                .last()
+                .map(|t| t.text().to_string());
+        }
+        // Don't descend into ARG_LIST
+        if child.kind() == SyntaxKind::ARG_LIST {
+            break;
+        }
+    }
+
+    // For simple function calls without dot, find the first IDENT before ARG_LIST
+    for token in node.children_with_tokens().filter_map(|e| e.into_token()) {
+        if token.kind() == SyntaxKind::IDENT {
+            return Some(token.text().to_string());
+        }
+    }
+
+    None
 }

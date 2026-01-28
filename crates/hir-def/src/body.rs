@@ -367,7 +367,8 @@ pub enum BodyDiagnostic {
 
     /// Magic number literal (hardcoded number that should be a constant).
     /// Value is stored as string to allow Eq derivation.
-    MagicNumber { value: String, range: TextRange },
+    /// Context is used for filtering by excludedConstructors and allowMagicIndexes config.
+    MagicNumber { value: String, range: TextRange, context: MagicNumberContext },
 
     /// Self-assignment (a = a).
     SelfAssign { range: TextRange },
@@ -731,6 +732,122 @@ pub enum BodyDiagnostic {
     /// This is a read-only property and cannot be assigned.
     /// Validated in from_hir() to check if module type is CommonModule or FormModule.
     ThisObjectAssign { range: TextRange },
+
+    // ==========================================================================
+    // Phase 4: Method-scoped diagnostics (emitted at end of method lowering)
+    // ==========================================================================
+    /// Cognitive complexity exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by complexityThreshold in from_hir().
+    CognitiveComplexity {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Calculated cognitive complexity.
+        complexity: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
+
+    /// Cyclomatic complexity exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by complexityThreshold in from_hir().
+    CyclomaticComplexity {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Calculated cyclomatic complexity.
+        complexity: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
+
+    /// Method size (number of statements) exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by maxSize in from_hir().
+    MethodSize {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Calculated method size (number of statements).
+        size: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
+
+    /// Nested statements depth exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by maxAllowedLevel in from_hir().
+    NestedStatements {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Maximum nesting depth found.
+        depth: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the deepest nested statement for the diagnostic.
+        range: TextRange,
+    },
+
+    /// Number of parameters exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by maxParamsCount in from_hir().
+    NumberOfParams {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Number of parameters.
+        count: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
+
+    /// Number of optional parameters exceeds threshold.
+    /// Emitted at end of method lowering. Filtered by maxOptionalParamsCount in from_hir().
+    NumberOfOptionalParams {
+        /// Method name for the diagnostic message.
+        method_name: String,
+        /// Number of optional parameters.
+        count: u32,
+        /// Is this a function (vs procedure)?
+        is_function: bool,
+        /// Range of the method name for the diagnostic.
+        range: TextRange,
+    },
+}
+
+/// Context of a magic number for filtering by configuration.
+///
+/// Used by MagicNumber diagnostic to determine if a number should be excluded
+/// based on `excludedConstructors` and `allowMagicIndexes` parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MagicNumberContext {
+    /// Number inside a constructor: `Новый ТипОбъекта(10, 2)`
+    InConstructor {
+        /// Type name of the constructor (lowercase for comparison)
+        type_name: String,
+    },
+    /// Number inside Structure.Insert() or Map.Insert() call
+    InStructureInsert,
+    /// Number inside structure constructor: `Новый Структура("Поле", 20)`
+    InStructureConstructor,
+    /// Number as default parameter value: `Функция Метод(Значение = 566)`
+    InDefaultParam,
+    /// Number in array index access: `Массив[20]`
+    InArrayIndex,
+    /// Number in property assignment: `Структура.Поле = 20`
+    InPropertyAssignment,
+    /// Number in simple assignment (direct value without operators): `День = 6`
+    InSimpleAssignment,
+    /// Number in binary expression: `СекундВЧасе = 60 * 60`
+    InExpression,
+    /// Number in return statement: `Возврат 12`
+    InReturn,
+    /// Number in method call argument: `.Добавить(2)`
+    InMethodCall,
+    /// Number in ternary operator branch (for exclusion check)
+    InTernaryBranch,
+    /// Other context (not excluded)
+    Other,
 }
 
 /// Category of deprecated attribute (8.3.12).
@@ -932,6 +1049,13 @@ impl BodyDiagnostic {
             BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => *range,
             BodyDiagnostic::DeprecatedMethodCall { range, .. } => *range,
             BodyDiagnostic::ThisObjectAssign { range } => *range,
+            // Phase 4: Method-scoped diagnostics
+            BodyDiagnostic::CognitiveComplexity { range, .. } => *range,
+            BodyDiagnostic::CyclomaticComplexity { range, .. } => *range,
+            BodyDiagnostic::MethodSize { range, .. } => *range,
+            BodyDiagnostic::NestedStatements { range, .. } => *range,
+            BodyDiagnostic::NumberOfParams { range, .. } => *range,
+            BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
         }
     }
 }
@@ -1066,7 +1190,11 @@ mod tests {
             BodyDiagnostic::UnreachableCode { range },
             BodyDiagnostic::EmptyCodeBlock { range },
             BodyDiagnostic::DeprecatedMethod { name: "Test".to_string(), range },
-            BodyDiagnostic::MagicNumber { value: "42".to_string(), range },
+            BodyDiagnostic::MagicNumber {
+                value: "42".to_string(),
+                range,
+                context: MagicNumberContext::Other,
+            },
             BodyDiagnostic::SelfAssign { range },
             BodyDiagnostic::UnusedVariable { name: "x".to_string(), range },
             BodyDiagnostic::FunctionShouldHaveReturn { range },

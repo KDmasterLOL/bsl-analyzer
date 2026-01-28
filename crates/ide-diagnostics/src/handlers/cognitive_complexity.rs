@@ -184,6 +184,43 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::CognitiveComplexity` is encountered.
+/// Applies configuration filtering (complexityThreshold).
+pub fn from_hir(
+    method_name: &str,
+    complexity: u32,
+    is_function: bool,
+    range: ide_db::TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::CognitiveComplexity;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    let config = Config::from_context(ctx);
+    if complexity <= config.complexity_threshold {
+        return None;
+    }
+
+    let method_type = if is_function { "Функция" } else { "Процедура" };
+    Some(Diagnostic {
+        code,
+        message: format!(
+            "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
+             Упростите логику или уменьшите вложенность",
+            method_type, method_name, complexity, config.complexity_threshold
+        ),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 /// Calculate cognitive complexity for a method body (HIR-based).
 ///
 /// This is a PUBLIC function that can be reused for:

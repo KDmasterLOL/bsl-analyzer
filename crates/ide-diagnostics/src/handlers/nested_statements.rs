@@ -167,6 +167,38 @@ fn get_first_keyword_range(node: &SyntaxNode) -> TextRange {
         .unwrap_or_else(|| node.text_range())
 }
 
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::NestedStatements` is encountered.
+/// Applies configuration filtering (maxAllowedLevel).
+pub fn from_hir(
+    _method_name: &str,
+    depth: u32,
+    _is_function: bool,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::NestedStatements;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    let config = Config::from_context(ctx);
+    if (depth as usize) <= config.max_allowed_level {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::check;

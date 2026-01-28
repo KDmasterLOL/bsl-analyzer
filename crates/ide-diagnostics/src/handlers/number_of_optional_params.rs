@@ -105,6 +105,41 @@ fn check_method(
     }
 }
 
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::NumberOfOptionalParams` is encountered.
+/// Applies configuration filtering (maxOptionalParamsCount).
+pub fn from_hir(
+    _method_name: &str,
+    count: u32,
+    _is_function: bool,
+    range: ide_db::TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::NumberOfOptionalParams;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    let config = Config::from_context(ctx);
+    if (count as usize) <= config.max_optional_params {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: format!(
+            "Уменьшите количество необязательных параметров c {} до допустимого {}",
+            count, config.max_optional_params
+        ),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::check;

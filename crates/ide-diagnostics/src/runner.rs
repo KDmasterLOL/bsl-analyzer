@@ -318,47 +318,23 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    diagnostics.extend(run_diagnostic(
-        "CreateQueryInCycle",
-        ctx,
-        handlers::create_query_in_cycle::check,
-    ));
+    // CreateQueryInCycle: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
     diagnostics.extend(run_diagnostic(
         "DataExchangeLoading",
         ctx,
         handlers::data_exchange_loading::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "DeletingCollectionItem",
-        ctx,
-        handlers::deleting_collection_item::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "DeprecatedAttributes8312",
-        ctx,
-        handlers::deprecated_attributes_8312::check,
-    ));
+    // DeletingCollectionItem: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
+    // DeprecatedAttributes8312: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
     diagnostics.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
     diagnostics.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
-    diagnostics.extend(run_diagnostic(
-        "CognitiveComplexity",
-        ctx,
-        handlers::cognitive_complexity::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "CyclomaticComplexity",
-        ctx,
-        handlers::cyclomatic_complexity::check,
-    ));
-    diagnostics.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
+    // CognitiveComplexity: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
+    // CyclomaticComplexity: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
+    // MagicNumber: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
     diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
     diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
-    diagnostics.extend(run_diagnostic(
-        "NumberOfOptionalParams",
-        ctx,
-        handlers::number_of_optional_params::check,
-    ));
-    diagnostics.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
+    // NumberOfOptionalParams: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
+    // NumberOfParams: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
     diagnostics.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
     diagnostics.extend(run_diagnostic(
         "ReservedParameterNames",

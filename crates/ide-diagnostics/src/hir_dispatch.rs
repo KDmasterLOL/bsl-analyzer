@@ -46,9 +46,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::EmptyCodeBlock { range } => {
             handlers::empty_code_block::from_hir(*range, ctx)
         }
-        BodyDiagnostic::MagicNumber { .. } => {
-            // Handled by AST-path in runner::collect_semantic_diagnostics
-            None
+        BodyDiagnostic::MagicNumber { value, range, context } => {
+            handlers::magic_number::from_hir(value, *range, context, ctx)
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
         BodyDiagnostic::UnusedVariable { name, range } => {
@@ -249,6 +248,43 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::ThisObjectAssign { range } => {
             handlers::this_object_assign::from_hir(*range, ctx)
+        }
+        // Phase 4: Method-scoped diagnostics
+        BodyDiagnostic::CognitiveComplexity { method_name, complexity, is_function, range } => {
+            handlers::cognitive_complexity::from_hir(
+                method_name,
+                *complexity,
+                *is_function,
+                *range,
+                ctx,
+            )
+        }
+        BodyDiagnostic::CyclomaticComplexity { method_name, complexity, is_function, range } => {
+            handlers::cyclomatic_complexity::from_hir(
+                method_name,
+                *complexity,
+                *is_function,
+                *range,
+                ctx,
+            )
+        }
+        BodyDiagnostic::MethodSize { method_name, size, is_function, range } => {
+            handlers::method_size::from_hir(method_name, *size, *is_function, *range, ctx)
+        }
+        BodyDiagnostic::NestedStatements { method_name, depth, is_function, range } => {
+            handlers::nested_statements::from_hir(method_name, *depth, *is_function, *range, ctx)
+        }
+        BodyDiagnostic::NumberOfParams { method_name, count, is_function, range } => {
+            handlers::number_of_params::from_hir(method_name, *count, *is_function, *range, ctx)
+        }
+        BodyDiagnostic::NumberOfOptionalParams { method_name, count, is_function, range } => {
+            handlers::number_of_optional_params::from_hir(
+                method_name,
+                *count,
+                *is_function,
+                *range,
+                ctx,
+            )
         }
     }
 }

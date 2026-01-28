@@ -165,6 +165,41 @@ fn get_method_name(node: &SyntaxNode) -> Option<SyntaxToken> {
         .find(|tok| tok.kind() == SyntaxKind::IDENT)
 }
 
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::MethodSize` is encountered.
+/// Applies configuration filtering (maxMethodSize).
+pub fn from_hir(
+    method_name: &str,
+    size: u32,
+    _is_function: bool,
+    range: ide_db::TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::MethodSize;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    let config = Config::from_context(ctx);
+    if (size as usize) <= config.max_method_size {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: format!(
+            "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
+            method_name, size, config.max_method_size
+        ),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{calculate_method_size, check};

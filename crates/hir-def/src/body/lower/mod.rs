@@ -540,6 +540,80 @@ fn check_function_returns_same_primitive(ctx: &mut LoweringCtx, method_node: &Sy
     }
 }
 
+/// Emit method-scoped diagnostics at end of lowering.
+///
+/// Phase 4: Method metrics (complexity, size, nesting, params) are calculated
+/// after body is lowered and emitted as diagnostics.
+/// Threshold filtering happens in from_hir() handlers.
+fn emit_method_scoped_diagnostics(
+    ctx: &mut LoweringCtx,
+    method_name: &str,
+    name_range: TextRange,
+    is_function: bool,
+) {
+    use crate::body::BodyDiagnostic;
+    use crate::cognitive_complexity;
+    use crate::cyclomatic_complexity;
+
+    // Calculate complexity metrics using existing implementations
+    let cognitive = cognitive_complexity::calculate_complexity(&ctx.body);
+    let cyclomatic = cyclomatic_complexity::calculate_complexity(&ctx.body);
+
+    // Emit CognitiveComplexity candidate (always emit, filter in from_hir)
+    // Only emit if complexity > 0 to reduce noise
+    if cognitive > 0 {
+        ctx.emit(BodyDiagnostic::CognitiveComplexity {
+            method_name: method_name.to_string(),
+            complexity: cognitive,
+            is_function,
+            range: name_range,
+        });
+    }
+
+    // Emit CyclomaticComplexity candidate
+    // Base complexity is 1, so only emit if > 1
+    if cyclomatic > 1 {
+        ctx.emit(BodyDiagnostic::CyclomaticComplexity {
+            method_name: method_name.to_string(),
+            complexity: cyclomatic,
+            is_function,
+            range: name_range,
+        });
+    }
+
+    // Emit MethodSize candidate
+    // Calculate method size from body statements count (simplified)
+    // Note: Actual line-based calculation happens in check() for now
+    // HIR-based emit can use statement count as proxy
+
+    // Emit NumberOfParams and NumberOfOptionalParams candidates
+    let params_count = ctx.body.params.len() as u32;
+    let optional_count =
+        ctx.body.params.iter().filter(|&p| ctx.body.bindings[*p].default_value.is_some()).count()
+            as u32;
+
+    if params_count > 0 {
+        ctx.emit(BodyDiagnostic::NumberOfParams {
+            method_name: method_name.to_string(),
+            count: params_count,
+            is_function,
+            range: name_range,
+        });
+    }
+
+    if optional_count > 0 {
+        ctx.emit(BodyDiagnostic::NumberOfOptionalParams {
+            method_name: method_name.to_string(),
+            count: optional_count,
+            is_function,
+            range: name_range,
+        });
+    }
+
+    // Note: NestedStatements and MethodSize require AST traversal or line counting
+    // which is better done in check() for now. HIR-based alternatives could be added later.
+}
+
 /// Compare two literals for equality (case-insensitive for strings by default).
 ///
 /// Matches Java behavior: strings are compared case-insensitively unless configured otherwise.
@@ -809,6 +883,11 @@ pub fn lower_method_with_externals_and_line_index(
     // Emit TooManyReturns diagnostic
     if let Some(ref token) = name_token {
         ctx.emit_too_many_returns_diagnostic(token.text().to_string(), token.text_range());
+    }
+
+    // Emit method-scoped diagnostics (Phase 4)
+    if let Some(ref token) = name_token {
+        emit_method_scoped_diagnostics(&mut ctx, token.text(), token.text_range(), is_function);
     }
 
     // Collect referenced externals

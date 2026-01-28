@@ -47,15 +47,24 @@
 //! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir_def::body::MagicNumberContext;
 use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
-/// Called from lib.rs dispatch when `BodyDiagnostic::MagicNumber` is encountered.
-/// Applies configuration filtering (authorizedNumbers).
-pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+/// Called from hir_dispatch when `BodyDiagnostic::MagicNumber` is encountered.
+/// Applies configuration filtering:
+/// - authorizedNumbers: numbers that are always allowed
+/// - allowMagicIndexes: whether to allow numbers in array index access
+/// - excludedConstructors: constructor types where numbers are allowed
+pub fn from_hir(
+    value: &str,
+    range: TextRange,
+    context: &MagicNumberContext,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
     let code = DiagnosticCode::MagicNumber;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -66,6 +75,33 @@ pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opti
     let config = Config::from_context(ctx);
     if is_authorized(value, &config) {
         return None;
+    }
+
+    // Apply context-based exclusions
+    match context {
+        MagicNumberContext::InDefaultParam => return None,
+        MagicNumberContext::InStructureInsert => return None,
+        MagicNumberContext::InStructureConstructor => return None,
+        MagicNumberContext::InPropertyAssignment => return None,
+        MagicNumberContext::InSimpleAssignment => return None,
+        MagicNumberContext::InTernaryBranch => return None,
+        MagicNumberContext::InArrayIndex => {
+            if config.allow_magic_indexes {
+                return None;
+            }
+            // If not allowed, fall through to emit diagnostic
+        }
+        MagicNumberContext::InConstructor { type_name } => {
+            if config.excluded_constructors.contains(type_name) {
+                return None;
+            }
+            // If not excluded, fall through to emit diagnostic
+        }
+        // These contexts should emit diagnostics:
+        MagicNumberContext::InExpression
+        | MagicNumberContext::InReturn
+        | MagicNumberContext::InMethodCall
+        | MagicNumberContext::Other => {}
     }
 
     Some(Diagnostic {
