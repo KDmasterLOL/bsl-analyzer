@@ -32,7 +32,7 @@ BSL_PROFILE=* cargo run           # Enable profiling
 ```
 bsl-analyzer (LSP Server)
   └── ide (High-level API)
-      ├── ide-diagnostics (171/181 diagnostics, 94%)
+      ├── ide-diagnostics (180/181 diagnostics, 99%)
       ├── ide-assists (Code actions)
       └── ide-db (Salsa database)
           └── hir / hir-def / hir-ty (Semantic analysis)
@@ -48,7 +48,7 @@ bsl-analyzer (LSP Server)
 
 **Rowan** - Immutable CST, full-fidelity parsing, typed AST wrappers
 
-**DiagnosticMetadata** - Zero-cost metadata system (171 const definitions, 100% coverage):
+**DiagnosticMetadata** - Zero-cost metadata system (180 const definitions, 100% coverage):
 - Compile-time const metadata + runtime JSON overrides
 - `ctx.severity(code)`, `ctx.tags(code)` instead of hardcoded values
 - Automatic LSP severity mapping from type+severity
@@ -66,7 +66,7 @@ bsl-analyzer (LSP Server)
 |-------|--------|---------|
 | **Analysis** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
 | **Semantic** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | Database, 171 diagnostics, code actions |
+| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | Database, 180 diagnostics, code actions |
 | **SDBL** | sdbl-hir | Query language HIR + type inference |
 | **Dataflow** | cfg, dataflow | CFG, reaching defs, liveness |
 | **Metadata** | bsl-metadata, bsl-platform | Configuration, platform types |
@@ -138,9 +138,9 @@ All test files in repo. Never use absolute paths: `include_str!("fixtures/Module
 
 ## Status & Files
 
-**Completed:** Lexer, Parser, Syntax, HIR, SDBL, Metadata, Dataflow, 171/181 diagnostics (94%), DiagnosticMetadata architecture
+**Completed:** Lexer, Parser, Syntax, HIR, SDBL, Metadata, Dataflow, 180/181 diagnostics (99%), DiagnosticMetadata architecture, LSP server
 
-**Next:** Remaining 10 diagnostics, LSP server integration, SonarQube integration, IDE features
+**Next:** CrazyMultilineString diagnostic, SonarQube integration, IDE features (formatting, refactoring)
 
 **Key Files:**
 - `docs/architecture/ARCHITECTURE.md` - Architecture details
