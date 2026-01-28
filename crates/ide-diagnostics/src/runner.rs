@@ -544,11 +544,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // UsageWriteLogEvent moved to HIR (BodyDiagnostic::UsageWriteLogEvent)
     // UseLessForEach moved to HIR (BodyDiagnostic::UselessForEach)
     // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)
-    diagnostics.extend(run_diagnostic(
-        "UnsafeFindByCode",
-        ctx,
-        handlers::unsafe_find_by_code::check,
-    ));
+    // UnsafeFindByCode moved to HIR (BodyDiagnostic::UnsafeFindByCode)
 
     diagnostics
 }

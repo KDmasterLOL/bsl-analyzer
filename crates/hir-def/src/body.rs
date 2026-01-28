@@ -830,6 +830,10 @@ pub enum BodyDiagnostic {
     /// from_hir() checks symbol_tree to skip module-level variables.
     UselessForEach { iterator_name: String, range: TextRange },
 
+    /// Potential unsafe FindByCode/НайтиПоКоду call on metadata object.
+    /// from_hir() checks configuration metadata to verify code uniqueness.
+    UnsafeFindByCode { manager_name: String, object_name: String, range: TextRange },
+
     /// WriteLogEvent / ЗаписьЖурналаРегистрации call with validation info.
     /// Validation logic is in from_hir() based on collected flags.
     UsageWriteLogEvent {
@@ -1097,6 +1101,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
             BodyDiagnostic::UnsafeSafeModeMethodCall { range } => *range,
             BodyDiagnostic::UselessForEach { range, .. } => *range,
+            BodyDiagnostic::UnsafeFindByCode { range, .. } => *range,
             BodyDiagnostic::UsageWriteLogEvent { range, .. } => *range,
         }
     }

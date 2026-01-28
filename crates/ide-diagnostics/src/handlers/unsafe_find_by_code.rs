@@ -22,9 +22,55 @@
 //! - **Minutes to fix:** 5
 
 use bsl_metadata::{CodeSeries, MdoType};
+use ide_db::TextRange;
 use syntax::SyntaxKind;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+
+pub fn from_hir(
+    manager_name: &str,
+    object_name: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UnsafeFindByCode;
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    let config = ctx.load_configuration()?;
+
+    let manager_lower = manager_name.to_lowercase();
+    let mdo_type = if matches!(manager_lower.as_str(), "справочники" | "catalogs") {
+        MdoType::Catalog
+    } else if matches!(
+        manager_lower.as_str(),
+        "планывидовхарактеристик" | "chartsofcharacteristictypes"
+    ) {
+        MdoType::ChartOfCharacteristicTypes
+    } else if matches!(manager_lower.as_str(), "планысчетов" | "chartsofaccounts") {
+        MdoType::ChartOfAccounts
+    } else {
+        return None;
+    };
+
+    let mdo = config.find_metadata_object(mdo_type, object_name)?;
+
+    if mdo.is_find_by_code_safe() {
+        return None;
+    }
+
+    let message = build_message(mdo_type, object_name, mdo.check_unique, mdo.code_series);
+
+    Some(Diagnostic {
+        code,
+        message,
+        range,
+        severity: ctx.severity(code),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
 
 const FIND_BY_CODE_METHODS: &[&str] = &["найтипокоду", "findbycode"];
 

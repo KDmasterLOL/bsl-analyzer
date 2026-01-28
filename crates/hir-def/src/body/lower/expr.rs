@@ -943,6 +943,50 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
     }
 
+    // Check for UnsafeFindByCode: Manager.Object.FindByCode()
+    if actual_callee.kind() == SyntaxKind::FIELD_EXPR {
+        if let Some(method_token) = actual_callee
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|tok| tok.kind() == SyntaxKind::IDENT)
+            .last()
+        {
+            use super::diagnostics::is_find_by_code_method;
+            if is_find_by_code_method(method_token.text()) {
+                // Receiver should be FIELD_EXPR: Manager.Object
+                if let Some(receiver) = actual_callee.first_child() {
+                    if receiver.kind() == SyntaxKind::FIELD_EXPR {
+                        // Extract object name (last IDENT in receiver)
+                        let object_name = receiver
+                            .children_with_tokens()
+                            .filter_map(|e| e.into_token())
+                            .filter(|t| t.kind() == SyntaxKind::IDENT)
+                            .last()
+                            .map(|t| t.text().to_string());
+
+                        // Extract manager name (first child IDENT)
+                        let manager_name = receiver.first_child().and_then(|base| {
+                            if let Some(token) = base.first_token() {
+                                if token.kind() == SyntaxKind::IDENT {
+                                    return Some(token.text().to_string());
+                                }
+                            }
+                            None
+                        });
+
+                        if let (Some(manager), Some(object)) = (manager_name, object_name) {
+                            ctx.emit(BodyDiagnostic::UnsafeFindByCode {
+                                manager_name: manager,
+                                object_name: object,
+                                range: method_token.text_range(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Emit MissedRequiredParameter diagnostic for local calls (simple IDENT)
     // Qualified calls (FIELD_EXPR) are handled in lower_field_expr
     if actual_callee.kind() == SyntaxKind::IDENT {

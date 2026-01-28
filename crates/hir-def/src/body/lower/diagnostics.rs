@@ -198,6 +198,12 @@ pub(crate) fn is_safe_mode_query(name: &str) -> bool {
     is_global_function(name, "SafeMode")
 }
 
+/// Check if a method name is НайтиПоКоду / FindByCode.
+pub(crate) fn is_find_by_code_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "найтипокоду" | "findbycode")
+}
+
 /// Check if a method name is УстановитьПривилегированныйРежим / SetPrivilegedMode.
 /// Returns true if the method sets privileged mode.
 pub(crate) fn is_set_privileged_mode(name: &str) -> bool {

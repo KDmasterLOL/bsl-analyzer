@@ -296,6 +296,9 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UselessForEach { iterator_name, range } => {
             handlers::useless_for_each::from_hir(iterator_name, *range, ctx)
         }
+        BodyDiagnostic::UnsafeFindByCode { manager_name, object_name, range } => {
+            handlers::unsafe_find_by_code::from_hir(manager_name, object_name, *range, ctx)
+        }
         BodyDiagnostic::UsageWriteLogEvent {
             in_except_block,
             arg_count,
