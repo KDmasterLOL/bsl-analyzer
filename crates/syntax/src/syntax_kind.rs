@@ -276,6 +276,9 @@ pub enum SyntaxKind {
     SDBL_AUTOORDER,     // AUTOORDER clause
     SDBL_TOTALS_BY,     // TOTALS BY clause
 
+    // Missing argument placeholder
+    SDBL_MISSING_ARG, // Intentionally empty VT parameter slot
+
     // Error recovery
     SDBL_ERROR, // Error node for SDBL
 

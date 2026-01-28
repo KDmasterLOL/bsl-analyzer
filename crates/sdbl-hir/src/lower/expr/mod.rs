@@ -50,6 +50,7 @@ impl<'a> LoweringContext<'a> {
             SyntaxKind::SDBL_REFS_EXPR => self.lower_refs_expr(node),
             SyntaxKind::SDBL_CASE_EXPR => self.lower_case_expr(node),
             SyntaxKind::SDBL_PARAMETER => self.lower_parameter(node),
+            SyntaxKind::SDBL_MISSING_ARG => ExprHir::Missing { range: node.text_range() },
             _ => ExprHir::Missing { range: node.text_range() },
         }
     }

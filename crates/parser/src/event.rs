@@ -136,6 +136,7 @@ pub enum NodeKind {
     SdblMultiString,
     SdblParameter,
     SdblType,
+    SdblMissingArg,
     SdblError,
 
     // Other

@@ -189,6 +189,52 @@ mod tests {
     }
 
     #[test]
+    fn test_parameter_as_data_source_no_diagnostic() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |    ТЗ.ИмяКолонки КАК Поле,
+             |    ТЗ.Серия КАК Серия
+             |ПОМЕСТИТЬ ВТ
+             |ИЗ
+             |    &ТЗ КАК ТЗ
+             |;
+             |
+             |////////////////////////////////////////////////////////////////////////////////
+             |ВЫБРАТЬ
+             |    Остатки.Номенклатура КАК Номенклатура,
+             |    Остатки.Количество КАК Количество
+             |ПОМЕСТИТЬ ОстаткиWMS
+             |ИЗ
+             |    &ВМС_Остатки КАК ВМС_Остатки";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Parameter as FROM data source should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_false_positive_complex_query_with_comments() {
+        let code = include_str!("../../test_data/QueryParseErrorFalsePositive.bsl");
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        if !diagnostics.is_empty() {
+            for diag in &diagnostics {
+                let (sl, sc, el, ec) = crate::test_utils::range_to_line_col(code, diag.range);
+                eprintln!("Diagnostic: {} at {}:{}..{}:{}", diag.message, sl, sc, el, ec);
+            }
+        }
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Complex query with BSL comments and &Parameter should not trigger diagnostic"
+        );
+    }
+
+    #[test]
     fn test_complex_valid_query() {
         let code = r#"
 Процедура Тест()

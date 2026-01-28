@@ -2059,3 +2059,109 @@ fn test_estnull_no_space_issue() {
         eprintln!("\n✗ ЕСТЬNULL not recognized as function");
     }
 }
+
+#[test]
+fn test_parameter_as_data_source() {
+    // &Parameter as a table reference in FROM clause (e.g., ValueTable passed as param)
+    check_no_errors("ВЫБРАТЬ Поле КАК Поле ИЗ &ТЗ КАК ТЗ");
+    check_no_errors("ВЫБРАТЬ Поле ИЗ &ТаблицаЗначений КАК Т");
+}
+
+#[test]
+fn test_parameter_as_data_source_in_batch() {
+    // Batch query with &Parameter data sources and comment separator
+    let query = "ВЫБРАТЬ Поле КАК Поле ПОМЕСТИТЬ ВТ ИЗ &ТЗ КАК ТЗ;\n\
+////////////////////////////////////////////////////////////////////////////////\n\
+ВЫБРАТЬ Остатки.Номенклатура КАК Номенклатура ПОМЕСТИТЬ Результат ИЗ &Остатки КАК Остатки";
+
+    let parse = parse_sdbl(query);
+    assert!(!parse.has_errors(), "Batch with &Parameter data sources should parse without errors");
+
+    use syntax::ast::{AstNode, SdblQueryPackage};
+    let root = parse.syntax_node();
+    let package = SdblQueryPackage::cast(root).expect("Should have query package");
+    assert_eq!(package.queries().count(), 2, "Expected 2 queries");
+}
+
+#[test]
+fn test_sdbl_constructs_for_false_positive() {
+    use syntax::SyntaxKind;
+
+    let tests: Vec<(&str, &str)> = vec![
+        ("VALUE function", "ВЫБРАТЬ ЗНАЧЕНИЕ(Перечисление.Качества.Новый) ИЗ T"),
+        ("NOT IN subquery", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Поле В (ВЫБРАТЬ X ИЗ T2)"),
+        ("DATETIME", "ВЫБРАТЬ * ИЗ T ГДЕ Дата <> ДАТАВРЕМЯ(1, 1, 1)"),
+        ("BOOLEAN", "ВЫБРАТЬ * ИЗ T ГДЕ X = ИСТИНА И Y = ЛОЖЬ"),
+        ("IN with param", "ВЫБРАТЬ * ИЗ T ГДЕ Склад В (&Список)"),
+        ("Virtual table with params", "ВЫБРАТЬ * ИЗ Рег.Остатки(, Поле = &Парам) КАК Т"),
+        ("Virtual table empty params", "ВЫБРАТЬ * ИЗ Рег.Остатки(, ) КАК Т"),
+        ("TOTALS BY", "ВЫБРАТЬ Поле ИЗ T ИТОГИ СУММА(Кол) ПО Поле"),
+        ("NOT expr IN with param list", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Поле В (&Исключ)"),
+        ("PRESENTATION function", "ВЫБРАТЬ ПРЕДСТАВЛЕНИЕ(Поле) ИЗ T"),
+        ("ISNULL with comparison arg", "ВЫБРАТЬ ЕСТЬNULL(X.Y = ЗНАЧЕНИЕ(Справ.Пуст), ИСТИНА) ИЗ T"),
+        ("Division in expression", "ВЫБРАТЬ X / Y ИЗ T"),
+        (
+            "ISNULL with CASE inside",
+            "ВЫБРАТЬ ЕСТЬNULL(ВЫБОР КОГДА X = 0 ТОГДА 1 ИНАЧЕ X КОНЕЦ, 1) ИЗ T",
+        ),
+        ("Nested NOT IS NULL", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Ссылка ЕСТЬ NULL"),
+        ("NOT...NOT IS NULL", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Назначение.Договор.Ссылка ЕСТЬ NULL"),
+        (
+            "CASE in VT param",
+            "ВЫБРАТЬ * ИЗ Рег.Остатки(, ВЫБОР КОГДА X ТОГДА ЛОЖЬ ИНАЧЕ ИСТИНА КОНЕЦ) КАК Т",
+        ),
+    ];
+
+    let mut failed = false;
+    for (name, query) in &tests {
+        let parse = parse_sdbl(query);
+        let has_error = parse.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::ERROR);
+        if has_error {
+            failed = true;
+            eprintln!("FAIL: {}: {}", name, query);
+            for node in parse.syntax_node().descendants() {
+                if node.kind() == SyntaxKind::ERROR {
+                    eprintln!("  ERROR at {:?}: {:?}", node.text_range(), node.text());
+                }
+            }
+        } else {
+            eprintln!("OK:   {}", name);
+        }
+    }
+
+    if failed {
+        panic!("Some SDBL constructs produced ERROR nodes");
+    }
+}
+
+#[test]
+fn test_error_node_analysis() {
+    use syntax::SyntaxKind;
+
+    let cases: Vec<(&str, &str)> = vec![
+        ("valid VT empty params", "ВЫБРАТЬ * ИЗ Рег.Остатки(, Поле = &Парам) КАК Т"),
+        ("valid VT all empty", "ВЫБРАТЬ * ИЗ Рег.Остатки(, ) КАК Т"),
+        ("invalid incomplete FROM", "ВЫБРАТЬ Поле ИЗ  "),
+        ("invalid incomplete WHERE", "ВЫБРАТЬ Поле ИЗ Таблица ГДЕ Условие >"),
+        ("invalid batch partial", "ВЫБРАТЬ Поле ИЗ Таблица1; ВЫБРАТЬ Поле2 ИЗ"),
+    ];
+
+    for (name, query) in &cases {
+        let parse = parse_sdbl(query);
+        let errors: Vec<_> =
+            parse.syntax_node().descendants().filter(|n| n.kind() == SyntaxKind::ERROR).collect();
+
+        eprintln!("\n=== {} ===", name);
+        eprintln!("has_errors(): {}", parse.has_errors());
+        for e in &errors {
+            let parent_kind = e.parent().map(|p| format!("{:?}", p.kind())).unwrap_or_default();
+            eprintln!(
+                "  ERROR range={:?} empty={} text={:?} parent={}",
+                e.text_range(),
+                e.text_range().is_empty(),
+                e.text(),
+                parent_kind,
+            );
+        }
+    }
+}

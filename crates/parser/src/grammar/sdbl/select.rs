@@ -38,6 +38,7 @@ fn is_data_source_start(p: &Parser) -> bool {
     match p.current() {
         Some(TokenKind::LParen) => true,                 // Subquery
         Some(TokenKind::Ident) => !is_clause_keyword(p), // Table name (but not clause keyword)
+        Some(TokenKind::Ampersand) => true,              // Parameter as data source (&ТЗ)
         _ => false,
     }
 }
@@ -691,6 +692,18 @@ fn data_source(p: &mut Parser) {
 fn table_ref(p: &mut Parser) {
     let m = p.start();
 
+    // Parameter as data source: &Parameter (e.g., ИЗ &ТЗ КАК ТЗ)
+    if p.at(TokenKind::Ampersand) {
+        let pm = p.start();
+        p.bump(); // &
+        if p.at(TokenKind::Ident) {
+            p.bump(); // parameter name
+        }
+        pm.complete(p, NodeKind::SdblParameter);
+        m.complete(p, NodeKind::SdblTableRef);
+        return;
+    }
+
     // Parse identifier chain (Table, MDO.Table, MDO.Table.VT)
     if !p.expect(TokenKind::Ident) {
         // Error recovery
@@ -733,9 +746,9 @@ fn table_ref(p: &mut Parser) {
         p.skip_trivia();
 
         // Parse arguments (comma-separated expressions)
-        // Support empty parameters like: .Обороты(, , Авто, ...)
+        // Empty parameters are valid SDBL: .Остатки(, , Авто, ) means "use defaults"
         if !p.at(TokenKind::RParen) {
-            // First argument (might be empty)
+            // First argument (might be empty — valid for VT params)
             if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
                 super::expressions::expression(p);
 
@@ -744,10 +757,9 @@ fn table_ref(p: &mut Parser) {
                 if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                     recover_to_delimiter_vt(p);
                 }
-            } else if p.at(TokenKind::Comma) {
-                // Empty first argument: .Обороты(, value) - create ERROR node
-                let err = p.start();
-                err.complete(p, NodeKind::Error);
+            } else {
+                let m = p.start();
+                m.complete(p, NodeKind::SdblMissingArg);
             }
 
             // Parse remaining arguments with error recovery
@@ -755,18 +767,13 @@ fn table_ref(p: &mut Parser) {
                 p.check_iteration_limit();
                 p.skip_trivia();
 
-                // ERROR RECOVERY: Empty element or invalid token
-                // Examples: .Обороты(1, , 3) or .Обороты(1, 2,)
+                // Empty or trailing argument — valid for VT params
                 if p.at(TokenKind::Comma)
                     || p.at(TokenKind::RParen)
                     || !super::expressions::is_expression_start(p)
                 {
-                    // Create ERROR node for missing/invalid argument
-                    let err = p.start();
-                    err.complete(p, NodeKind::Error);
-
-                    // If next token is comma, continue to next argument
-                    // Otherwise (RParen or invalid), break
+                    let m = p.start();
+                    m.complete(p, NodeKind::SdblMissingArg);
                     if !p.at(TokenKind::Comma) {
                         break;
                     }

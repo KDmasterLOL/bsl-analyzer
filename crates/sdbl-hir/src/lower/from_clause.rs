@@ -257,6 +257,7 @@ impl<'a> LoweringContext<'a> {
                             | syntax::SyntaxKind::SDBL_PAREN_EXPR
                             | syntax::SyntaxKind::SDBL_TUPLE_EXPR
                             | syntax::SyntaxKind::SDBL_IN_EXPR
+                            | syntax::SyntaxKind::SDBL_MISSING_ARG
                             | syntax::SyntaxKind::ERROR
                     )
                 })
