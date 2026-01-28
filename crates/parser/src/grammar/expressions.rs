@@ -178,14 +178,15 @@ fn postfix_expr(p: &mut Parser) {
     postfix_expr_with_call_info(p);
 }
 
-/// Parses a postfix expression and returns whether it ends with a call.
-/// Used by assignment_or_call to distinguish `Foo()` (call) from `Foo` (error).
+/// Parses a postfix expression and returns whether it's a valid statement.
+/// Valid statements: calls `Foo()` and index access `Arr[i]` (may have side effects).
+/// Invalid: bare identifiers `Foo` or field access `Foo.Bar` without call/index.
 fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
     let Some(mut lhs) = primary_expr(p) else {
         return false;
     };
 
-    let mut ends_with_call = false;
+    let mut is_valid_statement = false;
 
     loop {
         p.check_iteration_limit();
@@ -201,7 +202,7 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 if is_ident_or_keyword(p) {
                     p.bump();
                     lhs = m.complete(p, NodeKind::FieldExpr);
-                    ends_with_call = false;
+                    is_valid_statement = false;
                 } else {
                     p.error(); // Expected property name after dot
                                // ERROR RECOVERY: Complete as FieldExpr anyway, exit loop
@@ -211,6 +212,7 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
             }
             Some(TokenKind::LBracket) => {
                 // Wrap the base in an IndexExpr
+                // Index access is valid as statement (may trigger getter with side effects)
                 let m = lhs.precede(p);
                 p.bump();
                 p.skip_trivia();
@@ -218,20 +220,20 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 p.skip_trivia();
                 p.expect(TokenKind::RBracket);
                 lhs = m.complete(p, NodeKind::IndexExpr);
-                ends_with_call = false;
+                is_valid_statement = true;
             }
             Some(TokenKind::LParen) => {
                 // Wrap the base in a CallExpr
                 let m = lhs.precede(p);
                 arg_list(p);
                 lhs = m.complete(p, NodeKind::CallExpr);
-                ends_with_call = true;
+                is_valid_statement = true;
             }
             _ => break,
         }
     }
 
-    ends_with_call
+    is_valid_statement
 }
 
 fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {

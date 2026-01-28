@@ -418,8 +418,8 @@ fn assignment_or_call(p: &mut Parser) {
 
     // Parse left-hand side as postfix expression (identifier, field access, indexing, call)
     // This prevents `=` from being consumed as comparison operator
-    // Returns true if expression ends with a call (has parentheses)
-    let is_call = expressions::postfix_expression_for_assignment(p);
+    // Returns true if expression is valid as statement (call or index access)
+    let is_valid_stmt = expressions::postfix_expression_for_assignment(p);
 
     p.skip_trivia();
 
@@ -430,12 +430,12 @@ fn assignment_or_call(p: &mut Parser) {
         p.skip_trivia();
         m.complete(p, NodeKind::AssignStmt);
         p.eat(TokenKind::Semicolon);
-    } else if is_call {
-        // This is a call statement: Foo() or Obj.Method()
+    } else if is_valid_stmt {
+        // Valid statement: Foo(), Obj.Method(), or Arr[i]
         m.complete(p, NodeKind::CallStmt);
         p.eat(TokenKind::Semicolon);
     } else {
-        // Bare identifier without assignment or call - syntax error
+        // Bare identifier or field access without call/index - syntax error
         // e.g., "HHH" instead of "HHH()" or "HHH = value"
         m.complete(p, NodeKind::Error);
         p.eat(TokenKind::Semicolon);

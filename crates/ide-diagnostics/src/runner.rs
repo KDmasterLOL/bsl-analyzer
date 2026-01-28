@@ -456,6 +456,7 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::unused_local_variable::check,
     ));
+    diagnostics.extend(run_diagnostic("UnusedParameters", ctx, handlers::unused_parameters::check));
 
     diagnostics
 }
