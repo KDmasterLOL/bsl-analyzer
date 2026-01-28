@@ -119,6 +119,10 @@ fn check_missing_return_in_cfg(body: &hir_def::Body, cfg: &cfg::ControlFlowGraph
     let incoming: Vec<_> = cfg.incoming_edges(exit_point).collect();
 
     for (source_idx, edge_type) in incoming.iter() {
+        // Skip dead code edges — unreachable paths don't need returns
+        if edge_type.is_dead_code_edge() {
+            continue;
+        }
         if let Some(vertex) = cfg.vertex(*source_idx) {
             // Check if this path has missing return
             let has_missing = match vertex {
@@ -319,6 +323,68 @@ mod tests {
                 .count(),
             0,
             "No diagnostic when all paths return"
+        );
+    }
+
+    /// If/Else where both branches have Return should not trigger diagnostic
+    #[test]
+    fn test_no_diagnostic_if_else_both_return() {
+        let code = r#"
+Функция НайтиНазначение(ТекущееНазначение)
+
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ
+    |    СпрНазначения.Ссылка КАК Назначение
+    |ИЗ
+    |    Справочник.Назначения КАК СпрНазначения
+    |ГДЕ
+    |    СпрНазначения.НазначениеНаПроверке = &НазначениеНаПроверке";
+
+    Запрос.УстановитьПараметр("НазначениеНаПроверке", ТекущееНазначение);
+    РезультатЗапроса = Запрос.Выполнить();
+
+    Выборка = РезультатЗапроса.Выбрать();
+
+    Если Выборка.Следующий() Тогда
+        Возврат Выборка.Назначение;
+    Иначе
+        Возврат Справочники.Назначения.ПустаяСсылка();
+    КонецЕсли;
+
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+                .count(),
+            0,
+            "If/Else with Return in both branches should not trigger diagnostic"
+        );
+    }
+
+    /// Simple If/Else where both branches return
+    #[test]
+    fn test_no_diagnostic_simple_if_else_both_return() {
+        let code = r#"
+Функция Тест(Х)
+    Если Х > 0 Тогда
+        Возврат 1;
+    Иначе
+        Возврат 0;
+    КонецЕсли;
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+                .count(),
+            0,
+            "Simple if/else with both branches returning should not trigger"
         );
     }
 

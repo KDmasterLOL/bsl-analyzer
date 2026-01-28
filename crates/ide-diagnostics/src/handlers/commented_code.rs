@@ -103,7 +103,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if is_comment_group_code(&group, &config) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
-                message: "Commented code should be removed".to_string(),
+                message: message_ru(),
                 range: group.range,
                 severity: ctx.severity(code),
                 tags: Vec::new(),
@@ -541,6 +541,15 @@ fn has_consecutive_identifiers(text: &str) -> bool {
     }
 
     false
+}
+
+fn message_ru() -> String {
+    "Программные модули не должны иметь закомментированных фрагментов кода".to_string()
+}
+
+#[allow(dead_code)]
+fn message_en() -> String {
+    "Commented code should be removed".to_string()
 }
 
 #[cfg(test)]

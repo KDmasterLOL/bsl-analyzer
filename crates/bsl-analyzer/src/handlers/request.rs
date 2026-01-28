@@ -4,14 +4,16 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
-use base_db::SourceDatabase;
+use base_db::{DiagnosticsConfigId, FileIdInput, SourceDatabase};
 use ide::Location as IdeLocation;
+use ide_diagnostics::file_diagnostics_query;
 use line_index::LineIndex;
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, Location, MarkupContent, MarkupKind, ReferenceParams, SemanticTokens,
-    SemanticTokensParams, SemanticTokensResult,
+    CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
+    CompletionParams, CompletionResponse, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
+    MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
+    SemanticTokensResult,
 };
 
 use crate::global_state::GlobalStateSnapshot;
@@ -335,6 +337,57 @@ pub fn handle_document_symbol(
         .collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+}
+
+/// Handles textDocument/codeAction request.
+///
+/// Returns quick-fix code actions for diagnostics in the requested range.
+pub fn handle_code_action(
+    snap: GlobalStateSnapshot,
+    params: CodeActionParams,
+) -> Result<Option<CodeActionResponse>> {
+    let _p = tracing::info_span!(
+        "handle_code_action",
+        uri = %params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document.uri;
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let line_index = LineIndex::new(&text);
+    let range = crate::lsp::text_range(&line_index, &text, params.range)?;
+
+    let db = snap.analysis.database();
+    let file_id_input = FileIdInput::new(db, file_id);
+    let config_id = DiagnosticsConfigId::new(db, snap.diagnostics_config.clone());
+    let diagnostics = file_diagnostics_query(db, file_id_input, config_id);
+
+    let mut actions = Vec::new();
+    for diag in diagnostics.iter() {
+        if diag.fixes.is_empty() {
+            continue;
+        }
+        if diag.range.intersect(range).is_none() {
+            continue;
+        }
+        for fix in &diag.fixes {
+            if let Some(action) =
+                crate::lsp::to_proto::code_action(&line_index, &text, &uri, diag, fix)
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+        }
+    }
+
+    if actions.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(actions))
+    }
 }
 
 fn convert_document_symbol(

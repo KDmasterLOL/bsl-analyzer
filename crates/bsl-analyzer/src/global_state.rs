@@ -28,6 +28,10 @@ use crate::task_pool;
 pub enum Task {
     /// Dependency preloading completed for a file.
     DependenciesPreloaded { file_id: FileId, count: usize },
+    /// Diagnostics computed in background thread.
+    DiagnosticsReady { uri: Url, diagnostics: Vec<lsp_types::Diagnostic>, generation: u64 },
+    /// Diagnostics cancelled (Salsa query was interrupted).
+    DiagnosticsCancelled { generation: u64 },
 }
 
 /// The main state of the LSP server (mutable, main thread only).
@@ -91,6 +95,14 @@ pub struct GlobalState {
     /// This is the normalized config used for Salsa queries. When config file
     /// changes, this is updated and all diagnostic caches are invalidated.
     diagnostics_config: DiagnosticsConfigInput,
+
+    /// Monotonically increasing generation counter for background diagnostics.
+    /// Used to discard stale results when a newer change has been made.
+    pub diagnostics_generation: u64,
+
+    /// URI of the most recently changed file pending diagnostics scheduling.
+    /// Set by `handle_did_change`, consumed after event loop drains all messages.
+    pub pending_diagnostics_uri: Option<Url>,
 }
 
 impl GlobalState {
@@ -116,6 +128,8 @@ impl GlobalState {
             task_pool: task_pool::TaskPool::new_with_handle(),
             next_request_id: AtomicI32::new(1),
             diagnostics_config: DiagnosticsConfigInput::new(),
+            diagnostics_generation: 0,
+            pending_diagnostics_uri: None,
         }
     }
 
@@ -464,6 +478,7 @@ impl GlobalState {
             mem_docs: self.mem_docs.clone(),
             workspace_root: self.workspace_root.clone(),
             project: self.project.clone(),
+            diagnostics_config: self.diagnostics_config.clone(),
         }
     }
 
@@ -532,6 +547,9 @@ pub struct GlobalStateSnapshot {
 
     /// Project configuration.
     pub project: Option<Project>,
+
+    /// Current diagnostics configuration (for code action handler).
+    pub diagnostics_config: DiagnosticsConfigInput,
 }
 
 impl GlobalStateSnapshot {

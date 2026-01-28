@@ -128,6 +128,40 @@ pub fn related_information(
     Some(DiagnosticRelatedInformation { location: loc, message })
 }
 
+/// Converts a diagnostic Fix to an LSP CodeAction.
+pub fn code_action(
+    line_index: &LineIndex,
+    text: &str,
+    uri: &Url,
+    diag: &IdeDiagnostic,
+    fix: &ide_diagnostics::Fix,
+) -> Option<lsp_types::CodeAction> {
+    let edits: Vec<lsp_types::TextEdit> = fix
+        .edits
+        .iter()
+        .filter_map(|edit| {
+            let edit_range = range(line_index, text, edit.range)?;
+            Some(lsp_types::TextEdit { range: edit_range, new_text: edit.new_text.clone() })
+        })
+        .collect();
+
+    if edits.is_empty() {
+        return None;
+    }
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), edits);
+
+    Some(lsp_types::CodeAction {
+        title: fix.label.clone(),
+        kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diagnostic(line_index, text, diag)?]),
+        edit: Some(lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
 /// Returns the semantic tokens legend (token types and modifiers).
 pub fn semantic_tokens_legend() -> SemanticTokensLegend {
     let token_types = vec![

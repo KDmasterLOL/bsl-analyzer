@@ -14,7 +14,7 @@
 //! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` when EMPTY_STMT
 //! AST node is encountered during statement lowering (if no parser errors nearby).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -33,7 +33,10 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix {
+            label: "Удалить пустой оператор".to_string(),
+            edits: vec![TextEdit { range, new_text: String::new() }],
+        }],
     })
 }
 

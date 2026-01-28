@@ -9,9 +9,9 @@ use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{
     notification::{Exit, Notification as _},
     request::Shutdown,
-    InitializeParams, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkDoneProgressOptions,
+    CodeActionProviderCapability, InitializeParams, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
 };
 
 use crate::{
@@ -89,91 +89,145 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
 /// Runs the main event loop.
 ///
-/// Handles incoming LSP messages and VFS loader messages until shutdown is requested.
+/// Handles incoming LSP messages, VFS loader messages, and background task results.
+/// Uses event coalescing (drain loops) to batch rapid changes before scheduling diagnostics.
 fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Result<()> {
     loop {
         select! {
             recv(receiver) -> msg => {
-                match msg? {
-                    Message::Request(req) => {
-                        if state.shutdown_requested {
-                            tracing::warn!("Received request after shutdown: {}", req.method);
-                            continue;
-                        }
-                        handle_request(state, req)?;
-                    }
-                    Message::Notification(not) => {
-                        handle_notification(state, not)?;
-                    }
-                    Message::Response(resp) => {
-                        tracing::warn!("Unexpected response: {:?}", resp);
-                    }
-                }
-
-                if state.shutdown_requested {
-                    break;
+                handle_lsp_msg(state, msg?)?;
+                // Drain pending LSP messages to coalesce rapid changes (e.g., 50dd)
+                while let Ok(msg) = receiver.try_recv() {
+                    handle_lsp_msg(state, msg)?;
                 }
             }
 
             recv(&state.loader_receiver) -> msg => {
-                match msg? {
-                    vfs::loader::Message::Progress { n_total, n_done, config_version, dir } => {
-                        use vfs::loader::LoadingProgress;
-                        match n_done {
-                            LoadingProgress::Finished => {
-                                state.vfs_done = true;
-                                tracing::info!("VFS loading complete");
+                handle_loader_msg(state, msg?)?;
+                while let Ok(msg) = state.loader_receiver.try_recv() {
+                    handle_loader_msg(state, msg)?;
+                }
+            }
 
-                                // End loading progress
-                                state.report_progress(
-                                    "Loading",
-                                    Progress::End,
-                                    Some("Done".into()),
-                                    Some(1.0),
-                                );
-
-                                // Initialize SourceRoot after loading completes
-                                state.init_source_root();
-
-                                // Note: Cache priming removed - dependencies are now
-                                // preloaded lazily when files are opened via didOpen
-                            }
-                            LoadingProgress::Started => {
-                                tracing::info!("VFS loading started: {} entries", n_total);
-                                state.report_progress(
-                                    "Loading",
-                                    Progress::Begin,
-                                    Some(format!("Scanning {} files...", n_total)),
-                                    Some(0.0),
-                                );
-                            }
-                            LoadingProgress::Progress(done) => {
-                                tracing::debug!(
-                                    "VFS loading progress: {}/{} (config v{})",
-                                    done, n_total, config_version
-                                );
-                                if let Some(ref dir) = dir {
-                                    tracing::debug!("  processing: {:?}", dir);
-                                }
-                                let fraction = Progress::fraction(done, n_total);
-                                state.report_progress(
-                                    "Loading",
-                                    Progress::Report,
-                                    Some(format!("{}/{}", done, n_total)),
-                                    Some(fraction),
-                                );
-                            }
-                        }
-                    }
-                    vfs::loader::Message::Loaded { files } |
-                    vfs::loader::Message::Changed { files } => {
-                        handle_vfs_msg(state, files)?;
-                    }
+            recv(&state.task_pool.receiver) -> task => {
+                handle_task(state, task?)?;
+                while let Ok(task) = state.task_pool.receiver.try_recv() {
+                    handle_task(state, task)?;
                 }
             }
         }
+
+        if state.shutdown_requested {
+            break;
+        }
+
+        // Schedule pending diagnostics after all events drained.
+        // This ensures rapid changes (e.g., 50dd) are coalesced into a single diagnostic run.
+        if let Some(uri) = state.pending_diagnostics_uri.take() {
+            crate::handlers::schedule_diagnostics(state, &uri);
+        }
     }
 
+    Ok(())
+}
+
+/// Handles a single LSP message (request, notification, or response).
+fn handle_lsp_msg(state: &mut GlobalState, msg: Message) -> Result<()> {
+    match msg {
+        Message::Request(req) => {
+            if state.shutdown_requested {
+                tracing::warn!("Received request after shutdown: {}", req.method);
+                return Ok(());
+            }
+            handle_request(state, req)?;
+        }
+        Message::Notification(not) => {
+            handle_notification(state, not)?;
+        }
+        Message::Response(resp) => {
+            tracing::warn!("Unexpected response: {:?}", resp);
+        }
+    }
+    Ok(())
+}
+
+/// Handles a VFS loader message.
+fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Result<()> {
+    match msg {
+        vfs::loader::Message::Progress { n_total, n_done, config_version, dir } => {
+            use vfs::loader::LoadingProgress;
+            match n_done {
+                LoadingProgress::Finished => {
+                    state.vfs_done = true;
+                    tracing::info!("VFS loading complete");
+
+                    state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
+
+                    state.init_source_root();
+                }
+                LoadingProgress::Started => {
+                    tracing::info!("VFS loading started: {} entries", n_total);
+                    state.report_progress(
+                        "Loading",
+                        Progress::Begin,
+                        Some(format!("Scanning {} files...", n_total)),
+                        Some(0.0),
+                    );
+                }
+                LoadingProgress::Progress(done) => {
+                    tracing::debug!(
+                        "VFS loading progress: {}/{} (config v{})",
+                        done,
+                        n_total,
+                        config_version
+                    );
+                    if let Some(ref dir) = dir {
+                        tracing::debug!("  processing: {:?}", dir);
+                    }
+                    let fraction = Progress::fraction(done, n_total);
+                    state.report_progress(
+                        "Loading",
+                        Progress::Report,
+                        Some(format!("{}/{}", done, n_total)),
+                        Some(fraction),
+                    );
+                }
+            }
+        }
+        vfs::loader::Message::Loaded { files } | vfs::loader::Message::Changed { files } => {
+            handle_vfs_msg(state, files)?;
+        }
+    }
+    Ok(())
+}
+
+/// Handles a background task result.
+fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Result<()> {
+    use crate::global_state::Task;
+
+    match task {
+        Task::DiagnosticsReady { uri, diagnostics, generation } => {
+            if generation >= state.diagnostics_generation {
+                let params =
+                    lsp_types::PublishDiagnosticsParams { uri, diagnostics, version: None };
+                let notification =
+                    Notification::new("textDocument/publishDiagnostics".to_string(), params);
+                state.sender.send(notification.into())?;
+            } else {
+                tracing::debug!(
+                    generation,
+                    current = state.diagnostics_generation,
+                    "discarding stale diagnostics"
+                );
+            }
+        }
+        Task::DiagnosticsCancelled { generation } => {
+            tracing::debug!(generation, "diagnostics cancelled");
+        }
+        Task::DependenciesPreloaded { file_id, count } => {
+            tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
+        }
+    }
     Ok(())
 }
 
@@ -227,8 +281,8 @@ fn handle_vfs_msg(
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, References,
-        SemanticTokensFullRequest,
+        CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+        References, SemanticTokensFullRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -244,6 +298,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_sync::<Completion>(crate::handlers::handle_completion)
         .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
         .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
+        .on_sync::<CodeActionRequest>(crate::handlers::handle_code_action)
         .finish();
 
     Ok(())
@@ -312,6 +367,9 @@ fn server_capabilities() -> ServerCapabilities {
 
         // Document symbols (outline, breadcrumbs)
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+
+        // Code actions (quick fixes)
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
         ..Default::default()
     }

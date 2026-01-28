@@ -13,7 +13,8 @@
 //! COMMENT tokens. This avoids false positives on // inside strings (lexer distinguishes them).
 //! Cannot use per-node check_node() API because comments are tokens, not nodes.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use line_index::TextSize;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{NodeOrToken, SyntaxKind};
@@ -103,13 +104,21 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
                 // Check if comment is bad
                 if !is_good_comment(text, use_strict, &comments_annotation) {
+                    let slash_count = text.chars().take_while(|c| *c == '/').count() as u32;
+                    let insert_pos = token.text_range().start() + TextSize::from(slash_count);
                     diagnostics.push(Diagnostic {
                         code,
                         message: "Comment should have space after //".to_string(),
                         severity: ctx.severity(code),
                         range: token.text_range(),
                         tags: ctx.tags(code),
-                        fixes: vec![],
+                        fixes: vec![Fix {
+                            label: "Добавить пробел после //".to_string(),
+                            edits: vec![TextEdit {
+                                range: ide_db::TextRange::new(insert_pos, insert_pos),
+                                new_text: " ".to_string(),
+                            }],
+                        }],
                     });
                 }
             }

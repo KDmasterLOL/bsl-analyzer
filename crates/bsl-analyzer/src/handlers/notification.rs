@@ -17,60 +17,43 @@ use lsp_types::{
 
 use crate::global_state::{GlobalState, Task};
 
-/// Publishes diagnostics for a file using Salsa-cached query.
+/// Schedules diagnostics computation in a background thread.
 ///
-/// This uses `file_diagnostics_query` which is cached by Salsa.
-/// On first call: ~700ms (full computation)
-/// On subsequent calls: <1ms (cache hit)
-/// After file change: ~700ms (recomputes)
-/// After config change: all files recompute (config ID changed)
-fn publish_diagnostics(state: &mut GlobalState, uri: &Url) -> Result<()> {
-    let start = std::time::Instant::now();
-    let file_id = crate::lsp::file_id(state, uri)?;
+/// The background thread clones the Salsa database and runs `file_diagnostics_query`.
+/// If a new `set_file_text()` is called before the query finishes, Salsa cancels
+/// the in-flight query via `zalsa_mut()` → `cancel_others()`, the background thread
+/// panics, `catch_unwind` catches it, and the stale result is discarded by generation check.
+pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
+    state.diagnostics_generation += 1;
+    let generation = state.diagnostics_generation;
 
-    // Get file text for line index
-    let text = state
-        .mem_docs
-        .get(uri)
-        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    let file_id = match crate::lsp::file_id(state, uri) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+    let text = match state.mem_docs.get(uri) {
+        Some(t) => t,
+        None => return,
+    };
 
-    let line_index = LineIndex::new(&text);
+    let db = state.analysis_host.raw_database().clone();
+    let config = state.diagnostics_config().clone();
+    let uri = uri.clone();
 
-    // Run diagnostics using Salsa-cached query
-    let db = state.analysis_host.raw_database();
-    let file_id_input = FileIdInput::new(db, file_id);
-    let config_id = state.diagnostics_config_id();
+    state.task_pool.pool.spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let file_id_input = FileIdInput::new(&db, file_id);
+            let config_id = base_db::DiagnosticsConfigId::new(&db, config);
+            let ide_diagnostics = file_diagnostics_query(&db, file_id_input, config_id);
+            let line_index = LineIndex::new(&text);
+            crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics)
+        }));
 
-    let diag_start = std::time::Instant::now();
-    let ide_diagnostics = file_diagnostics_query(db, file_id_input, config_id);
-    let diag_elapsed = diag_start.elapsed();
-    tracing::warn!(
-        file_id = file_id.0,
-        count = ide_diagnostics.len(),
-        elapsed_ms = diag_elapsed.as_millis() as u64,
-        "publish_diagnostics: file_diagnostics_query() completed"
-    );
-
-    // Convert to LSP diagnostics
-    let lsp_diagnostics = crate::lsp::diagnostics(&line_index, &text, &ide_diagnostics);
-    let total_elapsed = start.elapsed();
-    tracing::warn!(
-        file_id = file_id.0,
-        count = lsp_diagnostics.len(),
-        total_ms = total_elapsed.as_millis() as u64,
-        %uri,
-        "publish_diagnostics: completed"
-    );
-
-    // Publish
-    let params =
-        PublishDiagnosticsParams { uri: uri.clone(), diagnostics: lsp_diagnostics, version: None };
-
-    let notification = Notification::new("textDocument/publishDiagnostics".to_string(), params);
-
-    state.sender.send(notification.into())?;
-
-    Ok(())
+        match result {
+            Ok(diagnostics) => Task::DiagnosticsReady { uri, diagnostics, generation },
+            Err(_) => Task::DiagnosticsCancelled { generation },
+        }
+    });
 }
 
 /// Handles textDocument/didOpen notification.
@@ -110,8 +93,8 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
     // Preload dependencies in background for fast GoToDefinition
     preload_dependencies(state, file_id);
 
-    // Publish diagnostics
-    publish_diagnostics(state, &uri)?;
+    // Schedule diagnostics in background (didOpen runs immediately, no batching benefit)
+    schedule_diagnostics(state, &uri);
 
     Ok(())
 }
@@ -219,8 +202,8 @@ pub fn handle_did_change(
 
     tracing::debug!("Document updated successfully: {}", uri);
 
-    // Publish diagnostics
-    publish_diagnostics(state, &uri)?;
+    // Mark file as pending diagnostics (scheduled after event loop drains all messages)
+    state.pending_diagnostics_uri = Some(uri);
 
     Ok(())
 }

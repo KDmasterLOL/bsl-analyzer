@@ -11,7 +11,7 @@
 //! AST node has no SEMICOLON token (excluding EMPTY_STMT, LABEL_STMT, and
 //! statements with parse errors).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -30,7 +30,13 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix {
+            label: "Добавить точку с запятой".to_string(),
+            edits: vec![TextEdit {
+                range: TextRange::new(range.end(), range.end()),
+                new_text: ";".to_string(),
+            }],
+        }],
     })
 }
 

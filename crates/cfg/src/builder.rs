@@ -150,7 +150,14 @@ impl CfgBuilder {
                 };
 
             if !ends_with_terminator {
-                let _ = self.cfg.add_edge(block_idx, exit, CfgEdgeType::Direct);
+                // Use AdjacentCode for unreachable blocks (e.g., merge block after
+                // if/else where all branches return) to avoid false positives
+                // in missing-return diagnostics
+                if self.block_has_live_incoming(block_idx) {
+                    let _ = self.cfg.add_edge(block_idx, exit, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(block_idx, exit, CfgEdgeType::AdjacentCode);
+                }
             }
         }
 
