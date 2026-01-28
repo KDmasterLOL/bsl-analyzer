@@ -66,11 +66,12 @@
 //! Ported from:
 //! - MissingTemporaryFileDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
+use cfg_types::{IdConversion, StmtId};
+use hir_def::hir::{Expr, ExprIdx, Stmt};
+use hir_def::{Body, BodySourceMap};
+
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use regex::Regex;
-use syntax::ast::{self, AstNode};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Default deletion methods pattern
 const DEFAULT_SEARCH_DELETE_FILE_METHOD: &str =
@@ -108,21 +109,18 @@ impl Config {
     }
 }
 
-/// Main entry point for MissingTemporaryFileDeletion diagnostic.
+/// HIR + CFG based entry point for MissingTemporaryFileDeletion diagnostic.
 ///
-/// Detects temporary files created with GetTempFileName() that are not deleted.
+/// Uses Salsa-cached module_bodies and module_cfgs instead of raw AST traversal.
 ///
 /// ## Algorithm
 ///
-/// 1. Collect all tokens once (O(n) optimization)
-/// 2. Find GetTempFileName calls using token pattern (IDENT + LPAREN without preceding DOT)
-/// 3. For each call:
-///    - Extract variable name from assignment
-///    - Find enclosing method body
-///    - Search for deletion calls after GetTempFileName
-///    - Create diagnostic if no deletion found
+/// For each method in the module:
+/// 1. Walk HIR expressions to find GetTempFileName() calls
+/// 2. Determine if call is assigned to a variable (Assign stmt) or inline
+/// 3. For assigned calls: check if any deletion call in the body uses that variable
+/// 4. Use CFG to verify the deletion call is reachable from the GetTempFileName call
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("MissingTemporaryFileDeletion::check").entered();
     let code = DiagnosticCode::MissingTemporaryFileDeletion;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -130,368 +128,303 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    // ✅ OPTIMIZATION: Collect tokens ONCE (O(n) instead of O(n²))
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
+    let module_bodies = ctx.module_bodies();
+    let module_cfgs = ctx.module_cfgs();
     let mut diagnostics = Vec::new();
 
-    // Find all global GetTempFileName calls using token pattern
-    for (i, token) in tokens.iter().enumerate() {
-        if token.kind() == SyntaxKind::IDENT {
-            let next_is_lparen =
-                tokens.get(i + 1).map(|t| t.kind() == SyntaxKind::L_PAREN).unwrap_or(false);
+    // Check each method body
+    for (local_id, body) in module_bodies.iter_bodies() {
+        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
+        let cfg = module_cfgs.get(local_id);
 
-            if next_is_lparen {
-                // Check if it's NOT a member access (Module.Method)
-                let prev_is_dot = i
-                    .checked_sub(1)
-                    .and_then(|idx| tokens.get(idx))
-                    .map(|t| t.kind() == SyntaxKind::DOT)
-                    .unwrap_or(false);
+        diagnostics.extend(check_body(
+            body,
+            source_map,
+            cfg.map(|c| c.as_ref()),
+            &config,
+            code,
+            ctx,
+        ));
+    }
 
-                tracing::trace!(
-                    i = i,
-                    token_text = %token.text(),
-                    next_is_lparen = next_is_lparen,
-                    prev_is_dot = prev_is_dot,
-                    is_get_temp_filename = is_get_temp_filename(token.text()),
-                    "Checking IDENT + LPAREN pattern"
-                );
+    // Check module-level code
+    if let Some(module_result) = module_bodies.module_code_result() {
+        let body = &module_result.body;
+        let source_map = &module_result.source_map;
+        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+            body.body_stmts_typed(),
+            body,
+            Some(source_map),
+        );
 
-                if !prev_is_dot && is_get_temp_filename(token.text()) {
-                    tracing::trace!(token_text = %token.text(), "Found GetTempFileName call");
-                    // Found GetTempFileName call
-                    if let Some(diag) = check_temp_file_usage(token, &config, code, ctx) {
-                        diagnostics.push(diag);
-                    }
+        diagnostics.extend(check_body(body, source_map, Some(&cfg), &config, code, ctx));
+    }
+
+    diagnostics.sort_by_key(|d| d.range.start());
+    diagnostics
+}
+
+/// Check a single HIR body for MissingTemporaryFileDeletion.
+fn check_body(
+    body: &Body,
+    source_map: &BodySourceMap,
+    cfg: Option<&cfg::ControlFlowGraph>,
+    config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Build set of ExprIdx that are direct RHS of Assign statements
+    // Maps: value_expr → target_expr (for extracting variable name)
+    let mut assigned_values: rustc_hash::FxHashMap<ExprIdx, ExprIdx> =
+        rustc_hash::FxHashMap::default();
+    // Also map value_expr → StmtId (for CFG lookup)
+    let mut value_to_stmt: rustc_hash::FxHashMap<ExprIdx, StmtId> =
+        rustc_hash::FxHashMap::default();
+
+    for (stmt_id, stmt) in body.stmts_iter() {
+        if let Stmt::Assign { target, value } = stmt {
+            assigned_values.insert(*value, *target);
+            value_to_stmt.insert(*value, stmt_id);
+        }
+    }
+
+    // Build stmt→block mapping for CFG reachability (if CFG available)
+    let stmt_to_block = cfg.map(build_stmt_to_block_map);
+
+    // Find all GetTempFileName calls in HIR expressions
+    for (expr_id, expr) in body.exprs_iter() {
+        let Expr::Call { callee, .. } = expr else { continue };
+        let Expr::Path(name) = body.expr_idx(*callee) else { continue };
+        if !is_get_temp_filename(name.as_str()) {
+            continue;
+        }
+
+        let call_expr_idx: ExprIdx = expr_id.to_idx();
+
+        // Check if this call is the direct RHS of an Assign
+        if let Some(&target_idx) = assigned_values.get(&call_expr_idx) {
+            let Expr::Path(var_name) = body.expr_idx(target_idx) else { continue };
+
+            // Check if there's a deletion call for this variable
+            let has_deletion = has_deletion_in_body(
+                body,
+                var_name.as_str(),
+                config,
+                value_to_stmt.get(&call_expr_idx).copied(),
+                stmt_to_block.as_ref(),
+                cfg,
+            );
+
+            if !has_deletion {
+                if let Some(range) = source_map.expr_range(expr_id) {
+                    diagnostics.push(Diagnostic {
+                        code,
+                        message: format!(
+                            "Нужно добавить удаление временного файла '{}' после использования",
+                            var_name.as_str()
+                        ),
+                        severity: ctx.severity(code),
+                        range,
+                        tags: ctx.tags(code),
+                        fixes: vec![],
+                    });
                 }
+            }
+        } else {
+            // Inline usage (not assigned) → always error
+            if let Some(range) = source_map.expr_range(expr_id) {
+                diagnostics.push(Diagnostic {
+                    code,
+                    message: "Нужно добавить удаление временного файла после использования"
+                        .to_string(),
+                    severity: ctx.severity(code),
+                    range,
+                    tags: ctx.tags(code),
+                    fixes: vec![],
+                });
             }
         }
     }
 
-    tracing::debug!(count = diagnostics.len(), "MissingTemporaryFileDeletion diagnostics found");
     diagnostics
 }
 
-/// Check if token text is GetTempFileName (case-insensitive)
+/// Check if token text is GetTempFileName (case-insensitive).
 fn is_get_temp_filename(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "получитьимявременногофайла" || lower == "gettempfilename"
 }
 
-/// Check temporary file usage for a GetTempFileName call.
+/// Check if body contains a deletion call for the given variable.
 ///
-/// Returns diagnostic if:
-/// - GetTempFileName called without assignment (inline usage) - ALWAYS error
-/// - Variable is assigned but not deleted
-/// - Returns None only if deletion is found
-fn check_temp_file_usage(
-    call_token: &SyntaxToken,
+/// Uses CFG to verify the deletion call is reachable from the GetTempFileName statement.
+fn has_deletion_in_body(
+    body: &Body,
+    var_name: &str,
     config: &Config,
-    code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    // Extract variable name from assignment
-    let var_name = match extract_variable_from_assignment(call_token) {
-        Some(v) => v,
-        None => {
-            // No assignment found - inline usage like: Func(GetTempFileName())
-            // This is ALWAYS an error (matches Java behavior)
-            tracing::trace!(
-                call_pos = ?call_token.text_range(),
-                "GetTempFileName called without assignment (inline usage)"
-            );
+    get_temp_stmt: Option<StmtId>,
+    stmt_to_block: Option<&rustc_hash::FxHashMap<StmtId, cfg::NodeIndex>>,
+    cfg: Option<&cfg::ControlFlowGraph>,
+) -> bool {
+    // Find the CFG block containing GetTempFileName (for reachability check)
+    let get_temp_block = get_temp_stmt.and_then(|s| stmt_to_block.and_then(|m| m.get(&s).copied()));
 
-            let call_range = get_call_expression_range(call_token);
+    for (_, stmt) in body.stmts_iter() {
+        // Only check expression statements and assignments that could contain deletion calls
+        let call_expr_ids = match stmt {
+            Stmt::Expr(expr_idx) => vec![*expr_idx],
+            Stmt::Assign { value, .. } => vec![*value],
+            _ => continue,
+        };
 
-            return Some(Diagnostic {
-                code,
-                message: "Нужно добавить удаление временного файла после использования".to_string(),
-                severity: ctx.severity(code),
-                range: call_range,
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
-    };
-
-    tracing::trace!(
-        var_name = %var_name,
-        call_pos = ?call_token.text_range(),
-        "Found GetTempFileName assignment"
-    );
-
-    // Find enclosing method/procedure body
-    let parent = match call_token.parent() {
-        Some(p) => p,
-        None => {
-            return None;
-        }
-    };
-
-    let method_body = match find_enclosing_method_body(parent) {
-        Some(mb) => mb,
-        None => {
-            return None;
-        }
-    };
-
-    // Search for deletion calls after this point
-    if has_deletion_call(&method_body, call_token, &var_name, config) {
-        tracing::trace!(var_name = %var_name, "Found deletion call");
-        return None; // File is deleted, no diagnostic
-    }
-
-    // No deletion found - create diagnostic
-    tracing::trace!(var_name = %var_name, "No deletion found, creating diagnostic");
-
-    // Range spans from method name to closing paren
-    let call_range = get_call_expression_range(call_token);
-
-    Some(Diagnostic {
-        code,
-        message: format!(
-            "Нужно добавить удаление временного файла '{}' после использования",
-            var_name
-        ),
-        severity: ctx.severity(code),
-        range: call_range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
-}
-
-/// Extract variable name from assignment statement.
-///
-/// Pattern: `Variable = GetTempFileName(...)`
-///
-/// Returns the left-hand side identifier ONLY if GetTempFileName is the
-/// direct right-hand side of the assignment.
-///
-/// Returns None for inline usage:
-/// - `Func(GetTempFileName())` - no assignment
-/// - `Var = Func(GetTempFileName())` - GetTempFileName inside RHS expression
-fn extract_variable_from_assignment(call_token: &SyntaxToken) -> Option<String> {
-    // Walk up to find ASSIGN_STMT
-    let mut current = call_token.parent();
-    while let Some(node) = current {
-        if node.kind() == SyntaxKind::ASSIGN_STMT {
-            // ASSIGN_STMT structure: LHS EQ RHS
-            // Find EQ token position
-            let eq_pos = node.children_with_tokens().position(|el| {
-                el.as_token().map(|t| t.kind() == SyntaxKind::EQ).unwrap_or(false)
-            })?;
-
-            // Check if GetTempFileName is the DIRECT RHS (not nested inside)
-            // Strategy: GetTempFileName should be in the first EXPR after EQ
-            let rhs_expr = node
-                .children_with_tokens()
-                .skip(eq_pos + 1) // Skip to after EQ
-                .find_map(|el| el.as_node().filter(|n| n.kind() == SyntaxKind::EXPR).cloned())?;
-
-            // Check if call_token is a direct descendant of the first RHS EXPR
-            // If it's nested deeper (e.g., inside Новый Файл(...)), it's inline usage
-            let mut depth = 0;
-            let mut check_node = call_token.parent();
-            while let Some(n) = check_node {
-                if n == rhs_expr {
-                    // Found the RHS EXPR
-                    // If depth > a few levels, it's nested (inline usage)
-                    // Direct assignment: Var = GetTempFileName() has depth ~4-5
-                    // Nested: Var = Func(GetTempFileName()) has depth > 5
-                    if depth > 5 {
-                        return None; // Inline usage (too deep)
-                    }
-                    break;
+        for call_idx in call_expr_ids {
+            if check_expr_for_deletion(body, call_idx, var_name, config) {
+                // If CFG is available, verify reachability
+                if let (Some(from_block), Some(cfg_ref)) = (get_temp_block, cfg) {
+                    let deletion_reachable =
+                        is_deletion_reachable_from(body, cfg_ref, from_block, var_name, config);
+                    return deletion_reachable;
                 }
-                depth += 1;
-                check_node = n.parent();
+                return true;
             }
-
-            // Get first IDENT before EQ by searching recursively in child nodes
-            // The variable might be wrapped in EXPR nodes, so we need to search descendants
-            let result = node.children_with_tokens().take(eq_pos).find_map(|el| {
-                // For direct tokens, check if it's IDENT
-                if let Some(token) = el.as_token() {
-                    if token.kind() == SyntaxKind::IDENT {
-                        return Some(token.text().to_string());
-                    }
-                }
-                // For nodes (like EXPR), search recursively for IDENT
-                if let Some(child_node) = el.as_node() {
-                    return child_node
-                        .descendants_with_tokens()
-                        .filter_map(|desc| desc.into_token())
-                        .find(|t| t.kind() == SyntaxKind::IDENT)
-                        .map(|t| t.text().to_string());
-                }
-                None
-            });
-
-            return result;
-        }
-        current = node.parent();
-    }
-
-    // If no assignment found, return None
-    // This handles cases like: `Func(GetTempFileName())` - inline usage
-    None
-}
-
-/// Find the enclosing method/procedure body.
-///
-/// Uses AST wrappers to find ProcedureDef or FunctionDef,
-/// then extracts the statement list body.
-fn find_enclosing_method_body(node: SyntaxNode) -> Option<SyntaxNode> {
-    // Use .ancestors() to walk up the tree
-    for ancestor in node.ancestors() {
-        // Try casting to ProcedureDef
-        if let Some(proc) = ast::ProcedureDef::cast(ancestor.clone()) {
-            return proc.body().map(|b| b.syntax().clone());
-        }
-
-        // Try casting to FunctionDef
-        if let Some(func) = ast::FunctionDef::cast(ancestor.clone()) {
-            return func.body().map(|b| b.syntax().clone());
         }
     }
-    None
+
+    false
 }
 
-/// Check if there's a deletion call for the variable after the GetTempFileName call.
-///
-/// Searches for:
-/// 1. Global deletion methods: `DeleteFiles(var)`
-/// 2. Module-qualified methods: `Module.DeleteFile(var)`
-///
-/// Only checks calls AFTER the GetTempFileName call (same scope).
-fn has_deletion_call(
-    method_body: &SyntaxNode,
-    get_temp_call_token: &SyntaxToken,
+/// Check if an expression (or its subexpressions) is a deletion call for the variable.
+fn check_expr_for_deletion(
+    body: &Body,
+    expr_idx: ExprIdx,
     var_name: &str,
     config: &Config,
 ) -> bool {
-    let temp_call_offset = get_temp_call_token.text_range().start();
-
-    // Find all ARG_LIST nodes (indicates method calls)
-    for node in method_body.descendants() {
-        // Only check nodes AFTER the GetTempFileName call
-        if node.text_range().start() <= temp_call_offset {
-            continue;
+    match body.expr_idx(expr_idx) {
+        Expr::Call { callee, args } => {
+            let method_path = extract_call_path(body, *callee);
+            if config.deletion_methods.is_match(&method_path)
+                && args.iter().any(|&a| expr_contains_var(body, a, var_name))
+            {
+                return true;
+            }
+            // Check nested calls in arguments
+            args.iter().any(|&a| check_expr_for_deletion(body, a, var_name, config))
         }
+        Expr::MethodCall { receiver, method, args } => {
+            // Check method name for deletion pattern
+            if config.deletion_methods.is_match(method.as_str())
+                && args.iter().any(|&a| expr_contains_var(body, a, var_name))
+            {
+                return true;
+            }
+            // Check receiver and args for nested deletion calls
+            check_expr_for_deletion(body, *receiver, var_name, config)
+                || args.iter().any(|&a| check_expr_for_deletion(body, a, var_name, config))
+        }
+        _ => false,
+    }
+}
 
-        if node.kind() == SyntaxKind::ARG_LIST {
-            if let Some(parent) = node.parent() {
-                // Extract method name (handles both global and qualified calls)
-                let method_path = extract_method_path(&parent);
+/// Extract method path from a Call expression's callee.
+fn extract_call_path(body: &Body, callee: ExprIdx) -> String {
+    match body.expr_idx(callee) {
+        Expr::Path(name) => name.as_str().to_string(),
+        Expr::Field { base, field } => {
+            let base_path = extract_call_path(body, *base);
+            if base_path.is_empty() {
+                field.as_str().to_string()
+            } else {
+                format!("{}.{}", base_path, field.as_str())
+            }
+        }
+        _ => String::new(),
+    }
+}
 
-                tracing::trace!(
-                    method_path = %method_path,
-                    var_name = %var_name,
-                    range = ?parent.text_range(),
-                    "Checking deletion call candidate"
-                );
+/// Check if expression tree contains a reference to the variable (case-insensitive).
+fn expr_contains_var(body: &Body, expr_idx: ExprIdx, var_name: &str) -> bool {
+    match body.expr_idx(expr_idx) {
+        Expr::Path(name) => name.as_str().eq_ignore_ascii_case(var_name),
+        Expr::Call { callee, args } => {
+            expr_contains_var(body, *callee, var_name)
+                || args.iter().any(|&a| expr_contains_var(body, a, var_name))
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_contains_var(body, *receiver, var_name)
+                || args.iter().any(|&a| expr_contains_var(body, a, var_name))
+        }
+        Expr::Field { base, .. } => expr_contains_var(body, *base, var_name),
+        Expr::Index { base, index } => {
+            expr_contains_var(body, *base, var_name) || expr_contains_var(body, *index, var_name)
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            expr_contains_var(body, *lhs, var_name) || expr_contains_var(body, *rhs, var_name)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains_var(body, *expr, var_name),
+        Expr::New { args, .. } => args.iter().any(|&a| expr_contains_var(body, a, var_name)),
+        _ => false,
+    }
+}
 
-                // Check if method matches deletion pattern
-                if config.deletion_methods.is_match(&method_path) {
-                    // Check if variable is used in this call
-                    if call_uses_variable(&parent, var_name) {
-                        tracing::trace!(
-                            method_path = %method_path,
-                            var_name = %var_name,
-                            "Found matching deletion call"
-                        );
+/// Build mapping from StmtId → CFG NodeIndex (basic block).
+fn build_stmt_to_block_map(
+    cfg: &cfg::ControlFlowGraph,
+) -> rustc_hash::FxHashMap<StmtId, cfg::NodeIndex> {
+    let mut map = rustc_hash::FxHashMap::default();
+    for (node_idx, vertex) in cfg.vertices() {
+        if let cfg::CfgVertex::BasicBlock(block) = vertex {
+            for &stmt_id in block.statements() {
+                map.insert(stmt_id, node_idx);
+            }
+        }
+    }
+    map
+}
+
+/// Check if any deletion call is reachable from the GetTempFileName block via CFG.
+fn is_deletion_reachable_from(
+    body: &Body,
+    cfg: &cfg::ControlFlowGraph,
+    from_block: cfg::NodeIndex,
+    var_name: &str,
+    config: &Config,
+) -> bool {
+    // BFS from from_block to find any block containing a matching deletion call
+    let mut visited = rustc_hash::FxHashSet::default();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(from_block);
+    visited.insert(from_block);
+
+    while let Some(current) = queue.pop_front() {
+        // Check if current block contains a deletion call
+        if let Some(cfg::CfgVertex::BasicBlock(block)) = cfg.vertex(current) {
+            for &stmt_id in block.statements() {
+                let stmt = body.stmt(stmt_id);
+                let call_exprs = match stmt {
+                    Stmt::Expr(e) => vec![*e],
+                    Stmt::Assign { value, .. } => vec![*value],
+                    _ => continue,
+                };
+                for call_idx in call_exprs {
+                    if check_expr_for_deletion(body, call_idx, var_name, config) {
                         return true;
                     }
                 }
             }
         }
+
+        // Enqueue successors
+        for (succ, _edge_type) in cfg.outgoing_edges(current) {
+            if visited.insert(succ) {
+                queue.push_back(succ);
+            }
+        }
     }
 
     false
-}
-
-/// Extract method path from a call node.
-///
-/// Examples:
-/// - `УдалитьФайлы(...)` → "УдалитьФайлы"
-/// - `РаботаСФайламиКлиент.УдалитьФайл(...)` → "РаботаСФайламиКлиент.УдалитьФайл"
-/// - `Справочники.Модуль.Удалить(...)` → "Справочники.Модуль.Удалить"
-///
-/// Pattern from MissingCommonModuleMethod: collect IDENT tokens before ARG_LIST.
-fn extract_method_path(call_node: &SyntaxNode) -> String {
-    let mut idents: Vec<String> = Vec::new();
-
-    for child in call_node.children_with_tokens() {
-        // Stop at ARG_LIST
-        if child.kind() == SyntaxKind::ARG_LIST {
-            break;
-        }
-
-        // Collect IDENT tokens
-        if let Some(element) = child.as_node() {
-            for token in element.descendants_with_tokens() {
-                if let Some(t) = token.as_token() {
-                    if t.kind() == SyntaxKind::IDENT {
-                        idents.push(t.text().to_string());
-                    }
-                }
-            }
-        } else if let Some(token) = child.as_token() {
-            if token.kind() == SyntaxKind::IDENT {
-                idents.push(token.text().to_string());
-            }
-        }
-    }
-
-    // Join with dots: ["Module", "Method"] → "Module.Method"
-    idents.join(".")
-}
-
-/// Check if a call uses the specified variable in its arguments.
-///
-/// Performs case-insensitive comparison (BSL standard).
-fn call_uses_variable(call_node: &SyntaxNode, var_name: &str) -> bool {
-    // Check all IDENT tokens in the call's arguments
-    for token in call_node.descendants_with_tokens() {
-        if let Some(t) = token.as_token() {
-            if t.kind() == SyntaxKind::IDENT && t.text().eq_ignore_ascii_case(var_name) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Get the range for the GetTempFileName call expression.
-///
-/// Spans from the method name to the closing paren.
-fn get_call_expression_range(call_token: &SyntaxToken) -> TextRange {
-    // Walk up to find the call expression (EXPR node containing the call with arguments)
-    // Return the first EXPR node whose parent is NOT an EXPR
-    let mut current = call_token.parent();
-
-    while let Some(node) = current {
-        if node.kind() == SyntaxKind::EXPR {
-            // Check if parent is also EXPR
-            if let Some(parent) = node.parent() {
-                if parent.kind() != SyntaxKind::EXPR {
-                    // Parent is not EXPR, so this is the outermost call expression
-                    return node.text_range();
-                }
-            } else {
-                // No parent, use this EXPR's range
-                return node.text_range();
-            }
-        }
-        current = node.parent();
-    }
-
-    // Fallback: just the token itself
-    call_token.text_range()
 }
 
 #[cfg(test)]

@@ -521,11 +521,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::missing_temp_storage_deletion::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "MissingTemporaryFileDeletion",
-        ctx,
-        handlers::missing_temporary_file_deletion::check,
-    ));
+    // MissingTemporaryFileDeletion moved to collect_dataflow_diagnostics (uses module_bodies + module_cfgs)
 
     // Hardcoded values
     diagnostics.extend(run_diagnostic(
@@ -694,6 +690,11 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         handlers::unused_local_variable::check,
     ));
     diagnostics.extend(run_diagnostic("UnusedParameters", ctx, handlers::unused_parameters::check));
+    diagnostics.extend(run_diagnostic(
+        "MissingTemporaryFileDeletion",
+        ctx,
+        handlers::missing_temporary_file_deletion::check,
+    ));
 
     diagnostics
 }
