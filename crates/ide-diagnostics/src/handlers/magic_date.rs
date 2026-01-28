@@ -442,62 +442,63 @@ fn is_in_simple_assignment(token: &SyntaxToken) -> bool {
     false
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("MagicDate::check").entered();
-
+/// Single-pass token handler for MagicDate diagnostic.
+#[inline]
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::MagicDate;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
+    }
+
+    if !is_date_literal(token) {
+        return;
+    }
+
+    let Some(date_str) = extract_date_text(token) else {
+        return;
+    };
+
+    // For STRING tokens, validate format strictly
+    // For DATE tokens, accept any format (Java behavior)
+    if token.kind() == SyntaxKind::STRING && !is_valid_date(&date_str) {
+        return;
     }
 
     let config = Config::from_context(ctx);
+
+    if is_authorized(&date_str, &config) {
+        return;
+    }
+
+    if is_excluded_context(token) {
+        return;
+    }
+
+    acc.push(Diagnostic {
+        code,
+        message: format!(
+            "Создайте переменную с понятным названием, присвойте ей значение \"{}\" и используйте эту константу вместо магической даты.",
+            date_str
+        ),
+        severity: ctx.severity(code),
+        range: token.text_range(),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
+}
+
+/// Legacy check function (delegates to single-pass).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let _span = tracing::debug_span!("MagicDate::check").entered();
+
     let parse = ctx.parse();
     let root = parse.syntax_node();
-
     let mut diagnostics = Vec::new();
 
-    // Traverse all tokens
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
-            // Check if this is a date literal
-            if !is_date_literal(&token) {
-                continue;
-            }
-
-            // Extract and validate date
-            let Some(date_str) = extract_date_text(&token) else {
-                continue;
-            };
-
-            // For STRING tokens, validate format strictly
-            // For DATE tokens, accept any format (Java behavior)
-            if token.kind() == SyntaxKind::STRING && !is_valid_date(&date_str) {
-                continue;
-            }
-
-            // Check authorized list
-            if is_authorized(&date_str, &config) {
-                continue;
-            }
-
-            // Check exclusion contexts
-            if is_excluded_context(&token) {
-                continue;
-            }
-
-            // Create diagnostic
-            diagnostics.push(Diagnostic {
-                code,
-                message: format!(
-                    "Создайте переменную с понятным названием, присвойте ей значение \"{}\" и используйте эту константу вместо магической даты.",
-                    date_str
-                ),
-                severity: ctx.severity(code),
-                range: token.text_range(),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
+            check_token(&token, &mut diagnostics, ctx);
         }
     }
 

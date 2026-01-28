@@ -62,7 +62,7 @@ use syntax::{SyntaxKind, SyntaxNode};
 
 /// Check a single syntax node for nested ternary operators (node-based API).
 ///
-/// This is called from collect_text_diagnostics() for each node in single AST pass.
+/// This is called from collect_syntax_single_pass() for each node in single AST pass.
 /// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
 ///
 /// ## Cases checked

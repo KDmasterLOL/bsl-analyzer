@@ -39,8 +39,8 @@ pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, Text
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
-    collect_dataflow_diagnostics, collect_metadata_ast_diagnostics, collect_sdbl_hir_diagnostics,
-    collect_semantic_diagnostics, collect_syntax_diagnostics, collect_text_diagnostics,
+    collect_dataflow_diagnostics, collect_line_diagnostics, collect_metadata_ast_diagnostics,
+    collect_sdbl_hir_diagnostics, collect_semantic_diagnostics, collect_syntax_diagnostics,
 };
 
 /// Runs all diagnostics on a file.
@@ -61,8 +61,8 @@ use runner::{
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
-    // 1. Text-based diagnostics (single AST pass)
-    result.extend(collect_text_diagnostics(ctx));
+    // 1. Line-based diagnostics (text/formatting checks)
+    result.extend(collect_line_diagnostics(ctx));
 
     // 2. Tier 1: Syntax diagnostics
     result.extend(collect_syntax_diagnostics(ctx));

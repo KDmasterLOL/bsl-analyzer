@@ -6,35 +6,52 @@
 //! Exception is interface texts displayed to user in messages, forms and help.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::SyntaxKind;
+use syntax::{SyntaxKind, SyntaxToken};
 
 fn contains_yo_letter(text: &str) -> bool {
     text.chars().any(|c| c == 'ё' || c == 'Ё')
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Single-pass token handler for YoLetterUsage diagnostic.
+#[inline]
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::YoLetterUsage;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
+    if token.kind() != SyntaxKind::IDENT {
+        return;
+    }
+
+    if !contains_yo_letter(token.text()) {
+        return;
+    }
+
+    acc.push(Diagnostic {
+        code,
+        message: "В текстах модулей не допускается использовать букву \"Ё\".".into(),
+        severity: ctx.severity(code),
+        range: token.text_range(),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
+}
+
+/// Legacy check function (delegates to single-pass).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
+    let mut diagnostics = Vec::new();
 
-    root.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::IDENT)
-        .filter(|token| contains_yo_letter(token.text()))
-        .map(|token| Diagnostic {
-            code,
-            message: "В текстах модулей не допускается использовать букву \"Ё\".".into(),
-            severity: ctx.severity(code),
-            range: token.text_range(),
-            tags: ctx.tags(code),
-            fixes: vec![],
-        })
-        .collect()
+    for element in root.descendants_with_tokens() {
+        if let Some(token) = element.into_token() {
+            check_token(&token, &mut diagnostics, ctx);
+        }
+    }
+
+    diagnostics
 }
 
 #[cfg(test)]

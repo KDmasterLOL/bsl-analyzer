@@ -51,34 +51,41 @@
 
 use crate::utils::preprocessor_symbols;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::SyntaxKind;
+use syntax::{SyntaxKind, SyntaxNode};
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Single-pass node handler for UnknownPreprocessorSymbol diagnostic.
+#[inline]
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UnknownPreprocessorSymbol;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
+    if node.kind() != SyntaxKind::PRE_SYMBOL {
+        return;
+    }
+
+    let text = node.text().to_string();
+    if !preprocessor_symbols::is_known_symbol(&text) {
+        acc.push(Diagnostic {
+            code,
+            message: format!("Неизвестный символ препроцессора '{}'", text),
+            severity: ctx.severity(code),
+            range: node.text_range(),
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+}
+
+/// Legacy check function (delegates to single-pass).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = ctx.parse().syntax_node();
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
-        if node.kind() != SyntaxKind::PRE_SYMBOL {
-            continue;
-        }
-
-        let text = node.text().to_string();
-        if !preprocessor_symbols::is_known_symbol(&text) {
-            diagnostics.push(Diagnostic {
-                code,
-                message: format!("Неизвестный символ препроцессора '{}'", text),
-                severity: ctx.severity(code),
-                range: node.text_range(),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
+        check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics

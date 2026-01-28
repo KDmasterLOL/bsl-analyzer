@@ -7,11 +7,12 @@
 //!
 //! | Type | Collector | Description |
 //! |------|-----------|-------------|
-//! | Text-based | `collect_text_diagnostics` | Line/formatting checks |
-//! | Syntax (Tier 1) | `collect_syntax_single_pass` | Single-pass AST traversal |
+//! | Line-based | `collect_line_diagnostics` | Line/formatting checks |
+//! | AST Single-pass | `collect_syntax_single_pass` | Single-pass AST traversal (9 handlers) |
+//! | Syntax (Tier 1) | `collect_syntax_diagnostics` | Legacy syntax handlers |
 //! | Semantic (Tier 2) | `collect_semantic_diagnostics` | Semantic analysis |
 //! | Metadata (Tier 3) | `collect_metadata_ast_diagnostics` | AST-based metadata checks |
-//! | SDBL | `collect_sdbl_diagnostics` | Query language diagnostics |
+//! | SDBL | `collect_sdbl_hir_diagnostics` | Query language diagnostics |
 //! | Dataflow | `collect_dataflow_diagnostics` | CFG + liveness analysis |
 //! | HIR | `hir_dispatch::collect_hir_diagnostics` | HIR lowering byproducts |
 //! | Metadata HIR | `metadata_dispatch::collect_metadata_diagnostics` | ModuleMetadata checks |
@@ -23,6 +24,11 @@
 //! - **Performance:** O(n) instead of O(n × handlers)
 //! - **Cache locality:** Better CPU cache utilization
 //! - **Reduced latency:** Faster diagnostics, less UI flicker
+//!
+//! ### Migrated handlers (9 total):
+//! - **Node-based:** useless_ternary_operator, double_negatives, unknown_preprocessor_symbol,
+//!   bad_words, typo, nested_ternary_operator
+//! - **Token-based:** yo_letter_usage, magic_date
 //!
 //! Handlers not yet migrated remain in `collect_syntax_diagnostics` (legacy).
 
@@ -159,9 +165,15 @@ pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Each handler checks `ctx.is_disabled_with_metadata()` internally.
 #[inline]
 fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, sp_ctx: &SinglePassContext) {
-    // Migrated handlers (Phase 2+):
+    // Migrated handlers (Phase 1):
     handlers::useless_ternary_operator::check_node(node, acc, sp_ctx.ctx);
     handlers::double_negatives::check_node(node, acc, sp_ctx.ctx);
+    // Migrated handlers (Phase 2):
+    handlers::unknown_preprocessor_symbol::check_node(node, acc, sp_ctx.ctx);
+    // Migrated handlers (Phase 4 - from collect_text_diagnostics):
+    handlers::bad_words::check_node(node, acc, sp_ctx.ctx);
+    handlers::typo::check_node(node, acc, sp_ctx.ctx);
+    handlers::nested_ternary_operator::check_node(node, acc, sp_ctx.ctx);
 }
 
 /// Dispatch to all token-based handlers.
@@ -169,25 +181,22 @@ fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, sp_ctx: &Si
 /// Each handler checks `ctx.is_disabled_with_metadata()` internally.
 #[inline]
 fn check_token_handlers(
-    _token: &SyntaxToken,
-    _acc: &mut Vec<Diagnostic>,
-    _sp_ctx: &SinglePassContext,
+    token: &SyntaxToken,
+    acc: &mut Vec<Diagnostic>,
+    sp_ctx: &SinglePassContext,
 ) {
-    // Token-based handlers will be added in Phase 4:
-    // handlers::yo_letter_usage::check_token(token, acc, sp_ctx.ctx);
-    // handlers::magic_date::check_token(token, acc, sp_ctx.ctx);
+    // Migrated handlers (Phase 2):
+    handlers::yo_letter_usage::check_token(token, acc, sp_ctx.ctx);
+    handlers::magic_date::check_token(token, acc, sp_ctx.ctx);
 }
 
-/// Collect text-based diagnostics in a single AST pass.
+/// Collect line-based diagnostics.
 ///
-/// This function performs ONE traversal of the syntax tree and calls all text-based
-/// diagnostics on each node. This is much faster than calling each diagnostic separately.
+/// These diagnostics work on lines/text level, not AST nodes.
+/// Examples: line_length, consecutive_empty_lines, parse_error, etc.
 ///
 /// Pattern from rust-analyzer: crates/ide-diagnostics/src/lib.rs:336-352
-pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
+pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     diagnostics.extend(handlers::parse_error::check(ctx));
@@ -201,11 +210,8 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::missing_space::check(ctx));
     diagnostics.extend(handlers::space_at_start_comment::check(ctx));
 
-    for node in root.descendants() {
-        handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
-        handlers::typo::check_node(&node, &mut diagnostics, ctx);
-        handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
-    }
+    // Node-based handlers moved to collect_syntax_single_pass():
+    // - bad_words, typo, nested_ternary_operator
 
     diagnostics
 }
@@ -292,20 +298,16 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::latin_and_cyrillic_symbol_in_word::check,
     ));
-    diagnostics.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
-    // NestedTernaryOperator: already in collect_text_diagnostics via check_node()
+    // MagicDate: MIGRATED to single-pass (check_token)
+    // NestedTernaryOperator: MIGRATED to single-pass (check_node)
     diagnostics.extend(run_diagnostic(
         "NonStandardRegion",
         ctx,
         handlers::non_standard_region::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "UnknownPreprocessorSymbol",
-        ctx,
-        handlers::unknown_preprocessor_symbol::check,
-    ));
-    // UselessTernaryOperator: MIGRATED to single-pass
-    diagnostics.extend(run_diagnostic("YoLetterUsage", ctx, handlers::yo_letter_usage::check));
+    // UnknownPreprocessorSymbol: MIGRATED to single-pass (check_node)
+    // UselessTernaryOperator: MIGRATED to single-pass (check_node)
+    // YoLetterUsage: MIGRATED to single-pass (check_token)
 
     diagnostics
 }
@@ -771,5 +773,180 @@ mod tests {
             single_pass_filtered.len(),
             "Filtered results must match"
         );
+    }
+
+    #[test]
+    fn test_single_pass_invariant_yo_letter_usage() {
+        let code = r#"
+Перем ёжик;
+Перем Ёлка;
+Перем НормальнаяПеременная;
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::yo_letter_usage::check);
+
+        // Run single-pass check_token() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for element in root.descendants_with_tokens() {
+                if let Some(token) = element.into_token() {
+                    handlers::yo_letter_usage::check_token(&token, &mut diagnostics, ctx);
+                }
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "YoLetterUsage: single-pass and legacy must produce same number of diagnostics"
+        );
+
+        for (l, s) in legacy.iter().zip(single_pass.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+        }
+    }
+
+    #[test]
+    fn test_single_pass_invariant_magic_date() {
+        let code = r#"
+Процедура Тест()
+    Дата1 = '20250101' + 1;
+    Дата2 = '00010101';
+КонецПроцедуры
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::magic_date::check);
+
+        // Run single-pass check_token() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for element in root.descendants_with_tokens() {
+                if let Some(token) = element.into_token() {
+                    handlers::magic_date::check_token(&token, &mut diagnostics, ctx);
+                }
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "MagicDate: single-pass and legacy must produce same number of diagnostics"
+        );
+
+        for (l, s) in legacy.iter().zip(single_pass.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+        }
+    }
+
+    #[test]
+    fn test_single_pass_invariant_unknown_preprocessor_symbol() {
+        let code = r#"
+#Если Сервер Тогда
+#КонецЕсли
+
+#Если НеизвестныйСимвол Тогда
+#КонецЕсли
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::unknown_preprocessor_symbol::check);
+
+        // Run single-pass check_node() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::unknown_preprocessor_symbol::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "UnknownPreprocessorSymbol: single-pass and legacy must produce same number of diagnostics"
+        );
+
+        for (l, s) in legacy.iter().zip(single_pass.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+        }
+    }
+
+    #[test]
+    fn test_single_pass_invariant_bad_words() {
+        let code = r#"
+Процедура Тест()
+    // TODO: исправить
+    Сообщить("ерунда");
+КонецПроцедуры
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::bad_words::check);
+
+        // Run single-pass check_node() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "BadWords: single-pass and legacy must produce same number of diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_single_pass_invariant_nested_ternary() {
+        let code = r#"
+Процедура Тест()
+    А = ?(Условие, ?(Вложенное, 1, 2), 3);
+    Если ?(Условие, Истина, Ложь) Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::nested_ternary_operator::check);
+
+        // Run single-pass check_node() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "NestedTernaryOperator: single-pass and legacy must produce same number of diagnostics"
+        );
+
+        for (l, s) in legacy.iter().zip(single_pass.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+        }
     }
 }
