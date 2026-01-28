@@ -826,6 +826,13 @@ fn lower_return_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     Some(Stmt::Return { value })
 }
 
+/// Check if condition text contains platform type keywords (Linux, Windows, MacOS).
+/// Used for UsingObjectNotAvailableUnix diagnostic to detect platform guards.
+fn has_platform_type_check(condition_node: &SyntaxNode) -> bool {
+    let text = condition_node.text().to_string().to_lowercase();
+    text.contains("linux") || text.contains("windows") || text.contains("macos")
+}
+
 /// Lower if statement.
 fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
     // Track nesting depth for NestedStatements diagnostic
@@ -836,6 +843,13 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
 
     // Condition (first EXPR or expression node)
     let condition_node = children.next()?;
+
+    // Check if this IF has a platform type check in condition
+    // If so, all branches are considered "guarded" for UsingObjectNotAvailableUnix diagnostic
+    let saved_platform_guard = ctx.in_platform_guard;
+    if has_platform_type_check(&condition_node) {
+        ctx.in_platform_guard = true;
+    }
 
     // Check if condition complexity for IfConditionComplexity diagnostic
     // Complexity = number of boolean operations + 1
@@ -934,6 +948,9 @@ fn lower_if_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
             ctx.emit(BodyDiagnostic::IfElseIfEndsWithElse { range });
         }
     }
+
+    // Restore platform guard state
+    ctx.in_platform_guard = saved_platform_guard;
 
     // Exit nesting tracking (emit diagnostic if leaf)
     let method_name = ctx.current_method_name.clone().unwrap_or_default();

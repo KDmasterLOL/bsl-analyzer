@@ -1,4 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::SyntaxKind;
@@ -8,6 +9,29 @@ static PATTERN_NEW_EXPRESSION: Lazy<Regex> =
 
 static PATTERN_TYPE_PLATFORM: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)Linux_x86|Windows|MacOS").unwrap());
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::UsingObjectNotAvailableUnix` is encountered.
+pub fn from_hir(type_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UsingObjectNotAvailableUnix;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: format!(
+            "Проверить, что задействованы аналоги \"{}\" при работе в Unix-клиенте.",
+            type_name
+        ),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
 
 fn has_platform_check_in_ancestors(node: &syntax::SyntaxNode) -> bool {
     for ancestor in node.ancestors() {
@@ -209,5 +233,43 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "English COMObject should trigger");
+    }
+
+    #[test]
+    fn test_hir_detection() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    obj = Новый COMОбъект("test");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let unix: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingObjectNotAvailableUnix)
+            .collect();
+
+        assert_eq!(unix.len(), 1, "HIR should detect UsingObjectNotAvailableUnix");
+    }
+
+    #[test]
+    fn test_hir_with_platform_guard() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    Если ТипПлатформы.Windows Тогда
+        obj = Новый COMОбъект("test");
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let unix: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingObjectNotAvailableUnix)
+            .collect();
+
+        assert_eq!(unix.len(), 0, "HIR should NOT detect with Windows guard");
     }
 }

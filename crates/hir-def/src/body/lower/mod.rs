@@ -149,6 +149,10 @@ pub(crate) struct LoweringCtx {
     /// Flag indicating if any child was a nesting statement.
     /// Used for NestedStatements diagnostic to identify leaf statements.
     pub(crate) had_nested_child: bool,
+
+    /// Whether we're inside an IF statement that has a platform type guard.
+    /// Used for UsingObjectNotAvailableUnix diagnostic to skip COMObject/Mail checks.
+    pub(crate) in_platform_guard: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -197,6 +201,7 @@ impl LoweringCtx {
             is_server_method: false,  // Will be set in lower_method_with_externals
             nesting_depth: 0,
             had_nested_child: false,
+            in_platform_guard: false,
         }
     }
 

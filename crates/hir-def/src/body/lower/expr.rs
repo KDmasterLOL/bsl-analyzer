@@ -1481,6 +1481,23 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         ctx.diagnostics.push(BodyDiagnostic::UseSystemInformation { range: node.text_range() });
     }
 
+    // Check for Unix-unavailable objects (COMObject, Mail) without platform guard
+    // Two syntax forms: Новый COMОбъект(...) and Новый("COMОбъект", ...)
+    if !ctx.in_platform_guard {
+        let unix_unavailable_type = if let Some(ref name) = type_name {
+            is_unix_unavailable_type(name.as_str()).then(|| name.as_str().to_string())
+        } else {
+            extract_type_name_from_first_arg(node).filter(|name| is_unix_unavailable_type(name))
+        };
+
+        if let Some(type_name_str) = unix_unavailable_type {
+            ctx.diagnostics.push(BodyDiagnostic::UsingObjectNotAvailableUnix {
+                type_name: type_name_str,
+                range: node.text_range(),
+            });
+        }
+    }
+
     // Arguments
     let args = node
         .children()
@@ -1637,6 +1654,13 @@ fn is_style_element_type(name: &str) -> bool {
 fn is_system_information_type(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "системнаяинформация" | "systeminfo")
+}
+
+/// Check if type name is an object not available on Unix (COMObject, Mail).
+/// These are Windows-only objects and should be guarded by platform checks.
+fn is_unix_unavailable_type(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(lower.as_str(), "comобъект" | "comobject" | "почта" | "mail")
 }
 
 /// Extract type name from first string argument of Новый("ТипОбъекта", ...).

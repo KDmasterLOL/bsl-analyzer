@@ -552,11 +552,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::usage_write_log_event::check,
     ));
     diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
-    diagnostics.extend(run_diagnostic(
-        "UsingObjectNotAvailableUnix",
-        ctx,
-        handlers::using_object_not_available_unix::check,
-    ));
+    // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)
     diagnostics.extend(run_diagnostic(
         "UnsafeFindByCode",
         ctx,

@@ -817,6 +817,10 @@ pub enum BodyDiagnostic {
     /// Число()/Number() call inside try block body.
     /// Using exceptions for type casting is incorrect - use TypeDescription instead.
     TryNumber { range: TextRange },
+
+    /// Usage of Unix-unavailable objects (COMObject, Mail) without platform guard.
+    /// Detected when creating these objects outside of IF with platform type check.
+    UsingObjectNotAvailableUnix { type_name: String, range: TextRange },
 }
 
 /// Context of a magic number for filtering by configuration.
@@ -1061,6 +1065,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::NumberOfParams { range, .. } => *range,
             BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,
+            BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
         }
     }
 }

@@ -287,5 +287,8 @@ pub fn dispatch_hir_diagnostic(
             )
         }
         BodyDiagnostic::TryNumber { range } => handlers::try_number::from_hir(*range, ctx),
+        BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {
+            handlers::using_object_not_available_unix::from_hir(type_name, *range, ctx)
+        }
     }
 }
