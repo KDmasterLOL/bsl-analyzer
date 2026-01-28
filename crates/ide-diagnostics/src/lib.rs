@@ -39,7 +39,7 @@ pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, Text
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
-    collect_dataflow_diagnostics, collect_line_diagnostics, collect_metadata_ast_diagnostics,
+    collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_line_diagnostics,
     collect_sdbl_hir_diagnostics, collect_semantic_diagnostics, collect_syntax_diagnostics,
 };
 
@@ -53,7 +53,7 @@ use runner::{
 /// 1. **Text-based** - Line/formatting checks (single AST pass)
 /// 2. **Syntax (Tier 1)** - Syntactic pattern checks
 /// 3. **Semantic (Tier 2)** - Semantic analysis checks
-/// 4. **Metadata AST (Tier 3)** - AST-based metadata property checks
+/// 4. **Configuration** - Configuration XML-based checks (SessionModule only)
 /// 5. **SDBL HIR** - Query language diagnostics (collected during SDBL lowering)
 /// 6. **HIR** - Diagnostics collected during BSL AST→HIR lowering
 /// 7. **Dataflow** - CFG + liveness/reaching definitions analysis
@@ -70,8 +70,8 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 3. Tier 2: Semantic diagnostics
     result.extend(collect_semantic_diagnostics(ctx));
 
-    // 4. Tier 3: Metadata diagnostics (AST-based)
-    result.extend(collect_metadata_ast_diagnostics(ctx));
+    // 4. Configuration-based diagnostics (SessionModule only)
+    result.extend(collect_configuration_diagnostics(ctx));
 
     // 5. SDBL HIR diagnostics (collected during SDBL lowering)
     result.extend(collect_sdbl_hir_diagnostics(ctx));

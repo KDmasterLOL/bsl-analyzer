@@ -1,21 +1,29 @@
 //! Diagnostic runner helpers.
 //!
 //! This module provides helper functions for running diagnostics.
-//! Each diagnostic type has a dedicated collector function for clean separation.
+//! Diagnostics are organized by data source for clarity and proper caching.
 //!
-//! ## Diagnostic Types
+//! ## Architecture
 //!
-//! | Type | Collector | Description |
-//! |------|-----------|-------------|
-//! | Line-based | `collect_line_diagnostics` | Line/formatting checks |
-//! | AST Single-pass | `collect_syntax_single_pass` | Single-pass AST traversal (9 handlers) |
-//! | Syntax (Tier 1) | `collect_syntax_diagnostics` | Legacy syntax handlers |
-//! | Semantic (Tier 2) | `collect_semantic_diagnostics` | Semantic analysis |
-//! | Metadata (Tier 3) | `collect_metadata_ast_diagnostics` | AST-based metadata checks |
-//! | SDBL | `collect_sdbl_hir_diagnostics` | Query language diagnostics |
-//! | Dataflow | `collect_dataflow_diagnostics` | CFG + liveness analysis |
-//! | HIR | `hir_dispatch::collect_hir_diagnostics` | HIR lowering byproducts |
-//! | Metadata HIR | `metadata_dispatch::collect_metadata_diagnostics` | ModuleMetadata checks |
+//! | Category | Collector | Data Source | Caching |
+//! |----------|-----------|-------------|---------|
+//! | **HIR Body emit** | `hir_dispatch::collect_hir_diagnostics` | Lowering | Salsa |
+//! | **ItemTree** | `collect_item_tree_diagnostics` | ItemTree + Metadata | Salsa |
+//! | **ModuleBodies** | `collect_module_bodies_diagnostics` | HIR bodies | Salsa |
+//! | **Configuration** | `collect_configuration_diagnostics` | Configuration XML | Salsa |
+//! | **AST traversal** | `collect_ast_diagnostics` | `parse().descendants()` | None |
+//! | **Single-pass AST** | `collect_syntax_single_pass` | One traversal | None |
+//! | **Line/Text** | `collect_line_diagnostics` | Raw text | None |
+//! | **SDBL** | `collect_sdbl_hir_diagnostics` | SDBL HIR | Salsa |
+//! | **Dataflow** | `collect_dataflow_diagnostics` | CFG + liveness | Salsa |
+//! | **Metadata HIR** | `metadata_dispatch::collect_metadata_diagnostics` | ModuleMetadata | Salsa |
+//!
+//! ## Caching Strategy
+//!
+//! 1. **Salsa-cached (optimal):** HIR Body emit, ItemTree, ModuleBodies, Configuration, SDBL, Dataflow, Metadata
+//! 2. **Not cached (keep minimal):** AST traversal, Single-pass AST, Line/Text
+//!
+//! Migration goal: Maximize Salsa-cached diagnostics (~85%), minimize AST traversal (~15%)
 //!
 //! ## Single-Pass Architecture
 //!
@@ -218,30 +226,22 @@ pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Collect Tier 1 syntax diagnostics.
 ///
-/// Uses hybrid approach:
-/// - Single-pass traversal for migrated handlers (via `collect_syntax_single_pass`)
-/// - Legacy individual calls for handlers not yet migrated
-///
-/// ## Migration Status
-/// **Migrated to single-pass:**
-/// - UselessTernaryOperator
-/// - DoubleNegatives
-///
-/// **Pending migration:** All other handlers in this function
+/// Contains:
+/// - Single-pass AST traversal (optimized)
+/// - Pure AST diagnostics (parse + descendants)
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // Phase 1: Single-pass handlers (migrated)
+    // Single-pass handlers (optimized - one traversal for all)
     diagnostics.extend(collect_syntax_single_pass(ctx));
 
-    // Phase 2: Legacy handlers (not yet migrated)
+    // Pure AST handlers (parse + descendants)
     diagnostics.extend(run_diagnostic(
         "CodeBlockBeforeSub",
         ctx,
         handlers::code_block_before_sub::check,
     ));
     diagnostics.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
-    // DoubleNegatives: MIGRATED to single-pass
     diagnostics.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
     diagnostics.extend(run_diagnostic(
         "DuplicateStringLiteral",
@@ -249,24 +249,9 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::duplicate_string_literal::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "DuplicatedInsertionIntoCollection",
-        ctx,
-        handlers::duplicated_insertion_into_collection::check,
-    ));
-    diagnostics.extend(run_diagnostic(
         "ExcessiveAutoTestCheck",
         ctx,
         handlers::excessive_auto_test_check::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "IdenticalExpressions",
-        ctx,
-        handlers::identical_expressions::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "IncorrectUseOfStrTemplate",
-        ctx,
-        handlers::incorrect_use_of_str_template::check,
     ));
     diagnostics.extend(run_diagnostic(
         "MultilingualStringHasAllDeclaredLanguages",
@@ -279,157 +264,68 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::multilingual_string_using_with_template::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "NestedConstructorsInStructureDeclaration",
-        ctx,
-        handlers::nested_constructors_in_structure_declaration::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "NestedFunctionInParameters",
-        ctx,
-        handlers::nested_function_in_parameters::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "NonExportMethodsInApiRegion",
-        ctx,
-        handlers::non_export_methods_in_api_region::check,
-    ));
-    diagnostics.extend(run_diagnostic(
         "LatinAndCyrillicSymbolInWord",
         ctx,
         handlers::latin_and_cyrillic_symbol_in_word::check,
     ));
-    // MagicDate: MIGRATED to single-pass (check_token)
-    // NestedTernaryOperator: MIGRATED to single-pass (check_node)
     diagnostics.extend(run_diagnostic(
         "NonStandardRegion",
         ctx,
         handlers::non_standard_region::check,
     ));
-    // UnknownPreprocessorSymbol: MIGRATED to single-pass (check_node)
-    // UselessTernaryOperator: MIGRATED to single-pass (check_node)
-    // YoLetterUsage: MIGRATED to single-pass (check_token)
 
     diagnostics
 }
 
-/// Collect Tier 2 semantic diagnostics.
+// ============================================================================
+// ItemTree-based diagnostics (method signatures, cached by Salsa)
+// ============================================================================
+
+/// Collect diagnostics based on ItemTree (method signatures).
 ///
-/// Semantic analysis checks that may use HIR/CFG but are triggered via check().
-pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// These diagnostics use Salsa-cached data:
+/// - `ctx.item_tree()` - method signatures, parameters, annotations
+/// - `ctx.module_metadata()` - module type (FormModule, CommonModule, etc.)
+/// - `ctx.region_tree()` - code regions (ПрограммныйИнтерфейс, etc.)
+/// - `ctx.method_docs()` - method documentation comments
+/// - `ctx.module_data()` - module-level data
+///
+/// All data sources are cached by Salsa, making these diagnostics efficient.
+pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // CreateQueryInCycle: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
-    diagnostics.extend(run_diagnostic(
-        "DataExchangeLoading",
-        ctx,
-        handlers::data_exchange_loading::check,
-    ));
-    // DeletingCollectionItem: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
-    // DeprecatedAttributes8312: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
-    diagnostics.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
-    diagnostics.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
-    // CognitiveComplexity: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
-    // CyclomaticComplexity: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
-    // MagicNumber: MIGRATED to HIR (emit in hir-def/body/lower/expr.rs, dispatch in hir_dispatch.rs)
-    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
-    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
-    // NumberOfOptionalParams: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
-    // NumberOfParams: MIGRATED to HIR (emit in hir-def/body/lower/mod.rs, dispatch in hir_dispatch.rs)
+    // === Pure ItemTree checks ===
+
+    // Parameter checks
     diagnostics.extend(run_diagnostic("OrderOfParams", ctx, handlers::order_of_params::check));
     diagnostics.extend(run_diagnostic(
         "ReservedParameterNames",
         ctx,
         handlers::reserved_parameter_names::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "NumberOfValuesInStructureConstructor",
-        ctx,
-        handlers::number_of_values_in_structure_constructor::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MissingCodeTryCatchEx",
-        ctx,
-        handlers::missing_code_try_catch_ex::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MissingTempStorageDeletion",
-        ctx,
-        handlers::missing_temp_storage_deletion::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MissingTemporaryFileDeletion",
-        ctx,
-        handlers::missing_temporary_file_deletion::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "PairingBrokenTransaction",
-        ctx,
-        handlers::pairing_broken_transaction::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "TimeoutsInExternalResources",
-        ctx,
-        handlers::timeouts_in_external_resources::check,
-    ));
-    diagnostics.extend(run_diagnostic("TryNumber", ctx, handlers::try_number::check));
+
+    // Compiler directives
     diagnostics.extend(run_diagnostic(
         "SeveralCompilerDirectives",
         ctx,
         handlers::several_compiler_directives::check,
     ));
+
+    // === ItemTree + RegionTree checks ===
+
+    // Region/export checks
     diagnostics.extend(run_diagnostic(
-        "TransferringParametersBetweenClientAndServer",
+        "NonExportMethodsInApiRegion",
         ctx,
-        handlers::transferring_parameters_between_client_and_server::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UnsafeSafeModeMethodCall",
-        ctx,
-        handlers::unsafe_safe_mode_method_call::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UnusedLocalMethod",
-        ctx,
-        handlers::unused_local_method::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UsageWriteLogEvent",
-        ctx,
-        handlers::usage_write_log_event::check,
-    ));
-    diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodeNetworkAddress",
-        ctx,
-        handlers::using_hardcode_network_address::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodePath",
-        ctx,
-        handlers::using_hardcode_path::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodeSecretInformation",
-        ctx,
-        handlers::using_hardcode_secret_information::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UsingObjectNotAvailableUnix",
-        ctx,
-        handlers::using_object_not_available_unix::check,
+        handlers::non_export_methods_in_api_region::check,
     ));
 
-    diagnostics
-}
-
-/// Collect Tier 3 metadata-related diagnostics (AST-based).
-///
-/// These diagnostics check metadata properties via AST analysis.
-/// Different from metadata_dispatch which uses ModuleMetadata from HIR.
-pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
+    // Cached module checks (RegionTree + ItemTree + ModuleMetadata)
     diagnostics.extend(run_diagnostic("CachedPublic", ctx, handlers::cached_public::check));
+
+    // === ItemTree + ModuleMetadata checks ===
+
+    // Compilation directive checks (require ModuleMetadata for module type)
     diagnostics.extend(run_diagnostic(
         "CompilationDirectiveLost",
         ctx,
@@ -446,15 +342,19 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         handlers::command_module_export_methods::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "ExecuteExternalCodeInCommonModule",
+        "ServerSideExportFormMethod",
         ctx,
-        handlers::execute_external_code_in_common_module::check,
+        handlers::server_side_export_form_method::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "CommonModuleMissingAPI",
+        "OrdinaryAppSupport",
         ctx,
-        handlers::common_module_missing_api::check,
+        handlers::ordinary_app_support::check,
     ));
+
+    // === ItemTree + MethodDocs checks ===
+
+    // Documentation checks (require MethodDocs)
     diagnostics.extend(run_diagnostic(
         "MissingReturnedValueDescription",
         ctx,
@@ -471,36 +371,232 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         handlers::public_methods_description::check,
     ));
     diagnostics.extend(run_diagnostic(
-        "OrdinaryAppSupport",
+        "MissingVariablesDescription",
         ctx,
-        handlers::ordinary_app_support::check,
+        handlers::missing_variables_description::check,
+    ));
+
+    // === ItemTree + CommonModule metadata checks ===
+
+    diagnostics.extend(run_diagnostic(
+        "ExecuteExternalCodeInCommonModule",
+        ctx,
+        handlers::execute_external_code_in_common_module::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "CommonModuleMissingAPI",
+        ctx,
+        handlers::common_module_missing_api::check,
     ));
     diagnostics.extend(run_diagnostic(
         "PrivilegedModuleMethodCall",
         ctx,
         handlers::privileged_module_method_call::check,
     ));
-    diagnostics.extend(run_diagnostic("ProtectedModule", ctx, handlers::protected_module::check));
-    diagnostics.extend(run_diagnostic(
-        "ServerSideExportFormMethod",
-        ctx,
-        handlers::server_side_export_form_method::check,
-    ));
     diagnostics.extend(run_diagnostic(
         "SetPermissionsForNewObjects",
         ctx,
         handlers::set_permissions_for_new_objects::check,
+    ));
+
+    diagnostics
+}
+
+// ============================================================================
+// ModuleBodies-based diagnostics (HIR bodies, cached by Salsa)
+// ============================================================================
+
+/// Collect diagnostics based on ModuleBodies (HIR method bodies).
+///
+/// These diagnostics use `ctx.module_bodies()` which is cached by Salsa.
+/// They analyze HIR expressions and statements, not raw AST.
+pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Security checks
+    diagnostics.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
+    diagnostics.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
+
+    // Transaction checks
+    diagnostics.extend(run_diagnostic(
+        "PairingBrokenTransaction",
+        ctx,
+        handlers::pairing_broken_transaction::check,
+    ));
+
+    // Resource management
+    diagnostics.extend(run_diagnostic(
+        "TimeoutsInExternalResources",
+        ctx,
+        handlers::timeouts_in_external_resources::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodeSecretInformation",
+        ctx,
+        handlers::using_hardcode_secret_information::check,
+    ));
+
+    // Module-level checks
+    diagnostics.extend(run_diagnostic(
+        "DataExchangeLoading",
+        ctx,
+        handlers::data_exchange_loading::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "TransferringParametersBetweenClientAndServer",
+        ctx,
+        handlers::transferring_parameters_between_client_and_server::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "UnusedLocalMethod",
+        ctx,
+        handlers::unused_local_method::check,
+    ));
+
+    // Expression analysis
+    diagnostics.extend(run_diagnostic(
+        "IdenticalExpressions",
+        ctx,
+        handlers::identical_expressions::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "DuplicatedInsertionIntoCollection",
+        ctx,
+        handlers::duplicated_insertion_into_collection::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "IncorrectUseOfStrTemplate",
+        ctx,
+        handlers::incorrect_use_of_str_template::check,
+    ));
+
+    // Constructor checks
+    diagnostics.extend(run_diagnostic(
+        "NumberOfValuesInStructureConstructor",
+        ctx,
+        handlers::number_of_values_in_structure_constructor::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "NestedConstructorsInStructureDeclaration",
+        ctx,
+        handlers::nested_constructors_in_structure_declaration::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "NestedFunctionInParameters",
+        ctx,
+        handlers::nested_function_in_parameters::check,
+    ));
+
+    diagnostics
+}
+
+// ============================================================================
+// Pure AST-based diagnostics (parse + descendants)
+// ============================================================================
+
+/// Collect diagnostics that traverse raw AST.
+///
+/// These diagnostics use `ctx.parse().syntax_node().descendants()`.
+/// They should be migrated to HIR or single-pass when possible.
+pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Method metrics (require line counting or AST depth)
+    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
+    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
+
+    // Try-catch patterns
+    diagnostics.extend(run_diagnostic("TryNumber", ctx, handlers::try_number::check));
+    diagnostics.extend(run_diagnostic(
+        "MissingCodeTryCatchEx",
+        ctx,
+        handlers::missing_code_try_catch_ex::check,
+    ));
+
+    // Resource cleanup
+    diagnostics.extend(run_diagnostic(
+        "MissingTempStorageDeletion",
+        ctx,
+        handlers::missing_temp_storage_deletion::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "MissingTemporaryFileDeletion",
+        ctx,
+        handlers::missing_temporary_file_deletion::check,
+    ));
+
+    // Hardcoded values
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodeNetworkAddress",
+        ctx,
+        handlers::using_hardcode_network_address::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodePath",
+        ctx,
+        handlers::using_hardcode_path::check,
+    ));
+
+    // Other AST checks
+    diagnostics.extend(run_diagnostic(
+        "UnsafeSafeModeMethodCall",
+        ctx,
+        handlers::unsafe_safe_mode_method_call::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "UsageWriteLogEvent",
+        ctx,
+        handlers::usage_write_log_event::check,
+    ));
+    diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
+    diagnostics.extend(run_diagnostic(
+        "UsingObjectNotAvailableUnix",
+        ctx,
+        handlers::using_object_not_available_unix::check,
     ));
     diagnostics.extend(run_diagnostic(
         "UnsafeFindByCode",
         ctx,
         handlers::unsafe_find_by_code::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "MissingVariablesDescription",
-        ctx,
-        handlers::missing_variables_description::check,
-    ));
+
+    diagnostics
+}
+
+// ============================================================================
+// Legacy: collect_semantic_diagnostics (calls new functions)
+// ============================================================================
+
+/// Collect Tier 2 semantic diagnostics.
+///
+/// Now delegates to specialized collectors for better organization.
+pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    diagnostics.extend(collect_item_tree_diagnostics(ctx));
+    diagnostics.extend(collect_module_bodies_diagnostics(ctx));
+    diagnostics.extend(collect_ast_diagnostics(ctx));
+
+    diagnostics
+}
+
+// ============================================================================
+// Configuration-based diagnostics (require Configuration XML, SessionModule only)
+// ============================================================================
+
+/// Collect diagnostics that require Configuration XML metadata.
+///
+/// These diagnostics use `ctx.load_configuration()` which loads the full
+/// Configuration.xml metadata. They only run for SessionModule files.
+///
+/// Data source: Configuration XML (ScheduledJobs, EventSubscriptions, CommonModules)
+pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Protected module check (Configuration + CommonModules)
+    diagnostics.extend(run_diagnostic("ProtectedModule", ctx, handlers::protected_module::check));
+
+    // Handler validation (Configuration + ScheduledJobs/EventSubscriptions)
     diagnostics.extend(run_diagnostic(
         "MissingEventSubscriptionHandler",
         ctx,
