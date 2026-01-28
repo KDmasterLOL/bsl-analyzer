@@ -53,7 +53,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
     Some(Diagnostic {
         code,
-        message: "Using FindByName, FindByCode and FindByNumber".to_string(),
+        message: "Использование НайтиПоНаименованию, НайтиПоКоду и НайтиПоНомеру".to_string(),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

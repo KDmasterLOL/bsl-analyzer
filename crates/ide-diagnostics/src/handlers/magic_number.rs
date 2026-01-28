@@ -27,6 +27,7 @@
 //! 5. `Correspondence.Insert()`: `Соответствие.Вставить("Код", 123)`
 //! 6. Property assignments: `Структура.Поле = 20`
 //! 7. Array index access (when `allowMagicIndexes = true`): `Массив[20]`
+//! 8. Excluded constructors (configurable): `Новый КвалификаторыЧисла(10, 2)`
 //!
 //! ## Configuration
 //!
@@ -37,6 +38,13 @@
 //! ### `allowMagicIndexes` (Boolean)
 //! Allow magic numbers in array index access.
 //! Default: `true`
+//!
+//! ### `excludedConstructors` (String)
+//! Comma-separated list of constructor names where numbers are excluded.
+//! Useful for type qualifiers where parameters are self-documenting.
+//! Default: `"КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers"`
+//!
+//! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
@@ -75,12 +83,15 @@ pub fn from_hir(value: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opti
 
 const DEFAULT_AUTHORIZED_NUMBERS: &str = "-1,0,1";
 const DEFAULT_ALLOW_MAGIC_INDEXES: bool = true;
+const DEFAULT_EXCLUDED_CONSTRUCTORS: &str =
+    "КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers";
 
 /// Configuration for the diagnostic
 #[derive(Debug, Clone)]
 struct Config {
     authorized_numbers: HashSet<String>,
     allow_magic_indexes: bool,
+    excluded_constructors: HashSet<String>,
 }
 
 impl Config {
@@ -101,13 +112,25 @@ impl Config {
             .get_bool(DiagnosticCode::MagicNumber, "allowMagicIndexes")
             .unwrap_or(DEFAULT_ALLOW_MAGIC_INDEXES);
 
+        let excluded_constructors_str = ctx
+            .config
+            .get_string(DiagnosticCode::MagicNumber, "excludedConstructors")
+            .unwrap_or(DEFAULT_EXCLUDED_CONSTRUCTORS);
+
+        let excluded_constructors: HashSet<String> = excluded_constructors_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         tracing::debug!(
-            count = authorized_numbers.len(),
+            authorized_count = authorized_numbers.len(),
             allow_indexes = allow_magic_indexes,
+            excluded_constructors_count = excluded_constructors.len(),
             "MagicNumber config loaded"
         );
 
-        Self { authorized_numbers, allow_magic_indexes }
+        Self { authorized_numbers, allow_magic_indexes, excluded_constructors }
     }
 }
 
@@ -189,6 +212,7 @@ fn is_excluded_context(token: &SyntaxToken, config: &Config) -> bool {
     is_in_default_value(token)
         || is_in_structure_or_correspondence_insert(token)
         || is_in_structure_constructor(token)
+        || is_in_excluded_constructor(token, config)
         || is_in_property_assignment(token)
         || is_in_simple_assignment(token)
 }
@@ -283,6 +307,36 @@ fn is_in_structure_constructor(token: &SyntaxToken) -> bool {
                             || type_name.contains("map")
                         {
                             // Simplified: exclude ALL params (including first)
+                            return true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        node = current.parent();
+    }
+
+    false
+}
+
+/// Check if inside excluded constructor: Новый КвалификаторыЧисла(10, 2) etc.
+/// Excludes all numeric parameters in constructors from excludedConstructors list.
+fn is_in_excluded_constructor(token: &SyntaxToken, config: &Config) -> bool {
+    if config.excluded_constructors.is_empty() {
+        return false;
+    }
+
+    let mut node = token.parent();
+
+    while let Some(current) = node {
+        if current.kind() == SyntaxKind::NEW_EXPR {
+            // Extract type name (IDENT after "Новый"/"New")
+            for element in current.children_with_tokens() {
+                if let Some(t) = element.as_token() {
+                    if t.kind() == SyntaxKind::IDENT {
+                        let type_name = t.text().to_lowercase();
+                        if config.excluded_constructors.contains(&type_name) {
                             return true;
                         }
                         break;
@@ -721,5 +775,127 @@ mod tests {
             "Magic numbers in expressions should be detected, found {}",
             diagnostics.len()
         );
+    }
+
+    #[test]
+    fn test_excluded_constructors_number_qualifiers() {
+        // КвалификаторыЧисла - параметры самодокументируемы (длина, точность)
+        let code = r"
+Процедура Тест()
+    Квалификатор = Новый КвалификаторыЧисла(10, 2);
+    Квалификатор2 = Новый КвалификаторыЧисла(15, 3, ДопустимыйЗнак.Любой);
+КонецПроцедуры
+        ";
+        let diagnostics = check_ast_diagnostic(code, check);
+
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "NumberQualifiers constructor params should be excluded by default"
+        );
+    }
+
+    #[test]
+    fn test_excluded_constructors_string_qualifiers() {
+        // КвалификаторыСтроки - параметры самодокументируемы (длина)
+        let code = r"
+Процедура Тест()
+    Квалификатор = Новый КвалификаторыСтроки(100);
+    Квалификатор2 = Новый КвалификаторыСтроки(255, ДопустимаяДлина.Переменная);
+КонецПроцедуры
+        ";
+        let diagnostics = check_ast_diagnostic(code, check);
+
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "StringQualifiers constructor params should be excluded by default"
+        );
+    }
+
+    #[test]
+    fn test_excluded_constructors_english_names() {
+        // English names should also work
+        let code = r"
+Процедура Тест()
+    Qualifier = New NumberQualifiers(10, 2);
+    StrQualifier = New StringQualifiers(100);
+КонецПроцедуры
+        ";
+        let diagnostics = check_ast_diagnostic(code, check);
+
+        assert_eq!(diagnostics.len(), 0, "English constructor names should be excluded by default");
+    }
+
+    #[test]
+    fn test_excluded_constructors_custom_list() {
+        // Пользователь может добавить свои конструкторы
+        // Используем вызов метода чтобы избежать simple assignment exclusion
+        let code = r"
+Процедура Тест()
+    МетодОбработки(Новый Массив(100));
+    МетодОбработки(Новый КвалификаторыЧисла(10, 2));
+КонецПроцедуры
+        ";
+
+        // По умолчанию Массив НЕ исключён, но КвалификаторыЧисла исключён
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Array constructor should NOT be excluded by default");
+        assert!(diagnostics[0].message.contains("100"), "Should detect 100 in Array");
+
+        // С кастомным списком - Массив тоже исключён
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MagicNumber,
+            serde_json::json!({
+                "excludedConstructors": "КвалификаторыЧисла,КвалификаторыСтроки,Массив"
+            }),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0, "Array constructor should be excluded with custom config");
+    }
+
+    #[test]
+    fn test_excluded_constructors_empty_disables() {
+        // Пустой список отключает исключение конструкторов
+        // Используем вызов метода чтобы избежать simple assignment exclusion
+        let code = r"
+Процедура Тест()
+    МетодОбработки(Новый КвалификаторыЧисла(10, 2));
+КонецПроцедуры
+        ";
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::MagicNumber,
+            serde_json::json!({
+                "excludedConstructors": ""
+            }),
+        );
+
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "Empty excludedConstructors should detect all numbers in constructors"
+        );
+    }
+
+    #[test]
+    fn test_other_constructors_not_excluded() {
+        // Другие конструкторы НЕ должны исключаться
+        // Используем вызов метода чтобы избежать simple assignment exclusion
+        let code = r"
+Процедура Тест()
+    МетодОбработки(Новый Массив(100));
+    Список = Новый СписокЗначений;
+    Список.Добавить(42);
+КонецПроцедуры
+        ";
+        let diagnostics = check_ast_diagnostic(code, check);
+
+        // 100 в Массив и 42 в Добавить должны детектироваться
+        assert_eq!(diagnostics.len(), 2, "Non-excluded constructors should be detected");
     }
 }

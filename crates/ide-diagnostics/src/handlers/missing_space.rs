@@ -250,7 +250,7 @@ fn check_left_space(
 
     Some(Diagnostic {
         code,
-        message: format!("Missing space to the left of '{}'", token.text()),
+        message: format!("Отсутствует пробел слева от '{}'", token.text()),
         severity: ctx.severity(code),
         range: token.text_range(),
         tags: ctx.tags(code),
@@ -311,7 +311,7 @@ fn check_right_space(
 
     Some(Diagnostic {
         code,
-        message: format!("Missing space to the right of '{}'", token.text()),
+        message: format!("Отсутствует пробел справа от '{}'", token.text()),
         severity: ctx.severity(code),
         range: token.text_range(),
         tags: ctx.tags(code),
@@ -336,11 +336,11 @@ fn check_left_right_space(
     }
 
     let message = if missing_left && missing_right {
-        format!("Missing space to the left and right of '{}'", token.text())
+        format!("Отсутствует пробел слева и справа от '{}'", token.text())
     } else if missing_left {
-        format!("Missing space to the left of '{}'", token.text())
+        format!("Отсутствует пробел слева от '{}'", token.text())
     } else {
-        format!("Missing space to the right of '{}'", token.text())
+        format!("Отсутствует пробел справа от '{}'", token.text())
     };
 
     Some(Diagnostic {
