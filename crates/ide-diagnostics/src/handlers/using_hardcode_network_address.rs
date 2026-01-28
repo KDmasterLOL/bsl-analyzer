@@ -1,4 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir_def::{Body, BodySourceMap, Expr, Literal};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -54,14 +55,6 @@ impl Config {
 
         Self { search_words_exclusion, search_popular_version_exclusion }
     }
-}
-
-fn extract_string_content(token: &SyntaxToken) -> Option<String> {
-    let text = token.text();
-    if text.len() < 3 {
-        return None;
-    }
-    Some(text[1..text.len() - 1].to_string())
 }
 
 fn is_url(content: &str) -> bool {
@@ -159,51 +152,16 @@ fn is_letter_before_match(content: &str, match_start: usize) -> bool {
     false
 }
 
-fn process_string(
-    token: &SyntaxToken,
-    content: &str,
-    config: &Config,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let code = DiagnosticCode::UsingHardcodeNetworkAddress;
-
-    if let Some(matched) = PATTERN_NETWORK_ADDRESS.find(content) {
-        let first_value = matched.as_str();
-        let count_dots = count_char(first_value, '.');
-        let count_dots_all = count_char(content, '.');
-        let find_alphabet = PATTERN_ALPHABET.is_match(first_value);
-
-        if count_dots > 0 && (count_dots_all > DOTS_IN_IPV4 || find_alphabet) {
-            return;
-        }
-
-        if first_value.starts_with(':') && is_letter_before_match(content, matched.start()) {
-            return;
-        }
-
-        if skip_statement_context(token, config)
-            || skip_param_context(token, config)
-            || is_version_return(token, config)
-        {
-            return;
-        }
-
-        if config.search_popular_version_exclusion.is_match(content) {
-            return;
-        }
-
-        diagnostics.push(Diagnostic {
-            code,
-            message: "Используется хранение в коде ip-адреса".to_string(),
-            severity: ctx.severity(code),
-            range: token.text_range(),
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
+/// Find the STRING token in the AST at the given range (for context checks).
+fn find_string_token(root: &SyntaxNode, range: ide_db::TextRange) -> Option<SyntaxToken> {
+    root.token_at_offset(range.start())
+        .find(|t| t.kind() == SyntaxKind::STRING && t.text_range() == range)
 }
 
+/// HIR-based entry point for UsingHardcodeNetworkAddress diagnostic.
+///
+/// Uses Salsa-cached module_bodies for string literal discovery.
+/// Falls back to AST only for context exclusion checks (rare path).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UsingHardcodeNetworkAddress;
 
@@ -212,34 +170,90 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
+    let module_bodies = ctx.module_bodies();
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
 
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if token.kind() != SyntaxKind::STRING {
-                continue;
-            }
-
-            let Some(content) = extract_string_content(&token) else {
-                continue;
-            };
-
-            if content.len() <= 2 {
-                continue;
-            }
-
-            if is_url(&content) {
-                continue;
-            }
-
-            process_string(&token, &content, &config, ctx, &mut diagnostics);
-        }
+    for (_, body, source_map) in module_bodies.method_bodies() {
+        check_body(body, source_map, &root, &config, code, ctx, &mut diagnostics);
     }
 
+    if let Some(module_result) = module_bodies.module_code_result() {
+        check_body(
+            &module_result.body,
+            &module_result.source_map,
+            &root,
+            &config,
+            code,
+            ctx,
+            &mut diagnostics,
+        );
+    }
+
+    diagnostics.sort_by_key(|d| d.range.start());
     diagnostics
+}
+
+/// Check a single HIR body for hardcoded network addresses.
+#[allow(clippy::too_many_arguments)]
+fn check_body(
+    body: &Body,
+    source_map: &BodySourceMap,
+    root: &SyntaxNode,
+    config: &Config,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (expr_id, expr) in body.exprs_iter() {
+        let Expr::Literal(Literal::String(content)) = expr else { continue };
+
+        if content.len() <= 2 || is_url(content) {
+            continue;
+        }
+
+        let Some(matched) = PATTERN_NETWORK_ADDRESS.find(content) else { continue };
+
+        let first_value = matched.as_str();
+        let count_dots = count_char(first_value, '.');
+        let count_dots_all = count_char(content, '.');
+        let find_alphabet = PATTERN_ALPHABET.is_match(first_value);
+
+        if count_dots > 0 && (count_dots_all > DOTS_IN_IPV4 || find_alphabet) {
+            continue;
+        }
+
+        if first_value.starts_with(':') && is_letter_before_match(content, matched.start()) {
+            continue;
+        }
+
+        let Some(range) = source_map.expr_range(expr_id) else { continue };
+
+        // Context exclusion checks via AST (only for matched strings — rare path)
+        if let Some(token) = find_string_token(root, range) {
+            if skip_statement_context(&token, config)
+                || skip_param_context(&token, config)
+                || is_version_return(&token, config)
+            {
+                continue;
+            }
+        }
+
+        if config.search_popular_version_exclusion.is_match(content) {
+            continue;
+        }
+
+        diagnostics.push(Diagnostic {
+            code,
+            message: "Используется хранение в коде ip-адреса".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
 }
 
 #[cfg(test)]

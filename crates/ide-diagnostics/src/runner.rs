@@ -494,6 +494,13 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::missing_code_try_catch_ex::check,
     ));
 
+    // Hardcoded values (uses module_bodies for string literal iteration)
+    diagnostics.extend(run_diagnostic(
+        "UsingHardcodeNetworkAddress",
+        ctx,
+        handlers::using_hardcode_network_address::check,
+    ));
+
     diagnostics
 }
 
@@ -518,12 +525,9 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // MissingTempStorageDeletion moved to collect_dataflow_diagnostics (uses module_bodies)
     // MissingTemporaryFileDeletion moved to collect_dataflow_diagnostics (uses module_bodies + module_cfgs)
 
+    // UsingHardcodeNetworkAddress moved to collect_module_bodies_diagnostics (uses module_bodies)
+
     // Hardcoded values
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodeNetworkAddress",
-        ctx,
-        handlers::using_hardcode_network_address::check,
-    ));
     diagnostics.extend(run_diagnostic(
         "UsingHardcodePath",
         ctx,
