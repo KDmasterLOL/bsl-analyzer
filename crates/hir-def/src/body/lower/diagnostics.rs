@@ -383,6 +383,51 @@ pub(crate) fn is_inside_try_body(node: &SyntaxNode) -> bool {
     false
 }
 
+/// Check if a node is inside try body (not except clause).
+///
+/// Returns true if the node is inside a TRY_STMT but NOT inside EXCEPT_CLAUSE.
+pub(crate) fn is_inside_try_body_not_except(node: &SyntaxNode) -> bool {
+    let mut current = node.clone();
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            SyntaxKind::EXCEPT_CLAUSE => return false, // Inside except - not valid
+            SyntaxKind::TRY_STMT => return true,       // Inside try body
+            _ => {}
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Check if a CALL_EXPR is a Число()/Number() call inside try body (TryNumber diagnostic).
+///
+/// Returns Some(range) if this is a Number call inside try block (not except).
+pub(crate) fn check_try_number_call(node: &SyntaxNode) -> Option<TextRange> {
+    // Must be CALL_EXPR
+    if node.kind() != SyntaxKind::CALL_EXPR {
+        return None;
+    }
+
+    // Must be inside try body (not except)
+    if !is_inside_try_body_not_except(node) {
+        return None;
+    }
+
+    // Get first child - should be IDENT for global call
+    let first_child = node.children().next()?;
+    if first_child.kind() != SyntaxKind::IDENT {
+        return None;
+    }
+
+    // Check if it's Number/Число
+    let name = first_child.text().to_string().to_lowercase();
+    if name == "число" || name == "number" {
+        return Some(node.text_range());
+    }
+
+    None
+}
+
 /// Check if a statement is a global CommitTransaction/ЗафиксироватьТранзакцию call.
 ///
 /// Returns true if the statement is a non-qualified call to CommitTransaction/ЗафиксироватьТранзакцию.

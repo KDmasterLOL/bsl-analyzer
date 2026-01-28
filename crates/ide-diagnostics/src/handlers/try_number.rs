@@ -28,7 +28,8 @@
 //! - **Minutes to fix:** 2
 //!
 //! ## Implementation
-//! **This is an AST-based diagnostic** - detects Number() calls in Try blocks via AST traversal.
+//! Uses HIR-based detection during lowering. Число()/Number() calls inside try blocks
+//! are detected and emitted as BodyDiagnostic::TryNumber.
 //!
 //! Ported from:
 //! - TryNumberDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
@@ -36,6 +37,26 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
+
+/// Creates diagnostic from HIR BodyDiagnostic.
+///
+/// Called from hir_dispatch when `BodyDiagnostic::TryNumber` is encountered.
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    let code = DiagnosticCode::TryNumber;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: "Don't use try-catch to number cast".to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::TryNumber;
@@ -133,7 +154,8 @@ fn is_number_call(node: &SyntaxNode) -> Option<TextRange> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic, check_hir_diagnostic};
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_comprehensive() {
@@ -145,6 +167,24 @@ mod tests {
         assert_diagnostic_range(code, &diagnostics[0], 8, 4, 12);
         assert_diagnostic_range(code, &diagnostics[1], 9, 4, 13);
         assert_diagnostic_range(code, &diagnostics[2], 12, 8, 17);
+    }
+
+    #[test]
+    fn test_hir_detection() {
+        // Test that HIR-based detection works
+        let code = r#"
+Процедура Тест()
+    Попытка
+        А = Число(Б);
+    Исключение
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let try_number: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();
+
+        assert_eq!(try_number.len(), 1, "HIR should detect TryNumber");
     }
 
     #[test]

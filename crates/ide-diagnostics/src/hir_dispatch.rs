@@ -286,5 +286,6 @@ pub fn dispatch_hir_diagnostic(
                 ctx,
             )
         }
+        BodyDiagnostic::TryNumber { range } => handlers::try_number::from_hir(*range, ctx),
     }
 }

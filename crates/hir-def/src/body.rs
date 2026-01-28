@@ -813,6 +813,10 @@ pub enum BodyDiagnostic {
         /// Range of the method name for the diagnostic.
         range: TextRange,
     },
+
+    /// Число()/Number() call inside try block body.
+    /// Using exceptions for type casting is incorrect - use TypeDescription instead.
+    TryNumber { range: TextRange },
 }
 
 /// Context of a magic number for filtering by configuration.
@@ -1056,6 +1060,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::NestedStatements { range, .. } => *range,
             BodyDiagnostic::NumberOfParams { range, .. } => *range,
             BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
+            BodyDiagnostic::TryNumber { range } => *range,
         }
     }
 }

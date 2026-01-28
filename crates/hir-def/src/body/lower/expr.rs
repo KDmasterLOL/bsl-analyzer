@@ -507,6 +507,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 .push(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
         }
 
+        // Check for Число()/Number() inside try block (TryNumber diagnostic)
+        use super::diagnostics::check_try_number_call;
+        if let Some(range) = check_try_number_call(node) {
+            ctx.diagnostics.push(BodyDiagnostic::TryNumber { range });
+        }
+
         // Check for file system access methods
         if is_file_system_method(&name) {
             // Emit FileSystemAccess diagnostic

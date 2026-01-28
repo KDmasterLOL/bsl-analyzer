@@ -487,6 +487,13 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         handlers::nested_function_in_parameters::check,
     ));
 
+    // Try-catch checks (uses module_bodies)
+    diagnostics.extend(run_diagnostic(
+        "MissingCodeTryCatchEx",
+        ctx,
+        handlers::missing_code_try_catch_ex::check,
+    ));
+
     diagnostics
 }
 
@@ -506,12 +513,8 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
 
     // Try-catch patterns
-    diagnostics.extend(run_diagnostic("TryNumber", ctx, handlers::try_number::check));
-    diagnostics.extend(run_diagnostic(
-        "MissingCodeTryCatchEx",
-        ctx,
-        handlers::missing_code_try_catch_ex::check,
-    ));
+    // TryNumber moved to HIR (BodyDiagnostic::TryNumber)
+    // MissingCodeTryCatchEx moved to collect_module_bodies_diagnostics (already uses module_bodies())
 
     // Resource cleanup
     diagnostics.extend(run_diagnostic(
