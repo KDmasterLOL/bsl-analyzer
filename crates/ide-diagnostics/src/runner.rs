@@ -62,10 +62,16 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics.extend(handlers::line_length::check(ctx));
     diagnostics.extend(handlers::commented_code::check(ctx));
     diagnostics.extend(handlers::using_service_tag::check(ctx));
+    diagnostics.extend(handlers::canonical_spelling_keywords::check(ctx));
+    diagnostics.extend(handlers::incorrect_line_break::check(ctx));
+    diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
+    diagnostics.extend(handlers::missing_space::check(ctx));
+    diagnostics.extend(handlers::space_at_start_comment::check(ctx));
 
     for node in root.descendants() {
         handlers::bad_words::check_node(&node, &mut diagnostics, ctx);
         handlers::typo::check_node(&node, &mut diagnostics, ctx);
+        handlers::nested_ternary_operator::check_node(&node, &mut diagnostics, ctx);
     }
 
     diagnostics
@@ -77,7 +83,19 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
+    diagnostics.extend(run_diagnostic(
+        "CodeBlockBeforeSub",
+        ctx,
+        handlers::code_block_before_sub::check,
+    ));
+    diagnostics.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
     diagnostics.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
+    diagnostics.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
+    diagnostics.extend(run_diagnostic(
+        "DuplicateStringLiteral",
+        ctx,
+        handlers::duplicate_string_literal::check,
+    ));
     diagnostics.extend(run_diagnostic(
         "DuplicatedInsertionIntoCollection",
         ctx,
@@ -127,6 +145,17 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "LatinAndCyrillicSymbolInWord",
         ctx,
         handlers::latin_and_cyrillic_symbol_in_word::check,
+    ));
+    diagnostics.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
+    diagnostics.extend(run_diagnostic(
+        "NestedTernaryOperator",
+        ctx,
+        handlers::nested_ternary_operator::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "NonStandardRegion",
+        ctx,
+        handlers::non_standard_region::check,
     ));
     diagnostics.extend(run_diagnostic(
         "UnknownPreprocessorSymbol",
@@ -354,6 +383,16 @@ pub fn collect_metadata_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnos
         "MissingVariablesDescription",
         ctx,
         handlers::missing_variables_description::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "MissingEventSubscriptionHandler",
+        ctx,
+        handlers::missing_event_subscription_handler::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "ScheduledJobHandler",
+        ctx,
+        handlers::scheduled_job_handler::check,
     ));
 
     diagnostics
