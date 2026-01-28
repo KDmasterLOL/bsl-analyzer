@@ -821,6 +821,27 @@ pub enum BodyDiagnostic {
     /// Usage of Unix-unavailable objects (COMObject, Mail) without platform guard.
     /// Detected when creating these objects outside of IF with platform type check.
     UsingObjectNotAvailableUnix { type_name: String, range: TextRange },
+
+    /// WriteLogEvent / ЗаписьЖурналаРегистрации call with validation info.
+    /// Validation logic is in from_hir() based on collected flags.
+    UsageWriteLogEvent {
+        /// Is this call inside an EXCEPT_CLAUSE?
+        in_except_block: bool,
+        /// Number of arguments
+        arg_count: usize,
+        /// Is 2nd param (log level) empty/missing?
+        log_level_empty: bool,
+        /// Is 5th param (comment) empty/missing?
+        comment_empty: bool,
+        /// Does log level contain Error value?
+        has_error_log_level: bool,
+        /// Does comment contain DetailErrorDescription(ErrorInfo())?
+        has_detail_error_description: bool,
+        /// Does except block contain Raise statement?
+        except_has_raise: bool,
+        /// Range for the diagnostic
+        range: TextRange,
+    },
 }
 
 /// Context of a magic number for filtering by configuration.
@@ -1066,6 +1087,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,
             BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
+            BodyDiagnostic::UsageWriteLogEvent { range, .. } => *range,
         }
     }
 }

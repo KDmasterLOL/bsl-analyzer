@@ -546,11 +546,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::unsafe_safe_mode_method_call::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "UsageWriteLogEvent",
-        ctx,
-        handlers::usage_write_log_event::check,
-    ));
+    // UsageWriteLogEvent moved to HIR (BodyDiagnostic::UsageWriteLogEvent)
     diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
     // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)
     diagnostics.extend(run_diagnostic(

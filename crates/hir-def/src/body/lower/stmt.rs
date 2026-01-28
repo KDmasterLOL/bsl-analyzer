@@ -1175,10 +1175,20 @@ fn lower_try_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
         .children()
         .find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
         .and_then(|except_clause| {
-            except_clause
-                .children()
-                .find(|n| n.kind() == SyntaxKind::STMT_LIST)
-                .map(|n| lower_stmt_list(ctx, &n).into_boxed_slice())
+            except_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| {
+                // Track that we're in except block for UsageWriteLogEvent diagnostic
+                ctx.in_except_block = true;
+                // Check if except block has Raise statement
+                ctx.except_has_raise = n.descendants().any(|d| d.kind() == SyntaxKind::RAISE_STMT);
+
+                let stmts = lower_stmt_list(ctx, &n).into_boxed_slice();
+
+                // Restore state
+                ctx.in_except_block = false;
+                ctx.except_has_raise = false;
+
+                stmts
+            })
         })
         .unwrap_or_default();
 

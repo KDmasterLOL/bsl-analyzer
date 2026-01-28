@@ -29,6 +29,101 @@ use bsl_platform::PlatformData;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
+const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
+
+/// Creates diagnostic from HIR BodyDiagnostic::UsageWriteLogEvent.
+///
+/// Validates WriteLogEvent calls based on collected flags:
+/// 1. Must have at least 5 parameters
+/// 2. Second parameter (log level) must not be empty
+/// 3. Fifth parameter (comment) must not be empty
+/// 4. Inside exception blocks:
+///    - Log level must be Error
+///    - Comment must contain DetailErrorDescription(ErrorInfo()) or have Raise statement
+#[allow(clippy::too_many_arguments)]
+pub fn from_hir(
+    in_except_block: bool,
+    arg_count: usize,
+    log_level_empty: bool,
+    comment_empty: bool,
+    has_error_log_level: bool,
+    has_detail_error_description: bool,
+    except_has_raise: bool,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UsageWriteLogEvent;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    // Check 1: Wrong param count
+    if arg_count < WRITE_LOG_EVENT_METHOD_PARAMS_COUNT {
+        return Some(Diagnostic {
+            code,
+            message: "Неверное число параметров метода".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 2: Missing log level (2nd param)
+    if log_level_empty {
+        return Some(Diagnostic {
+            code,
+            message: "Не указан 2й параметр с типом \"УровеньЖурналаРегистрации\"".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 3: Missing comment (5th param)
+    if comment_empty {
+        return Some(Diagnostic {
+            code,
+            message: "Не указан 5й параметр \"Комментарий\"".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 4: Inside except block validation
+    if in_except_block {
+        // Must have Error log level
+        if !has_error_log_level {
+            return Some(Diagnostic {
+                code,
+                message: "Нужно указывать уровень \"Ошибка\" при записи в журнал регистрации внутри блока Исключение-КонецПопытки".to_string(),
+                severity: ctx.severity(code),
+                range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
+        }
+
+        // Must have DetailErrorDescription or Raise in block
+        if !has_detail_error_description && !except_has_raise {
+            return Some(Diagnostic {
+                code,
+                message: "В тексте комментария нет вызова \"ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())\"".to_string(),
+                severity: ctx.severity(code),
+                range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
+        }
+    }
+
+    None
+}
+
 /// Check if a method name matches a platform global function by its English name.
 ///
 /// Uses bsl-platform for bilingual, case-insensitive lookup.
@@ -41,7 +136,6 @@ fn is_platform_function(method_name: &str, english_name: &str) -> bool {
     }
 }
 
-const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
 const COMMENTS_PARAM_INDEX: usize = 4;
 const LOG_LEVEL_PARAM_INDEX: usize = 1;
 
@@ -695,5 +789,38 @@ EndProcedure
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsageWriteLogEvent).collect();
 
         assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_hir_detection_wrong_params() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsageWriteLogEvent).collect();
+
+        assert_eq!(diags.len(), 1, "HIR should detect wrong param count");
+        assert!(diags[0].message.contains("параметров"));
+    }
+
+    #[test]
+    fn test_hir_detection_correct_usage() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Информация, , , "Комментарий");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsageWriteLogEvent).collect();
+
+        assert_eq!(diags.len(), 0, "HIR should not detect for correct usage");
     }
 }

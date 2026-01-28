@@ -290,5 +290,25 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {
             handlers::using_object_not_available_unix::from_hir(type_name, *range, ctx)
         }
+        BodyDiagnostic::UsageWriteLogEvent {
+            in_except_block,
+            arg_count,
+            log_level_empty,
+            comment_empty,
+            has_error_log_level,
+            has_detail_error_description,
+            except_has_raise,
+            range,
+        } => handlers::usage_write_log_event::from_hir(
+            *in_except_block,
+            *arg_count,
+            *log_level_empty,
+            *comment_empty,
+            *has_error_log_level,
+            *has_detail_error_description,
+            *except_has_raise,
+            *range,
+            ctx,
+        ),
     }
 }

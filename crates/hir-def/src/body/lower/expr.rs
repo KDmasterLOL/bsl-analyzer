@@ -513,6 +513,11 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             ctx.diagnostics.push(BodyDiagnostic::TryNumber { range });
         }
 
+        // Check for WriteLogEvent / ЗаписьЖурналаРегистрации
+        if is_write_log_event_method(&name) {
+            check_write_log_event_call(ctx, node);
+        }
+
         // Check for file system access methods
         if is_file_system_method(&name) {
             // Emit FileSystemAccess diagnostic
@@ -1661,6 +1666,95 @@ fn is_system_information_type(name: &str) -> bool {
 fn is_unix_unavailable_type(name: &str) -> bool {
     let lower = name.to_lowercase();
     matches!(lower.as_str(), "comобъект" | "comobject" | "почта" | "mail")
+}
+
+/// Check if method name is WriteLogEvent / ЗаписьЖурналаРегистрации.
+fn is_write_log_event_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "записьжурналарегистрации" || lower == "writelogevent"
+}
+
+/// Check WriteLogEvent call and emit diagnostic with validation info.
+fn check_write_log_event_call(ctx: &mut LoweringCtx, node: &SyntaxNode) {
+    let arg_list = match node.children().find(|n| n.kind() == SyntaxKind::ARG_LIST) {
+        Some(al) => al,
+        None => return,
+    };
+
+    // Parse arguments properly, handling empty positions (consecutive commas)
+    let args = collect_arguments(&arg_list);
+    let arg_count = args.len();
+
+    // Check if 2nd param (log level, index 1) is empty
+    let log_level_empty = args.get(1).map(|a| a.is_none()).unwrap_or(true);
+
+    // Check if 5th param (comment, index 4) is empty
+    let comment_empty = args.get(4).map(|a| a.is_none()).unwrap_or(true);
+
+    // Check if log level contains Error value (УровеньЖурналаРегистрации.Ошибка / EventLogLevel.Error)
+    let has_error_log_level =
+        args.get(1).and_then(|a| a.as_ref()).map(has_error_log_level_value).unwrap_or(false);
+
+    // Check if comment contains DetailErrorDescription(ErrorInfo())
+    let has_detail_error_description =
+        args.get(4).and_then(|a| a.as_ref()).map(has_detail_error_description).unwrap_or(false);
+
+    ctx.diagnostics.push(BodyDiagnostic::UsageWriteLogEvent {
+        in_except_block: ctx.in_except_block,
+        arg_count,
+        log_level_empty,
+        comment_empty,
+        has_error_log_level,
+        has_detail_error_description,
+        except_has_raise: ctx.except_has_raise,
+        range: node.text_range(),
+    });
+}
+
+/// Collect arguments from ARG_LIST, handling empty positions (consecutive commas).
+fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
+    let mut args: Vec<Option<SyntaxNode>> = Vec::new();
+    let mut current_arg: Option<SyntaxNode> = None;
+    let mut has_content = false;
+
+    for child in arg_list.children_with_tokens() {
+        match child.kind() {
+            SyntaxKind::COMMA => {
+                args.push(current_arg.take());
+                has_content = true;
+            }
+            SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => {}
+            kind if kind.is_trivia() => {}
+            _ => {
+                if current_arg.is_none() {
+                    if let Some(node) = child.as_node() {
+                        current_arg = Some(node.clone());
+                        has_content = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Don't forget the last argument after the final comma (or only argument without commas)
+    if current_arg.is_some() || has_content {
+        args.push(current_arg);
+    }
+
+    args
+}
+
+/// Check if argument contains Error log level value.
+fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
+    let text = arg.text().to_string().to_lowercase();
+    text.contains("ошибка") || text.contains("error")
+}
+
+/// Check if argument contains DetailErrorDescription(ErrorInfo()).
+fn has_detail_error_description(arg: &SyntaxNode) -> bool {
+    let text = arg.text().to_string().to_lowercase();
+    (text.contains("подробноепредставлениеошибки") || text.contains("detailerrordescription"))
+        && (text.contains("информацияобошибке") || text.contains("errorinfo"))
 }
 
 /// Extract type name from first string argument of Новый("ТипОбъекта", ...).

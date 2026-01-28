@@ -153,6 +153,14 @@ pub(crate) struct LoweringCtx {
     /// Whether we're inside an IF statement that has a platform type guard.
     /// Used for UsingObjectNotAvailableUnix diagnostic to skip COMObject/Mail checks.
     pub(crate) in_platform_guard: bool,
+
+    /// Whether we're inside an EXCEPT_CLAUSE of a try statement.
+    /// Used for UsageWriteLogEvent diagnostic validation.
+    pub(crate) in_except_block: bool,
+
+    /// Whether current except block contains a Raise statement.
+    /// Used for UsageWriteLogEvent diagnostic validation.
+    pub(crate) except_has_raise: bool,
 }
 
 /// Type of query-like variable for CreateQueryInCycle diagnostic.
@@ -202,6 +210,8 @@ impl LoweringCtx {
             nesting_depth: 0,
             had_nested_child: false,
             in_platform_guard: false,
+            in_except_block: false,
+            except_has_raise: false,
         }
     }
 
