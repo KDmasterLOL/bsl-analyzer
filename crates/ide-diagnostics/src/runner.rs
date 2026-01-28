@@ -8,15 +8,26 @@
 //! | Type | Collector | Description |
 //! |------|-----------|-------------|
 //! | Text-based | `collect_text_diagnostics` | Line/formatting checks |
-//! | Syntax (Tier 1) | `collect_syntax_diagnostics` | Syntactic patterns |
+//! | Syntax (Tier 1) | `collect_syntax_single_pass` | Single-pass AST traversal |
 //! | Semantic (Tier 2) | `collect_semantic_diagnostics` | Semantic analysis |
 //! | Metadata (Tier 3) | `collect_metadata_ast_diagnostics` | AST-based metadata checks |
 //! | SDBL | `collect_sdbl_diagnostics` | Query language diagnostics |
 //! | Dataflow | `collect_dataflow_diagnostics` | CFG + liveness analysis |
 //! | HIR | `hir_dispatch::collect_hir_diagnostics` | HIR lowering byproducts |
 //! | Metadata HIR | `metadata_dispatch::collect_metadata_diagnostics` | ModuleMetadata checks |
+//!
+//! ## Single-Pass Architecture
+//!
+//! The single-pass collector (`collect_syntax_single_pass`) traverses the AST once and calls
+//! all migrated handlers via `check_node()` or `check_token()` API. This provides:
+//! - **Performance:** O(n) instead of O(n × handlers)
+//! - **Cache locality:** Better CPU cache utilization
+//! - **Reduced latency:** Faster diagnostics, less UI flicker
+//!
+//! Handlers not yet migrated remain in `collect_syntax_diagnostics` (legacy).
 
 use crate::{handlers, Diagnostic, DiagnosticsContext};
+use syntax::{SyntaxNode, SyntaxToken};
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
 pub fn run_diagnostic<F>(
@@ -43,6 +54,128 @@ where
     }
 
     result
+}
+
+// ============================================================================
+// Single-Pass Infrastructure
+// ============================================================================
+
+/// Context passed to single-pass handlers during AST traversal.
+///
+/// This struct holds per-file configuration that handlers need.
+/// It's created once per file and passed to all handlers.
+pub struct SinglePassContext<'a> {
+    pub ctx: &'a DiagnosticsContext<'a>,
+}
+
+impl<'a> SinglePassContext<'a> {
+    pub fn new(ctx: &'a DiagnosticsContext<'a>) -> Self {
+        Self { ctx }
+    }
+}
+
+/// State accumulated during single-pass traversal for stateful handlers.
+///
+/// Some handlers need to track state across multiple nodes (e.g., counting
+/// occurrences, tracking seen regions). This struct holds that state.
+#[derive(Debug, Default)]
+pub struct DiagnosticState {
+    // Reserved for future stateful handlers:
+    // - duplicate_string_literal: HashMap<String, Vec<TextRange>>
+    // - duplicate_region: HashMap<String, Vec<TextRange>>
+    // - consecutive_empty_lines: usize
+}
+
+impl DiagnosticState {
+    /// Create new empty state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Finalize and emit diagnostics from accumulated state.
+    ///
+    /// Called after AST traversal completes. Stateful handlers emit
+    /// their diagnostics here based on accumulated data.
+    #[allow(unused_variables, clippy::ptr_arg)]
+    pub fn finalize(&self, diagnostics: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+        // Reserved for stateful handlers that emit diagnostics at the end
+        // Note: Using &mut Vec here is intentional as stateful handlers may push diagnostics
+    }
+}
+
+/// Collect syntax diagnostics using single-pass AST traversal.
+///
+/// This function performs ONE traversal of the syntax tree and calls all
+/// migrated handlers on each node/token. Handlers use:
+/// - `check_node(&node, acc, ctx)` for node-based checks
+/// - `check_token(&token, acc, ctx)` for token-based checks
+///
+/// ## Performance
+/// Single pass: O(n) instead of O(n × handlers)
+/// Expected speedup: 2-5x for files with many handlers
+///
+/// ## Migration Status
+/// Handlers are incrementally migrated from `collect_syntax_diagnostics`.
+/// Once all handlers are migrated, `collect_syntax_diagnostics` will be removed.
+pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let _span = tracing::debug_span!("collect_syntax_single_pass").entered();
+    let start = std::time::Instant::now();
+
+    let parse = ctx.parse();
+    let root = parse.syntax_node();
+
+    let mut diagnostics = Vec::new();
+    let state = DiagnosticState::new();
+    let sp_ctx = SinglePassContext::new(ctx);
+
+    // Single traversal: visit all nodes and tokens
+    for node in root.descendants() {
+        // Call node-based handlers
+        check_node_handlers(&node, &mut diagnostics, &sp_ctx);
+
+        // Call token-based handlers for tokens in this node
+        for element in node.children_with_tokens() {
+            if let Some(token) = element.into_token() {
+                check_token_handlers(&token, &mut diagnostics, &sp_ctx);
+            }
+        }
+    }
+
+    // Finalize stateful handlers
+    state.finalize(&mut diagnostics, ctx);
+
+    let elapsed = start.elapsed();
+    tracing::debug!(
+        elapsed_ms = elapsed.as_millis(),
+        count = diagnostics.len(),
+        "Single-pass syntax diagnostics collected"
+    );
+
+    diagnostics
+}
+
+/// Dispatch to all node-based handlers.
+///
+/// Each handler checks `ctx.is_disabled_with_metadata()` internally.
+#[inline]
+fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, sp_ctx: &SinglePassContext) {
+    // Migrated handlers (Phase 2+):
+    handlers::useless_ternary_operator::check_node(node, acc, sp_ctx.ctx);
+    handlers::double_negatives::check_node(node, acc, sp_ctx.ctx);
+}
+
+/// Dispatch to all token-based handlers.
+///
+/// Each handler checks `ctx.is_disabled_with_metadata()` internally.
+#[inline]
+fn check_token_handlers(
+    _token: &SyntaxToken,
+    _acc: &mut Vec<Diagnostic>,
+    _sp_ctx: &SinglePassContext,
+) {
+    // Token-based handlers will be added in Phase 4:
+    // handlers::yo_letter_usage::check_token(token, acc, sp_ctx.ctx);
+    // handlers::magic_date::check_token(token, acc, sp_ctx.ctx);
 }
 
 /// Collect text-based diagnostics in a single AST pass.
@@ -79,17 +212,30 @@ pub fn collect_text_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Collect Tier 1 syntax diagnostics.
 ///
-/// Syntactic pattern checks that don't require semantic analysis.
+/// Uses hybrid approach:
+/// - Single-pass traversal for migrated handlers (via `collect_syntax_single_pass`)
+/// - Legacy individual calls for handlers not yet migrated
+///
+/// ## Migration Status
+/// **Migrated to single-pass:**
+/// - UselessTernaryOperator
+/// - DoubleNegatives
+///
+/// **Pending migration:** All other handlers in this function
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
+    // Phase 1: Single-pass handlers (migrated)
+    diagnostics.extend(collect_syntax_single_pass(ctx));
+
+    // Phase 2: Legacy handlers (not yet migrated)
     diagnostics.extend(run_diagnostic(
         "CodeBlockBeforeSub",
         ctx,
         handlers::code_block_before_sub::check,
     ));
     diagnostics.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
-    diagnostics.extend(run_diagnostic("DoubleNegatives", ctx, handlers::double_negatives::check));
+    // DoubleNegatives: MIGRATED to single-pass
     diagnostics.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
     diagnostics.extend(run_diagnostic(
         "DuplicateStringLiteral",
@@ -147,11 +293,7 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::latin_and_cyrillic_symbol_in_word::check,
     ));
     diagnostics.extend(run_diagnostic("MagicDate", ctx, handlers::magic_date::check));
-    diagnostics.extend(run_diagnostic(
-        "NestedTernaryOperator",
-        ctx,
-        handlers::nested_ternary_operator::check,
-    ));
+    // NestedTernaryOperator: already in collect_text_diagnostics via check_node()
     diagnostics.extend(run_diagnostic(
         "NonStandardRegion",
         ctx,
@@ -162,11 +304,7 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ctx,
         handlers::unknown_preprocessor_symbol::check,
     ));
-    diagnostics.extend(run_diagnostic(
-        "UselessTernaryOperator",
-        ctx,
-        handlers::useless_ternary_operator::check,
-    ));
+    // UselessTernaryOperator: MIGRATED to single-pass
     diagnostics.extend(run_diagnostic("YoLetterUsage", ctx, handlers::yo_letter_usage::check));
 
     diagnostics
@@ -499,4 +637,139 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     diagnostics.extend(run_diagnostic("UnusedParameters", ctx, handlers::unused_parameters::check));
 
     diagnostics
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::check_ast_diagnostic;
+    use crate::DiagnosticCode;
+
+    /// Invariant test: single-pass check_node() must produce same results as legacy check()
+    ///
+    /// This test ensures that migrated handlers produce identical diagnostics
+    /// regardless of whether they're called via single-pass or legacy API.
+    #[test]
+    fn test_single_pass_invariant_useless_ternary() {
+        let code = r#"
+Процедура Тест()
+    А = ?(Б = 1, Истина, Ложь);
+    В = ?(Г = 0, False, True);
+    Д = ?(истина, 1, 0);
+КонецПроцедуры
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::useless_ternary_operator::check);
+
+        // Run single-pass check_node() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::useless_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        // Compare results
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "Single-pass and legacy must produce same number of diagnostics"
+        );
+
+        for (l, s) in legacy.iter().zip(single_pass.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+            assert_eq!(l.message, s.message, "Diagnostic messages must match");
+        }
+    }
+
+    #[test]
+    fn test_single_pass_invariant_double_negatives() {
+        let code = r#"
+Процедура Тест()
+    А = Не (Не Значение);
+    Б = Не (Отказ <> Ложь);
+    В = Не Отказ <> Ложь;
+КонецПроцедуры
+"#;
+
+        // Run legacy check()
+        let legacy = check_ast_diagnostic(code, handlers::double_negatives::check);
+
+        // Run single-pass check_node() manually
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::double_negatives::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        // Compare results
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "Single-pass and legacy must produce same number of diagnostics. Legacy: {}, Single-pass: {}",
+            legacy.len(),
+            single_pass.len()
+        );
+
+        // Sort by range for stable comparison
+        let mut legacy_sorted = legacy.clone();
+        let mut single_pass_sorted = single_pass.clone();
+        legacy_sorted.sort_by_key(|d| (d.range.start(), d.range.end()));
+        single_pass_sorted.sort_by_key(|d| (d.range.start(), d.range.end()));
+
+        for (l, s) in legacy_sorted.iter().zip(single_pass_sorted.iter()) {
+            assert_eq!(l.code, s.code, "Diagnostic codes must match");
+            assert_eq!(l.range, s.range, "Diagnostic ranges must match");
+        }
+    }
+
+    #[test]
+    fn test_single_pass_comprehensive() {
+        // Test with real test files to ensure comprehensive coverage
+        let code = include_str!("../test_data/UselessTernaryOperatorDiagnostic.bsl");
+
+        let legacy = check_ast_diagnostic(code, handlers::useless_ternary_operator::check);
+        let single_pass = check_ast_diagnostic(code, |ctx| {
+            let parse = ctx.parse();
+            let root = parse.syntax_node();
+            let mut diagnostics = Vec::new();
+            for node in root.descendants() {
+                handlers::useless_ternary_operator::check_node(&node, &mut diagnostics, ctx);
+            }
+            diagnostics
+        });
+
+        assert_eq!(
+            legacy.len(),
+            single_pass.len(),
+            "Comprehensive test: single-pass and legacy must match"
+        );
+
+        // Filter to UselessTernaryOperator only
+        let legacy_filtered: Vec<_> =
+            legacy.iter().filter(|d| d.code == DiagnosticCode::UselessTernaryOperator).collect();
+        let single_pass_filtered: Vec<_> = single_pass
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UselessTernaryOperator)
+            .collect();
+
+        assert_eq!(
+            legacy_filtered.len(),
+            single_pass_filtered.len(),
+            "Filtered results must match"
+        );
+    }
 }

@@ -24,6 +24,127 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
+/// Check a single syntax node for double negatives (node-based API).
+///
+/// This is called from `collect_syntax_single_pass()` for each node in single AST pass.
+/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
+///
+/// Note: This handler has complex logic that requires looking at descendants.
+/// The check_node approach works but may revisit some patterns. For full
+/// optimization, consider stateful tracking in DiagnosticState.
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    let code = DiagnosticCode::DoubleNegatives;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return;
+    }
+
+    // Only process UNARY_EXPR and BINARY_EXPR nodes
+    match node.kind() {
+        SyntaxKind::UNARY_EXPR => {
+            // Check Pattern 1: Double NOT
+            if let Some(range) = check_double_not_simple(node) {
+                acc.push(make_diagnostic(code, range, ctx));
+            }
+            // Check Pattern 2a: NOT wrapping NEQ
+            if let Some(range) = check_not_wrapping_neq_simple(node) {
+                acc.push(make_diagnostic(code, range, ctx));
+            }
+        }
+        SyntaxKind::BINARY_EXPR => {
+            // Check Pattern 2b: NOT on left operand of NEQ
+            if let Some(range) = check_not_on_left_neq_simple(node) {
+                acc.push(make_diagnostic(code, range, ctx));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Create diagnostic for double negatives.
+fn make_diagnostic(code: DiagnosticCode, range: TextRange, ctx: &DiagnosticsContext) -> Diagnostic {
+    Diagnostic {
+        code,
+        message: "Using double negatives complicates understanding of code".to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    }
+}
+
+/// Pattern 1: Detect Не (Не X) - double NOT (simplified version for single-pass)
+fn check_double_not_simple(node: &SyntaxNode) -> Option<TextRange> {
+    if !has_not_token(node) {
+        return None;
+    }
+
+    // Check if any descendant UNARY_EXPR has NOT
+    for descendant in node.descendants().skip(1) {
+        if descendant.kind() == SyntaxKind::UNARY_EXPR && has_not_token(&descendant) {
+            // Filter: skip if logical operators inside
+            if contains_logical_operators(node) {
+                return None;
+            }
+
+            // Filter: skip if text ends with "=" (incomplete due to parse error)
+            let text = node.text().to_string();
+            if text.trim_end().ends_with('=') {
+                return None;
+            }
+
+            return Some(node.text_range());
+        }
+    }
+
+    None
+}
+
+/// Pattern 2a: Detect Не (X <> Y) - NOT wrapping NEQ (simplified version)
+fn check_not_wrapping_neq_simple(node: &SyntaxNode) -> Option<TextRange> {
+    if !has_not_token(node) {
+        return None;
+    }
+
+    // Check if any descendant BINARY_EXPR has NEQ
+    for descendant in node.descendants().skip(1) {
+        if descendant.kind() == SyntaxKind::BINARY_EXPR && has_neq_token(&descendant) {
+            // Filter: skip if logical operators inside
+            if contains_logical_operators(node) {
+                return None;
+            }
+
+            return Some(node.text_range());
+        }
+    }
+
+    None
+}
+
+/// Pattern 2b: Detect (Не X) <> Y - NOT on left operand (simplified version)
+fn check_not_on_left_neq_simple(node: &SyntaxNode) -> Option<TextRange> {
+    if !has_neq_token(node) {
+        return None;
+    }
+
+    // Check if left child is UNARY_EXPR with NOT operator
+    for child in node.children() {
+        if child.kind() == SyntaxKind::UNARY_EXPR && has_not_token(&child) {
+            // Filter: skip if logical operators inside
+            if contains_logical_operators(node) {
+                return None;
+            }
+
+            return Some(node.text_range());
+        }
+    }
+
+    None
+}
+
+/// Main entry point for DoubleNegatives diagnostic.
+///
+/// Traverses AST and calls `check_node()` for each node.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::DoubleNegatives;
 
