@@ -25,7 +25,7 @@
 mod control_flow;
 mod diagnostics;
 mod expr;
-mod magic_number;
+
 mod platform_helpers;
 mod preproc;
 mod stmt;
@@ -686,9 +686,6 @@ pub fn lower_method_with_externals(
         check_function_returns_same_primitive(&mut ctx, method_node);
     }
 
-    // Check for magic numbers using HIR
-    magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
-
     // Collect referenced externals (variables used but not declared locally)
     let referenced_externals = collect_referenced_externals(&ctx.body);
 
@@ -805,9 +802,6 @@ pub fn lower_method_with_externals_and_line_index(
     if is_function {
         check_function_returns_same_primitive(&mut ctx, method_node);
     }
-
-    // Check for magic numbers using HIR
-    magic_number::check_magic_numbers(&ctx.body, &ctx.source_map, &mut ctx.diagnostics);
 
     // Emit OneStatementPerLine diagnostics
     ctx.emit_one_statement_per_line_diagnostics();

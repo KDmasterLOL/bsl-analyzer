@@ -227,7 +227,8 @@ fn handle_vfs_msg(
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        Completion, GotoDefinition, HoverRequest, References, SemanticTokensFullRequest,
+        Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, References,
+        SemanticTokensFullRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -242,6 +243,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_sync::<HoverRequest>(crate::handlers::handle_hover)
         .on_sync::<Completion>(crate::handlers::handle_completion)
         .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
+        .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .finish();
 
     Ok(())
@@ -308,8 +310,9 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
 
-        // Future capabilities will be added here:
-        // - diagnostic_provider
+        // Document symbols (outline, breadcrumbs)
+        document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+
         ..Default::default()
     }
 }

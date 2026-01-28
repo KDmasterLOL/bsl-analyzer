@@ -8,9 +8,10 @@ use base_db::SourceDatabase;
 use ide::Location as IdeLocation;
 use line_index::LineIndex;
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupContent, MarkupKind,
-    ReferenceParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
+    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, Location, MarkupContent, MarkupKind, ReferenceParams, SemanticTokens,
+    SemanticTokensParams, SemanticTokensResult,
 };
 
 use crate::global_state::GlobalStateSnapshot;
@@ -298,6 +299,84 @@ pub fn handle_semantic_tokens_full(
     );
 
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: tokens })))
+}
+
+/// Handles textDocument/documentSymbol request.
+pub fn handle_document_symbol(
+    snap: GlobalStateSnapshot,
+    params: DocumentSymbolParams,
+) -> Result<Option<DocumentSymbolResponse>> {
+    let _p = tracing::info_span!(
+        "handle_document_symbol",
+        uri = %params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document.uri;
+
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    let symbols = snap.analysis.document_symbols(file_id);
+
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
+        .into_iter()
+        .filter_map(|s| convert_document_symbol(&line_index, &text, s))
+        .collect();
+
+    Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+}
+
+fn convert_document_symbol(
+    line_index: &LineIndex,
+    text: &str,
+    sym: ide::DocumentSymbol,
+) -> Option<lsp_types::DocumentSymbol> {
+    let range = crate::lsp::range(line_index, text, sym.range)?;
+    let selection_range = crate::lsp::range(line_index, text, sym.selection_range)?;
+
+    let kind = match sym.kind {
+        ide::SymbolKind::Procedure | ide::SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
+        ide::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
+        ide::SymbolKind::Region => lsp_types::SymbolKind::NAMESPACE,
+    };
+
+    let children = if sym.children.is_empty() {
+        None
+    } else {
+        let converted: Vec<_> = sym
+            .children
+            .into_iter()
+            .filter_map(|c| convert_document_symbol(line_index, text, c))
+            .collect();
+        if converted.is_empty() {
+            None
+        } else {
+            Some(converted)
+        }
+    };
+
+    #[allow(deprecated)]
+    Some(lsp_types::DocumentSymbol {
+        name: sym.name,
+        detail: None,
+        kind,
+        tags: None,
+        deprecated: None,
+        range,
+        selection_range,
+        children,
+    })
 }
 
 /// Convert IDE Location to LSP Location.

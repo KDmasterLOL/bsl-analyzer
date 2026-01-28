@@ -4,6 +4,7 @@
 
 mod completion;
 pub mod config_finder;
+mod document_symbols;
 mod goto_definition;
 mod hover;
 mod references;
@@ -112,10 +113,9 @@ impl Analysis {
         hover::hover(self.db.as_ref(), file_id, offset)
     }
 
-    /// Returns document symbols.
-    pub fn document_symbols(&self, _file_id: FileId) -> Vec<DocumentSymbol> {
-        // TODO: Implement
-        Vec::new()
+    /// Returns document symbols (procedures, functions, variables, regions).
+    pub fn document_symbols(&self, file_id: FileId) -> Vec<DocumentSymbol> {
+        document_symbols::document_symbols(self.db.as_ref(), file_id)
     }
 
     /// Returns code actions at the position.

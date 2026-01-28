@@ -96,16 +96,22 @@ impl MemDocs {
                     let start = usize::from(start_offset);
                     let end = usize::from(end_offset);
 
+                    // Clamp to valid char boundaries to prevent panics
+                    // when line_index is slightly out of sync with text
+                    let start = data.text.floor_char_boundary(start.min(data.text.len()));
+                    let end = data.text.floor_char_boundary(end.min(data.text.len()));
+
                     // Apply the change
                     data.text.replace_range(start..end, &change.text);
                 } else {
                     // Full document sync
                     data.text = change.text;
                 }
-            }
 
-            // Rebuild line index after changes
-            data.line_index = LineIndex::new(&data.text);
+                // Rebuild line index after each change so subsequent
+                // changes in the same batch use correct byte offsets
+                data.line_index = LineIndex::new(&data.text);
+            }
             data.version += 1;
         } else {
             tracing::warn!("Attempted to update non-existent document: {}", uri);

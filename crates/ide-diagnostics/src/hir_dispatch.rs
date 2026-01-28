@@ -46,8 +46,9 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::EmptyCodeBlock { range } => {
             handlers::empty_code_block::from_hir(*range, ctx)
         }
-        BodyDiagnostic::MagicNumber { value, range } => {
-            handlers::magic_number::from_hir(value, *range, ctx)
+        BodyDiagnostic::MagicNumber { .. } => {
+            // Handled by AST-path in runner::collect_semantic_diagnostics
+            None
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
         BodyDiagnostic::UnusedVariable { name, range } => {

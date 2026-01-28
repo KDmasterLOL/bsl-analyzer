@@ -50,7 +50,7 @@ pub enum SymbolKind {
     Procedure,
     Function,
     Variable,
-    // TODO: Add more symbol kinds as needed
+    Region,
 }
 
 /// Symbol information.

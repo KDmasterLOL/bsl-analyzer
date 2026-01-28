@@ -210,6 +210,7 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
         ctx,
         handlers::cyclomatic_complexity::check,
     ));
+    diagnostics.extend(run_diagnostic("MagicNumber", ctx, handlers::magic_number::check));
     diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
     diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
     diagnostics.extend(run_diagnostic(
