@@ -1131,6 +1131,16 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
         })
         .unwrap_or_default();
 
+    // Check for UselessForEach: iterator not used in loop body
+    if let Some(stmt_list_node) = node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
+        if !check_iterator_usage_in_body(&stmt_list_node, var_token.text()) {
+            ctx.emit(BodyDiagnostic::UselessForEach {
+                iterator_name: var_token.text().to_string(),
+                range,
+            });
+        }
+    }
+
     // Leave ForEach context
     ctx.leave_foreach();
 
@@ -1402,4 +1412,60 @@ pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
         .last()
         .map(|t| t.text_range())
         .unwrap_or_else(|| node.text_range())
+}
+
+/// Check if an iterator variable is used in a ForEach loop body.
+///
+/// Returns true if any IDENT token matches the iterator name
+/// AND is NOT used as a direct function call (e.g., `Iterator()` is not valid usage).
+fn check_iterator_usage_in_body(stmt_list: &SyntaxNode, iterator_name: &str) -> bool {
+    let iterator_lower = iterator_name.to_lowercase();
+
+    for descendant in stmt_list.descendants_with_tokens() {
+        if let Some(token) = descendant.into_token() {
+            if token.kind() == SyntaxKind::IDENT
+                && token.text().to_lowercase() == iterator_lower
+                && !is_direct_function_call(&token)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if an IDENT token is used as a direct function callee (e.g., `Iterator()`).
+fn is_direct_function_call(token: &syntax::SyntaxToken) -> bool {
+    let Some(ident_node) = token.parent() else {
+        return false;
+    };
+
+    let Some(parent) = ident_node.parent() else {
+        return false;
+    };
+
+    if parent.kind() == SyntaxKind::CALL_EXPR {
+        return is_direct_callee(&ident_node, &parent);
+    }
+
+    if parent.kind() == SyntaxKind::CALL_STMT {
+        for child in parent.children() {
+            if child.kind() == SyntaxKind::CALL_EXPR {
+                return is_direct_callee(&ident_node, &child);
+            }
+        }
+    }
+
+    false
+}
+
+fn is_direct_callee(ident_node: &SyntaxNode, call_expr: &SyntaxNode) -> bool {
+    if let Some(first_child) = call_expr.first_child() {
+        if first_child.text_range() == ident_node.text_range() {
+            // If there's a FIELD_EXPR child, it's a method call (Obj.Method()), not a direct call
+            return !call_expr.children().any(|c| c.kind() == SyntaxKind::FIELD_EXPR);
+        }
+    }
+    false
 }

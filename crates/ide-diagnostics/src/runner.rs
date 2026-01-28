@@ -542,7 +542,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     // UnsafeSafeModeMethodCall moved to HIR (BodyDiagnostic::UnsafeSafeModeMethodCall)
     // UsageWriteLogEvent moved to HIR (BodyDiagnostic::UsageWriteLogEvent)
-    diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
+    // UseLessForEach moved to HIR (BodyDiagnostic::UselessForEach)
     // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)
     diagnostics.extend(run_diagnostic(
         "UnsafeFindByCode",

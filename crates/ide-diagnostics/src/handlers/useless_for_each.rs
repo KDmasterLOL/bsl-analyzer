@@ -41,6 +41,32 @@ use hir_def::Name;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
+pub fn from_hir(
+    iterator_name: &str,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UseLessForEach;
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    // Skip if iterator name matches a module-level variable
+    let symbol_tree = ctx.symbol_tree();
+    if symbol_tree.find_variable(&Name::new(iterator_name)).is_some() {
+        return None;
+    }
+
+    Some(Diagnostic {
+        code,
+        message: "Итератор не используется в теле цикла".to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UseLessForEach;
 
@@ -295,5 +321,39 @@ mod tests {
 
         assert_diagnostic_range(code, diags[0], 2, 12, 20);
         assert_diagnostic_range(code, diags[1], 39, 16, 26);
+    }
+
+    #[test]
+    fn test_hir_unused_iterator() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    Для Каждого Итератор Из Коллекция Цикл
+        Итератор();
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let filtered: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect();
+        assert_eq!(filtered.len(), 1, "HIR should detect unused iterator");
+    }
+
+    #[test]
+    fn test_hir_used_iterator() {
+        use crate::test_utils::check_hir_diagnostic;
+
+        let code = r#"
+Процедура Тест()
+    Для Каждого Элемент Из Коллекция Цикл
+        Результат = Элемент.Свойство;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let filtered: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect();
+        assert_eq!(filtered.len(), 0, "HIR should not trigger for used iterator");
     }
 }
