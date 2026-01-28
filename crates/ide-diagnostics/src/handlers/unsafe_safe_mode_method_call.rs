@@ -1,5 +1,21 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
+
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UnsafeSafeModeMethodCall;
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+    Some(Diagnostic {
+        code,
+        message: "Use explicit comparison with boolean when calling SafeMode method".to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UnsafeSafeModeMethodCall;
@@ -191,7 +207,8 @@ fn is_direct_assignment(rhs_node: &SyntaxNode, call_node: &SyntaxNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_ast_diagnostic;
+    use crate::test_utils::{check_ast_diagnostic, check_hir_diagnostic};
+    use crate::DiagnosticCode;
 
     #[test]
     fn test_safe_direct_assignment() {
@@ -289,5 +306,37 @@ mod tests {
         assert_diagnostic_range(code, &diagnostics[7], 20, 34, 49);
         assert_diagnostic_range(code, &diagnostics[8], 23, 20, 35);
         assert_diagnostic_range(code, &diagnostics[9], 26, 9, 24);
+    }
+
+    #[test]
+    fn test_hir_unsafe_sole_condition() {
+        let code = r#"
+Процедура Тест()
+    Если БезопасныйРежим() Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnsafeSafeModeMethodCall)
+            .collect();
+        assert_eq!(filtered.len(), 1, "HIR should detect unsafe SafeMode call");
+    }
+
+    #[test]
+    fn test_hir_safe_comparison() {
+        let code = r#"
+Процедура Тест()
+    Если БезопасныйРежим() = Истина Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let filtered: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnsafeSafeModeMethodCall)
+            .collect();
+        assert_eq!(filtered.len(), 0, "HIR should not trigger for explicit comparison");
     }
 }

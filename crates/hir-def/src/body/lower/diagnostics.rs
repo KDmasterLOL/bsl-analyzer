@@ -192,6 +192,12 @@ pub(crate) fn is_safe_mode_method(name: &str) -> bool {
     is_any_global_function(name, &["SetSafeMode", "SetSafeModeDisabled"])
 }
 
+/// Check if a method name is БезопасныйРежим / SafeMode (the getter, not setter).
+/// Returns true if the method queries safe mode state.
+pub(crate) fn is_safe_mode_query(name: &str) -> bool {
+    is_global_function(name, "SafeMode")
+}
+
 /// Check if a method name is УстановитьПривилегированныйРежим / SetPrivilegedMode.
 /// Returns true if the method sets privileged mode.
 pub(crate) fn is_set_privileged_mode(name: &str) -> bool {

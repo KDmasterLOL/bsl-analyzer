@@ -540,12 +540,7 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::using_hardcode_path::check,
     ));
 
-    // Other AST checks
-    diagnostics.extend(run_diagnostic(
-        "UnsafeSafeModeMethodCall",
-        ctx,
-        handlers::unsafe_safe_mode_method_call::check,
-    ));
+    // UnsafeSafeModeMethodCall moved to HIR (BodyDiagnostic::UnsafeSafeModeMethodCall)
     // UsageWriteLogEvent moved to HIR (BodyDiagnostic::UsageWriteLogEvent)
     diagnostics.extend(run_diagnostic("UseLessForEach", ctx, handlers::useless_for_each::check));
     // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)

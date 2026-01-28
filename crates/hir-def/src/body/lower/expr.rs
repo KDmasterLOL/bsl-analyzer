@@ -363,6 +363,9 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // Track privileged mode method name for later diagnostic check
     let mut privileged_mode_name: Option<String> = None;
 
+    // Track if this is a SafeMode() query call for UnsafeSafeModeMethodCall
+    let mut is_safe_mode_query_call = false;
+
     // Track if this is a StrTemplate call for later validation
     let mut is_str_template_call = false;
 
@@ -374,6 +377,12 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_safe_mode_method;
         if is_safe_mode_method(&name) {
             safe_mode_name = Some(name.clone());
+        }
+
+        // Check for SafeMode() query (the getter)
+        use super::diagnostics::is_safe_mode_query;
+        if is_safe_mode_query(&name) {
+            is_safe_mode_query_call = true;
         }
 
         // Check for privileged mode methods
@@ -743,6 +752,11 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     .push(BodyDiagnostic::SetPrivilegedModeCall { range: token.text_range() });
             }
         }
+    }
+
+    // Check for UnsafeSafeModeMethodCall: SafeMode() used without explicit comparison
+    if is_safe_mode_query_call && is_unsafe_safe_mode_context(node) {
+        ctx.emit(BodyDiagnostic::UnsafeSafeModeMethodCall { range: actual_callee.text_range() });
     }
 
     // Check for StrTemplate/СтрШаблон incorrect usage
@@ -2248,4 +2262,115 @@ fn find_method_name_for_magic_number(node: &SyntaxNode) -> Option<String> {
     }
 
     None
+}
+
+/// Check if a SafeMode() call is in an unsafe context.
+///
+/// Unsafe contexts:
+/// - `Не БезопасныйРежим()` (NOT operator)
+/// - `БезопасныйРежим() ИЛИ ...` (boolean AND/OR)
+/// - `Если БезопасныйРежим() Тогда` (sole condition without comparison)
+///
+/// Safe contexts:
+/// - `БезопасныйРежим() = Истина` (explicit comparison)
+/// - `Перем = БезопасныйРежим()` (assignment)
+/// - `Метод(БезопасныйРежим())` (argument)
+fn is_unsafe_safe_mode_context(call_node: &SyntaxNode) -> bool {
+    let mut current = call_node.parent();
+
+    while let Some(node) = current {
+        match node.kind() {
+            SyntaxKind::UNARY_EXPR => {
+                if node
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .any(|tok| tok.kind() == SyntaxKind::KW_NOT)
+                {
+                    return true;
+                }
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let has_comparison =
+                    node.children_with_tokens().filter_map(|el| el.into_token()).any(|tok| {
+                        matches!(
+                            tok.kind(),
+                            SyntaxKind::EQ
+                                | SyntaxKind::NEQ
+                                | SyntaxKind::LT
+                                | SyntaxKind::LE
+                                | SyntaxKind::GT
+                                | SyntaxKind::GE
+                        )
+                    });
+                if has_comparison {
+                    return false;
+                }
+                let has_boolean = node
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .any(|tok| matches!(tok.kind(), SyntaxKind::KW_AND | SyntaxKind::KW_OR));
+                if has_boolean {
+                    return true;
+                }
+            }
+            SyntaxKind::PAREN_EXPR | SyntaxKind::EXPR => {}
+            SyntaxKind::IF_STMT | SyntaxKind::ELSIF_CLAUSE => {
+                if let Some(cond) = node.children().find(|n| n.kind() == SyntaxKind::EXPR) {
+                    let call_range = call_node.text_range();
+                    let contains_call = cond
+                        .descendants()
+                        .any(|n| n.kind() == SyntaxKind::CALL_EXPR && n.text_range() == call_range);
+                    if contains_call {
+                        let has_comparison = cond.descendants().any(|n| {
+                            n.kind() == SyntaxKind::BINARY_EXPR
+                                && n.children_with_tokens().filter_map(|el| el.into_token()).any(
+                                    |tok| {
+                                        matches!(
+                                            tok.kind(),
+                                            SyntaxKind::EQ
+                                                | SyntaxKind::NEQ
+                                                | SyntaxKind::LT
+                                                | SyntaxKind::LE
+                                                | SyntaxKind::GT
+                                                | SyntaxKind::GE
+                                        )
+                                    },
+                                )
+                        });
+                        return !has_comparison;
+                    }
+                }
+                return false;
+            }
+            SyntaxKind::ASSIGN_STMT => {
+                if let Some(rhs_node) = node.children().nth(1) {
+                    let call_range = call_node.text_range();
+                    if rhs_node.text_range() == call_range {
+                        return false;
+                    }
+                    if rhs_node.kind() == SyntaxKind::EXPR {
+                        if let Some(inner) = rhs_node.children().next() {
+                            if inner.text_range() == call_range {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            SyntaxKind::ARG_LIST | SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
+                return false;
+            }
+            SyntaxKind::STMT_LIST
+            | SyntaxKind::PROCEDURE_DEF
+            | SyntaxKind::FUNCTION_DEF
+            | SyntaxKind::SOURCE_FILE => {
+                break;
+            }
+            _ => {}
+        }
+        current = node.parent();
+    }
+
+    false
 }

@@ -290,6 +290,9 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {
             handlers::using_object_not_available_unix::from_hir(type_name, *range, ctx)
         }
+        BodyDiagnostic::UnsafeSafeModeMethodCall { range } => {
+            handlers::unsafe_safe_mode_method_call::from_hir(*range, ctx)
+        }
         BodyDiagnostic::UsageWriteLogEvent {
             in_except_block,
             arg_count,

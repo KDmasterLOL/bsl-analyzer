@@ -822,6 +822,10 @@ pub enum BodyDiagnostic {
     /// Detected when creating these objects outside of IF with platform type check.
     UsingObjectNotAvailableUnix { type_name: String, range: TextRange },
 
+    /// Unsafe usage of SafeMode/БезопасныйРежим method.
+    /// Detected when SafeMode() is used without explicit comparison (= True, <> False).
+    UnsafeSafeModeMethodCall { range: TextRange },
+
     /// WriteLogEvent / ЗаписьЖурналаРегистрации call with validation info.
     /// Validation logic is in from_hir() based on collected flags.
     UsageWriteLogEvent {
@@ -1087,6 +1091,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::NumberOfOptionalParams { range, .. } => *range,
             BodyDiagnostic::TryNumber { range } => *range,
             BodyDiagnostic::UsingObjectNotAvailableUnix { range, .. } => *range,
+            BodyDiagnostic::UnsafeSafeModeMethodCall { range } => *range,
             BodyDiagnostic::UsageWriteLogEvent { range, .. } => *range,
         }
     }
