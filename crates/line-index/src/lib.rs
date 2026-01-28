@@ -158,6 +158,25 @@ impl LineIndex {
         self.len
     }
 
+    /// Returns a safe slice of line text with defensive char boundary checks.
+    ///
+    /// If `LineIndex` is out of sync with `text` (e.g., after edits),
+    /// byte ranges may not align with UTF-8 character boundaries.
+    /// This method uses `floor_char_boundary` to prevent panics.
+    ///
+    /// Returns `None` if the line doesn't exist.
+    #[inline]
+    pub fn safe_line_str<'a>(&self, text: &'a str, line: u32) -> Option<&'a str> {
+        let range = self.line_range(line)?;
+        let start: usize = range.start().into();
+        let end: usize = range.end().into();
+
+        let start = text.floor_char_boundary(start.min(text.len()));
+        let end = text.floor_char_boundary(end.min(text.len()));
+
+        Some(&text[start..end])
+    }
+
     /// Calculates the UTF-16 length of text in a given range.
     ///
     /// This is needed for LSP, which uses UTF-16 code units for positions and lengths.
@@ -229,10 +248,7 @@ impl LineIndex {
     /// assert_eq!(index.utf16_col_to_byte_col(text, 0, 9), Some(18));
     /// ```
     pub fn utf16_col_to_byte_col(&self, text: &str, line: u32, utf16_col: u32) -> Option<u32> {
-        let line_range = self.line_range(line)?;
-        let line_start: usize = line_range.start().into();
-        let line_end: usize = line_range.end().into();
-        let line_text = &text[line_start..line_end.min(text.len())];
+        let line_text = self.safe_line_str(text, line)?;
 
         // Iterate through characters, counting UTF-16 code units until we reach utf16_col
         let mut utf16_offset = 0u32;
@@ -291,14 +307,15 @@ impl LineIndexExt for LineIndex {
         let col_end = line_start + byte_col as usize;
         let col_end = col_end.min(text.len());
 
+        // SAFETY: Ensure char boundaries to avoid panic if LineIndex is out of sync
+        let line_start = text.floor_char_boundary(line_start);
+        let col_end = text.floor_char_boundary(col_end);
+
         text[line_start..col_end].chars().count() as u32
     }
 
     fn char_col_to_byte_col(&self, text: &str, line: u32, char_col: u32) -> Option<u32> {
-        let line_range = self.line_range(line)?;
-        let line_start: usize = line_range.start().into();
-        let line_end: usize = line_range.end().into();
-        let line_text = &text[line_start..line_end.min(text.len())];
+        let line_text = self.safe_line_str(text, line)?;
 
         let mut byte_col = 0u32;
         for (i, ch) in line_text.chars().enumerate() {
@@ -313,10 +330,7 @@ impl LineIndexExt for LineIndex {
     }
 
     fn line_char_len(&self, text: &str, line: u32) -> Option<u32> {
-        let line_range = self.line_range(line)?;
-        let line_start: usize = line_range.start().into();
-        let line_end: usize = line_range.end().into();
-        let line_text = &text[line_start..line_end.min(text.len())];
+        let line_text = self.safe_line_str(text, line)?;
 
         Some(line_text.chars().count() as u32)
     }

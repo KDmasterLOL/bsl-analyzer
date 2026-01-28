@@ -56,19 +56,12 @@ pub fn offset(line_index: &LineIndex, text: &str, position: Position) -> Result<
     );
 
     // Get line content to log it
-    if let Some(line_range) = line_index.line_range(position.line) {
-        let line_start: usize = line_range.start().into();
-        let line_end: usize = line_range.end().into();
-        if line_start < text.len() {
-            let line_text = &text[line_start..line_end.min(text.len())];
-            tracing::info!(
-                "Line {} range: {}..{}, text (first 100 chars): {:?}",
-                position.line,
-                line_start,
-                line_end,
-                line_text.chars().take(100).collect::<String>()
-            );
-        }
+    if let Some(line_text) = line_index.safe_line_str(text, position.line) {
+        tracing::info!(
+            "Line {} text (first 100 chars): {:?}",
+            position.line,
+            line_text.chars().take(100).collect::<String>()
+        );
     }
 
     let line_col = LineCol { line: position.line, col: byte_col };
