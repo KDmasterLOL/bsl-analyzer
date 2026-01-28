@@ -40,8 +40,46 @@
 //! Now uses SDBL HIR with diagnostics collected during lowering.
 
 use crate::sdbl_utils::SdblPositionMapper;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use ide_db::TextRange;
 use sdbl_hir;
+
+/// Builds a quick-fix for missing alias.
+///
+/// - No alias (`field_name = None`): insert ` КАК <raw_name>` at end of expression.
+/// - Implicit alias without AS (`field_name = Some`): insert `КАК ` before alias identifier.
+fn build_alias_fix(
+    field_name: &Option<String>,
+    raw_name: &Option<String>,
+    bsl_range: TextRange,
+) -> Vec<Fix> {
+    match (field_name, raw_name) {
+        (None, Some(name)) => {
+            // No alias at all → insert " КАК <raw_name>" at end of expression
+            let insert = bsl_range.end();
+            vec![Fix {
+                label: format!("Добавить псевдоним КАК {}", name),
+                edits: vec![TextEdit {
+                    range: TextRange::new(insert, insert),
+                    new_text: format!(" КАК {}", name),
+                }],
+            }]
+        }
+        (Some(name), _) => {
+            // Implicit alias without AS → insert "КАК " before alias identifier
+            let alias_byte_len = name.len() as u32;
+            let insert = bsl_range.end() - line_index::TextSize::from(alias_byte_len);
+            vec![Fix {
+                label: format!("Добавить ключевое слово КАК перед '{}'", name),
+                edits: vec![TextEdit {
+                    range: TextRange::new(insert, insert),
+                    new_text: "КАК ".to_string(),
+                }],
+            }]
+        }
+        _ => vec![],
+    }
+}
 
 /// Runs the AssignAliasFieldsInQuery diagnostic.
 ///
@@ -93,7 +131,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         // Emit diagnostics from HIR
         for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = hir_diag
+            if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, raw_name, range } =
+                hir_diag
             {
                 diag_count += 1;
                 let t_map = Instant::now();
@@ -106,13 +145,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК".to_string()
                 };
 
+                let fixes = build_alias_fix(field_name, raw_name, bsl_range);
+
                 diagnostics.push(Diagnostic {
                     code,
                     message,
                     severity: ctx.severity(code),
                     range: bsl_range,
                     tags: ctx.tags(code),
-                    fixes: vec![],
+                    fixes,
                 });
             }
         }
@@ -197,7 +238,10 @@ mod tests {
         package
             .all_diagnostics()
             .filter_map(|d| {
-                if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword { field_name, range } = d {
+                if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword {
+                    field_name, range, ..
+                } = d
+                {
                     let message = if let Some(name) = field_name {
                         format!(
                             "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",

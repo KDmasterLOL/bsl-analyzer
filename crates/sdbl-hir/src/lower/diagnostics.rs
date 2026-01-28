@@ -624,6 +624,7 @@ impl<'a> LoweringContext<'a> {
             if needs_diagnostic {
                 self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
                     field_name: field.alias.as_ref().map(|n| n.to_string()),
+                    raw_name: field.raw_name.as_ref().map(|n| n.to_string()),
                     range: field.diagnostic_range,
                 });
             }

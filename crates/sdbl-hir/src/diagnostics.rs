@@ -135,6 +135,8 @@ pub enum SdblDiagnostic {
     AliasWithoutAsKeyword {
         /// Field name (for message).
         field_name: Option<String>,
+        /// Raw field name from expression (last identifier, e.g. "ВидНоменклатуры").
+        raw_name: Option<String>,
         /// Source range.
         range: TextRange,
     },
