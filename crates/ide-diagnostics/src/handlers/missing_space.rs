@@ -40,7 +40,8 @@
 //! Allow consecutive commas without spaces between them.
 //! Default: `false`
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
 
@@ -248,13 +249,21 @@ fn check_left_space(
         return None;
     }
 
+    let range = token.text_range();
+    let insert = range.start();
     Some(Diagnostic {
         code,
         message: format!("Отсутствует пробел слева от '{}'", token.text()),
         severity: ctx.severity(code),
-        range: token.text_range(),
+        range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix {
+            label: format!("Добавить пробел слева от '{}'", token.text()),
+            edits: vec![TextEdit {
+                range: TextRange::new(insert, insert),
+                new_text: " ".to_string(),
+            }],
+        }],
     })
 }
 
@@ -309,13 +318,21 @@ fn check_right_space(
         return None;
     }
 
+    let range = token.text_range();
+    let insert = range.end();
     Some(Diagnostic {
         code,
         message: format!("Отсутствует пробел справа от '{}'", token.text()),
         severity: ctx.severity(code),
-        range: token.text_range(),
+        range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix {
+            label: format!("Добавить пробел справа от '{}'", token.text()),
+            edits: vec![TextEdit {
+                range: TextRange::new(insert, insert),
+                new_text: " ".to_string(),
+            }],
+        }],
     })
 }
 
@@ -343,13 +360,32 @@ fn check_left_right_space(
         format!("Отсутствует пробел справа от '{}'", token.text())
     };
 
+    let range = token.text_range();
+    let mut edits = Vec::new();
+    if missing_left {
+        let insert = range.start();
+        edits.push(TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() });
+    }
+    if missing_right {
+        let insert = range.end();
+        edits.push(TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() });
+    }
+
+    let label = if missing_left && missing_right {
+        format!("Добавить пробелы вокруг '{}'", token.text())
+    } else if missing_left {
+        format!("Добавить пробел слева от '{}'", token.text())
+    } else {
+        format!("Добавить пробел справа от '{}'", token.text())
+    };
+
     Some(Diagnostic {
         code,
         message,
         severity: ctx.severity(code),
-        range: token.text_range(),
+        range,
         tags: ctx.tags(code),
-        fixes: vec![],
+        fixes: vec![Fix { label, edits }],
     })
 }
 
