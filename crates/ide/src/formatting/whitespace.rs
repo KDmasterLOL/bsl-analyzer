@@ -5,10 +5,8 @@
 //! - Spaces after commas
 //! - Trailing whitespace removal
 
-// These functions are prepared for future token-level whitespace normalization
-#![allow(dead_code)]
-
-use syntax::{SyntaxKind, SyntaxToken};
+use lexer::{tokenize, TokenKind};
+use syntax::SyntaxKind;
 
 use super::FormattingConfig;
 
@@ -94,25 +92,31 @@ pub fn forbids_space_before(kind: SyntaxKind) -> bool {
 pub fn forbids_space_after(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET | SyntaxKind::DOT | SyntaxKind::KW_NOT // Унарный оператор НЕ может быть без пробела перед скобкой
+        SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET | SyntaxKind::DOT | SyntaxKind::TILDE // Label prefix ~
     )
 }
 
-/// Checks if a token is the unary minus (before a number or identifier).
-pub fn is_unary_minus(token: &SyntaxToken) -> bool {
-    if token.kind() != SyntaxKind::MINUS {
+/// Checks if there should be no space before opening paren (function call).
+fn forbids_space_before_paren(prev_kind: SyntaxKind) -> bool {
+    matches!(
+        prev_kind,
+        SyntaxKind::IDENT | SyntaxKind::KW_NEW | SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET
+    )
+}
+
+/// Checks if this is likely a unary operator based on previous token.
+fn is_likely_unary(kind: SyntaxKind, prev_kind: Option<SyntaxKind>) -> bool {
+    if !matches!(kind, SyntaxKind::MINUS | SyntaxKind::PLUS) {
         return false;
     }
 
-    // Check previous non-trivia token
-    let prev = token.prev_token();
-    match prev {
-        Some(t) => {
-            let kind = t.kind();
-            // Unary if after operator, open paren, comma, or at start
+    match prev_kind {
+        None => true, // At start
+        Some(prev) => {
             matches!(
-                kind,
+                prev,
                 SyntaxKind::L_PAREN
+                    | SyntaxKind::L_BRACKET
                     | SyntaxKind::COMMA
                     | SyntaxKind::EQ
                     | SyntaxKind::PLUS
@@ -127,35 +131,227 @@ pub fn is_unary_minus(token: &SyntaxToken) -> bool {
                     | SyntaxKind::KW_RETURN
                     | SyntaxKind::KW_AND
                     | SyntaxKind::KW_OR
+                    | SyntaxKind::KW_NOT
             )
         }
-        None => true, // At start of expression
     }
 }
 
-/// Trims trailing whitespace from a line.
-pub fn trim_trailing_whitespace(line: &str) -> &str {
-    line.trim_end_matches([' ', '\t'])
+/// Convert lexer TokenKind to syntax SyntaxKind.
+fn token_to_syntax_kind(kind: TokenKind) -> SyntaxKind {
+    match kind {
+        // Keywords
+        TokenKind::KwProcedure => SyntaxKind::KW_PROCEDURE,
+        TokenKind::KwEndProcedure => SyntaxKind::KW_END_PROCEDURE,
+        TokenKind::KwFunction => SyntaxKind::KW_FUNCTION,
+        TokenKind::KwEndFunction => SyntaxKind::KW_END_FUNCTION,
+        TokenKind::KwExport => SyntaxKind::KW_EXPORT,
+        TokenKind::KwVal => SyntaxKind::KW_VAL,
+        TokenKind::KwIf => SyntaxKind::KW_IF,
+        TokenKind::KwThen => SyntaxKind::KW_THEN,
+        TokenKind::KwElsIf => SyntaxKind::KW_ELSIF,
+        TokenKind::KwElse => SyntaxKind::KW_ELSE,
+        TokenKind::KwEndIf => SyntaxKind::KW_END_IF,
+        TokenKind::KwFor => SyntaxKind::KW_FOR,
+        TokenKind::KwEach => SyntaxKind::KW_EACH,
+        TokenKind::KwIn => SyntaxKind::KW_IN,
+        TokenKind::KwTo => SyntaxKind::KW_TO,
+        TokenKind::KwWhile => SyntaxKind::KW_WHILE,
+        TokenKind::KwDo => SyntaxKind::KW_DO,
+        TokenKind::KwEndDo => SyntaxKind::KW_END_DO,
+        TokenKind::KwReturn => SyntaxKind::KW_RETURN,
+        TokenKind::KwContinue => SyntaxKind::KW_CONTINUE,
+        TokenKind::KwBreak => SyntaxKind::KW_BREAK,
+        TokenKind::KwGoto => SyntaxKind::KW_GOTO,
+        TokenKind::KwTry => SyntaxKind::KW_TRY,
+        TokenKind::KwExcept => SyntaxKind::KW_EXCEPT,
+        TokenKind::KwEndTry => SyntaxKind::KW_END_TRY,
+        TokenKind::KwRaise => SyntaxKind::KW_RAISE,
+        TokenKind::KwVar => SyntaxKind::KW_VAR,
+        TokenKind::KwNew => SyntaxKind::KW_NEW,
+        TokenKind::KwExecute => SyntaxKind::KW_EXECUTE,
+        TokenKind::KwAddHandler => SyntaxKind::KW_ADD_HANDLER,
+        TokenKind::KwRemoveHandler => SyntaxKind::KW_REMOVE_HANDLER,
+        TokenKind::KwAsync => SyntaxKind::KW_ASYNC,
+        TokenKind::KwAwait => SyntaxKind::KW_AWAIT,
+        TokenKind::KwAnd => SyntaxKind::KW_AND,
+        TokenKind::KwOr => SyntaxKind::KW_OR,
+        TokenKind::KwNot => SyntaxKind::KW_NOT,
+        TokenKind::KwTrue => SyntaxKind::KW_TRUE,
+        TokenKind::KwFalse => SyntaxKind::KW_FALSE,
+        TokenKind::KwUndefined => SyntaxKind::KW_UNDEFINED,
+        TokenKind::KwNull => SyntaxKind::KW_NULL,
+
+        // Preprocessor
+        TokenKind::PreIf => SyntaxKind::PRE_IF,
+        TokenKind::PreElsIf => SyntaxKind::PRE_ELSIF,
+        TokenKind::PreElse => SyntaxKind::PRE_ELSE,
+        TokenKind::PreEndIf => SyntaxKind::PRE_END_IF,
+        TokenKind::PreRegion => SyntaxKind::PRE_REGION,
+        TokenKind::PreEndRegion => SyntaxKind::PRE_END_REGION,
+        TokenKind::PreUse => SyntaxKind::PRE_USE,
+        TokenKind::PreInsert => SyntaxKind::PRE_INSERT,
+        TokenKind::PreEndInsert => SyntaxKind::PRE_END_INSERT,
+        TokenKind::PreDelete => SyntaxKind::PRE_DELETE,
+        TokenKind::PreEndDelete => SyntaxKind::PRE_END_DELETE,
+
+        // Annotations
+        TokenKind::AnnAtClient => SyntaxKind::ANN_AT_CLIENT,
+        TokenKind::AnnAtServer => SyntaxKind::ANN_AT_SERVER,
+        TokenKind::AnnAtServerNoContext => SyntaxKind::ANN_AT_SERVER_NO_CONTEXT,
+        TokenKind::AnnAtClientAtServerNoContext => SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT,
+        TokenKind::AnnAtClientAtServer => SyntaxKind::ANN_AT_CLIENT_AT_SERVER,
+        TokenKind::AnnBefore => SyntaxKind::ANN_BEFORE,
+        TokenKind::AnnAfter => SyntaxKind::ANN_AFTER,
+        TokenKind::AnnAround => SyntaxKind::ANN_AROUND,
+        TokenKind::AnnChangeAndValidate => SyntaxKind::ANN_CHANGE_AND_VALIDATE,
+        TokenKind::AnnCustom => SyntaxKind::ANN_CUSTOM,
+
+        // Operators
+        TokenKind::Eq => SyntaxKind::EQ,
+        TokenKind::Neq => SyntaxKind::NEQ,
+        TokenKind::Le => SyntaxKind::LE,
+        TokenKind::Lt => SyntaxKind::LT,
+        TokenKind::Ge => SyntaxKind::GE,
+        TokenKind::Gt => SyntaxKind::GT,
+        TokenKind::Plus => SyntaxKind::PLUS,
+        TokenKind::Minus => SyntaxKind::MINUS,
+        TokenKind::Star => SyntaxKind::STAR,
+        TokenKind::Slash => SyntaxKind::SLASH,
+        TokenKind::Percent => SyntaxKind::PERCENT,
+
+        // Punctuation
+        TokenKind::LParen => SyntaxKind::L_PAREN,
+        TokenKind::RParen => SyntaxKind::R_PAREN,
+        TokenKind::LBracket => SyntaxKind::L_BRACKET,
+        TokenKind::RBracket => SyntaxKind::R_BRACKET,
+        TokenKind::Dot => SyntaxKind::DOT,
+        TokenKind::Comma => SyntaxKind::COMMA,
+        TokenKind::Semicolon => SyntaxKind::SEMICOLON,
+        TokenKind::Colon => SyntaxKind::COLON,
+        TokenKind::Question => SyntaxKind::QUESTION,
+        TokenKind::Tilde => SyntaxKind::TILDE,
+        TokenKind::Bar => SyntaxKind::BAR,
+        TokenKind::Hash => SyntaxKind::HASH,
+        TokenKind::Ampersand => SyntaxKind::AMPERSAND,
+        TokenKind::Exclamation => SyntaxKind::EXCLAMATION,
+
+        // Literals
+        TokenKind::Float => SyntaxKind::FLOAT,
+        TokenKind::Decimal => SyntaxKind::DECIMAL,
+        TokenKind::String => SyntaxKind::STRING,
+        TokenKind::StringStart => SyntaxKind::STRING_START,
+        TokenKind::StringTail => SyntaxKind::STRING_TAIL,
+        TokenKind::StringPart => SyntaxKind::STRING_PART,
+        TokenKind::Date => SyntaxKind::DATE,
+
+        // Identifier
+        TokenKind::Ident => SyntaxKind::IDENT,
+
+        // Trivia
+        TokenKind::Whitespace => SyntaxKind::WHITESPACE,
+        TokenKind::Newline => SyntaxKind::NEWLINE,
+        TokenKind::Comment => SyntaxKind::COMMENT,
+
+        // Error
+        TokenKind::Error => SyntaxKind::ERROR,
+    }
 }
 
-/// Normalizes internal whitespace (multiple spaces to one).
-pub fn normalize_internal_whitespace(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut prev_was_space = false;
+/// Normalizes whitespace in a line of BSL code.
+///
+/// Uses lexer to tokenize the line and rebuilds it with proper spacing:
+/// - Single space around binary operators
+/// - Single space after commas
+/// - No space before comma, semicolon, closing parens
+/// - No space after opening parens, dot
+pub fn normalize_line_whitespace(line: &str, config: &FormattingConfig) -> String {
+    // Skip empty lines
+    if line.trim().is_empty() {
+        return String::new();
+    }
 
-    for c in text.chars() {
-        if c == ' ' || c == '\t' {
-            if !prev_was_space {
-                result.push(' ');
-                prev_was_space = true;
+    // Skip comment-only lines
+    let trimmed = line.trim();
+    if trimmed.starts_with("//") {
+        return trimmed.to_string();
+    }
+
+    // Tokenize the line
+    let tokens = tokenize(line);
+
+    // Filter out whitespace and newlines, keeping only meaningful tokens
+    let meaningful_tokens: Vec<_> = tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Newline))
+        .collect();
+
+    if meaningful_tokens.is_empty() {
+        return String::new();
+    }
+
+    // Rebuild with proper spacing
+    let mut result = String::with_capacity(line.len());
+    let mut prev_syntax_kind: Option<SyntaxKind> = None;
+    let mut prev_was_unary = false;
+
+    for token in meaningful_tokens {
+        let syntax_kind = token_to_syntax_kind(token.kind);
+        let text = token.text.as_str();
+
+        // Check if current token is a unary operator
+        let is_unary = is_likely_unary(syntax_kind, prev_syntax_kind);
+
+        // Determine if we need space before this token
+        let need_space = if result.is_empty() || forbids_space_before(syntax_kind) || prev_was_unary
+        {
+            false
+        } else if let Some(prev) = prev_syntax_kind {
+            // No space before ( in function calls, or after tokens that forbid space
+            if (syntax_kind == SyntaxKind::L_PAREN && forbids_space_before_paren(prev))
+                || forbids_space_after(prev)
+            {
+                false
+            } else if is_unary {
+                // Unary operators need space before if previous token requires space after
+                // e.g., "А = -1" not "А =-1"
+                needs_space_after(prev, config)
+            } else if needs_space_before(syntax_kind, config) || needs_space_after(prev, config) {
+                true
+            } else {
+                // Default: space between tokens unless both are punctuation-like
+                !is_punctuation(syntax_kind) || !is_punctuation(prev)
             }
         } else {
-            result.push(c);
-            prev_was_space = false;
+            false
+        };
+
+        if need_space {
+            result.push(' ');
         }
+
+        result.push_str(text);
+        prev_syntax_kind = Some(syntax_kind);
+        prev_was_unary = is_unary;
     }
 
     result
+}
+
+/// Checks if a token is punctuation (doesn't need spaces around by default).
+fn is_punctuation(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::L_PAREN
+            | SyntaxKind::R_PAREN
+            | SyntaxKind::L_BRACKET
+            | SyntaxKind::R_BRACKET
+            | SyntaxKind::DOT
+            | SyntaxKind::COMMA
+            | SyntaxKind::SEMICOLON
+            | SyntaxKind::COLON
+            | SyntaxKind::TILDE
+    )
 }
 
 #[cfg(test)]
@@ -163,19 +359,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_trim_trailing() {
-        assert_eq!(trim_trailing_whitespace("hello  "), "hello");
-        assert_eq!(trim_trailing_whitespace("hello\t"), "hello");
-        assert_eq!(trim_trailing_whitespace("hello"), "hello");
-        assert_eq!(trim_trailing_whitespace(""), "");
+    fn test_normalize_simple() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("А=1;", &config), "А = 1;");
+        assert_eq!(normalize_line_whitespace("А  =  1 ;", &config), "А = 1;");
     }
 
     #[test]
-    fn test_normalize_whitespace() {
-        assert_eq!(normalize_internal_whitespace("a  b"), "a b");
-        assert_eq!(normalize_internal_whitespace("a   b   c"), "a b c");
-        assert_eq!(normalize_internal_whitespace("a\t\tb"), "a b");
-        assert_eq!(normalize_internal_whitespace("ab"), "ab");
+    fn test_normalize_binary_ops() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("А=Б+В;", &config), "А = Б + В;");
+        assert_eq!(normalize_line_whitespace("А=Б-В*Г/Д;", &config), "А = Б - В * Г / Д;");
+    }
+
+    #[test]
+    fn test_normalize_comma() {
+        let config = FormattingConfig::default();
+        // Use valid identifiers (not keywords)
+        assert_eq!(normalize_line_whitespace("Тест(А,Б,В)", &config), "Тест(А, Б, В)");
+        assert_eq!(normalize_line_whitespace("Тест(А ,Б ,В)", &config), "Тест(А, Б, В)");
+    }
+
+    #[test]
+    fn test_normalize_dot() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("А.Б.В", &config), "А.Б.В");
+        assert_eq!(normalize_line_whitespace("А . Б . В", &config), "А.Б.В");
+    }
+
+    #[test]
+    fn test_normalize_parens() {
+        let config = FormattingConfig::default();
+        // Use valid identifiers (not keywords like "Функция")
+        assert_eq!(normalize_line_whitespace("Тест( А )", &config), "Тест(А)");
+        assert_eq!(normalize_line_whitespace("( А + Б )", &config), "(А + Б)");
+    }
+
+    #[test]
+    fn test_normalize_unary_minus() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("А=-1;", &config), "А = -1;");
+        assert_eq!(normalize_line_whitespace("Тест(-1)", &config), "Тест(-1)");
+    }
+
+    #[test]
+    fn test_normalize_comment() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("// Комментарий", &config), "// Комментарий");
+    }
+
+    #[test]
+    fn test_normalize_keywords() {
+        let config = FormattingConfig::default();
+        assert_eq!(normalize_line_whitespace("Если А Тогда", &config), "Если А Тогда");
+        assert_eq!(normalize_line_whitespace("Возврат А;", &config), "Возврат А;");
     }
 
     #[test]

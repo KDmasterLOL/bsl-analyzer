@@ -6,6 +6,7 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
 use super::indent::{calculate_base_indent, IndentState};
+use super::whitespace::normalize_line_whitespace;
 
 /// Result of formatting operation.
 #[derive(Debug, Clone)]
@@ -173,8 +174,9 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
     let indent_level = state.total();
     let indent = config.indent_for_level(indent_level);
 
-    // Format the content (trim trailing whitespace)
-    let content = if config.trim_trailing_whitespace { trimmed.trim_end() } else { trimmed };
+    // Normalize whitespace within the content (spaces around operators, etc.)
+    let normalized = normalize_line_whitespace(trimmed, config);
+    let content = if config.trim_trailing_whitespace { normalized.trim_end() } else { &normalized };
 
     // Update state for next line
     state.reset_current_offset();

@@ -875,6 +875,7 @@ dependencies = [
  "ide-assists",
  "ide-db",
  "ide-diagnostics",
+ "lexer",
  "parser",
  "project-model",
  "rustc-hash 2.1.1",
