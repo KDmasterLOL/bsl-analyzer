@@ -32,8 +32,9 @@ use tracing::debug;
 /// Runs the QueryParseError diagnostic.
 ///
 /// Checks SDBL queries for parse errors using `all_sdbl_in_file()`.
-/// Detects errors by looking for ERROR nodes in the SDBL AST
-/// (SDBL parser is error-tolerant and doesn't populate the errors list).
+/// Detects errors by:
+/// 1. Looking for ERROR nodes in the SDBL AST (parser is error-tolerant)
+/// 2. Checking for trailing dots in REFS expressions (e.g., `ССЫЛКА Документ.`)
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
     let start = Instant::now();
@@ -48,17 +49,33 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for (_query_expr_id, query_info) in sdbl_queries.iter() {
-        // Check for ERROR nodes in AST (SDBL parser is error-tolerant)
-        let has_error_nodes = query_info
+        let has_parse_error = query_info
             .query_ast
             .as_ref()
-            .map(|ast| ast.syntax_node().descendants().any(|n| n.kind() == SyntaxKind::ERROR))
+            .map(|ast| {
+                let root = ast.syntax_node();
+
+                // Check 1: ERROR nodes in AST
+                let has_error_nodes = root.descendants().any(|n| n.kind() == SyntaxKind::ERROR);
+
+                // Check 2: Trailing dot in REFS expression (e.g., ССЫЛКА Документ.)
+                // This is a common error when dynamically constructing queries
+                let has_trailing_dot = root.descendants().any(|n| {
+                    if n.kind() == SyntaxKind::SDBL_REFS_EXPR {
+                        has_trailing_dot_in_refs(&n)
+                    } else {
+                        false
+                    }
+                });
+
+                has_error_nodes || has_trailing_dot
+            })
             .unwrap_or(true); // No AST means parse failed completely
 
-        if has_error_nodes {
+        if has_parse_error {
             diagnostics.push(Diagnostic {
                 code,
-                message: "Query text must be correct".to_string(),
+                message: "Текст запроса содержит ошибки".to_string(),
                 severity: ctx.severity(code),
                 range: query_info.bsl_literal_range,
                 tags: ctx.tags(code),
@@ -74,6 +91,30 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     );
 
     diagnostics
+}
+
+/// Check if SDBL_REFS_EXPR has a trailing dot without type name.
+///
+/// Valid: `ССЫЛКА Документ.ПриходныйОрдер` - has IDENT after DOT
+/// Invalid: `ССЫЛКА Документ.` - DOT is last significant child
+fn has_trailing_dot_in_refs(node: &syntax::SyntaxNode) -> bool {
+    let children: Vec<_> = node.children_with_tokens().collect();
+
+    // Find last DOT position
+    let last_dot_pos = children
+        .iter()
+        .rposition(|child| child.as_token().map(|t| t.kind() == SyntaxKind::DOT).unwrap_or(false));
+
+    let Some(dot_pos) = last_dot_pos else {
+        return false;
+    };
+
+    // Check if there's an IDENT after the DOT (ignoring whitespace)
+    let has_ident_after_dot = children[dot_pos + 1..]
+        .iter()
+        .any(|child| child.as_token().map(|t| t.kind() == SyntaxKind::IDENT).unwrap_or(false));
+
+    !has_ident_after_dot
 }
 
 #[cfg(test)]
@@ -249,5 +290,79 @@ mod tests {
 "#;
         let diagnostics = check_sdbl_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0, "Valid complex query should not trigger diagnostic");
+    }
+
+    #[test]
+    fn test_trailing_dot_triggers_diagnostic() {
+        // Query with trailing dot in REFS - should trigger diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Trailing dot in REFS should trigger diagnostic");
+        assert_eq!(diagnostics[0].code, DiagnosticCode::QueryParseError);
+    }
+
+    #[test]
+    fn test_valid_refs_no_diagnostic() {
+        // Query with complete REFS - should NOT trigger diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос.Текст = "ВЫБРАТЬ Поле ИЗ Т ГДЕ Поле ССЫЛКА Документ.ПриходныйОрдер";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Valid REFS should not trigger diagnostic");
+    }
+
+    #[test]
+    fn test_dynamic_query_with_trailing_dot() {
+        // Dynamic query construction with trailing dot - should trigger diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос.Текст = "ВЫБРАТЬ
+                   |    Задания.Источник КАК Документ
+                   |ИЗ
+                   |    РегистрСведений.Задания КАК Задания
+                   |ГДЕ
+                   |    Задания.Источник ССЫЛКА Документ."+ИмяДокумента+"";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Dynamic query with trailing dot should trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_original_user_query_trailing_dot() {
+        // Original user query from issue - should trigger diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос.Текст = "ВЫБРАТЬ
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.Источник КАК Документ,
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.ИдентификаторЗадания КАК ИдентификаторЗадания,
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.Дата КАК Дата,
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.ДатаОбработки КАК ДатаОбработки,
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.Обработано КАК Обработано,
+                   |    ЗаданияДляПроцессаОбработкиВходногоКонтроля.Ошибка КАК Ошибка
+                   |ИЗ
+                   |    РегистрСведений.ЗаданияДляПроцессаОбработкиВходногоКонтроля КАК ЗаданияДляПроцессаОбработкиВходногоКонтроля
+                   |ГДЕ
+                   |    Не ЗаданияДляПроцессаОбработкиВходногоКонтроля.Обработано
+                   |    И ЗаданияДляПроцессаОбработкиВходногоКонтроля.Источник ССЫЛКА Документ."+ИмяДокумента+"";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Original user query with 'ССЫЛКА Документ.' should trigger diagnostic"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::QueryParseError);
     }
 }
