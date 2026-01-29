@@ -119,6 +119,10 @@ fn format_text(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> Stri
     let base_indent = calculate_base_indent(text);
     let mut state = IndentState::with_base(base_indent);
     let mut result = String::with_capacity(text.len());
+
+    // Detect line ending style from the original text
+    let line_ending = detect_line_ending(text);
+
     let mut lines = text.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -126,13 +130,13 @@ fn format_text(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> Stri
         result.push_str(&formatted_line);
 
         if lines.peek().is_some() {
-            result.push('\n');
+            result.push_str(line_ending);
         }
     }
 
     // Handle final newline
     if config.insert_final_newline && !result.ends_with('\n') && !result.is_empty() {
-        result.push('\n');
+        result.push_str(line_ending);
     }
 
     result
@@ -142,6 +146,10 @@ fn format_text(text: &str, root: &SyntaxNode, config: &FormattingConfig) -> Stri
 fn format_lines(text: &str, base_indent: u32, config: &FormattingConfig) -> String {
     let mut state = IndentState::with_base(base_indent);
     let mut result = String::with_capacity(text.len());
+
+    // Detect line ending style from the original text
+    let line_ending = detect_line_ending(text);
+
     let mut lines = text.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -149,11 +157,21 @@ fn format_lines(text: &str, base_indent: u32, config: &FormattingConfig) -> Stri
         result.push_str(&formatted_line);
 
         if lines.peek().is_some() {
-            result.push('\n');
+            result.push_str(line_ending);
         }
     }
 
     result
+}
+
+/// Detects the line ending style used in the text.
+/// Returns "\r\n" for CRLF, "\n" for LF.
+fn detect_line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Formats a single line.
@@ -579,5 +597,114 @@ mod tests {
         assert_eq!(ranges[0], (0, 5)); // "line0" (excluding \r)
         assert_eq!(ranges[1], (7, 12)); // "line1"
         assert_eq!(ranges[2], (14, 19)); // "line2"
+    }
+
+    #[test]
+    fn test_format_real_code_performance() {
+        let code = r#"// NIA 01.06.2023 АРМ Управления неликвидами - СР--0018026.
+// Запускаем перевод номенклатуры в неликвид и в исходную
+//
+Процедура ПереводНоменклатурыВНеликвидИВИсходную() Экспорт
+
+    Организация = Справочники.Организации.НайтиПоРеквизиту("ИНН", "4802024282"); // ООО Прайм Топ
+    // ++ NIA 30.01.2024 Регистр_ Склады для анализа по сроку годности; правка рег. задания по переводу в неликвид по истечению срока годности - СР--0022920.
+    // получаем список складов по которым будет производится поиск номенклатуры для перевода в неликвид
+    СписокСкладов = ПолучитьСписокСкладов();
+    // -- NIA 30.01.2024 СР--0022920.
+    // ++ NIA 17.04.2024 Регламентное задание перевод в неликвид по сроку годности - СР--0024089.
+    ДатаНачалаВыполненияРегламентногоЗадания = ТекущаяДата();
+    // -- NIA 17.04.2024 СР--0024089.
+    ПереводВНеликвидНоменклатуру(Организация, СписокСкладов, ДатаНачалаВыполненияРегламентногоЗадания);
+    ПереводИзНеликвидНоменклатуры(Организация, СписокСкладов, ДатаНачалаВыполненияРегламентногоЗадания);
+
+КонецПроцедуры
+
+// NIA 01.06.2023 АРМ Управления неликвидами - СР--0018026.
+// Запускаем перевод номенклатуры в неликвид
+//
+Процедура ПереводВНеликвидНоменклатуру(Организация, СписокСкладов, ДатаНачалаВыполненияРегламентногоЗадания)
+
+    ОстаткиПоНоменклатуре = ПолучитьОстаткиПоНоменклатуре(Организация, "ПеревестиВНеликвид", СписокСкладов);
+    // ++ PIV 08.09.2025 Автоматический перевод статуса "Нетарный остаток" партии если другая часть партии переводится в ГО - СР--0030729.
+    СоздатьДокументыРегламентноеЗадание(Организация, ОстаткиПоНоменклатуре, "ПеревестиВНеликвид", ДатаНачалаВыполненияРегламентногоЗадания, СписокСкладов);
+    // -- PIV 08.09.2025 СР--0030729.
+
+КонецПроцедуры
+
+// NIA 01.06.2023 АРМ Управления неликвидами - СР--0018026.
+// Запускаем перевод номенклатуры в неликвид
+//
+Процедура ПереводИзНеликвидНоменклатуры(Организация, СписокСкладов, ДатаНачалаВыполненияРегламентногоЗадания)
+
+    ОстаткиПоНоменклатуре = ПолучитьОстаткиПоНоменклатуре(Организация, "ПеревестиВИсходную", СписокСкладов);
+    СоздатьДокументыРегламентноеЗадание(Организация, ОстаткиПоНоменклатуре, "ПеревестиВИсходную", ДатаНачалаВыполненияРегламентногоЗадания);
+
+КонецПроцедуры"#;
+
+        let start = std::time::Instant::now();
+        let parsed = parser::parse(code);
+        let parse_time = start.elapsed();
+
+        let root = parsed.syntax_node();
+        let config = FormattingConfig::default();
+
+        let start = std::time::Instant::now();
+        let result = format_file(&root, &config);
+        let format_time = start.elapsed();
+
+        println!("Parse time: {:?}", parse_time);
+        println!("Format time: {:?}", format_time);
+        println!("Code: {} bytes, {} lines", code.len(), code.lines().count());
+        println!("Result: {} bytes", result.text.len());
+
+        // Should complete in reasonable time
+        assert!(format_time.as_millis() < 1000, "Formatting took too long: {:?}", format_time);
+    }
+
+    #[test]
+    fn test_format_large_file_performance() {
+        // Generate a large file (100 procedures ~ 900 lines)
+        let mut code = String::new();
+        for i in 0..100 {
+            code.push_str(&format!(
+                r#"
+Процедура Тест{}() Экспорт
+    А = Справочники.Организации.НайтиПоРеквизиту("ИНН", "4802024282");
+    // Комментарий номер {}
+    Б = ПолучитьСписокСкладов();
+    В = ТекущаяДата();
+    Тест(А, Б, В);
+    ЕщёОдинТест(А, Б, В, Г, Д, Е);
+КонецПроцедуры
+"#,
+                i, i
+            ));
+        }
+
+        println!("Generated file: {} bytes, {} lines", code.len(), code.lines().count());
+
+        let start = std::time::Instant::now();
+        let parsed = parser::parse(&code);
+        let parse_time = start.elapsed();
+        println!("Parse time: {:?}", parse_time);
+
+        let root = parsed.syntax_node();
+        let config = FormattingConfig::default();
+
+        let start = std::time::Instant::now();
+        let result = format_file(&root, &config);
+        let format_time = start.elapsed();
+        println!("Full file format time: {:?}", format_time);
+        println!("Result: {} bytes", result.text.len());
+
+        // Test range formatting (just ~1000 bytes in the middle)
+        let start = std::time::Instant::now();
+        let range = TextRange::new(TextSize::from(5000), TextSize::from(6000));
+        let _result = format_range(&root, range, &config);
+        let range_time = start.elapsed();
+        println!("Range format time: {:?}", range_time);
+
+        assert!(format_time.as_millis() < 5000, "Full format took too long: {:?}", format_time);
+        assert!(range_time.as_millis() < 1000, "Range format took too long: {:?}", range_time);
     }
 }

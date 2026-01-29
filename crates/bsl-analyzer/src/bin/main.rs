@@ -99,6 +99,24 @@ enum Commands {
         config: std::path::PathBuf,
     },
 
+    /// Format a BSL file
+    Format {
+        /// Path to the BSL file to format
+        file: PathBuf,
+
+        /// Write formatted output back to file (default: print to stdout)
+        #[arg(short = 'w', long)]
+        write: bool,
+
+        /// Use spaces instead of tabs (default: tabs)
+        #[arg(long)]
+        spaces: bool,
+
+        /// Number of spaces per indent level (default: 4, only with --spaces)
+        #[arg(long, default_value = "4")]
+        indent_size: u32,
+    },
+
     /// Start LSP server (default)
     Lsp,
 }
@@ -161,6 +179,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             workers,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
+        Some(Commands::Format { file, write, spaces, indent_size }) => {
+            run_format(file, write, spaces, indent_size)
+        }
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
 }
@@ -675,6 +696,51 @@ fn get_changed_files_from_git(
         .collect();
 
     Ok(files)
+}
+
+fn run_format(
+    file: PathBuf,
+    write: bool,
+    spaces: bool,
+    indent_size: u32,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use ide::formatting::{format_file, FormattingConfig};
+    use std::time::Instant;
+
+    let content = fs::read_to_string(&file)?;
+    let file_size = content.len();
+    let line_count = content.lines().count();
+
+    eprintln!("Formatting: {:?}", file);
+    eprintln!("File size: {} bytes, {} lines", file_size, line_count);
+
+    let start = Instant::now();
+    let parsed = parser::parse(&content);
+    let parse_time = start.elapsed();
+    eprintln!("Parse time: {:?}", parse_time);
+
+    let root = parsed.syntax_node();
+
+    let config = if spaces {
+        FormattingConfig::with_spaces(indent_size)
+    } else {
+        FormattingConfig::default()
+    };
+
+    let start = Instant::now();
+    let result = format_file(&root, &config);
+    let format_time = start.elapsed();
+    eprintln!("Format time: {:?}", format_time);
+    eprintln!("Total time: {:?}", parse_time + format_time);
+
+    if write {
+        fs::write(&file, &result.text)?;
+        eprintln!("Written to: {:?}", file);
+    } else {
+        print!("{}", result.text);
+    }
+
+    Ok(())
 }
 
 fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send + Sync>> {

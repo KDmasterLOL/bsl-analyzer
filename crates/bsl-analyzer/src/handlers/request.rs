@@ -608,33 +608,47 @@ pub fn handle_range_formatting(
     )
     .entered();
 
+    let total_start = std::time::Instant::now();
+
     let uri = params.text_document.uri;
 
     // Get FileId
+    let start = std::time::Instant::now();
     let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+    tracing::debug!("file_id_snapshot: {:?}", start.elapsed());
 
     // Get text for line index
+    let start = std::time::Instant::now();
     let text = snap
         .mem_docs
         .get(&uri)
         .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+    tracing::debug!("mem_docs.get: {:?}, text len: {}", start.elapsed(), text.len());
 
+    let start = std::time::Instant::now();
     let line_index = LineIndex::new(&text);
+    tracing::debug!("LineIndex::new: {:?}", start.elapsed());
 
     // Convert LSP range to TextRange
+    let start = std::time::Instant::now();
     let range = crate::lsp::text_range(&line_index, &text, params.range)?;
+    tracing::debug!("text_range conversion: {:?}, range: {:?}", start.elapsed(), range);
 
     // Get formatting config
     let config = formatting_config_from_options(&params.options);
 
     // Call IDE API
+    let start = std::time::Instant::now();
     let result = snap.analysis.format_range(file_id, range, &config);
+    tracing::debug!("format_range: {:?}, edits: {}", start.elapsed(), result.edits.len());
 
     // Convert edits
     if result.edits.is_empty() {
+        tracing::debug!("total time (no edits): {:?}", total_start.elapsed());
         return Ok(None);
     }
 
+    let start = std::time::Instant::now();
     let lsp_edits: Vec<lsp_types::TextEdit> = result
         .edits
         .into_iter()
@@ -643,6 +657,9 @@ pub fn handle_range_formatting(
             Some(lsp_types::TextEdit { range, new_text: edit.new_text })
         })
         .collect();
+    tracing::debug!("convert edits: {:?}", start.elapsed());
+
+    tracing::info!("range_formatting total: {:?}", total_start.elapsed());
 
     if lsp_edits.is_empty() {
         Ok(None)

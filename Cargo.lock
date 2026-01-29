@@ -163,6 +163,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "parking_lot",
+ "parser",
  "paths",
  "profile",
  "project-model",

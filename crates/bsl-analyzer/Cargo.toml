@@ -15,6 +15,7 @@ path = "src/bin/main.rs"
 [dependencies]
 ide.workspace = true
 ide-diagnostics.workspace = true
+parser.workspace = true
 ide-db.workspace = true
 hir-def.workspace = true
 cfg.workspace = true
