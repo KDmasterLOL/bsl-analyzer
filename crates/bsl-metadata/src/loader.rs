@@ -37,6 +37,7 @@ use crate::traits::MdObject;
 use crate::xml_parser;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// Load configuration from Designer format directory
 ///
@@ -60,63 +61,8 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     let path = path.as_ref();
     let _span = tracing::info_span!("load_from_directory", ?path).entered();
 
-    let mut config = Configuration::new("Configuration");
-
-    // Load CommonModules
-    load_common_modules(&path.join("CommonModules"), &mut config)?;
-
-    // Load Catalogs
-    load_catalogs(&path.join("Catalogs"), &mut config)?;
-
-    // Load Documents
-    load_documents(&path.join("Documents"), &mut config)?;
-
-    // Load all 4 register types
-    load_information_registers(&path.join("InformationRegisters"), &mut config)?;
-    load_accumulation_registers(&path.join("AccumulationRegisters"), &mut config)?;
-    load_accounting_registers(&path.join("AccountingRegisters"), &mut config)?;
-    load_calculation_registers(&path.join("CalculationRegisters"), &mut config)?;
-
-    // Load EventSubscriptions
-    load_event_subscriptions(&path.join("EventSubscriptions"), &mut config)?;
-
-    // Load ScheduledJobs
-    load_scheduled_jobs(&path.join("ScheduledJobs"), &mut config)?;
-
-    // Load Roles
-    load_roles(&path.join("Roles"), &mut config)?;
-
-    // Load DefinedTypes
-    load_defined_types(&path.join("DefinedTypes"), &mut config)?;
-
-    // Load ChartsOfCharacteristicTypes (with full parsing for tabular sections)
-    load_charts_of_characteristic_types(&path.join("ChartsOfCharacteristicTypes"), &mut config)?;
-
-    // Load Constants
-    load_constants(&path.join("Constants"), &mut config)?;
-
-    // Load other metadata types
-    load_exchange_plans(&path.join("ExchangePlans"), &mut config)?;
-    load_business_processes(&path.join("BusinessProcesses"), &mut config)?;
-    load_enums(&path.join("Enums"), &mut config)?;
-    load_tasks(&path.join("Tasks"), &mut config)?;
-    load_charts_of_accounts(&path.join("ChartsOfAccounts"), &mut config)?;
-    load_simple_metadata_objects(
-        &path.join("ChartsOfCalculationTypes"),
-        &mut config,
-        MdoType::ChartOfCalculationTypes,
-    )?;
-    load_simple_metadata_objects(
-        &path.join("ExternalDataSources"),
-        &mut config,
-        MdoType::ExternalDataSource,
-    )?;
-
-    // Load HTTPServices
-    load_http_services(&path.join("HTTPServices"), &mut config)?;
-
-    // Load WebServices (SOAP)
-    load_web_services(&path.join("WebServices"), &mut config)?;
+    let loaded = load_all_metadata_parallel(path);
+    let config = build_configuration(loaded);
 
     tracing::info!(
         common_modules = config.common_modules().len(),
@@ -134,629 +80,550 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     Ok(config)
 }
 
-/// Load CommonModules from directory
-///
-/// Designer format structure:
-/// - XML: `CommonModules/<Name>.xml` (рядом с папкой!)
-/// - Code: `CommonModules/<Name>/Ext/Module.bsl` (внутри Ext/)
-fn load_common_modules(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_common_modules", ?dir).entered();
+/// All metadata loaded from disk, before assembling into Configuration.
+struct LoadedMetadata {
+    common_modules: Vec<crate::common_module::CommonModule>,
+    catalogs: Vec<MetadataObject>,
+    documents: Vec<MetadataObject>,
+    info_registers: Vec<crate::register::Register>,
+    accum_registers: Vec<crate::register::Register>,
+    account_registers: Vec<crate::register::Register>,
+    calc_registers: Vec<crate::register::Register>,
+    event_subscriptions: Vec<crate::event_subscription::EventSubscription>,
+    scheduled_jobs: Vec<crate::scheduled_job::ScheduledJob>,
+    roles: Vec<crate::role::Role>,
+    defined_types: Vec<crate::defined_type::DefinedType>,
+    charts_char_types: Vec<MetadataObject>,
+    constants: Vec<MetadataObject>,
+    exchange_plans: Vec<MetadataObject>,
+    business_processes: Vec<MetadataObject>,
+    enums: Vec<MetadataObject>,
+    tasks: Vec<MetadataObject>,
+    charts_accounts: Vec<MetadataObject>,
+    charts_calc_types: Vec<MetadataObject>,
+    external_data_sources: Vec<MetadataObject>,
+    http_services: Vec<crate::http_service::HTTPService>,
+    web_services: Vec<crate::web_service::WebService>,
+}
 
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+/// Load all metadata types in parallel using rayon::scope.
+fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
+    let common_modules = Mutex::new(Vec::new());
+    let catalogs = Mutex::new(Vec::new());
+    let documents = Mutex::new(Vec::new());
+    let info_registers = Mutex::new(Vec::new());
+    let accum_registers = Mutex::new(Vec::new());
+    let account_registers = Mutex::new(Vec::new());
+    let calc_registers = Mutex::new(Vec::new());
+    let event_subscriptions = Mutex::new(Vec::new());
+    let scheduled_jobs = Mutex::new(Vec::new());
+    let roles = Mutex::new(Vec::new());
+    let defined_types = Mutex::new(Vec::new());
+    let charts_char_types = Mutex::new(Vec::new());
+    let constants = Mutex::new(Vec::new());
+    let exchange_plans = Mutex::new(Vec::new());
+    let business_processes = Mutex::new(Vec::new());
+    let enums = Mutex::new(Vec::new());
+    let tasks = Mutex::new(Vec::new());
+    let charts_accounts = Mutex::new(Vec::new());
+    let charts_calc_types = Mutex::new(Vec::new());
+    let external_data_sources = Mutex::new(Vec::new());
+    let http_services = Mutex::new(Vec::new());
+    let web_services = Mutex::new(Vec::new());
+
+    rayon::scope(|s| {
+        s.spawn(|_| {
+            *common_modules.lock().unwrap() =
+                load_common_modules_parallel(&path.join("CommonModules"))
+        });
+        s.spawn(|_| *catalogs.lock().unwrap() = load_catalogs_parallel(&path.join("Catalogs")));
+        s.spawn(|_| *documents.lock().unwrap() = load_documents_parallel(&path.join("Documents")));
+        s.spawn(|_| {
+            *info_registers.lock().unwrap() =
+                load_information_registers_parallel(&path.join("InformationRegisters"))
+        });
+        s.spawn(|_| {
+            *accum_registers.lock().unwrap() =
+                load_accumulation_registers_parallel(&path.join("AccumulationRegisters"))
+        });
+        s.spawn(|_| {
+            *account_registers.lock().unwrap() =
+                load_accounting_registers_parallel(&path.join("AccountingRegisters"))
+        });
+        s.spawn(|_| {
+            *calc_registers.lock().unwrap() =
+                load_calculation_registers_parallel(&path.join("CalculationRegisters"))
+        });
+        s.spawn(|_| {
+            *event_subscriptions.lock().unwrap() =
+                load_event_subscriptions_parallel(&path.join("EventSubscriptions"))
+        });
+        s.spawn(|_| {
+            *scheduled_jobs.lock().unwrap() =
+                load_scheduled_jobs_parallel(&path.join("ScheduledJobs"))
+        });
+        s.spawn(|_| *roles.lock().unwrap() = load_roles_parallel(&path.join("Roles")));
+        s.spawn(|_| {
+            *defined_types.lock().unwrap() = load_defined_types_parallel(&path.join("DefinedTypes"))
+        });
+        s.spawn(|_| {
+            *charts_char_types.lock().unwrap() = load_charts_of_characteristic_types_parallel(
+                &path.join("ChartsOfCharacteristicTypes"),
+            )
+        });
+        s.spawn(|_| *constants.lock().unwrap() = load_constants_parallel(&path.join("Constants")));
+        s.spawn(|_| {
+            *exchange_plans.lock().unwrap() =
+                load_exchange_plans_parallel(&path.join("ExchangePlans"))
+        });
+        s.spawn(|_| {
+            *business_processes.lock().unwrap() =
+                load_business_processes_parallel(&path.join("BusinessProcesses"))
+        });
+        s.spawn(|_| *enums.lock().unwrap() = load_enums_parallel(&path.join("Enums")));
+        s.spawn(|_| *tasks.lock().unwrap() = load_tasks_parallel(&path.join("Tasks")));
+        s.spawn(|_| {
+            *charts_accounts.lock().unwrap() =
+                load_charts_of_accounts_parallel(&path.join("ChartsOfAccounts"))
+        });
+        s.spawn(|_| {
+            *charts_calc_types.lock().unwrap() = load_simple_metadata_objects_parallel(
+                &path.join("ChartsOfCalculationTypes"),
+                MdoType::ChartOfCalculationTypes,
+            )
+        });
+        s.spawn(|_| {
+            *external_data_sources.lock().unwrap() = load_simple_metadata_objects_parallel(
+                &path.join("ExternalDataSources"),
+                MdoType::ExternalDataSource,
+            )
+        });
+        s.spawn(|_| {
+            *http_services.lock().unwrap() = load_http_services_parallel(&path.join("HTTPServices"))
+        });
+        s.spawn(|_| {
+            *web_services.lock().unwrap() = load_web_services_parallel(&path.join("WebServices"))
+        });
+    });
+
+    LoadedMetadata {
+        common_modules: common_modules.into_inner().unwrap(),
+        catalogs: catalogs.into_inner().unwrap(),
+        documents: documents.into_inner().unwrap(),
+        info_registers: info_registers.into_inner().unwrap(),
+        accum_registers: accum_registers.into_inner().unwrap(),
+        account_registers: account_registers.into_inner().unwrap(),
+        calc_registers: calc_registers.into_inner().unwrap(),
+        event_subscriptions: event_subscriptions.into_inner().unwrap(),
+        scheduled_jobs: scheduled_jobs.into_inner().unwrap(),
+        roles: roles.into_inner().unwrap(),
+        defined_types: defined_types.into_inner().unwrap(),
+        charts_char_types: charts_char_types.into_inner().unwrap(),
+        constants: constants.into_inner().unwrap(),
+        exchange_plans: exchange_plans.into_inner().unwrap(),
+        business_processes: business_processes.into_inner().unwrap(),
+        enums: enums.into_inner().unwrap(),
+        tasks: tasks.into_inner().unwrap(),
+        charts_accounts: charts_accounts.into_inner().unwrap(),
+        charts_calc_types: charts_calc_types.into_inner().unwrap(),
+        external_data_sources: external_data_sources.into_inner().unwrap(),
+        http_services: http_services.into_inner().unwrap(),
+        web_services: web_services.into_inner().unwrap(),
+    }
+}
+
+/// Build Configuration from loaded metadata.
+fn build_configuration(loaded: LoadedMetadata) -> Configuration {
+    let mut config = Configuration::new("Configuration");
+
+    for module in loaded.common_modules {
+        config.add_common_module(module);
+    }
+    for obj in loaded.catalogs {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.documents {
+        config.add_metadata_object(obj);
+    }
+    for reg in loaded.info_registers {
+        config.add_register(reg);
+    }
+    for reg in loaded.accum_registers {
+        config.add_register(reg);
+    }
+    for reg in loaded.account_registers {
+        config.add_register(reg);
+    }
+    for reg in loaded.calc_registers {
+        config.add_register(reg);
+    }
+    for sub in loaded.event_subscriptions {
+        config.add_event_subscription(sub);
+    }
+    for job in loaded.scheduled_jobs {
+        config.add_scheduled_job(job);
+    }
+    for role in loaded.roles {
+        config.add_role(role);
+    }
+    for dt in loaded.defined_types {
+        config.add_defined_type(dt);
+    }
+    for obj in loaded.charts_char_types {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.constants {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.exchange_plans {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.business_processes {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.enums {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.tasks {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.charts_accounts {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.charts_calc_types {
+        config.add_metadata_object(obj);
+    }
+    for obj in loaded.external_data_sources {
+        config.add_metadata_object(obj);
+    }
+    for svc in loaded.http_services {
+        config.add_http_service(svc);
+    }
+    for svc in loaded.web_services {
+        config.add_web_service(svc);
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let module_dir = entry.path();
+    config
+}
 
-        // Look for directories
-        if module_dir.is_dir() {
-            if let Some(name) = module_dir.file_name().and_then(|n| n.to_str()) {
-                // Designer format structure:
-                // - XML: CommonModules/<Name>.xml (NEXT TO folder)
-                // - Code: CommonModules/<Name>/Ext/Module.bsl (inside Ext/)
+// ============================================================================
+// Parallel loading functions
+// ============================================================================
 
-                let xml_path = dir.join(format!("{}.xml", name));
-                let module_bsl_path = module_dir.join("Ext/Module.bsl");
-                let module_bin_path = module_dir.join("Ext/Module.bin");
+/// Load CommonModules in parallel, returning a Vec instead of mutating config.
+fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonModule> {
+    if !dir.exists() {
+        return Vec::new();
+    }
 
-                if xml_path.exists() {
-                    // Parse XML to get properties
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let mut module = xml_parser::parse_common_module_xml(&xml)?;
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-                    // Module is protected if .bin exists but .bsl does not
-                    let is_protected = module_bin_path.exists() && !module_bsl_path.exists();
-
-                    // Build URI to .bsl file if it exists
-                    if module_bsl_path.exists() {
-                        // URI relative to configuration root
-                        let uri = format!("CommonModules/{}/Ext/Module.bsl", name);
-                        module = crate::common_module::CommonModule::builder()
-                            .uuid(*module.uuid())
-                            .name(module.name())
-                            .uri(Some(uri))
-                            .server(module.is_server())
-                            .global(module.is_global())
-                            .client_managed_application(module.is_client_managed_application())
-                            .client_ordinary_application(module.is_client_ordinary_application())
-                            .external_connection(module.is_external_connection())
-                            .server_call(module.is_server_call())
-                            .privileged(module.is_privileged())
-                            .return_values_reuse(module.return_values_reuse())
-                            .protected(false)
-                            .build();
-                    } else if is_protected {
-                        // Protected module - has .bin without .bsl
-                        module = crate::common_module::CommonModule::builder()
-                            .uuid(*module.uuid())
-                            .name(module.name())
-                            .uri(None::<String>)
-                            .server(module.is_server())
-                            .global(module.is_global())
-                            .client_managed_application(module.is_client_managed_application())
-                            .client_ordinary_application(module.is_client_ordinary_application())
-                            .external_connection(module.is_external_connection())
-                            .server_call(module.is_server_call())
-                            .privileged(module.is_privileged())
-                            .return_values_reuse(module.return_values_reuse())
-                            .protected(true)
-                            .build();
-                    }
-
-                    tracing::debug!(
-                        module = %module.name(),
-                        has_code = module_bsl_path.exists(),
-                        is_protected = is_protected,
-                        "loaded common module"
-                    );
-
-                    config.add_common_module(module);
-                } else {
-                    tracing::warn!(
-                        name = %name,
-                        "CommonModule directory found but no XML file"
-                    );
-                }
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let module_dir = entry.path();
+            if !module_dir.is_dir() {
+                return None;
             }
-        }
-    }
 
-    Ok(())
-}
+            let name = module_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
+            let module_bsl_path = module_dir.join("Ext/Module.bsl");
+            let module_bin_path = module_dir.join("Ext/Module.bin");
 
-/// Load Catalogs from directory
-///
-/// Designer format structure:
-/// - XML: `Catalogs/<Name>.xml` (рядом с папкой!)
-/// - Code: `Catalogs/<Name>/Ext/ManagerModule.bsl` and `ObjectModule.bsl` (внутри Ext/)
-fn load_catalogs(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_catalogs", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let catalog_dir = entry.path();
-
-        // Look for directories
-        if catalog_dir.is_dir() {
-            if let Some(name) = catalog_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get catalog with attributes
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let catalog = xml_parser::parse_catalog_xml(&xml)?;
-
-                    tracing::debug!(
-                        catalog = %name,
-                        attributes = catalog.attributes.len(),
-                        "loaded catalog"
-                    );
-
-                    config.add_metadata_object(catalog);
-                }
+            if !xml_path.exists() {
+                return None;
             }
-        }
-    }
 
-    Ok(())
-}
+            let xml = fs::read_to_string(&xml_path).ok()?;
+            let mut module = xml_parser::parse_common_module_xml(&xml).ok()?;
 
-/// Load Documents from directory
-///
-/// Designer format structure:
-/// - XML: `Documents/<Name>.xml` (рядом с папкой!)
-/// - Code: `Documents/<Name>/Ext/ManagerModule.bsl` and `ObjectModule.bsl` (внутри Ext/)
-fn load_documents(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_documents", ?dir).entered();
+            let is_protected = module_bin_path.exists() && !module_bsl_path.exists();
 
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let document_dir = entry.path();
-
-        // Look for directories
-        if document_dir.is_dir() {
-            if let Some(name) = document_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get document with attributes
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let document = xml_parser::parse_document_xml(&xml)?;
-
-                    tracing::debug!(
-                        document = %name,
-                        attributes = document.attributes.len(),
-                        "loaded document"
-                    );
-
-                    config.add_metadata_object(document);
-                }
+            if module_bsl_path.exists() {
+                let uri = format!("CommonModules/{}/Ext/Module.bsl", name);
+                module = crate::common_module::CommonModule::builder()
+                    .uuid(*module.uuid())
+                    .name(module.name())
+                    .uri(Some(uri))
+                    .server(module.is_server())
+                    .global(module.is_global())
+                    .client_managed_application(module.is_client_managed_application())
+                    .client_ordinary_application(module.is_client_ordinary_application())
+                    .external_connection(module.is_external_connection())
+                    .server_call(module.is_server_call())
+                    .privileged(module.is_privileged())
+                    .return_values_reuse(module.return_values_reuse())
+                    .protected(false)
+                    .build();
+            } else if is_protected {
+                module = crate::common_module::CommonModule::builder()
+                    .uuid(*module.uuid())
+                    .name(module.name())
+                    .uri(None::<String>)
+                    .server(module.is_server())
+                    .global(module.is_global())
+                    .client_managed_application(module.is_client_managed_application())
+                    .client_ordinary_application(module.is_client_ordinary_application())
+                    .external_connection(module.is_external_connection())
+                    .server_call(module.is_server_call())
+                    .privileged(module.is_privileged())
+                    .return_values_reuse(module.return_values_reuse())
+                    .protected(true)
+                    .build();
             }
-        }
-    }
 
-    Ok(())
+            Some(module)
+        })
+        .collect()
 }
 
-/// Load BusinessProcesses from directory
-fn load_business_processes(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_business_processes", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let business_process_dir = entry.path();
-
-        // Look for directories
-        if business_process_dir.is_dir() {
-            if let Some(name) = business_process_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get business process with attributes
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let business_process = xml_parser::parse_business_process_xml(&xml)?;
-
-                    tracing::debug!(
-                        business_process = %name,
-                        attributes = business_process.attributes.len(),
-                        "loaded business process with attributes"
-                    );
-
-                    config.add_metadata_object(business_process);
-                }
-            }
-        }
-    }
-
-    Ok(())
+/// Load Catalogs in parallel.
+fn load_catalogs_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_catalog_xml)
 }
 
-/// Load Tasks from directory
-fn load_tasks(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_tasks", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let task_dir = entry.path();
-
-        // Look for directories
-        if task_dir.is_dir() {
-            if let Some(name) = task_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get task with attributes and tabular sections
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let task = xml_parser::parse_task_xml(&xml)?;
-
-                    tracing::debug!(
-                        task = %name,
-                        attributes = task.attributes.len(),
-                        tabular_sections = task.tabular_sections.len(),
-                        "loaded task"
-                    );
-
-                    config.add_metadata_object(task);
-                }
-            }
-        }
-    }
-
-    Ok(())
+/// Load Documents in parallel.
+fn load_documents_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_document_xml)
 }
 
-/// Load ExchangePlans from directory
-fn load_exchange_plans(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_exchange_plans", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let exchange_plan_dir = entry.path();
-
-        // Look for directories
-        if exchange_plan_dir.is_dir() {
-            if let Some(name) = exchange_plan_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get exchange plan with attributes and tabular sections
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let exchange_plan = xml_parser::parse_exchange_plan_xml(&xml)?;
-
-                    tracing::debug!(
-                        exchange_plan = %name,
-                        attributes = exchange_plan.attributes.len(),
-                        tabular_sections = exchange_plan.tabular_sections.len(),
-                        "loaded exchange plan"
-                    );
-
-                    config.add_metadata_object(exchange_plan);
-                }
-            }
-        }
-    }
-
-    Ok(())
+/// Load BusinessProcesses in parallel.
+fn load_business_processes_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_business_process_xml)
 }
 
-/// Load Enums from directory with EnumValue elements
-///
-/// Designer format structure:
-/// - XML: `Enums/<Name>.xml` (next to folder)
-/// - Folder: `Enums/<Name>/` (may exist but has no code files for Enums)
-fn load_enums(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_enums", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    // Collect all XML files to avoid duplicates
-    // (some enums have both directory and XML file with same name)
-    let mut processed = std::collections::HashSet::new();
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Only process XML files
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
-            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                // Skip if already processed
-                if !processed.insert(name.to_string()) {
-                    continue;
-                }
-
-                let xml = fs::read_to_string(&path)?;
-                let enum_obj = xml_parser::parse_enum_xml(&xml)?;
-
-                tracing::debug!(
-                    enum_name = %name,
-                    enum_values = enum_obj.enum_values.len(),
-                    "loaded enum"
-                );
-
-                config.add_metadata_object(enum_obj);
-            }
-        }
-    }
-
-    Ok(())
+/// Load Tasks in parallel.
+fn load_tasks_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_task_xml)
 }
 
-/// Load ChartsOfCharacteristicTypes from directory
-fn load_charts_of_characteristic_types(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_charts_of_characteristic_types", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let chart_dir = entry.path();
-
-        // Look for directories
-        if chart_dir.is_dir() {
-            if let Some(name) = chart_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    // Parse XML to get chart with attributes and tabular sections
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let chart = xml_parser::parse_chart_of_characteristic_types_xml(&xml)?;
-
-                    tracing::debug!(
-                        chart = %name,
-                        attributes = chart.attributes.len(),
-                        tabular_sections = chart.tabular_sections.len(),
-                        "loaded chart of characteristic types"
-                    );
-
-                    config.add_metadata_object(chart);
-                }
-            }
-        }
-    }
-
-    Ok(())
+/// Load ExchangePlans in parallel.
+fn load_exchange_plans_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_exchange_plan_xml)
 }
 
-/// Load ChartsOfAccounts from directory
-fn load_charts_of_accounts(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_charts_of_accounts", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let chart_dir = entry.path();
-
-        if chart_dir.is_dir() {
-            if let Some(name) = chart_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let chart = xml_parser::parse_chart_of_accounts_xml(&xml)?;
-
-                    tracing::debug!(
-                        chart = %name,
-                        attributes = chart.attributes.len(),
-                        check_unique = chart.check_unique,
-                        code_series = ?chart.code_series,
-                        "loaded chart of accounts"
-                    );
-
-                    config.add_metadata_object(chart);
-                }
-            }
-        }
-    }
-
-    Ok(())
+/// Load ChartsOfCharacteristicTypes in parallel.
+fn load_charts_of_characteristic_types_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_characteristic_types_xml)
 }
 
-/// Load Constants from directory
-///
-/// Constants are stored as individual XML files directly in the Constants folder,
-/// without subdirectories.
-fn load_constants(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_constants", ?dir).entered();
-
-    if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Constants are stored as XML files directly (no subdirectories)
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "xml") {
-            let xml = fs::read_to_string(&path)?;
-            let constant = xml_parser::parse_constant_xml(&xml)?;
-
-            tracing::debug!(
-                constant = %constant.name,
-                "loaded constant"
-            );
-
-            config.add_metadata_object(constant);
-        }
-    }
-
-    Ok(())
+/// Load ChartsOfAccounts in parallel.
+fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
+    load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
 }
 
-/// Load InformationRegisters from directory
-fn load_information_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
-    load_registers(dir, config, xml_parser::parse_information_register_xml)
-}
-
-/// Load AccumulationRegisters from directory
-fn load_accumulation_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
-    load_registers(dir, config, xml_parser::parse_accumulation_register_xml)
-}
-
-/// Load AccountingRegisters from directory
-fn load_accounting_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
-    load_registers(dir, config, xml_parser::parse_accounting_register_xml)
-}
-
-/// Load CalculationRegisters from directory
-fn load_calculation_registers(dir: &Path, config: &mut Configuration) -> Result<()> {
-    load_registers(dir, config, xml_parser::parse_calculation_register_xml)
-}
-
-/// Generic register loader for all 4 register types
-///
-/// Designer format structure:
-/// - XML: `<RegisterType>/<Name>.xml` (NEXT TO folder OR standalone)
-/// - Code: `<RegisterType>/<Name>/Ext/ManagerModule.bsl` (inside Ext/, optional)
-///
-/// Note: Registers without code (no Ext/ folder) will only have XML files.
-fn load_registers<F>(dir: &Path, config: &mut Configuration, parser: F) -> Result<()>
+/// Generic parallel loader for metadata objects with directory structure.
+fn load_metadata_objects_parallel<F>(dir: &Path, parser: F) -> Vec<MetadataObject>
 where
-    F: Fn(&str) -> Result<crate::register::Register>,
+    F: Fn(&str) -> Result<MetadataObject> + Sync,
 {
-    let _span = tracing::debug_span!("load_registers", ?dir).entered();
-
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    // Collect all XML files (both with and without folders)
-    let mut xml_files = std::collections::HashSet::new();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        // If it's a .xml file, add it to the set
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            if let Some(name) = path.file_stem().and_then(|n| n.to_str()) {
-                xml_files.insert(name.to_string());
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let obj_dir = entry.path();
+            if !obj_dir.is_dir() {
+                return None;
             }
-        }
-    }
 
-    // Load each register from its XML file
-    for name in xml_files {
-        let xml_path = dir.join(format!("{}.xml", name));
+            let name = obj_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
 
-        if xml_path.exists() {
-            let xml = fs::read_to_string(&xml_path)?;
-            let register = parser(&xml)?;
-            config.add_register(register);
+            if !xml_path.exists() {
+                return None;
+            }
 
-            tracing::debug!(
-                register = %name,
-                "loaded register"
-            );
-        }
-    }
-
-    Ok(())
+            let xml = fs::read_to_string(&xml_path).ok()?;
+            parser(&xml).ok()
+        })
+        .collect()
 }
 
-/// Load EventSubscriptions from directory
-///
-/// **CRITICAL:** EventSubscriptions have NO code files - only XML!
-///
-/// Designer format structure:
-/// - XML: `EventSubscriptions/<Name>.xml` (NO folders, NO code files)
-fn load_event_subscriptions(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_event_subscriptions", ?dir).entered();
-
+/// Load Enums in parallel.
+fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Only process .xml files (EventSubscriptions have no code)
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            let xml = fs::read_to_string(&path)?;
-            let subscription = xml_parser::parse_event_subscription_xml(&xml)?;
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
 
-            tracing::debug!(
-                subscription = %subscription.name(),
-                handler = %subscription.handler_string(),
-                "loaded event subscription"
-            );
-
-            config.add_event_subscription(subscription);
-        }
-    }
-
-    Ok(())
+            let xml = fs::read_to_string(&path).ok()?;
+            xml_parser::parse_enum_xml(&xml).ok()
+        })
+        .collect()
 }
 
-/// Load ScheduledJobs from directory
-///
-/// **CRITICAL:** ScheduledJobs have NO code files - only XML!
-///
-/// Designer format structure:
-/// - XML: `ScheduledJobs/<Name>.xml` (NO folders, NO code files)
-fn load_scheduled_jobs(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_scheduled_jobs", ?dir).entered();
-
+/// Load Constants in parallel.
+fn load_constants_parallel(dir: &Path) -> Vec<MetadataObject> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Only process .xml files (ScheduledJobs have no code)
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            let xml = fs::read_to_string(&path)?;
-            let job = xml_parser::parse_scheduled_job_xml(&xml)?;
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
 
-            tracing::debug!(
-                job_name = %job.name(),
-                method_name = %job.method_name(),
-                predefined = job.is_predefined(),
-                "loaded scheduled job"
-            );
-
-            config.add_scheduled_job(job);
-        }
-    }
-
-    Ok(())
+            let xml = fs::read_to_string(&path).ok()?;
+            xml_parser::parse_constant_xml(&xml).ok()
+        })
+        .collect()
 }
 
-/// Load Roles from directory
-///
-/// **CRITICAL:** Roles have NO code files - only XML!
-///
-/// Designer format structure:
-/// - XML: `Roles/<Name>.xml` - basic info (uuid, name)
-/// - Rights: `Roles/<Name>/Ext/Rights.xml` - permissions data
-fn load_roles(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_roles", ?dir).entered();
-
+/// Load registers in parallel (generic for all register types).
+fn load_registers_parallel<F>(dir: &Path, parser: F) -> Vec<crate::register::Register>
+where
+    F: Fn(&str) -> Result<crate::register::Register> + Sync,
+{
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Only process .xml files (role definition)
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                let xml = fs::read_to_string(&path)?;
-                let mut role = xml_parser::parse_role_xml(&xml)?;
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
 
-                // Try to load Rights.xml for this role
-                let rights_path = dir.join(name).join("Ext").join("Rights.xml");
-                if rights_path.exists() {
-                    let rights_xml = fs::read_to_string(&rights_path)?;
+            let xml = fs::read_to_string(&path).ok()?;
+            parser(&xml).ok()
+        })
+        .collect()
+}
+
+fn load_information_registers_parallel(dir: &Path) -> Vec<crate::register::Register> {
+    load_registers_parallel(dir, xml_parser::parse_information_register_xml)
+}
+
+fn load_accumulation_registers_parallel(dir: &Path) -> Vec<crate::register::Register> {
+    load_registers_parallel(dir, xml_parser::parse_accumulation_register_xml)
+}
+
+fn load_accounting_registers_parallel(dir: &Path) -> Vec<crate::register::Register> {
+    load_registers_parallel(dir, xml_parser::parse_accounting_register_xml)
+}
+
+fn load_calculation_registers_parallel(dir: &Path) -> Vec<crate::register::Register> {
+    load_registers_parallel(dir, xml_parser::parse_calculation_register_xml)
+}
+
+/// Load EventSubscriptions in parallel.
+fn load_event_subscriptions_parallel(
+    dir: &Path,
+) -> Vec<crate::event_subscription::EventSubscription> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
+
+            let xml = fs::read_to_string(&path).ok()?;
+            xml_parser::parse_event_subscription_xml(&xml).ok()
+        })
+        .collect()
+}
+
+/// Load ScheduledJobs in parallel.
+fn load_scheduled_jobs_parallel(dir: &Path) -> Vec<crate::scheduled_job::ScheduledJob> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
+
+            let xml = fs::read_to_string(&path).ok()?;
+            xml_parser::parse_scheduled_job_xml(&xml).ok()
+        })
+        .collect()
+}
+
+/// Load Roles in parallel.
+fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
+
+            let name = path.file_stem()?.to_str()?;
+            let xml = fs::read_to_string(&path).ok()?;
+            let mut role = xml_parser::parse_role_xml(&xml).ok()?;
+
+            // Try to load Rights.xml
+            let rights_path = dir.join(name).join("Ext").join("Rights.xml");
+            if rights_path.exists() {
+                if let Ok(rights_xml) = fs::read_to_string(&rights_path) {
                     if let Ok(rights_data) = xml_parser::parse_rights_xml(&rights_xml) {
                         role = crate::role::Role::with_data(
                             *role.uuid(),
@@ -765,190 +632,131 @@ fn load_roles(dir: &Path, config: &mut Configuration) -> Result<()> {
                         );
                     }
                 }
-
-                tracing::debug!(
-                    role_name = %role.name(),
-                    set_for_new_objects = role.data().set_for_new_objects(),
-                    "loaded role"
-                );
-
-                config.add_role(role);
             }
-        }
-    }
 
-    Ok(())
+            Some(role)
+        })
+        .collect()
 }
 
-/// Load DefinedTypes from directory
-///
-/// **CRITICAL:** DefinedTypes have NO code files - only XML!
-///
-/// Designer format structure:
-/// - XML: `DefinedTypes/<Name>.xml` (NO folders, NO code files)
-fn load_defined_types(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_defined_types", ?dir).entered();
-
+/// Load DefinedTypes in parallel.
+fn load_defined_types_parallel(dir: &Path) -> Vec<crate::defined_type::DefinedType> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Only process .xml files (DefinedTypes have no code)
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xml") {
-            let xml = fs::read_to_string(&path)?;
-            let defined_type = xml_parser::parse_defined_type_xml(&xml)?;
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                return None;
+            }
 
-            tracing::debug!(
-                defined_type_name = %defined_type.name(),
-                underlying_type = ?defined_type.underlying_type(),
-                "loaded defined type"
-            );
-
-            config.add_defined_type(defined_type);
-        }
-    }
-
-    Ok(())
+            let xml = fs::read_to_string(&path).ok()?;
+            xml_parser::parse_defined_type_xml(&xml).ok()
+        })
+        .collect()
 }
 
-/// Load HTTPServices from directory
-///
-/// Designer format structure:
-/// - XML: `HTTPServices/<Name>.xml` (next to folder)
-/// - Code: `HTTPServices/<Name>/Ext/Module.bsl` (inside Ext/)
-fn load_http_services(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_http_services", ?dir).entered();
-
+/// Load HTTPServices in parallel.
+fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPService> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let service_dir = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Look for directories (each HTTPService is a folder)
-        if service_dir.is_dir() {
-            if let Some(name) = service_dir.file_name().and_then(|n| n.to_str()) {
-                // XML is next to the folder
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let http_service = xml_parser::parse_http_service_xml(&xml, name)?;
-
-                    tracing::debug!(
-                        service_name = %http_service.name(),
-                        root_url = %http_service.root_url(),
-                        url_templates = http_service.url_templates().len(),
-                        "loaded HTTP service"
-                    );
-
-                    config.add_http_service(http_service);
-                }
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let service_dir = entry.path();
+            if !service_dir.is_dir() {
+                return None;
             }
-        }
-    }
 
-    Ok(())
+            let name = service_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
+
+            if !xml_path.exists() {
+                return None;
+            }
+
+            let xml = fs::read_to_string(&xml_path).ok()?;
+            xml_parser::parse_http_service_xml(&xml, name).ok()
+        })
+        .collect()
 }
 
-/// Load WebServices (SOAP) from directory
-///
-/// Designer format structure:
-/// - XML: `WebServices/<Name>.xml` (next to folder)
-/// - Code: `WebServices/<Name>/Ext/Module.bsl` (inside Ext/)
-fn load_web_services(dir: &Path, config: &mut Configuration) -> Result<()> {
-    let _span = tracing::debug_span!("load_web_services", ?dir).entered();
-
+/// Load WebServices in parallel.
+fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let service_dir = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Look for directories (each WebService is a folder)
-        if service_dir.is_dir() {
-            if let Some(name) = service_dir.file_name().and_then(|n| n.to_str()) {
-                // XML is next to the folder
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if xml_path.exists() {
-                    let xml = fs::read_to_string(&xml_path)?;
-                    let web_service = xml_parser::parse_web_service_xml(&xml, name)?;
-
-                    tracing::debug!(
-                        service_name = %web_service.name(),
-                        namespace = %web_service.namespace(),
-                        operations = web_service.operations().len(),
-                        "loaded web service"
-                    );
-
-                    config.add_web_service(web_service);
-                }
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let service_dir = entry.path();
+            if !service_dir.is_dir() {
+                return None;
             }
-        }
-    }
 
-    Ok(())
+            let name = service_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
+
+            if !xml_path.exists() {
+                return None;
+            }
+
+            let xml = fs::read_to_string(&xml_path).ok()?;
+            xml_parser::parse_web_service_xml(&xml, name).ok()
+        })
+        .collect()
 }
 
-/// Load metadata objects of any type (simplified - name only)
-///
-/// This is a generic loader for metadata types that don't have full parsers yet.
-/// It simply reads directory names and creates MetadataObject with name only.
-/// This is sufficient for SDBL completion to work.
-///
-/// Designer format structure:
-/// - XML: `<Type>/<Name>.xml` (next to folder)
-/// - Folder: `<Type>/<Name>/` (may have Ext/ inside)
-fn load_simple_metadata_objects(
-    dir: &Path,
-    config: &mut Configuration,
-    mdo_type: MdoType,
-) -> Result<()> {
-    let _span = tracing::debug_span!("load_simple_metadata_objects", ?dir, ?mdo_type).entered();
-
+/// Load simple metadata objects in parallel.
+fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<MetadataObject> {
     if !dir.exists() {
-        tracing::debug!("directory does not exist, skipping");
-        return Ok(());
+        return Vec::new();
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let object_dir = entry.path();
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
 
-        // Look for directories
-        if object_dir.is_dir() {
-            if let Some(name) = object_dir.file_name().and_then(|n| n.to_str()) {
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                // Only add if corresponding XML exists (standard Designer format)
-                if xml_path.exists() {
-                    let metadata_obj = MetadataObject::new(mdo_type, name);
-
-                    tracing::debug!(
-                        mdo_type = ?mdo_type,
-                        name = %name,
-                        "loaded metadata object (simplified)"
-                    );
-
-                    config.add_metadata_object(metadata_obj);
-                }
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let obj_dir = entry.path();
+            if !obj_dir.is_dir() {
+                return None;
             }
-        }
-    }
 
-    Ok(())
+            let name = obj_dir.file_name()?.to_str()?;
+            let xml_path = dir.join(format!("{}.xml", name));
+
+            if !xml_path.exists() {
+                return None;
+            }
+
+            Some(MetadataObject::new(mdo_type, name))
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -45,8 +45,13 @@ pub struct Config {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LoadingProgress {
+    /// Scanning workspace directories (before file count is known).
+    Scanning,
+    /// File count determined, loading started.
     Started,
+    /// Loading in progress (n files loaded).
     Progress(usize),
+    /// Loading finished.
     Finished,
 }
 

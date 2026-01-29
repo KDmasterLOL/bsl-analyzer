@@ -120,7 +120,15 @@ impl NotifyActor {
                         self.watched_dir_entries.clear();
                         self.watched_file_entries.clear();
 
-                        // First pass: count total files (fast, no I/O)
+                        // Send Scanning immediately so user sees feedback right away
+                        self.send(loader::Message::Progress {
+                            n_total: 0,
+                            n_done: LoadingProgress::Scanning,
+                            config_version,
+                            dir: None,
+                        });
+
+                        // First pass: count total files (uses WalkDir, may take time on large projects)
                         let n_total: usize =
                             config.load.iter().map(Self::count_files_in_entry).sum();
 
@@ -316,7 +324,8 @@ impl NotifyActor {
                             }
                             let path = entry.path();
 
-                            if path_might_be_cyclic(path) {
+                            // Only check for cycles if this is actually a symlink
+                            if entry.path_is_symlink() && symlink_might_be_cyclic(path) {
                                 return false;
                             }
 
@@ -358,55 +367,26 @@ impl NotifyActor {
         }
     }
 
-    /// Count files in an entry without reading their contents (fast).
+    /// Count files in an entry without reading their contents.
+    /// Uses parallel directory traversal for better performance on large projects.
     fn count_files_in_entry(entry: &loader::Entry) -> usize {
         match entry {
             loader::Entry::Files(files) => files.len(),
             loader::Entry::Directories(dirs) => {
-                let mut count = 0;
-                for root in &dirs.include {
-                    let walkdir =
-                        WalkDir::new(root).follow_links(true).into_iter().filter_entry(|entry| {
-                            if !entry.file_type().is_dir() {
-                                return true;
-                            }
-                            let path = entry.path();
+                let roots: Vec<&std::path::Path> =
+                    dirs.include.iter().map(|p| p.as_path().as_ref()).collect();
+                let excludes: Vec<&std::path::Path> =
+                    dirs.exclude.iter().map(|p| p.as_path().as_ref()).collect();
+                let extensions: Vec<&str> = dirs.extensions.iter().map(|s| s.as_str()).collect();
 
-                            if path_might_be_cyclic(path) {
-                                return false;
-                            }
-
-                            dirs.exclude.iter().all(|it| it.as_path() != path)
-                                && (root.as_path() == path
-                                    || dirs.include.iter().all(|it| it.as_path() != path))
-                        });
-
-                    count += walkdir
-                        .filter_map(|it| it.ok())
-                        .filter(|entry| {
-                            let is_file = entry.file_type().is_file();
-                            if !is_file {
-                                return false;
-                            }
-
-                            let utf8_path =
-                                match Utf8PathBuf::from_path_buf(entry.path().to_path_buf()) {
-                                    Ok(p) => p,
-                                    Err(_) => return false,
-                                };
-
-                            let path = match AbsPathBuf::try_from(utf8_path) {
-                                Ok(p) => p,
-                                Err(_) => return false,
-                            };
-
-                            dirs.extensions
-                                .iter()
-                                .any(|ext| path.as_path().extension().is_some_and(|it| it == ext))
-                        })
-                        .count();
-                }
-                count
+                stdx::fs::parallel_count(
+                    &roots,
+                    &stdx::fs::WalkConfig {
+                        extensions: &extensions,
+                        excludes: &excludes,
+                        follow_links: true,
+                    },
+                )
             }
         }
     }
@@ -439,7 +419,9 @@ fn log_notify_error<T>(res: notify::Result<T>) -> Option<T> {
 /// heuristic is not sufficient to catch all symlink cycles (it's
 /// possible to construct cycle using two or more symlinks), but it
 /// catches common cases.
-fn path_might_be_cyclic(path: &Path) -> bool {
+/// Check if a symlink points to a parent directory (potential cycle).
+/// `is_symlink` should be obtained from DirEntry::path_is_symlink() to avoid extra syscall.
+fn symlink_might_be_cyclic(path: &Path) -> bool {
     let Ok(destination) = std::fs::read_link(path) else {
         return false;
     };

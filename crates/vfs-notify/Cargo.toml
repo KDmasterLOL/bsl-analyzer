@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 tracing.workspace = true
 walkdir.workspace = true
+ignore.workspace = true
 crossbeam-channel.workspace = true
 notify.workspace = true
 rayon.workspace = true

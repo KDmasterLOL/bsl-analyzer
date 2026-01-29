@@ -105,9 +105,8 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
             recv(&state.loader_receiver) -> msg => {
                 handle_loader_msg(state, msg?)?;
-                while let Ok(msg) = state.loader_receiver.try_recv() {
-                    handle_loader_msg(state, msg)?;
-                }
+                // Don't drain loader messages - process one at a time
+                // to allow progress updates to be displayed
             }
 
             recv(&state.task_pool.receiver) -> task => {
@@ -124,8 +123,10 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
 
         // Schedule pending diagnostics after all events drained.
         // This ensures rapid changes (e.g., 50dd) are coalesced into a single diagnostic run.
-        if let Some(uri) = state.pending_diagnostics_uri.take() {
-            crate::handlers::schedule_diagnostics(state, &uri);
+        if state.vfs_done {
+            if let Some(uri) = state.pending_diagnostics_uri.take() {
+                crate::handlers::schedule_diagnostics(state, &uri);
+            }
         }
     }
 
@@ -155,36 +156,67 @@ fn handle_lsp_msg(state: &mut GlobalState, msg: Message) -> Result<()> {
 /// Handles a VFS loader message.
 fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Result<()> {
     match msg {
-        vfs::loader::Message::Progress { n_total, n_done, config_version, dir } => {
+        vfs::loader::Message::Progress { n_total, n_done, config_version: _, dir: _ } => {
             use vfs::loader::LoadingProgress;
             match n_done {
                 LoadingProgress::Finished => {
                     state.vfs_done = true;
                     tracing::info!("VFS loading complete");
 
-                    state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
+                    // Process all buffered VFS files (accumulated during loading)
+                    let pending_files = std::mem::take(&mut state.pending_vfs_files);
+                    if !pending_files.is_empty() {
+                        tracing::info!(
+                            file_count = pending_files.len(),
+                            "processing buffered VFS files"
+                        );
+                        handle_vfs_msg(state, pending_files, false)?;
+                    }
+
+                    // Sync all accumulated VFS changes to Salsa
+                    state.process_changes();
 
                     state.init_source_root();
+
+                    // Eagerly load metadata to warm Salsa cache
+                    state.report_progress(
+                        "Loading",
+                        Progress::Report,
+                        Some("Loading metadata...".into()),
+                        Some(0.95),
+                    );
+                    state.warm_metadata_cache();
+
+                    state.report_progress("Loading", Progress::End, Some("Done".into()), Some(1.0));
+
+                    // Schedule diagnostics for files that were opened before VFS finished
+                    for uri in state.mem_docs.uris() {
+                        crate::handlers::notification::schedule_diagnostics(state, &uri);
+                    }
+
+                    // Request client to refresh semantic tokens for all open files
+                    state.request_semantic_tokens_refresh();
                 }
-                LoadingProgress::Started => {
-                    tracing::info!("VFS loading started: {} entries", n_total);
+                LoadingProgress::Scanning => {
+                    tracing::info!("VFS scanning workspace...");
                     state.report_progress(
                         "Loading",
                         Progress::Begin,
-                        Some(format!("Scanning {} files...", n_total)),
+                        Some("Scanning workspace...".into()),
+                        None,
+                    );
+                }
+                LoadingProgress::Started => {
+                    tracing::info!("VFS loading started: {} files", n_total);
+                    state.report_progress(
+                        "Loading",
+                        Progress::Report,
+                        Some(format!("Loading {} files...", n_total)),
                         Some(0.0),
                     );
                 }
                 LoadingProgress::Progress(done) => {
-                    tracing::debug!(
-                        "VFS loading progress: {}/{} (config v{})",
-                        done,
-                        n_total,
-                        config_version
-                    );
-                    if let Some(ref dir) = dir {
-                        tracing::debug!("  processing: {:?}", dir);
-                    }
+                    tracing::debug!(done, n_total, "VFS loading progress");
                     let fraction = Progress::fraction(done, n_total);
                     state.report_progress(
                         "Loading",
@@ -196,7 +228,13 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             }
         }
         vfs::loader::Message::Loaded { files } | vfs::loader::Message::Changed { files } => {
-            handle_vfs_msg(state, files)?;
+            if state.vfs_done {
+                // After loading complete, process immediately
+                handle_vfs_msg(state, files, true)?;
+            } else {
+                // During initial loading, buffer files for later processing
+                state.pending_vfs_files.extend(files);
+            }
         }
     }
     Ok(())
@@ -235,10 +273,16 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
 /// Handle VFS messages from the loader thread.
 ///
 /// This function processes file contents received from the background loader thread
-/// and updates the VFS and Salsa database accordingly.
+/// and updates the VFS. Salsa database sync is deferred until VFS loading completes
+/// to allow progress messages to be processed immediately.
+///
+/// # Arguments
+/// * `sync_to_salsa` - If true, immediately sync VFS changes to Salsa database.
+///   During initial loading this should be false to avoid blocking on Salsa.
 fn handle_vfs_msg(
     state: &mut GlobalState,
     files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
+    sync_to_salsa: bool,
 ) -> Result<()> {
     use std::sync::Arc;
 
@@ -272,6 +316,12 @@ fn handle_vfs_msg(
     }
 
     drop(vfs); // Release VFS lock before processing changes
+
+    // During initial loading, defer Salsa sync to allow progress updates.
+    // All changes will be synced once VFS loading completes.
+    if !sync_to_salsa {
+        return Ok(());
+    }
 
     // Process changes and sync to Salsa database
     let (_, config_changed) = state.process_changes();

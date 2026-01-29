@@ -265,6 +265,16 @@ pub fn handle_semantic_tokens_full(
     )
     .entered();
 
+    // Don't block on metadata loading if VFS isn't done yet.
+    // Client will re-request when ready.
+    if !snap.vfs_done {
+        tracing::debug!("VFS not ready, returning empty semantic tokens");
+        return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: vec![],
+        })));
+    }
+
     let uri = params.text_document.uri;
 
     // Get FileId

@@ -186,8 +186,10 @@ name = "bsl-metadata"
 version = "0.1.0"
 dependencies = [
  "quick-xml",
+ "rayon",
  "rustc-hash 2.1.1",
  "serde",
+ "stdx",
  "thiserror 2.0.17",
  "tracing",
  "uuid",
@@ -203,6 +205,16 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+]
+
+[[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -639,6 +651,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,6 +1019,22 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
@@ -1882,6 +1923,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
+ "ignore",
  "itertools 0.12.1",
  "jod-thread",
  "libc",
@@ -2243,6 +2285,7 @@ name = "vfs-notify"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "ignore",
  "notify",
  "paths",
  "rayon",

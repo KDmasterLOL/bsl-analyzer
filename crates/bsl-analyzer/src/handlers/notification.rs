@@ -24,6 +24,13 @@ use crate::global_state::{GlobalState, Task};
 /// the in-flight query via `zalsa_mut()` → `cancel_others()`, the background thread
 /// panics, `catch_unwind` catches it, and the stale result is discarded by generation check.
 pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
+    // Don't schedule diagnostics until VFS is ready.
+    // They will be scheduled again after VFS loading completes.
+    if !state.vfs_done {
+        tracing::debug!("VFS not ready, skipping diagnostics scheduling");
+        return;
+    }
+
     state.diagnostics_generation += 1;
     let generation = state.diagnostics_generation;
 

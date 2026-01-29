@@ -3,6 +3,7 @@
 //! This crate contains utility functions and extensions used across
 //! the bsl-analyzer codebase.
 
+pub mod fs;
 pub mod thread;
 
 pub use itertools::Itertools;

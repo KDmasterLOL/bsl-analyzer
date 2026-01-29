@@ -103,6 +103,14 @@ pub struct GlobalState {
     /// URI of the most recently changed file pending diagnostics scheduling.
     /// Set by `handle_did_change`, consumed after event loop drains all messages.
     pub pending_diagnostics_uri: Option<Url>,
+
+    /// Last time progress was reported to the client.
+    /// Used for throttling to avoid overwhelming the UI.
+    pub last_progress_report: std::time::Instant,
+
+    /// Buffer for VFS files during initial loading.
+    /// Files are accumulated here and processed all at once after VFS Finished.
+    pub pending_vfs_files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
 }
 
 impl GlobalState {
@@ -130,6 +138,8 @@ impl GlobalState {
             diagnostics_config: DiagnosticsConfigInput::new(),
             diagnostics_generation: 0,
             pending_diagnostics_uri: None,
+            last_progress_report: std::time::Instant::now(),
+            pending_vfs_files: Vec::new(),
         }
     }
 
@@ -507,6 +517,40 @@ impl GlobalState {
         tracing::info!(total_files, vfs_files_added, "updated SourceRoot with VFS files (merged)");
     }
 
+    /// Eagerly load metadata to warm Salsa cache.
+    ///
+    /// This prevents the delay on first file open by loading metadata
+    /// immediately after VFS loading completes.
+    pub fn warm_metadata_cache(&mut self) {
+        let Some(ref project) = self.project else {
+            tracing::debug!("no project, skipping metadata warmup");
+            return;
+        };
+
+        let Some(config_path) = project.configuration_path() else {
+            tracing::debug!("no configuration path, skipping metadata warmup");
+            return;
+        };
+
+        let _span = tracing::info_span!("warm_metadata_cache", ?config_path).entered();
+
+        let db = self.analysis_host.raw_database();
+        let path_input = ide_db::metadata::ConfigurationPathInput::new(
+            db,
+            config_path.to_string_lossy().into_owned(),
+        );
+
+        // This call warms the Salsa cache - subsequent calls will be instant
+        let config = ide_db::metadata::load_configuration(db, path_input);
+
+        tracing::info!(
+            common_modules = config.common_modules().len(),
+            metadata_objects = config.metadata_objects().len(),
+            registers = config.registers().len(),
+            "metadata cache warmed"
+        );
+    }
+
     /// Creates an immutable snapshot for thread-safe access.
     ///
     /// This is a cheap operation (Arc clone + generation bump in Salsa).
@@ -519,6 +563,7 @@ impl GlobalState {
             workspace_root: self.workspace_root.clone(),
             project: self.project.clone(),
             diagnostics_config: self.diagnostics_config.clone(),
+            vfs_done: self.vfs_done,
         }
     }
 
@@ -526,6 +571,29 @@ impl GlobalState {
     pub fn respond(&mut self, response: Response) {
         if let Err(e) = self.sender.send(response.into()) {
             tracing::error!("Failed to send response: {}", e);
+        }
+    }
+
+    /// Requests the client to refresh semantic tokens for all open files.
+    ///
+    /// This sends a `workspace/semanticTokens/refresh` request to the client,
+    /// asking it to re-request semantic tokens. Used after VFS loading completes
+    /// when we may have returned empty tokens earlier.
+    pub fn request_semantic_tokens_refresh(&mut self) {
+        use lsp_server::Request;
+        use std::sync::atomic::Ordering;
+
+        let id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let request = Request::new(
+            lsp_server::RequestId::from(id),
+            "workspace/semanticTokens/refresh".to_string(),
+            (),
+        );
+
+        if let Err(e) = self.sender.send(request.into()) {
+            tracing::error!("Failed to send semantic tokens refresh request: {}", e);
+        } else {
+            tracing::info!("Requested client to refresh semantic tokens");
         }
     }
 
@@ -590,6 +658,9 @@ pub struct GlobalStateSnapshot {
 
     /// Current diagnostics configuration (for code action handler).
     pub diagnostics_config: DiagnosticsConfigInput,
+
+    /// Whether VFS loading has completed.
+    pub vfs_done: bool,
 }
 
 impl GlobalStateSnapshot {
