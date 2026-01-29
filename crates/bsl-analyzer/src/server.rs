@@ -273,7 +273,15 @@ fn handle_vfs_msg(
     drop(vfs); // Release VFS lock before processing changes
 
     // Process changes and sync to Salsa database
-    state.process_changes();
+    let (_, config_changed) = state.process_changes();
+
+    // If config changed, schedule diagnostics for all open files
+    if config_changed {
+        tracing::info!("config changed, scheduling diagnostics refresh for all open documents");
+        for uri in state.opened_document_uris() {
+            crate::handlers::notification::schedule_diagnostics(state, &uri);
+        }
+    }
 
     Ok(())
 }

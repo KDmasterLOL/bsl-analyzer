@@ -154,6 +154,11 @@ impl MemDocs {
     pub fn is_empty(&self) -> bool {
         self.docs.read().is_empty()
     }
+
+    /// Returns URIs of all tracked documents.
+    pub fn uris(&self) -> Vec<Url> {
+        self.docs.read().keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

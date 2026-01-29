@@ -156,9 +156,17 @@ impl GlobalState {
 
         tracing::info!(
             disabled_count = self.diagnostics_config.disabled.len(),
+            enabled_count = self.diagnostics_config.enabled.len(),
             params_count = self.diagnostics_config.parameters.len(),
             "updated diagnostics config"
         );
+
+        if !self.diagnostics_config.disabled.is_empty() {
+            tracing::debug!(
+                disabled = ?self.diagnostics_config.disabled,
+                "disabled diagnostics from config"
+            );
+        }
     }
 
     /// Converts project diagnostics config to hashable DiagnosticsConfigInput.
@@ -167,8 +175,15 @@ impl GlobalState {
     /// then converts to the Salsa-compatible `DiagnosticsConfigInput`.
     fn config_from_project(project: &Project) -> DiagnosticsConfigInput {
         // Deserialize JSON into ide_diagnostics::DiagnosticsConfig
-        let config: ide_diagnostics::DiagnosticsConfig =
-            serde_json::from_value(project.config.diagnostics.clone()).unwrap_or_default();
+        let config: ide_diagnostics::DiagnosticsConfig = match serde_json::from_value(
+            project.config.diagnostics.clone(),
+        ) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to deserialize diagnostics config, using defaults");
+                ide_diagnostics::DiagnosticsConfig::default()
+            }
+        };
 
         // Convert DiagnosticCode enums back to strings for Salsa hashing
         let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
@@ -297,17 +312,37 @@ impl GlobalState {
 
         // Configure VFS loader to scan source path in background thread
         self.vfs_progress_config_version += 1;
+
+        // Config files to watch for changes
+        let config_files: Vec<paths::AbsPathBuf> =
+            [".bsl-analyzer.json", ".bsl-language-server.json"]
+                .iter()
+                .map(|name| root.join(name))
+                .filter(|p| p.exists())
+                .map(paths::AbsPathBuf::assert_utf8)
+                .collect();
+
+        let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
+            extensions: vec!["bsl".to_string(), "os".to_string()],
+            include: vec![paths::AbsPathBuf::assert_utf8(source_path)],
+            exclude: vec![
+                paths::AbsPathBuf::assert_utf8(root.join(".git")),
+                paths::AbsPathBuf::assert_utf8(root.join("build")),
+                paths::AbsPathBuf::assert_utf8(root.join(".vscode")),
+            ],
+        })];
+
+        // Add config files as separate entry (index 1) and watch them
+        let watch = if config_files.is_empty() {
+            vec![0] // Watch only directories
+        } else {
+            load_entries.push(loader::Entry::Files(config_files));
+            vec![0, 1] // Watch directories (0) and config files (1)
+        };
+
         self.loader.set_config(loader::Config {
-            load: vec![loader::Entry::Directories(loader::Directories {
-                extensions: vec!["bsl".to_string(), "os".to_string()],
-                include: vec![paths::AbsPathBuf::assert_utf8(source_path)],
-                exclude: vec![
-                    paths::AbsPathBuf::assert_utf8(root.join(".git")),
-                    paths::AbsPathBuf::assert_utf8(root.join("build")),
-                    paths::AbsPathBuf::assert_utf8(root.join(".vscode")),
-                ],
-            })],
-            watch: vec![0], // Watch first entry for file changes
+            load: load_entries,
+            watch,
             version: self.vfs_progress_config_version,
         });
     }
@@ -318,15 +353,15 @@ impl GlobalState {
     /// 1. Takes all pending changes from VFS
     /// 2. Applies them to the Salsa database
     /// 3. Ensures files are mapped to SourceRoot and added to FileSet
-    /// 4. Returns true if any changes were processed
+    /// 4. Returns (has_changes, config_changed)
     ///
     /// Should be called after receiving loader messages or LSP file changes.
-    pub fn process_changes(&mut self) -> bool {
+    pub fn process_changes(&mut self) -> (bool, bool) {
         use base_db::SourceDatabase;
 
         let changed_files = self.vfs.write().take_changes();
         if changed_files.is_empty() {
-            return false;
+            return (false, false);
         }
 
         tracing::info!(file_count = changed_files.len(), "processing VFS changes");
@@ -410,7 +445,12 @@ impl GlobalState {
             }
         }
 
-        true
+        (true, config_file_changed)
+    }
+
+    /// Returns URIs of all currently opened documents (for re-running diagnostics).
+    pub fn opened_document_uris(&self) -> Vec<Url> {
+        self.mem_docs.uris()
     }
 
     /// Initialize or update SourceRoot after VFS loading completes.

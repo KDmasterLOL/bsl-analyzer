@@ -186,8 +186,20 @@ impl ProjectConfig {
     /// Load configuration from a specific file path.
     pub fn load_from_file(path: &Path) -> Option<Self> {
         if path.exists() {
-            let content = std::fs::read_to_string(path).ok()?;
-            serde_json::from_str(&content).ok()
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to read config file");
+                    return None;
+                }
+            };
+            match serde_json::from_str(&content) {
+                Ok(config) => Some(config),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to parse config file");
+                    None
+                }
+            }
         } else {
             None
         }
@@ -195,7 +207,27 @@ impl ProjectConfig {
 
     fn try_load(root: &Path, filename: &str) -> Option<Self> {
         let config_path = root.join(filename);
-        Self::load_from_file(&config_path)
+        if config_path.exists() {
+            match Self::load_from_file(&config_path) {
+                Some(config) => {
+                    tracing::info!(
+                        path = %config_path.display(),
+                        diagnostics_has_content = !config.diagnostics.is_null(),
+                        "loaded project config"
+                    );
+                    Some(config)
+                }
+                None => {
+                    tracing::warn!(
+                        path = %config_path.display(),
+                        "config file exists but failed to parse"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
 
     pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
