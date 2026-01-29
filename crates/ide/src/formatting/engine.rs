@@ -265,13 +265,18 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
     }
 
     // Handle continuation for incomplete statements (token-based, not char-based)
-    let ends_with_semicolon = matches!(tokens.last, Some(TokenKind::Semicolon));
-    if ends_with_semicolon || is_block_start {
-        // Statement complete: either ends with ; token or block keyword (Тогда/Цикл)
-        state.reset_expression();
-    } else if !is_block_end && state.expression == 0 {
-        // Incomplete statement, no ; token → next line needs continuation indent
-        state.enter_expression();
+    // Comment-only lines don't affect continuation state
+    // (analyze_line_tokens filters out comments, so first=None means comment-only)
+    let is_comment_only = tokens.first.is_none();
+    if !is_comment_only {
+        let ends_with_semicolon = matches!(tokens.last, Some(TokenKind::Semicolon));
+        if ends_with_semicolon || is_block_start {
+            // Statement complete: either ends with ; token or block keyword (Тогда/Цикл)
+            state.reset_expression();
+        } else if !is_block_end && state.expression == 0 {
+            // Incomplete statement, no ; token → next line needs continuation indent
+            state.enter_expression();
+        }
     }
 
     format!("{}{}", indent, content)
