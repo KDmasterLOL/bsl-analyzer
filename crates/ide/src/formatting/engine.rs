@@ -256,6 +256,7 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
     }
 
     // Track parentheses for continuation (token-based, ignores parens inside strings)
+    // Only unclosed parentheses trigger continuation indent
     let all_tokens = tokenize(trimmed);
     let open_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::LParen).count();
     let close_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::RParen).count();
@@ -265,18 +266,12 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
         state.leave_expression();
     }
 
-    // Handle continuation for incomplete statements (token-based, not char-based)
-    // Comment-only lines don't affect continuation state
-    // (analyze_line_tokens filters out comments, so first=None means comment-only)
+    // Reset expression on semicolon or block keywords
     let is_comment_only = tokens.first.is_none();
     if !is_comment_only {
         let ends_with_semicolon = matches!(tokens.last, Some(TokenKind::Semicolon));
-        if ends_with_semicolon || is_block_start {
-            // Statement complete: either ends with ; token or block keyword (Тогда/Цикл)
+        if ends_with_semicolon || is_block_start || is_block_end {
             state.reset_expression();
-        } else if !is_block_end && state.expression == 0 {
-            // Incomplete statement, no ; token → next line needs continuation indent
-            state.enter_expression();
         }
     }
 

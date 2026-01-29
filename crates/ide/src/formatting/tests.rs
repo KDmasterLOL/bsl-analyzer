@@ -393,14 +393,38 @@ fn test_comment_preservation() {
 
 #[test]
 fn test_multiline_string() {
+    // Multiline strings with | continuation marker should NOT get extra indent
+    // The | marker should stay at the same level as the opening quote
     check(
         r#"Текст = "Строка 1
 |Строка 2
 |Строка 3";"#,
         expect![[r#"
             Текст = "Строка 1
-            	|Строка 2
-            	|Строка 3";
+            |Строка 2
+            |Строка 3";
+        "#]],
+    );
+}
+
+#[test]
+fn test_procedure_statement_without_semicolon() {
+    // Statement without semicolon should NOT cause КонецПроцедуры to be indented
+    // Empty lines inside procedure get indent (1C Configurator behavior)
+    check(
+        "Процедура Тест() Экспорт
+
+    ОстаткиПоНоменклатуре = Получить();
+    СоздатьДокументы(ОстаткиПоНоменклатуре)
+
+КонецПроцедуры",
+        expect![[r#"
+            Процедура Тест() Экспорт
+	
+            	ОстаткиПоНоменклатуре = Получить();
+            	СоздатьДокументы(ОстаткиПоНоменклатуре)
+	
+            КонецПроцедуры
         "#]],
     );
 }
