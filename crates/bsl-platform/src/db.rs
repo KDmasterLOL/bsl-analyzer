@@ -209,14 +209,17 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
                 ParamDocs {
                     name: SmolStr::new("Имя переменной"),
                     description: "Идентификатор переменной (счетчика цикла), значение которой автоматически увеличивается на 1 при каждом повторении цикла.".to_string(),
+                    default_value: None,
                 },
                 ParamDocs {
                     name: SmolStr::new("Выражение 1"),
                     description: "Числовое выражение, которое задает начальное значение, присваиваемое счетчику цикла при первом проходе цикла.".to_string(),
+                    default_value: None,
                 },
                 ParamDocs {
                     name: SmolStr::new("Выражение 2"),
                     description: "Максимальное значение счетчика цикла. Когда переменная становится больше чем <Выражение 2>, выполнение оператора цикла Для прекращается.".to_string(),
+                    default_value: None,
                 },
             ],
             min_version: Some("8.0".to_string()),
@@ -230,6 +233,7 @@ fn get_keyword_docs_static(keyword: &str) -> Option<crate::types::KeywordDocs> {
                 ParamDocs {
                     name: SmolStr::new("Условие"),
                     description: "Выражение булева типа. Если значение равно Истина, выполняются операторы в соответствующем блоке.".to_string(),
+                    default_value: None,
                 },
             ],
             min_version: Some("8.0".to_string()),

@@ -230,6 +230,8 @@ pub struct ParamDocs {
     pub name: SmolStr,
     /// Full description
     pub description: String,
+    /// Default value (e.g., "Неопределено")
+    pub default_value: Option<String>,
 }
 
 /// Code example
@@ -258,6 +260,7 @@ pub struct RawMethodDocs {
 pub struct RawParamDocs {
     pub name: &'static str,
     pub description: &'static str,
+    pub default_value: Option<&'static str>,
 }
 
 /// Raw code example for const initialization
@@ -283,7 +286,11 @@ impl From<&RawMethodDocs> for MethodDocs {
 
 impl From<&RawParamDocs> for ParamDocs {
     fn from(raw: &RawParamDocs) -> Self {
-        Self { name: SmolStr::new(raw.name), description: raw.description.to_string() }
+        Self {
+            name: SmolStr::new(raw.name),
+            description: raw.description.to_string(),
+            default_value: raw.default_value.map(String::from),
+        }
     }
 }
 

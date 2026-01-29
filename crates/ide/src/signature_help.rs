@@ -4,8 +4,8 @@
 //! showing the function signature and highlighting the current parameter.
 
 use bsl_platform::{
-    global_function_query, platform_method_query, GlobalFunction, MethodLookupInput,
-    PlatformMethod, TypeNameInput,
+    global_function_query, platform_method_query, GlobalFunction, MethodDocs, MethodLookupInput,
+    PlatformDataInner, PlatformMethod, TypeNameInput,
 };
 use hir_def::item_tree::{Function, ModItem, Param, Procedure};
 use ide_db::RootDatabase;
@@ -196,7 +196,10 @@ fn build_for_platform_method<DB: RootDatabase>(
     let input = MethodLookupInput::new(db, type_name.to_string(), method_name.to_string());
     let method = platform_method_query(db, input)?;
 
-    Some(build_signature_from_platform_method(&method, active_param))
+    // Get documentation with default_value
+    let docs = PlatformDataInner::instance().get_method_docs(method.id);
+
+    Some(build_signature_from_platform_method(&method, docs.as_ref(), active_param))
 }
 
 /// Build SignatureHelp for a global function.
@@ -208,7 +211,10 @@ fn build_for_global_function<DB: RootDatabase>(
     let input = TypeNameInput::new(db, function_name.to_string());
     let function = global_function_query(db, input)?;
 
-    Some(build_signature_from_global_function(&function, active_param))
+    // Get documentation with default_value
+    let docs = PlatformDataInner::instance().get_global_function_docs(function.id);
+
+    Some(build_signature_from_global_function(&function, docs.as_ref(), active_param))
 }
 
 /// Build SignatureHelp for a user-defined method.
@@ -248,15 +254,25 @@ fn build_for_user_method<DB: RootDatabase>(
 /// Build SignatureHelp from a PlatformMethod.
 fn build_signature_from_platform_method(
     method: &PlatformMethod,
+    docs: Option<&MethodDocs>,
     active_param: usize,
 ) -> SignatureHelp {
     let params: Vec<ParameterInfo> = method
         .parameters
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let type_hint = p.param_type.as_deref().unwrap_or("Произвольный");
+
+            // Get default_value from docs if available
+            let default_value =
+                docs.and_then(|d| d.params.get(i)).and_then(|pd| pd.default_value.as_deref());
+
             let label = if p.is_optional {
-                format!("[{}: {}]", p.name, type_hint)
+                match default_value {
+                    Some(val) => format!("[{}: {} = {}]", p.name, type_hint, val),
+                    None => format!("[{}: {}]", p.name, type_hint),
+                }
             } else {
                 format!("{}: {}", p.name, type_hint)
             };
@@ -275,15 +291,25 @@ fn build_signature_from_platform_method(
 /// Build SignatureHelp from a GlobalFunction.
 fn build_signature_from_global_function(
     function: &GlobalFunction,
+    docs: Option<&MethodDocs>,
     active_param: usize,
 ) -> SignatureHelp {
     let params: Vec<ParameterInfo> = function
         .parameters
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let type_hint = p.param_type.as_deref().unwrap_or("Произвольный");
+
+            // Get default_value from docs if available
+            let default_value =
+                docs.and_then(|d| d.params.get(i)).and_then(|pd| pd.default_value.as_deref());
+
             let label = if p.is_optional {
-                format!("[{}: {}]", p.name, type_hint)
+                match default_value {
+                    Some(val) => format!("[{}: {} = {}]", p.name, type_hint, val),
+                    None => format!("[{}: {}]", p.name, type_hint),
+                }
             } else {
                 format!("{}: {}", p.name, type_hint)
             };

@@ -627,9 +627,15 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let description =
                                 param.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let default_value = param.get("default_value").and_then(|v| v.as_str());
                             code.push_str("    RawParamDocs {\n");
                             code.push_str(&format!("        name: {:?},\n", name));
                             code.push_str(&format!("        description: {:?},\n", description));
+                            if let Some(dv) = default_value {
+                                code.push_str(&format!("        default_value: Some({:?}),\n", dv));
+                            } else {
+                                code.push_str("        default_value: None,\n");
+                            }
                             code.push_str("    },\n");
                         }
                         code.push_str("];\n\n");
@@ -752,9 +758,15 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                             let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let description =
                                 param.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let default_value = param.get("default_value").and_then(|v| v.as_str());
                             code.push_str("    RawParamDocs {\n");
                             code.push_str(&format!("        name: {:?},\n", name));
                             code.push_str(&format!("        description: {:?},\n", description));
+                            if let Some(dv) = default_value {
+                                code.push_str(&format!("        default_value: Some({:?}),\n", dv));
+                            } else {
+                                code.push_str("        default_value: None,\n");
+                            }
                             code.push_str("    },\n");
                         }
                         code.push_str("];\n\n");

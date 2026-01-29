@@ -403,6 +403,34 @@ fn extract_chapter_content(html_content: &str, chapter_title: &str) -> Option<St
 pub struct ParamDescription {
     pub name: String,
     pub description: String,
+    /// Default value (extracted from "Значение по умолчанию:" in description)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+}
+
+/// Extracts "Значение по умолчанию:" from parameter description text.
+///
+/// Handles patterns like:
+/// - "Значение по умолчанию: Неопределено."
+/// - "Значение по умолчанию - 10."
+fn extract_default_value(text: &str) -> Option<String> {
+    const PATTERNS: &[&str] = &["Значение по умолчанию:", "Значение по умолчанию -"];
+
+    for pattern in PATTERNS {
+        if let Some(pos) = text.find(pattern) {
+            let after = &text[pos + pattern.len()..];
+            // Find end: period, newline, or end of string
+            let end = after
+                .find('.')
+                .or_else(|| after.find('\n'))
+                .unwrap_or(after.len());
+            let value = after[..end].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Extracts detailed parameter descriptions from HTML content
@@ -437,9 +465,11 @@ pub fn extract_parameter_descriptions(html_content: &str) -> Vec<ParamDescriptio
                             // Collect all text after this rubric until next rubric or chapter
                             let description = collect_param_description(elem_ref);
 
+                            let default_value = extract_default_value(&description);
                             param_descriptions.push(ParamDescription {
                                 name: param_name,
                                 description,
+                                default_value,
                             });
                         }
                     }
@@ -931,6 +961,25 @@ mod tests {
         let notes = extract_notes(html).unwrap();
         assert!(notes.contains("Первое примечание"));
         assert!(notes.contains("Второе примечание"));
+    }
+
+    #[test]
+    fn test_extract_default_value() {
+        // Colon variant
+        let text = "Тип: Число. Значение по умолчанию: 10. Описание...";
+        assert_eq!(extract_default_value(text), Some("10".to_string()));
+
+        // Dash variant
+        let text2 = "Тип: Строка. Значение по умолчанию - Пустая строка. Ещё текст.";
+        assert_eq!(extract_default_value(text2), Some("Пустая строка".to_string()));
+
+        // No default value
+        let text3 = "Тип: Булево. Без значения по умолчанию.";
+        assert_eq!(extract_default_value(text3), None);
+
+        // With Неопределено
+        let text4 = "Значение по умолчанию: Неопределено.";
+        assert_eq!(extract_default_value(text4), Some("Неопределено".to_string()));
     }
 
     #[test]
