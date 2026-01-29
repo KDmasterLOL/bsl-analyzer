@@ -302,17 +302,18 @@ pub fn handle_semantic_tokens_full(
 
     // Get highlights from IDE
     let highlight_start = std::time::Instant::now();
-    let highlights = snap.analysis.highlight(file_id);
+    let highlight_result = snap.analysis.highlight(file_id);
     let highlight_elapsed = highlight_start.elapsed();
     tracing::warn!(
         file_id = file_id.0,
-        highlight_count = highlights.len(),
+        highlight_count = highlight_result.highlights.len(),
+        resolved_external_files = highlight_result.resolved_external_files.len(),
         elapsed_ms = highlight_elapsed.as_millis() as u64,
         "semantic_tokens: analysis.highlight() completed"
     );
 
     // Convert to LSP semantic tokens (pass text for UTF-16 length calculation)
-    let tokens = crate::lsp::semantic_tokens(&line_index, &text, &highlights);
+    let tokens = crate::lsp::semantic_tokens(&line_index, &text, &highlight_result.highlights);
     let total_elapsed = start.elapsed();
     tracing::warn!(
         file_id = file_id.0,
@@ -321,6 +322,14 @@ pub fn handle_semantic_tokens_full(
         %uri,
         "semantic_tokens: completed"
     );
+
+    // Request preloading of external files for faster goto_definition
+    if !highlight_result.resolved_external_files.is_empty() {
+        use crate::global_state::Task;
+        let _ = snap
+            .task_sender
+            .send(Task::PreloadExternalFiles { files: highlight_result.resolved_external_files });
+    }
 
     Ok(Some(SemanticTokensResult::Tokens(SemanticTokens { result_id: None, data: tokens })))
 }

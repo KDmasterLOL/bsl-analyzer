@@ -360,6 +360,76 @@ impl SyntaxKind {
                 | SyntaxKind::KW_NULL
         )
     }
+
+    /// Returns true if this is a string literal token.
+    pub fn is_string_literal(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::STRING
+                | SyntaxKind::STRING_START
+                | SyntaxKind::STRING_TAIL
+                | SyntaxKind::STRING_PART
+        )
+    }
+
+    /// Returns true if this is a number literal token (including dates).
+    pub fn is_number_literal(self) -> bool {
+        matches!(self, SyntaxKind::DECIMAL | SyntaxKind::FLOAT | SyntaxKind::DATE)
+    }
+
+    /// Returns true if this is a boolean literal token.
+    pub fn is_boolean_literal(self) -> bool {
+        matches!(self, SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE)
+    }
+
+    /// Returns true if this is a preprocessor directive token.
+    pub fn is_preprocessor(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::PRE_IF
+                | SyntaxKind::PRE_ELSIF
+                | SyntaxKind::PRE_ELSE
+                | SyntaxKind::PRE_END_IF
+                | SyntaxKind::PRE_REGION
+                | SyntaxKind::PRE_END_REGION
+                | SyntaxKind::PRE_USE
+        )
+    }
+
+    /// Returns true if this is an annotation token.
+    pub fn is_annotation(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::ANN_AT_CLIENT
+                | SyntaxKind::ANN_AT_SERVER
+                | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
+                | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+                | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
+                | SyntaxKind::ANN_BEFORE
+                | SyntaxKind::ANN_AFTER
+                | SyntaxKind::ANN_AROUND
+                | SyntaxKind::ANN_CHANGE_AND_VALIDATE
+                | SyntaxKind::ANN_CUSTOM
+        )
+    }
+
+    /// Returns true if this is an operator token.
+    pub fn is_operator(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::PLUS
+                | SyntaxKind::MINUS
+                | SyntaxKind::STAR
+                | SyntaxKind::SLASH
+                | SyntaxKind::PERCENT
+                | SyntaxKind::EQ
+                | SyntaxKind::NEQ
+                | SyntaxKind::LT
+                | SyntaxKind::LE
+                | SyntaxKind::GT
+                | SyntaxKind::GE
+        )
+    }
 }
 
 impl From<u16> for SyntaxKind {

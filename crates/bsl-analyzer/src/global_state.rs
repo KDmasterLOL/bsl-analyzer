@@ -32,6 +32,9 @@ pub enum Task {
     DiagnosticsReady { uri: Url, diagnostics: Vec<lsp_types::Diagnostic>, generation: u64 },
     /// Diagnostics cancelled (Salsa query was interrupted).
     DiagnosticsCancelled { generation: u64 },
+    /// Request to preload external files discovered during semantic highlighting.
+    /// This enables faster goto_definition by warming caches before navigation.
+    PreloadExternalFiles { files: Vec<FileId> },
 }
 
 /// The main state of the LSP server (mutable, main thread only).
@@ -564,6 +567,7 @@ impl GlobalState {
             project: self.project.clone(),
             diagnostics_config: self.diagnostics_config.clone(),
             vfs_done: self.vfs_done,
+            task_sender: self.task_pool.pool.sender.clone(),
         }
     }
 
@@ -661,6 +665,10 @@ pub struct GlobalStateSnapshot {
 
     /// Whether VFS loading has completed.
     pub vfs_done: bool,
+
+    /// Task sender for triggering background work from handlers.
+    /// Used for preloading external files discovered during semantic highlighting.
+    pub task_sender: Sender<Task>,
 }
 
 impl GlobalStateSnapshot {

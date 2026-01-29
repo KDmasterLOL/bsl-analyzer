@@ -19,7 +19,7 @@ pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
 pub use signature_help::{ParameterInfo, SignatureHelp};
-pub use syntax_highlighting::{highlight, HlMod, HlRange, HlTag};
+pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,7 +129,10 @@ impl Analysis {
     }
 
     /// Returns semantic highlighting for a file.
-    pub fn highlight(&self, file_id: FileId) -> Vec<HlRange> {
+    ///
+    /// Returns `HighlightResult` containing both highlights and resolved external files.
+    /// External files can be preloaded in background for faster goto_definition.
+    pub fn highlight(&self, file_id: FileId) -> HighlightResult {
         syntax_highlighting::highlight(self.db.as_ref(), file_id)
     }
 

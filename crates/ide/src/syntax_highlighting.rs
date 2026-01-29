@@ -148,12 +148,26 @@ pub struct HlRange {
     pub modifiers: HlMod,
 }
 
+/// Result of semantic highlighting.
+///
+/// Contains highlights and any external files that were resolved during highlighting.
+/// External files can be preloaded in background to reduce latency when navigating to them.
+#[derive(Debug, Clone)]
+pub struct HighlightResult {
+    /// Semantic highlights for the file.
+    pub highlights: Vec<HlRange>,
+    /// External files resolved during highlighting (CommonModules, Manager modules, etc.).
+    /// These can be preloaded in background for faster goto_definition.
+    pub resolved_external_files: Vec<FileId>,
+}
+
 /// Context for semantic highlighting that caches ExprScopes for methods.
 ///
 /// This struct lives only during a single `highlight()` call and provides:
 /// - Cached ExprScopes for each method (avoids rebuilding for every token)
 /// - Database and file context
 /// - SDBL context (line index, tracked literals)
+/// - Resolved external files (for preloading)
 pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
     pub(crate) db: &'db DB,
     pub(crate) file_id: FileId,
@@ -165,15 +179,28 @@ pub(crate) struct HighlightContext<'db, DB: RootDatabase> {
     /// SDBL literal ranges to skip STRING token highlighting
     /// When a literal contains SDBL, its tokens are highlighted by sdbl module
     pub(crate) sdbl_literal_ranges: rustc_hash::FxHashSet<TextRange>,
+
+    /// External files resolved during highlighting.
+    /// Collected to enable preloading for faster goto_definition.
+    pub(crate) resolved_external_files: rustc_hash::FxHashSet<FileId>,
 }
 
 impl<'db, DB: RootDatabase> HighlightContext<'db, DB> {
     fn new(db: &'db DB, file_id: FileId, line_index: Option<Vec<usize>>) -> Self {
-        Self { db, file_id, line_index, sdbl_literal_ranges: rustc_hash::FxHashSet::default() }
+        Self {
+            db,
+            file_id,
+            line_index,
+            sdbl_literal_ranges: rustc_hash::FxHashSet::default(),
+            resolved_external_files: rustc_hash::FxHashSet::default(),
+        }
     }
 }
 /// Generates semantic highlighting for a file.
-pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<HlRange> {
+///
+/// Returns both highlights and any external files that were resolved during highlighting.
+/// External files can be preloaded in background for faster goto_definition.
+pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> HighlightResult {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
@@ -186,7 +213,11 @@ pub fn highlight<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<HlRange> {
     let mut highlights = Vec::new();
 
     traverse_node(&mut ctx, &root, &mut highlights);
-    highlights
+
+    HighlightResult {
+        highlights,
+        resolved_external_files: ctx.resolved_external_files.into_iter().collect(),
+    }
 }
 
 /// Recursively traverse AST and collect highlights.
@@ -276,6 +307,27 @@ fn highlight_ident_semantic<DB: RootDatabase>(
         hir::Definition::Unresolved => return None,
     };
 
+    // Collect external file IDs for preloading
+    // This enables warming up caches before user navigates via goto_definition
+    match &definition {
+        hir::Definition::MdoManagerModule { file_id, .. } => {
+            if *file_id != ctx.file_id {
+                ctx.resolved_external_files.insert(*file_id);
+            }
+        }
+        hir::Definition::Module(module_id) => {
+            if module_id.file_id != ctx.file_id {
+                ctx.resolved_external_files.insert(module_id.file_id);
+            }
+        }
+        hir::Definition::Method(method_id) => {
+            if method_id.module.file_id != ctx.file_id {
+                ctx.resolved_external_files.insert(method_id.module.file_id);
+            }
+        }
+        _ => {}
+    }
+
     let mut modifiers = HlMod::new();
 
     // Add EXPORT modifier for exported symbols
@@ -303,13 +355,7 @@ fn highlight_token<DB: RootDatabase>(
     let range = token.text_range();
 
     // Skip STRING tokens if parent is a SDBL literal (already highlighted by sdbl module)
-    if matches!(
-        kind,
-        SyntaxKind::STRING
-            | SyntaxKind::STRING_START
-            | SyntaxKind::STRING_TAIL
-            | SyntaxKind::STRING_PART
-    ) {
+    if kind.is_string_literal() {
         if let Some(parent) = token.parent() {
             if ctx.sdbl_literal_ranges.contains(&parent.text_range()) {
                 return None;
@@ -317,92 +363,25 @@ fn highlight_token<DB: RootDatabase>(
         }
     }
 
-    let tag = match kind {
-        // Keywords
-        SyntaxKind::KW_PROCEDURE
-        | SyntaxKind::KW_END_PROCEDURE
-        | SyntaxKind::KW_FUNCTION
-        | SyntaxKind::KW_END_FUNCTION
-        | SyntaxKind::KW_IF
-        | SyntaxKind::KW_THEN
-        | SyntaxKind::KW_ELSIF
-        | SyntaxKind::KW_ELSE
-        | SyntaxKind::KW_END_IF
-        | SyntaxKind::KW_FOR
-        | SyntaxKind::KW_EACH
-        | SyntaxKind::KW_IN
-        | SyntaxKind::KW_TO
-        | SyntaxKind::KW_DO
-        | SyntaxKind::KW_END_DO
-        | SyntaxKind::KW_WHILE
-        | SyntaxKind::KW_RETURN
-        | SyntaxKind::KW_VAR
-        | SyntaxKind::KW_EXPORT
-        | SyntaxKind::KW_NEW
-        | SyntaxKind::KW_TRY
-        | SyntaxKind::KW_EXCEPT
-        | SyntaxKind::KW_END_TRY
-        | SyntaxKind::KW_RAISE
-        | SyntaxKind::KW_EXECUTE
-        | SyntaxKind::KW_BREAK
-        | SyntaxKind::KW_CONTINUE
-        | SyntaxKind::KW_AND
-        | SyntaxKind::KW_OR
-        | SyntaxKind::KW_NOT
-        | SyntaxKind::KW_GOTO
-        | SyntaxKind::KW_ADD_HANDLER
-        | SyntaxKind::KW_REMOVE_HANDLER
-        | SyntaxKind::KW_ASYNC
-        | SyntaxKind::KW_AWAIT => HlTag::Keyword,
-
-        // Boolean literals
-        SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => HlTag::BooleanLiteral,
-
-        // Literals
-        SyntaxKind::STRING
-        | SyntaxKind::STRING_START
-        | SyntaxKind::STRING_TAIL
-        | SyntaxKind::STRING_PART => HlTag::StringLiteral,
-        SyntaxKind::DECIMAL | SyntaxKind::FLOAT | SyntaxKind::DATE => HlTag::NumberLiteral,
-
-        // Comments
-        SyntaxKind::COMMENT => HlTag::Comment,
-
-        // Preprocessor
-        SyntaxKind::PRE_IF
-        | SyntaxKind::PRE_ELSIF
-        | SyntaxKind::PRE_ELSE
-        | SyntaxKind::PRE_END_IF
-        | SyntaxKind::PRE_REGION
-        | SyntaxKind::PRE_END_REGION
-        | SyntaxKind::PRE_USE => HlTag::Preprocessor,
-
-        // Annotations
-        SyntaxKind::ANN_AT_CLIENT
-        | SyntaxKind::ANN_AT_SERVER
-        | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
-        | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
-        | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
-        | SyntaxKind::ANN_BEFORE
-        | SyntaxKind::ANN_AFTER
-        | SyntaxKind::ANN_AROUND
-        | SyntaxKind::ANN_CHANGE_AND_VALIDATE
-        | SyntaxKind::ANN_CUSTOM => HlTag::Annotation,
-
-        // Operators
-        SyntaxKind::PLUS
-        | SyntaxKind::MINUS
-        | SyntaxKind::STAR
-        | SyntaxKind::SLASH
-        | SyntaxKind::PERCENT
-        | SyntaxKind::EQ
-        | SyntaxKind::NEQ
-        | SyntaxKind::LT
-        | SyntaxKind::LE
-        | SyntaxKind::GT
-        | SyntaxKind::GE => HlTag::Operator,
-
-        _ => return None,
+    // Order matters: boolean literals are also keywords, so check them first
+    let tag = if kind.is_boolean_literal() {
+        HlTag::BooleanLiteral
+    } else if kind.is_string_literal() {
+        HlTag::StringLiteral
+    } else if kind.is_number_literal() {
+        HlTag::NumberLiteral
+    } else if kind.is_keyword() {
+        HlTag::Keyword
+    } else if kind == SyntaxKind::COMMENT {
+        HlTag::Comment
+    } else if kind.is_preprocessor() {
+        HlTag::Preprocessor
+    } else if kind.is_annotation() {
+        HlTag::Annotation
+    } else if kind.is_operator() {
+        HlTag::Operator
+    } else {
+        return None;
     };
 
     Some(HlRange { range, tag, modifiers: HlMod::new() })
@@ -519,7 +498,7 @@ mod tests {
 
         // Check that parameters are highlighted as Parameter
         let param_highlights: Vec<_> =
-            highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).collect();
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).collect();
 
         // Should find 4 parameter usages: 2 declarations + 2 usages
         assert!(
@@ -542,6 +521,7 @@ mod tests {
 
         // Check that local variables are highlighted as Variable
         let var_highlights: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Variable
@@ -571,10 +551,12 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // Check parameters
-        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+        let param_count =
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
         // Check local variables (excluding module-level)
         let local_var_count = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Variable
@@ -600,7 +582,8 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // All three variants of "Параметр" should be highlighted
-        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+        let param_count =
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
         assert!(
             param_count >= 3,
@@ -625,7 +608,7 @@ mod tests {
 
         // Both module and local variables should be highlighted
         let var_highlights: Vec<_> =
-            highlights.iter().filter(|hl| hl.tag == HlTag::Variable).collect();
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Variable).collect();
 
         // Should find at least 5 variable highlights:
         // 1 module var declaration + 1 module var usage
@@ -656,9 +639,11 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // Each method's parameters and locals should be independently highlighted
-        let param_count = highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
+        let param_count =
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::Parameter).count();
 
         let var_count = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Variable
@@ -684,7 +669,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // Find SELECT keyword - should be highlighted as Keyword
-        let select_kw = highlights.iter().find(|hl| {
+        let select_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword
                 && code[hl.range.start().into()..hl.range.end().into()] == *"SELECT"
         });
@@ -692,7 +677,7 @@ mod tests {
         assert!(select_kw.is_some(), "SELECT should be highlighted as Keyword");
 
         // Find FROM keyword - should be highlighted as Keyword
-        let from_kw = highlights.iter().find(|hl| {
+        let from_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword
                 && code[hl.range.start().into()..hl.range.end().into()] == *"FROM"
         });
@@ -715,7 +700,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // Find ВЫБРАТЬ keyword
-        let select_kw = highlights.iter().find(|hl| {
+        let select_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
                 text.contains("ВЫБРАТЬ")
@@ -725,7 +710,7 @@ mod tests {
         assert!(select_kw.is_some(), "ВЫБРАТЬ should be highlighted as Keyword");
 
         // Find ИЗ keyword
-        let from_kw = highlights.iter().find(|hl| {
+        let from_kw = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Keyword && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
                 text.contains("ИЗ")
@@ -747,7 +732,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // Find SUM function - should be highlighted as Function
-        let sum_fn = highlights.iter().find(|hl| {
+        let sum_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"SUM"
         });
@@ -768,6 +753,7 @@ mod tests {
 
         // Find = operator - should be highlighted as Operator
         let eq_op = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Operator
@@ -779,7 +765,7 @@ mod tests {
         assert!(eq_op >= 1, "= should be highlighted as Operator");
 
         // Find AND operator - should be highlighted as Operator
-        let and_op = highlights.iter().find(|hl| {
+        let and_op = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Operator
                 && code[hl.range.start().into()..hl.range.end().into()] == *"AND"
         });
@@ -800,7 +786,7 @@ mod tests {
 
         // The string "SELECT" is too short (< 15 chars) so should be highlighted as StringLiteral
         let string_highlights: Vec<_> =
-            highlights.iter().filter(|hl| hl.tag == HlTag::StringLiteral).collect();
+            highlights.highlights.iter().filter(|hl| hl.tag == HlTag::StringLiteral).collect();
 
         // Should have at least one string literal
         assert!(!string_highlights.is_empty(), "Short strings should remain as StringLiteral");
@@ -823,6 +809,7 @@ mod tests {
 
         // Find all КАК (AS) keywords - should be highlighted as Keyword
         let as_keywords: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Keyword && {
@@ -853,6 +840,7 @@ mod tests {
 
         // Find field aliases - should be highlighted as EnumMember
         let field_aliases: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::EnumMember && {
@@ -871,6 +859,7 @@ mod tests {
 
         // Find table alias - should be highlighted as Namespace
         let table_aliases: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Namespace && {
@@ -888,6 +877,7 @@ mod tests {
 
         // Find table name - should be highlighted as Type
         let table_names: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Type && {
@@ -919,7 +909,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         println!("\n=== Highlights for user example ===");
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             if text.contains("Валюты")
                 || text.contains("Наименование")
@@ -936,7 +926,7 @@ mod tests {
         let mut has_enum_member = false;
         let mut has_property_or_unresolved = false;
 
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             match hl.tag {
                 HlTag::Type if text.contains("Справочник") || text.contains("Валюты") =>
@@ -979,6 +969,7 @@ mod tests {
 
         // Find all AS keywords - should be highlighted as Keyword
         let as_keywords: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Keyword
@@ -1005,7 +996,7 @@ mod tests {
 
         // Debug: print all highlights
         eprintln!("\n=== All highlights ===");
-        for hl in highlights.iter() {
+        for hl in highlights.highlights.iter() {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             if !text.trim().is_empty() && text.chars().all(|c| c.is_alphabetic() || c == '_') {
                 eprintln!("{:?}: {:?} {:?}", text, hl.tag, hl.modifiers);
@@ -1014,7 +1005,7 @@ mod tests {
         eprintln!("======================\n");
 
         // Check НачатьТранзакцию - should be highlighted as BuiltinFunction with EXPORT modifier
-        let begin_trans = highlights.iter().find(|hl| {
+        let begin_trans = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
         });
@@ -1026,7 +1017,7 @@ mod tests {
         );
 
         // Check Сообщить
-        let message_fn = highlights.iter().find(|hl| {
+        let message_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Сообщить"
         });
@@ -1034,7 +1025,7 @@ mod tests {
         assert!(message_fn.is_some(), "Сообщить should be highlighted as BuiltinFunction");
 
         // Check Формат
-        let format_fn = highlights.iter().find(|hl| {
+        let format_fn = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Формат"
         });
@@ -1063,7 +1054,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // МояФункция should be Function (user-defined)
-        let my_func_call = highlights.iter().find(|hl| {
+        let my_func_call = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"МояФункция"
                 && !hl.modifiers.contains(HlMod::EXPORT)
@@ -1075,7 +1066,7 @@ mod tests {
         );
 
         // НачатьТранзакцию should be BuiltinFunction
-        let builtin_call = highlights.iter().find(|hl| {
+        let builtin_call = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::BuiltinFunction
                 && code[hl.range.start().into()..hl.range.end().into()] == *"НачатьТранзакцию"
         });
@@ -1098,7 +1089,7 @@ mod tests {
         let highlights = highlight(&db, file_id);
 
         // "Документы" should be highlighted as Class (MDO plural form)
-        let documents_highlight = highlights.iter().find(|hl| {
+        let documents_highlight = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
         });
@@ -1117,7 +1108,7 @@ EndFunction
         let (db, file_id) = create_db_with_file(code);
         let highlights = highlight(&db, file_id);
 
-        let catalogs_highlight = highlights.iter().find(|hl| {
+        let catalogs_highlight = highlights.highlights.iter().find(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Catalogs"
         });
@@ -1140,6 +1131,7 @@ EndFunction
 
         // Count all Class highlights that match "документы" in any case
         let documents_highlights: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 if hl.tag != HlTag::Class {
@@ -1185,7 +1177,7 @@ EndFunction
         ];
 
         for expected in expected_classes {
-            let found = highlights.iter().any(|hl| {
+            let found = highlights.highlights.iter().any(|hl| {
                 hl.tag == HlTag::Class
                     && code[hl.range.start().into()..hl.range.end().into()] == *expected
             });
@@ -1209,6 +1201,7 @@ EndFunction
         // All occurrences of "Документы" should be Variable, not Class
         // because local variable shadows the global MDO plural form
         let documents_as_variable = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 hl.tag == HlTag::Variable && {
@@ -1224,7 +1217,7 @@ EndFunction
         );
 
         // Ensure NO Class highlights for "Документы"
-        let documents_as_class = highlights.iter().any(|hl| {
+        let documents_as_class = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class && {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
                 text == "Документы"
@@ -1259,7 +1252,7 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         // "ПКО" should NOT be highlighted as Type (no configuration)
-        let metadata_name_highlight = highlights.iter().any(|hl| {
+        let metadata_name_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Type && code[hl.range.start().into()..hl.range.end().into()] == *"ПКО"
         });
 
@@ -1269,7 +1262,7 @@ EndFunction
         );
 
         // "Документы" should still be highlighted as Class
-        let plural_highlight = highlights.iter().any(|hl| {
+        let plural_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"Документы"
         });
@@ -1302,7 +1295,7 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         // РегистрыСведений → Class ✅
-        let plural_highlight = highlights.iter().any(|hl| {
+        let plural_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Class
                 && code[hl.range.start().into()..hl.range.end().into()] == *"РегистрыСведений"
         });
@@ -1310,7 +1303,7 @@ EndFunction
 
         // ОчередьЗапросовERP → Type (would require configuration)
         // ДобавитьВОчередь → Function (manager method - requires workspace scope)
-        let method_highlight = highlights.iter().any(|hl| {
+        let method_highlight = highlights.highlights.iter().any(|hl| {
             hl.tag == HlTag::Function
                 && code[hl.range.start().into()..hl.range.end().into()] == *"ДобавитьВОчередь"
         });
@@ -1340,19 +1333,20 @@ EndFunction
 
         // Debug: print all highlights with their ranges and text
         eprintln!("\n=== All highlights ===");
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
         // Find ЕСТЬNULL - should be highlighted (as function or identifier)
-        let estnull = highlights.iter().find(|hl| {
+        let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
         });
 
         // Find ДокЗаказКлиента - should be highlighted as one complete token
         let doc_orders = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -1401,19 +1395,19 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         eprintln!("\n=== Multiline ЕСТЬNULL test ===");
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
 
         // Find ЕСТЬNULL
-        let estnull = highlights.iter().find(|hl| {
+        let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
         });
 
         // Find ДокЗаказКлиента
-        let doc_orders = highlights.iter().find(|hl| {
+        let doc_orders = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ДокЗаказКлиента"
         });
@@ -1452,6 +1446,7 @@ EndFunction
 
         // Find ПРЕДСТАВЛЕНИЕ tokens
         let presentation_highlights: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -1467,6 +1462,7 @@ EndFunction
 
         // Check both ПРЕДСТАВЛЕНИЕ occurrences
         let presentation_count = highlights
+            .highlights
             .iter()
             .filter(|hl| {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
@@ -1497,11 +1493,11 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         eprintln!("\n=== Bonus Query Test ===");
-        eprintln!("Total highlights: {}", highlights.len());
+        eprintln!("Total highlights: {}", highlights.highlights.len());
 
         // Print all highlights
         eprintln!("\n=== All highlights ===");
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
         }
@@ -1509,7 +1505,7 @@ EndFunction
         // Check for important tokens
         let tokens = ["ЗНАЧЕНИЕ", "Партнер", "Проведен", "ПометкаУдаления", "НЕ"];
         for token in tokens {
-            let found = highlights.iter().any(|hl| {
+            let found = highlights.highlights.iter().any(|hl| {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
                 text == token
             });
@@ -1517,8 +1513,12 @@ EndFunction
         }
 
         // Find where highlighting stops
-        let last_keyword_pos =
-            highlights.iter().filter(|hl| hl.tag == HlTag::Keyword).map(|hl| hl.range.end()).max();
+        let last_keyword_pos = highlights
+            .highlights
+            .iter()
+            .filter(|hl| hl.tag == HlTag::Keyword)
+            .map(|hl| hl.range.end())
+            .max();
 
         if let Some(pos) = last_keyword_pos {
             let pos_usize: usize = pos.into();
@@ -1613,7 +1613,7 @@ EndFunction
 
         let highlights = highlight(&db, file_id);
         eprintln!("\n=== BSL Highlights (Functions only) ===");
-        for hl in &highlights {
+        for hl in &highlights.highlights {
             if hl.tag == HlTag::Function {
                 let text = &code[hl.range.start().into()..hl.range.end().into()];
                 eprintln!("Range {:?}, Tag {:?}, Text: '{}'", hl.range, hl.tag, text);
@@ -1621,11 +1621,11 @@ EndFunction
         }
 
         // Find both functions
-        let estnull = highlights.iter().find(|hl| {
+        let estnull = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ЕСТЬNULL"
         });
-        let presentation = highlights.iter().find(|hl| {
+        let presentation = highlights.highlights.iter().find(|hl| {
             let text = &code[hl.range.start().into()..hl.range.end().into()];
             text == "ПРЕДСТАВЛЕНИЕ"
         });
@@ -1658,10 +1658,11 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         eprintln!("\n=== JOIN with Tabular Section Test ===");
-        eprintln!("Total highlights: {}", highlights.len());
+        eprintln!("Total highlights: {}", highlights.highlights.len());
 
         // Print all SDBL highlights
         let sdbl_highlights: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|h| {
                 let start: usize = h.range.start().into();
@@ -1751,10 +1752,11 @@ EndFunction
         let highlights = highlight(&db, file_id);
 
         eprintln!("\n=== Complex Nested JOIN Test ===");
-        eprintln!("Total highlights: {}", highlights.len());
+        eprintln!("Total highlights: {}", highlights.highlights.len());
 
         // Print SDBL highlights
         let sdbl_highlights: Vec<_> = highlights
+            .highlights
             .iter()
             .filter(|h| {
                 let start: usize = h.range.start().into();

@@ -268,6 +268,38 @@ fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Resu
         Task::DependenciesPreloaded { file_id, count } => {
             tracing::debug!(file_id = file_id.0, count, "dependencies preloaded");
         }
+        Task::PreloadExternalFiles { files } => {
+            if files.is_empty() {
+                return Ok(());
+            }
+            let file_count = files.len();
+            let file_ids: Vec<u32> = files.iter().map(|f| f.0).collect();
+            tracing::debug!(?file_ids, "preloading external files from semantic highlighting");
+
+            // Spawn background task to warm up caches
+            let db = state.analysis_host.raw_database().clone();
+            let config = state.diagnostics_config().clone();
+            state.task_pool.pool.spawn(move || {
+                use base_db::{DiagnosticsConfigId, FileIdInput};
+                use ide_db::hir_def::{DefDatabase, ModuleId};
+
+                let config_id = DiagnosticsConfigId::new(&db, config);
+
+                for file_id in &files {
+                    let module_id = ModuleId::new(*file_id);
+                    // Warm up symbol_tree (for GoToDefinition)
+                    let _ = db.symbol_tree(module_id);
+                    // Warm up module_bodies (for hover, diagnostics)
+                    let _ = db.module_bodies(module_id);
+                    // Warm up diagnostics
+                    let file_id_input = FileIdInput::new(&db, *file_id);
+                    let _ = ide_diagnostics::file_diagnostics_query(&db, file_id_input, config_id);
+                }
+
+                tracing::debug!(count = file_count, "external files preloaded");
+                Task::DependenciesPreloaded { file_id: files[0], count: file_count }
+            });
+        }
     }
     Ok(())
 }
