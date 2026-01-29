@@ -216,9 +216,10 @@ fn format_line(
 fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingConfig) -> String {
     let trimmed = line.trim();
 
-    // Empty line - preserve but trim whitespace
+    // Empty line - output indent to match 1C Configurator behavior
     if trimmed.is_empty() {
-        return String::new();
+        let indent_level = state.total();
+        return config.indent_for_level(indent_level);
     }
 
     // Analyze tokens in the line
@@ -560,9 +561,10 @@ mod tests {
 
     #[test]
     fn test_empty_lines() {
+        // Empty lines should have indent to match 1C Configurator behavior
         let code = "Процедура Тест()\n\n\tА = 1;\n\nКонецПроцедуры";
         let formatted = format(code);
-        assert_eq!(formatted, "Процедура Тест()\n\n\tА = 1;\n\nКонецПроцедуры\n");
+        assert_eq!(formatted, "Процедура Тест()\n\t\n\tА = 1;\n\t\nКонецПроцедуры\n");
     }
 
     #[test]

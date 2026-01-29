@@ -326,6 +326,7 @@ fn test_trailing_whitespace_removal() {
 
 #[test]
 fn test_preserve_empty_lines() {
+    // Empty lines should have indent to match 1C Configurator behavior
     check(
         "Процедура Тест()
 
@@ -334,9 +335,9 @@ fn test_preserve_empty_lines() {
 КонецПроцедуры",
         expect![[r#"
             Процедура Тест()
-
+	
             	А = 1;
-
+	
             КонецПроцедуры
         "#]],
     );
