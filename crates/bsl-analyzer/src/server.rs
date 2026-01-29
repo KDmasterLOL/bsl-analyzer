@@ -11,7 +11,8 @@ use lsp_types::{
     request::Shutdown,
     CodeActionProviderCapability, InitializeParams, SemanticTokensFullOptions,
     SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkDoneProgressOptions,
 };
 
 use crate::{
@@ -290,7 +291,7 @@ fn handle_vfs_msg(
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
         CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-        References, SemanticTokensFullRequest,
+        References, SemanticTokensFullRequest, SignatureHelpRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -307,6 +308,7 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_sync::<SemanticTokensFullRequest>(crate::handlers::handle_semantic_tokens_full)
         .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .on_sync::<CodeActionRequest>(crate::handlers::handle_code_action)
+        .on_sync::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
         .finish();
 
     Ok(())
@@ -378,6 +380,13 @@ fn server_capabilities() -> ServerCapabilities {
 
         // Code actions (quick fixes)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+
+        // Signature help (parameter hints)
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: Some(vec![",".to_string()]),
+            work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+        }),
 
         ..Default::default()
     }

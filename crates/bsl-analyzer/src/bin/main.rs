@@ -182,9 +182,12 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(e.into());
     }
 
-    // Join IO threads
+    // Join IO threads - ignore errors during shutdown
+    // (client may close connection before we finish sending)
     tracing::info!("Joining IO threads");
-    io_threads.join()?;
+    if let Err(e) = io_threads.join() {
+        tracing::debug!("IO threads join error (expected during shutdown): {}", e);
+    }
 
     tracing::info!("LSP server shut down cleanly");
     Ok(())

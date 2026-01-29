@@ -8,6 +8,7 @@ mod document_symbols;
 mod goto_definition;
 mod hover;
 mod references;
+mod signature_help;
 pub mod streaming;
 mod syntax_highlighting;
 
@@ -15,6 +16,7 @@ pub use completion::{CompletionItem, CompletionItemKind};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
+pub use signature_help::{ParameterInfo, SignatureHelp};
 pub use syntax_highlighting::{highlight, HlMod, HlRange, HlTag};
 
 use std::path::PathBuf;
@@ -127,6 +129,22 @@ impl Analysis {
     /// Returns semantic highlighting for a file.
     pub fn highlight(&self, file_id: FileId) -> Vec<HlRange> {
         syntax_highlighting::highlight(self.db.as_ref(), file_id)
+    }
+
+    /// Returns signature help at the position.
+    ///
+    /// Provides parameter hints when the cursor is inside a function call:
+    /// - Global platform functions (НачатьТранзакцию, Формат, etc.)
+    /// - Platform type methods (Строка.Найти, Массив.Добавить, etc.)
+    /// - User-defined procedures and functions
+    ///
+    /// # Arguments
+    ///
+    /// * `file_id` - File identifier
+    /// * `offset` - Byte offset in the file (0-based)
+    pub fn signature_help(&self, file_id: FileId, offset: u32) -> Option<SignatureHelp> {
+        let offset = TextSize::from(offset);
+        signature_help::signature_help(self.db.as_ref(), file_id, offset)
     }
 }
 

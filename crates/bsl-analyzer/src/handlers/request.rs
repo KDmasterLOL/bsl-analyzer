@@ -13,7 +13,7 @@ use lsp_types::{
     CompletionParams, CompletionResponse, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
     MarkupContent, MarkupKind, ReferenceParams, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult,
+    SemanticTokensResult, SignatureHelpParams,
 };
 
 use crate::global_state::GlobalStateSnapshot;
@@ -337,6 +337,76 @@ pub fn handle_document_symbol(
         .collect();
 
     Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+}
+
+/// Handles textDocument/signatureHelp request.
+///
+/// Returns signature help (parameter hints) at the cursor position.
+pub fn handle_signature_help(
+    snap: GlobalStateSnapshot,
+    params: SignatureHelpParams,
+) -> Result<Option<lsp_types::SignatureHelp>> {
+    let _p = tracing::info_span!(
+        "handle_signature_help",
+        uri = %params.text_document_position_params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Convert position to offset
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
+
+    // Call IDE API
+    let sig_help = snap.analysis.signature_help(file_id, offset.into());
+
+    // Convert result
+    Ok(sig_help.map(to_lsp_signature_help))
+}
+
+/// Convert IDE SignatureHelp to LSP SignatureHelp.
+fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
+    let parameters: Vec<_> = sh
+        .parameters
+        .iter()
+        .map(|p| lsp_types::ParameterInformation {
+            label: lsp_types::ParameterLabel::Simple(p.label.clone()),
+            documentation: p.documentation.as_ref().map(|d| {
+                lsp_types::Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d.clone(),
+                })
+            }),
+        })
+        .collect();
+
+    lsp_types::SignatureHelp {
+        signatures: vec![lsp_types::SignatureInformation {
+            label: sh.signature,
+            documentation: sh.doc.map(|d| {
+                lsp_types::Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d,
+                })
+            }),
+            parameters: Some(parameters),
+            active_parameter: sh.active_parameter.map(|i| i as u32),
+        }],
+        active_signature: Some(0),
+        active_parameter: sh.active_parameter.map(|i| i as u32),
+    }
 }
 
 /// Handles textDocument/codeAction request.
