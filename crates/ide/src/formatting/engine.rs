@@ -2,11 +2,39 @@
 //!
 //! Traverses the syntax tree and produces formatted output.
 
+use lexer::{tokenize, TokenKind};
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
 use super::indent::{calculate_base_indent, IndentState};
 use super::whitespace::normalize_line_whitespace;
+
+/// Information about tokens in a line for formatting decisions.
+struct LineTokens {
+    first: Option<TokenKind>,
+    last: Option<TokenKind>,
+    has_then: bool, // Contains Тогда/Then
+}
+
+/// Analyzes a line and extracts token information for formatting.
+fn analyze_line_tokens(line: &str) -> LineTokens {
+    let tokens = tokenize(line);
+
+    // Filter out whitespace and comments
+    let meaningful: Vec<_> = tokens
+        .iter()
+        .filter(|t| {
+            !matches!(t.kind, TokenKind::Whitespace | TokenKind::Newline | TokenKind::Comment)
+        })
+        .collect();
+
+    let first = meaningful.first().map(|t| t.kind);
+    let last = meaningful.last().map(|t| t.kind);
+
+    let has_then = meaningful.iter().any(|t| t.kind == TokenKind::KwThen);
+
+    LineTokens { first, last, has_then }
+}
 
 /// Result of formatting operation.
 #[derive(Debug, Clone)]
@@ -193,13 +221,13 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
         return String::new();
     }
 
-    // Detect line type and adjust state
-    let line_upper = trimmed.to_uppercase();
+    // Analyze tokens in the line
+    let tokens = analyze_line_tokens(trimmed);
 
     // Check for block end keywords (КонецПроцедуры, КонецЕсли, etc.)
-    let is_block_end = is_line_block_end(&line_upper);
-    let is_middle = is_line_middle_keyword(&line_upper);
-    let is_block_start = is_line_block_start(&line_upper);
+    let is_block_end = is_line_block_end(&tokens);
+    let is_middle = is_line_middle_keyword(&tokens);
+    let is_block_start = is_line_block_start(&tokens);
 
     // Adjust indent for current line
     if is_block_end {
@@ -222,7 +250,7 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
     // For block-starting keywords (Процедура, Если...Тогда, etc.) increase indent
     // But NOT for middle keywords (Иначе, Исключение) - they don't increase indent,
     // the content after them should be at the same level as content after their parent block start
-    if is_block_start && !is_middle && !is_block_end_on_same_line(&line_upper) {
+    if is_block_start && !is_middle && !has_block_end(&tokens) {
         state.enter_block();
     }
 
@@ -243,117 +271,131 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
     format!("{}{}", indent, content)
 }
 
-/// Checks if a line starts with a block-ending keyword.
-fn is_line_block_end(line_upper: &str) -> bool {
-    line_upper.starts_with("КОНЕЦПРОЦЕДУРЫ")
-        || line_upper.starts_with("ENDPROCEDURE")
-        || line_upper.starts_with("КОНЕЦФУНКЦИИ")
-        || line_upper.starts_with("ENDFUNCTION")
-        || line_upper.starts_with("КОНЕЦЕСЛИ")
-        || line_upper.starts_with("ENDIF")
-        || line_upper.starts_with("КОНЕЦЦИКЛА")
-        || line_upper.starts_with("ENDDO")
-        || line_upper.starts_with("КОНЕЦПОПЫТКИ")
-        || line_upper.starts_with("ENDTRY")
-        || line_upper.starts_with("#КОНЕЦОБЛАСТИ")
-        || line_upper.starts_with("#ENDREGION")
-        || line_upper.starts_with("#КОНЕЦЕСЛИ")
-        || line_upper.starts_with("#ENDIF")
-        || line_upper.starts_with("#КОНЕЦВСТАВКИ")
-        || line_upper.starts_with("#ENDINSERT")
-        || line_upper.starts_with("#КОНЕЦУДАЛЕНИЯ")
-        || line_upper.starts_with("#ENDDELETE")
+/// Checks if the first token is a block-ending keyword.
+fn is_line_block_end(tokens: &LineTokens) -> bool {
+    matches!(
+        tokens.first,
+        Some(TokenKind::KwEndProcedure)
+            | Some(TokenKind::KwEndFunction)
+            | Some(TokenKind::KwEndIf)
+            | Some(TokenKind::KwEndDo)
+            | Some(TokenKind::KwEndTry)
+            | Some(TokenKind::PreEndRegion)
+            | Some(TokenKind::PreEndIf)
+            | Some(TokenKind::PreEndInsert)
+            | Some(TokenKind::PreEndDelete)
+    )
 }
 
-/// Checks if a line starts with a middle keyword (Иначе, ИначеЕсли, Исключение).
-fn is_line_middle_keyword(line_upper: &str) -> bool {
-    line_upper.starts_with("ИНАЧЕ")
-        || line_upper.starts_with("ELSE")
-        || line_upper.starts_with("ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("ELSEIF")
-        || line_upper.starts_with("ELSIF")
-        || line_upper.starts_with("ИСКЛЮЧЕНИЕ")
-        || line_upper.starts_with("EXCEPT")
-        || line_upper.starts_with("#ИНАЧЕ")
-        || line_upper.starts_with("#ELSE")
-        || line_upper.starts_with("#ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("#ELSEIF")
-        || line_upper.starts_with("#ELSIF")
+/// Checks if the line is a middle keyword (needs dedent for itself).
+/// Middle keywords: Иначе, ИначеЕсли, Исключение, standalone Тогда/Цикл,
+/// or continuation lines (ИЛИ/И) ending with Тогда/Цикл.
+fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
+    // Standard middle keywords (start of line)
+    let starts_middle = matches!(
+        tokens.first,
+        Some(TokenKind::KwElse)
+            | Some(TokenKind::KwElsIf)
+            | Some(TokenKind::KwExcept)
+            | Some(TokenKind::PreElse)
+            | Some(TokenKind::PreElsIf)
+    );
+
+    if starts_middle {
+        return true;
+    }
+
+    // Standalone Тогда/Цикл at start of line
+    if matches!(tokens.first, Some(TokenKind::KwThen) | Some(TokenKind::KwDo)) {
+        return true;
+    }
+
+    // Line ending with Тогда/Цикл - but only for continuation lines (ИЛИ/И)
+    // NOT for lines starting with Если/Для/Пока/ИначеЕсли or preprocessor #Если/#ИначеЕсли
+    let ends_with_then_or_do =
+        matches!(tokens.last, Some(TokenKind::KwThen) | Some(TokenKind::KwDo));
+    let starts_block_keyword = matches!(
+        tokens.first,
+        Some(TokenKind::KwIf)
+            | Some(TokenKind::KwElsIf)
+            | Some(TokenKind::KwFor)
+            | Some(TokenKind::KwWhile)
+            | Some(TokenKind::PreIf)
+            | Some(TokenKind::PreElsIf)
+    );
+
+    ends_with_then_or_do && !starts_block_keyword
 }
 
-/// Checks if a line starts with a block-starting keyword.
-fn is_line_block_start(line_upper: &str) -> bool {
+/// Checks if the line starts a block (increases indent for following lines).
+fn is_line_block_start(tokens: &LineTokens) -> bool {
+    let first = tokens.first;
+
     // Procedure/Function
-    if line_upper.starts_with("ПРОЦЕДУРА") || line_upper.starts_with("PROCEDURE") {
-        return true;
-    }
-    if line_upper.starts_with("ФУНКЦИЯ") || line_upper.starts_with("FUNCTION") {
+    if matches!(first, Some(TokenKind::KwProcedure) | Some(TokenKind::KwFunction)) {
         return true;
     }
 
-    // If with Тогда/Then
-    if (line_upper.starts_with("ЕСЛИ") || line_upper.starts_with("IF"))
-        && (line_upper.contains("ТОГДА") || line_upper.contains("THEN"))
-    {
+    // If - always starts block (for condition continuation or body)
+    if matches!(first, Some(TokenKind::KwIf)) {
         return true;
     }
 
-    // ИначеЕсли with Тогда/Then - is middle but also starts block
-    if (line_upper.starts_with("ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("ELSEIF")
-        || line_upper.starts_with("ELSIF"))
-        && (line_upper.contains("ТОГДА") || line_upper.contains("THEN"))
-    {
+    // Standalone Тогда/Then - starts block for body
+    if matches!(first, Some(TokenKind::KwThen)) {
         return true;
     }
 
-    // Else starts block for its content
-    if line_upper.starts_with("ИНАЧЕ") || line_upper.starts_with("ELSE") {
+    // Line ending with Тогда (like "ИЛИ Условие Тогда") - starts block for body
+    if tokens.last == Some(TokenKind::KwThen) {
         return true;
     }
 
-    // For/While with Цикл/Do
-    if (line_upper.starts_with("ДЛЯ") || line_upper.starts_with("FOR"))
-        && (line_upper.contains("ЦИКЛ") || line_upper.contains("DO"))
-    {
+    // For/While - always starts block
+    if matches!(first, Some(TokenKind::KwFor) | Some(TokenKind::KwWhile)) {
         return true;
     }
-    if (line_upper.starts_with("ПОКА") || line_upper.starts_with("WHILE"))
-        && (line_upper.contains("ЦИКЛ") || line_upper.contains("DO"))
-    {
+
+    // Standalone Цикл/Do - starts block for body
+    if matches!(first, Some(TokenKind::KwDo)) {
+        return true;
+    }
+
+    // Line ending with Цикл (like "К ... Цикл") - starts block for body
+    if tokens.last == Some(TokenKind::KwDo) {
+        return true;
+    }
+
+    // ИначеЕсли with Тогда - is middle but also starts block
+    if matches!(first, Some(TokenKind::KwElsIf)) && tokens.has_then {
+        return true;
+    }
+
+    // Else - starts block for its content
+    if matches!(first, Some(TokenKind::KwElse)) {
         return true;
     }
 
     // Try
-    if line_upper.starts_with("ПОПЫТКА") || line_upper.starts_with("TRY") {
+    if matches!(first, Some(TokenKind::KwTry)) {
         return true;
     }
 
-    // Except starts block for its content
-    if line_upper.starts_with("ИСКЛЮЧЕНИЕ") || line_upper.starts_with("EXCEPT") {
+    // Except - starts block for its content
+    if matches!(first, Some(TokenKind::KwExcept)) {
         return true;
     }
 
-    // Preprocessor
-    if line_upper.starts_with("#ОБЛАСТЬ") || line_upper.starts_with("#REGION") {
-        return true;
-    }
-    if line_upper.starts_with("#ЕСЛИ") || line_upper.starts_with("#IF") {
-        return true;
-    }
-    if line_upper.starts_with("#ИНАЧЕ") || line_upper.starts_with("#ELSE") {
-        return true;
-    }
-    if line_upper.starts_with("#ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("#ELSEIF")
-        || line_upper.starts_with("#ELSIF")
-    {
-        return true;
-    }
-    if line_upper.starts_with("#ВСТАВКА") || line_upper.starts_with("#INSERT") {
-        return true;
-    }
-    if line_upper.starts_with("#УДАЛЕНИЕ") || line_upper.starts_with("#DELETE") {
+    // Preprocessor directives that start blocks
+    if matches!(
+        first,
+        Some(TokenKind::PreRegion)
+            | Some(TokenKind::PreIf)
+            | Some(TokenKind::PreElse)
+            | Some(TokenKind::PreElsIf)
+            | Some(TokenKind::PreInsert)
+            | Some(TokenKind::PreDelete)
+    ) {
         return true;
     }
 
@@ -361,13 +403,13 @@ fn is_line_block_start(line_upper: &str) -> bool {
 }
 
 /// Checks if a block ends on the same line (e.g., `Если А Тогда Б КонецЕсли`).
-fn is_block_end_on_same_line(line_upper: &str) -> bool {
-    line_upper.contains("КОНЕЦЕСЛИ")
-        || line_upper.contains("ENDIF")
-        || line_upper.contains("КОНЕЦЦИКЛА")
-        || line_upper.contains("ENDDO")
-        || line_upper.contains("КОНЕЦПОПЫТКИ")
-        || line_upper.contains("ENDTRY")
+fn has_block_end(tokens: &LineTokens) -> bool {
+    // We check last token, but actually need to scan all tokens
+    // For simplicity, this is a heuristic - if line ends with block end keyword
+    matches!(
+        tokens.last,
+        Some(TokenKind::KwEndIf) | Some(TokenKind::KwEndDo) | Some(TokenKind::KwEndTry)
+    )
 }
 
 /// Calculates indent level at a given offset by analyzing parent nodes.
