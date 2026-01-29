@@ -40,49 +40,43 @@ pub fn format_range(
 ) -> FormattingResult {
     let text = root.text().to_string();
 
-    // Find lines that intersect with the range
-    let start_line = line_of_offset(&text, range.start());
-    let end_line = line_of_offset(&text, range.end());
-
-    // Get line boundaries
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
+    // Find line boundaries by scanning the text directly (handles both LF and CRLF)
+    let line_ranges = compute_line_ranges(&text);
+    if line_ranges.is_empty() {
         return FormattingResult { text: text.clone(), edits: vec![] };
     }
 
-    let start_line = start_line.min(lines.len().saturating_sub(1));
-    let end_line = end_line.min(lines.len().saturating_sub(1));
+    // Find lines that intersect with the range
+    let range_start_usize = u32::from(range.start()) as usize;
+    let range_end_usize = u32::from(range.end()) as usize;
 
-    // Calculate byte offsets for the range
-    let mut line_start_offset = 0u32;
-    for (i, line) in lines.iter().enumerate() {
-        if i == start_line {
-            break;
-        }
-        line_start_offset += line.len() as u32 + 1; // +1 for newline
-    }
+    let start_line = line_ranges
+        .iter()
+        .position(|(start, end)| range_start_usize >= *start && range_start_usize <= *end)
+        .unwrap_or(0);
 
-    let mut line_end_offset = line_start_offset;
-    for i in start_line..=end_line {
-        if i < lines.len() {
-            line_end_offset += lines[i].len() as u32 + 1;
-        }
-    }
-    line_end_offset = line_end_offset.saturating_sub(1); // Remove last newline
+    let end_line = line_ranges
+        .iter()
+        .position(|(start, end)| range_end_usize >= *start && range_end_usize <= *end)
+        .unwrap_or(line_ranges.len().saturating_sub(1));
 
-    // Format only the selected lines
-    let range_text: String =
-        lines[start_line..=end_line.min(lines.len().saturating_sub(1))].join("\n");
+    // Get the actual byte range for the selected lines
+    let (line_start_offset, _) = line_ranges[start_line];
+    let (_, line_end_offset) = line_ranges[end_line];
+
+    // Extract the text for the selected lines
+    let range_text = &text[line_start_offset..line_end_offset];
 
     // Calculate base indent from context (parent blocks)
-    let base_indent = calculate_indent_at_offset(root, TextSize::from(line_start_offset));
+    let base_indent = calculate_indent_at_offset(root, TextSize::from(line_start_offset as u32));
 
-    let formatted_range = format_lines(&range_text, base_indent, config);
+    let formatted_range = format_lines(range_text, base_indent, config);
 
     // Compute edits only for the range
-    let range_start = TextSize::from(line_start_offset);
-    let range_end = TextSize::from(line_end_offset.min(text.len() as u32));
-    let actual_range = TextRange::new(range_start, range_end);
+    let actual_range = TextRange::new(
+        TextSize::from(line_start_offset as u32),
+        TextSize::from(line_end_offset as u32),
+    );
 
     if formatted_range != range_text {
         FormattingResult {
@@ -90,8 +84,34 @@ pub fn format_range(
             edits: vec![TextEdit { range: actual_range, new_text: formatted_range }],
         }
     } else {
-        FormattingResult { text: range_text, edits: vec![] }
+        FormattingResult { text: range_text.to_string(), edits: vec![] }
     }
+}
+
+/// Computes the byte ranges (start, end) for each line in the text.
+/// Returns ranges that include the line content but NOT the newline characters.
+fn compute_line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut line_start = 0;
+
+    for (i, c) in text.char_indices() {
+        if c == '\n' {
+            // End of line - exclude the newline itself
+            // Also handle CRLF: if previous char was \r, exclude it too
+            let line_end =
+                if i > 0 && text.as_bytes().get(i - 1) == Some(&b'\r') { i - 1 } else { i };
+            ranges.push((line_start, line_end));
+            line_start = i + 1;
+        }
+    }
+
+    // Don't forget the last line (if no trailing newline)
+    if line_start <= text.len() {
+        let line_end = if text.ends_with('\r') { text.len() - 1 } else { text.len() };
+        ranges.push((line_start, line_end));
+    }
+
+    ranges
 }
 
 /// Formats text using line-based approach (similar to RDT1C).
@@ -361,12 +381,6 @@ fn calculate_indent_at_offset(root: &SyntaxNode, offset: TextSize) -> u32 {
     indent
 }
 
-/// Returns the line number (0-based) for a given offset.
-fn line_of_offset(text: &str, offset: TextSize) -> usize {
-    let offset = u32::from(offset) as usize;
-    text[..offset.min(text.len())].chars().filter(|&c| c == '\n').count()
-}
-
 /// Computes minimal text edits between original and formatted text.
 fn compute_edits(original: &str, formatted: &str) -> Vec<TextEdit> {
     if original == formatted {
@@ -502,5 +516,68 @@ mod tests {
         let edits = compute_edits("hello", "world");
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "world");
+    }
+
+    #[test]
+    fn test_range_formatting_middle_lines() {
+        // Test range formatting of middle lines in a procedure
+        // "Процедура Тест()" = 29 bytes (UTF-8), + \n = 30 bytes
+        let code = "Процедура Тест()\n    А = 1;\n    Б = 2;\nКонецПроцедуры";
+        let parsed = parser::parse(code);
+        let root = parsed.syntax_node();
+        let config = FormattingConfig::default();
+
+        // Format lines 1-2 (А = 1; and Б = 2;)
+        // Line 1 starts at byte 30
+        let line1_start = "Процедура Тест()\n".len() as u32;
+        let range = TextRange::new(TextSize::from(line1_start), TextSize::from(line1_start + 20));
+        let result = format_range(&root, range, &config);
+
+        // Should format with tabs, not 4 spaces
+        assert!(result.text.contains('\t'), "Should use tabs: {:?}", result.text);
+        assert!(!result.edits.is_empty(), "Should have edits");
+    }
+
+    #[test]
+    fn test_range_formatting_preserves_surrounding() {
+        // Ensure range formatting doesn't corrupt surrounding text
+        let code = "Процедура Тест()\n    А = 1;\nКонецПроцедуры";
+        let parsed = parser::parse(code);
+        let root = parsed.syntax_node();
+        let config = FormattingConfig::default();
+
+        // Format only line 1 (А = 1;)
+        let line1_start = "Процедура Тест()\n".len() as u32;
+        let range = TextRange::new(TextSize::from(line1_start), TextSize::from(line1_start + 10));
+        let result = format_range(&root, range, &config);
+
+        // Check that the edit range is correct
+        if !result.edits.is_empty() {
+            let edit = &result.edits[0];
+            // The edit should only cover the selected line, not touch header
+            assert!(
+                u32::from(edit.range.start()) >= line1_start,
+                "Edit should not touch header, got start: {}, expected >= {}",
+                u32::from(edit.range.start()),
+                line1_start
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_line_ranges() {
+        // Test LF line endings
+        let ranges = compute_line_ranges("line0\nline1\nline2");
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (0, 5)); // "line0"
+        assert_eq!(ranges[1], (6, 11)); // "line1"
+        assert_eq!(ranges[2], (12, 17)); // "line2"
+
+        // Test CRLF line endings
+        let ranges = compute_line_ranges("line0\r\nline1\r\nline2");
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (0, 5)); // "line0" (excluding \r)
+        assert_eq!(ranges[1], (7, 12)); // "line1"
+        assert_eq!(ranges[2], (14, 19)); // "line2"
     }
 }
