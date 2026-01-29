@@ -54,6 +54,11 @@ pub fn handle_goto_definition(
     // Convert result
     match target {
         Some(nav_target) => {
+            tracing::debug!(
+                target_file_id = nav_target.file_id.0,
+                ?nav_target.range,
+                "goto_definition: found target"
+            );
             // Get URL for target file (may be different from source file)
             let target_url = snap.url_for_file_id(nav_target.file_id)?;
 
@@ -82,7 +87,14 @@ pub fn handle_goto_definition(
 
             Ok(Some(GotoDefinitionResponse::Scalar(location)))
         }
-        None => Ok(None),
+        None => {
+            tracing::debug!(
+                file_id = file_id.0,
+                offset = u32::from(offset),
+                "goto_definition: no target found"
+            );
+            Ok(None)
+        }
     }
 }
 

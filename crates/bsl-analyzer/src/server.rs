@@ -166,7 +166,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                     // Process all buffered VFS files (accumulated during loading)
                     let pending_files = std::mem::take(&mut state.pending_vfs_files);
                     if !pending_files.is_empty() {
-                        tracing::info!(
+                        tracing::debug!(
                             file_count = pending_files.len(),
                             "processing buffered VFS files"
                         );
@@ -233,7 +233,9 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
                 handle_vfs_msg(state, files, true)?;
             } else {
                 // During initial loading, buffer files for later processing
+                let count = files.len();
                 state.pending_vfs_files.extend(files);
+                tracing::debug!(count, total = state.pending_vfs_files.len(), "buffered VFS files");
             }
         }
     }
