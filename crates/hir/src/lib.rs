@@ -448,7 +448,10 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         for ancestor in parent.ancestors() {
             if let Some(field_expr) = syntax::ast::FieldExpr::cast(ancestor.clone()) {
                 // Extract qualified name
-                let qualified_name = self.extract_qualified_name_from_field_expr(field_expr)?;
+                let qualified_name = match self.extract_qualified_name_from_field_expr(field_expr) {
+                    Some(qn) => qn,
+                    None => continue,
+                };
                 tracing::debug!(?qualified_name, "extracted qualified name from field expr");
 
                 // Resolve using workspace scope for cross-file resolution

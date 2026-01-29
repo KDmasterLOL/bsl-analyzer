@@ -210,13 +210,16 @@ enum ModulePathType {
 /// Parse module path to extract type and name.
 ///
 /// Designer format paths:
-/// - `CommonModules/<Name>/Ext/Module.bsl`
-/// - `Documents/<Name>/Ext/ObjectModule.bsl`
-/// - `Catalogs/<Name>/Ext/ObjectModule.bsl`
-/// - `DataProcessors/<Name>/Ext/ObjectModule.bsl`
-/// - `Reports/<Name>/Ext/ObjectModule.bsl`
-/// - `InformationRegisters/<Name>/Ext/RecordSetModule.bsl`
-/// - `AccumulationRegisters/<Name>/Ext/RecordSetModule.bsl`
+/// - `CommonModules/<Name>/Ext/Module.bsl` → CommonModule
+/// - `Documents/<Name>/Ext/ManagerModule.bsl` → Document manager
+/// - `Catalogs/<Name>/Ext/ManagerModule.bsl` → Catalog manager
+/// - `DataProcessors/<Name>/Ext/ManagerModule.bsl` → DataProcessor manager
+/// - `Reports/<Name>/Ext/ManagerModule.bsl` → Report manager
+/// - `InformationRegisters/<Name>/Ext/ManagerModule.bsl` → InformationRegister manager
+/// - `AccumulationRegisters/<Name>/Ext/ManagerModule.bsl` → AccumulationRegister manager
+///
+/// Note: Only `ManagerModule.bsl` files are indexed for MDO types that have manager modules.
+/// This ensures we don't accidentally index `ObjectModule.bsl` or `RecordSetModule.bsl`.
 fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
     let parts: Vec<&str> = path.split('/').collect();
 
@@ -224,6 +227,8 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
     if parts.len() < 4 {
         return None;
     }
+
+    let path_lower = path.to_lowercase();
 
     // Find the type folder and extract name
     for (i, part) in parts.iter().enumerate() {
@@ -270,9 +275,17 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String)> {
             if i + 1 < parts.len() {
                 let name = parts[i + 1].to_string();
 
-                // Verify it's a .bsl file (anywhere in the path after name)
-                if path.to_lowercase().ends_with(".bsl") {
-                    return Some((mod_type, name));
+                // CommonModules: accept Module.bsl
+                if mod_type == ModulePathType::CommonModule {
+                    if path_lower.ends_with("module.bsl") {
+                        return Some((mod_type, name));
+                    }
+                } else {
+                    // For MDO types with managers: only accept ManagerModule.bsl
+                    // This prevents indexing ObjectModule.bsl, RecordSetModule.bsl, etc.
+                    if path_lower.ends_with("managermodule.bsl") {
+                        return Some((mod_type, name));
+                    }
                 }
             }
         }
@@ -294,16 +307,35 @@ mod tests {
 
     #[test]
     fn test_parse_document_path() {
-        let path = "Documents/ПриходнаяНакладная/Ext/ObjectModule.bsl";
+        // ManagerModule.bsl is indexed for manager resolution
+        let path = "Documents/ПриходнаяНакладная/Ext/ManagerModule.bsl";
         let result = parse_module_path(path);
         assert_eq!(result, Some((ModulePathType::Document, "ПриходнаяНакладная".to_string())));
+
+        // ObjectModule.bsl is NOT indexed (not needed for manager resolution)
+        let object_path = "Documents/ПриходнаяНакладная/Ext/ObjectModule.bsl";
+        assert_eq!(parse_module_path(object_path), None);
     }
 
     #[test]
     fn test_parse_catalog_path() {
-        let path = "Catalogs/Номенклатура/Ext/ObjectModule.bsl";
+        let path = "Catalogs/Номенклатура/Ext/ManagerModule.bsl";
         let result = parse_module_path(path);
         assert_eq!(result, Some((ModulePathType::Catalog, "Номенклатура".to_string())));
+    }
+
+    #[test]
+    fn test_parse_information_register_path() {
+        // ManagerModule.bsl is indexed
+        let manager_path = "InformationRegisters/Test/Ext/ManagerModule.bsl";
+        assert_eq!(
+            parse_module_path(manager_path),
+            Some((ModulePathType::InformationRegister, "Test".to_string()))
+        );
+
+        // RecordSetModule.bsl is NOT indexed
+        let recordset_path = "InformationRegisters/Test/Ext/RecordSetModule.bsl";
+        assert_eq!(parse_module_path(recordset_path), None);
     }
 
     #[test]
