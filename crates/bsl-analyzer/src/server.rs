@@ -290,8 +290,9 @@ fn handle_vfs_msg(
 /// Handles an LSP request.
 fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
     use lsp_types::request::{
-        CodeActionRequest, Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest,
-        References, SemanticTokensFullRequest, SignatureHelpRequest,
+        CodeActionRequest, Completion, DocumentSymbolRequest, Formatting, GotoDefinition,
+        HoverRequest, OnTypeFormatting, RangeFormatting, References, SemanticTokensFullRequest,
+        SignatureHelpRequest,
     };
 
     tracing::info!("INCOMING REQUEST: method={} id={:?}", req.method, req.id);
@@ -309,6 +310,9 @@ fn handle_request(state: &mut GlobalState, req: Request) -> Result<()> {
         .on_sync::<DocumentSymbolRequest>(crate::handlers::handle_document_symbol)
         .on_sync::<CodeActionRequest>(crate::handlers::handle_code_action)
         .on_sync::<SignatureHelpRequest>(crate::handlers::handle_signature_help)
+        .on_sync::<Formatting>(crate::handlers::handle_formatting)
+        .on_sync::<RangeFormatting>(crate::handlers::handle_range_formatting)
+        .on_sync::<OnTypeFormatting>(crate::handlers::handle_on_type_formatting)
         .finish();
 
     Ok(())
@@ -386,6 +390,18 @@ fn server_capabilities() -> ServerCapabilities {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: Some(vec![",".to_string()]),
             work_done_progress_options: WorkDoneProgressOptions { work_done_progress: None },
+        }),
+
+        // Document formatting
+        document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+
+        // Range formatting
+        document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+
+        // On-type formatting
+        document_on_type_formatting_provider: Some(lsp_types::DocumentOnTypeFormattingOptions {
+            first_trigger_character: ";".to_string(),
+            more_trigger_character: Some(vec!["\n".to_string()]),
         }),
 
         ..Default::default()

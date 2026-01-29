@@ -542,6 +542,188 @@ fn convert_completion_kind(kind: ide::CompletionItemKind) -> CompletionItemKind 
     }
 }
 
+/// Handles textDocument/formatting request.
+///
+/// Formats the entire document.
+pub fn handle_formatting(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::DocumentFormattingParams,
+) -> Result<Option<Vec<lsp_types::TextEdit>>> {
+    let _p = tracing::info_span!(
+        "handle_formatting",
+        uri = %params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document.uri;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Get formatting config from LSP options
+    let config = formatting_config_from_options(&params.options);
+
+    // Call IDE API
+    let result = snap.analysis.format_file(file_id, &config);
+
+    // Convert edits
+    if result.edits.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_edits: Vec<lsp_types::TextEdit> = result
+        .edits
+        .into_iter()
+        .filter_map(|edit| {
+            let range = crate::lsp::range(&line_index, &text, edit.range)?;
+            Some(lsp_types::TextEdit { range, new_text: edit.new_text })
+        })
+        .collect();
+
+    if lsp_edits.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_edits))
+    }
+}
+
+/// Handles textDocument/rangeFormatting request.
+///
+/// Formats a selected range in the document.
+pub fn handle_range_formatting(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::DocumentRangeFormattingParams,
+) -> Result<Option<Vec<lsp_types::TextEdit>>> {
+    let _p = tracing::info_span!(
+        "handle_range_formatting",
+        uri = %params.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document.uri;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Convert LSP range to TextRange
+    let range = crate::lsp::text_range(&line_index, &text, params.range)?;
+
+    // Get formatting config
+    let config = formatting_config_from_options(&params.options);
+
+    // Call IDE API
+    let result = snap.analysis.format_range(file_id, range, &config);
+
+    // Convert edits
+    if result.edits.is_empty() {
+        return Ok(None);
+    }
+
+    let lsp_edits: Vec<lsp_types::TextEdit> = result
+        .edits
+        .into_iter()
+        .filter_map(|edit| {
+            let range = crate::lsp::range(&line_index, &text, edit.range)?;
+            Some(lsp_types::TextEdit { range, new_text: edit.new_text })
+        })
+        .collect();
+
+    if lsp_edits.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lsp_edits))
+    }
+}
+
+/// Handles textDocument/onTypeFormatting request.
+///
+/// Formats when a trigger character is typed (e.g., `;`, `\n`).
+pub fn handle_on_type_formatting(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::DocumentOnTypeFormattingParams,
+) -> Result<Option<Vec<lsp_types::TextEdit>>> {
+    let _p = tracing::info_span!(
+        "handle_on_type_formatting",
+        uri = %params.text_document_position.text_document.uri
+    )
+    .entered();
+
+    let uri = params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+
+    // Get FileId
+    let file_id = crate::lsp::file_id_snapshot(&snap, &uri)?;
+
+    // Get text for line index
+    let text = snap
+        .mem_docs
+        .get(&uri)
+        .ok_or_else(|| anyhow::anyhow!("Document not in MemDocs: {}", uri))?;
+
+    let line_index = LineIndex::new(&text);
+
+    // Convert position to offset
+    let offset = crate::lsp::offset(&line_index, &text, position)?;
+
+    // Get the typed character
+    let char_typed = params.ch.chars().next().unwrap_or('\0');
+
+    // Get formatting config
+    let config = formatting_config_from_options(&params.options);
+
+    // Call IDE API
+    let edits = snap.analysis.on_type_formatting(file_id, offset.into(), char_typed, &config);
+
+    match edits {
+        Some(ide_edits) => {
+            let lsp_edits: Vec<lsp_types::TextEdit> = ide_edits
+                .into_iter()
+                .filter_map(|edit| {
+                    let range = crate::lsp::range(&line_index, &text, edit.range)?;
+                    Some(lsp_types::TextEdit { range, new_text: edit.new_text })
+                })
+                .collect();
+
+            if lsp_edits.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(lsp_edits))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// Creates a FormattingConfig from LSP FormattingOptions.
+fn formatting_config_from_options(options: &lsp_types::FormattingOptions) -> ide::FormattingConfig {
+    ide::FormattingConfig {
+        use_tabs: !options.insert_spaces,
+        indent_size: if options.insert_spaces { options.tab_size } else { 1 },
+        continuation_indent: 1,
+        space_after_comma: true,
+        space_around_assignment: true,
+        space_around_binary_ops: true,
+        trim_trailing_whitespace: options.trim_trailing_whitespace.unwrap_or(true),
+        insert_final_newline: options.insert_final_newline.unwrap_or(true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

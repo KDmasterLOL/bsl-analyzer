@@ -5,6 +5,7 @@
 mod completion;
 pub mod config_finder;
 mod document_symbols;
+pub mod formatting;
 mod goto_definition;
 mod hover;
 mod references;
@@ -13,6 +14,7 @@ pub mod streaming;
 mod syntax_highlighting;
 
 pub use completion::{CompletionItem, CompletionItemKind};
+pub use formatting::{FormattingConfig, FormattingResult};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
 pub use ide_diagnostics::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
@@ -145,6 +147,48 @@ impl Analysis {
     pub fn signature_help(&self, file_id: FileId, offset: u32) -> Option<SignatureHelp> {
         let offset = TextSize::from(offset);
         signature_help::signature_help(self.db.as_ref(), file_id, offset)
+    }
+
+    /// Formats an entire file.
+    ///
+    /// Returns formatting result with the formatted text and text edits.
+    pub fn format_file(&self, file_id: FileId, config: &FormattingConfig) -> FormattingResult {
+        use ide_db::base_db::RootQueryDb;
+        let parse = self.db.as_ref().parse(file_id);
+        let root = parse.syntax_node();
+        formatting::format_file(&root, config)
+    }
+
+    /// Formats a range within a file.
+    ///
+    /// Returns formatting result with the formatted text and text edits for the range.
+    pub fn format_range(
+        &self,
+        file_id: FileId,
+        range: TextRange,
+        config: &FormattingConfig,
+    ) -> FormattingResult {
+        use ide_db::base_db::RootQueryDb;
+        let parse = self.db.as_ref().parse(file_id);
+        let root = parse.syntax_node();
+        formatting::format_range(&root, range, config)
+    }
+
+    /// Handles on-type formatting when a character is typed.
+    ///
+    /// Returns text edits to apply, or None if no formatting needed.
+    pub fn on_type_formatting(
+        &self,
+        file_id: FileId,
+        offset: u32,
+        char_typed: char,
+        config: &FormattingConfig,
+    ) -> Option<Vec<formatting::TextEdit>> {
+        use ide_db::base_db::RootQueryDb;
+        let parse = self.db.as_ref().parse(file_id);
+        let root = parse.syntax_node();
+        let offset = TextSize::from(offset);
+        formatting::on_char_typed(&root, offset, char_typed, config).map(|r| r.edits)
     }
 }
 
