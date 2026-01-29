@@ -31,7 +31,7 @@ pub fn range(line_index: &LineIndex, text: &str, range: TextRange) -> Option<Ran
 /// **IMPORTANT**: LSP requires character positions in UTF-16 code units, not bytes!
 /// This function is a helper - you must use `position_utf16()` which takes text parameter.
 pub fn position(line_index: &LineIndex, offset: TextSize) -> Option<Position> {
-    let line_col = line_index.line_col(offset);
+    let line_col = line_index.try_line_col(offset)?;
     Some(Position { line: line_col.line, character: line_col.col })
 }
 
@@ -40,7 +40,7 @@ pub fn position(line_index: &LineIndex, offset: TextSize) -> Option<Position> {
 /// **USE THIS** instead of `position()` for all LSP protocol conversions.
 /// LSP requires positions in UTF-16 code units, not bytes.
 pub fn position_utf16(line_index: &LineIndex, text: &str, offset: TextSize) -> Option<Position> {
-    let line_col = line_index.line_col(offset);
+    let line_col = line_index.try_line_col(offset)?;
     let utf16_col = line_index.utf16_col(text, line_col.line, line_col.col);
     Some(Position { line: line_col.line, character: utf16_col })
 }

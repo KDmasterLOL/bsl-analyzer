@@ -88,7 +88,17 @@ impl LineIndex {
     ///
     /// Panics if `offset > text.len()`.
     pub fn line_col(&self, offset: TextSize) -> LineCol {
-        assert!(offset <= self.len, "offset {:?} exceeds text length {:?}", offset, self.len);
+        self.try_line_col(offset)
+            .unwrap_or_else(|| panic!("offset {:?} exceeds text length {:?}", offset, self.len))
+    }
+
+    /// Converts a byte offset to a line/column position, or `None` if out of bounds.
+    ///
+    /// This is an O(log n) operation using binary search.
+    pub fn try_line_col(&self, offset: TextSize) -> Option<LineCol> {
+        if offset > self.len {
+            return None;
+        }
 
         // Binary search to find the line containing this offset.
         // We want the largest line index where line_start <= offset.
@@ -97,7 +107,7 @@ impl LineIndex {
         let line_start = self.line_start(line);
         let col = u32::from(offset) - u32::from(line_start);
 
-        LineCol { line, col }
+        Some(LineCol { line, col })
     }
 
     /// Converts a line/column position to a byte offset.
