@@ -10,14 +10,14 @@ use super::indent::{calculate_base_indent, IndentState};
 use super::whitespace::normalize_line_whitespace;
 
 /// Information about tokens in a line for formatting decisions.
-struct LineTokens {
-    first: Option<TokenKind>,
-    last: Option<TokenKind>,
-    has_then: bool, // Contains Тогда/Then
+pub(crate) struct LineTokens {
+    pub first: Option<TokenKind>,
+    pub last: Option<TokenKind>,
+    pub has_then: bool, // Contains Тогда/Then
 }
 
 /// Analyzes a line and extracts token information for formatting.
-fn analyze_line_tokens(line: &str) -> LineTokens {
+pub(crate) fn analyze_line_tokens(line: &str) -> LineTokens {
     let tokens = tokenize(line);
 
     // Filter out whitespace and comments
@@ -284,7 +284,7 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
 }
 
 /// Checks if the first token is a block-ending keyword.
-fn is_line_block_end(tokens: &LineTokens) -> bool {
+pub(crate) fn is_line_block_end(tokens: &LineTokens) -> bool {
     matches!(
         tokens.first,
         Some(TokenKind::KwEndProcedure)
@@ -302,7 +302,7 @@ fn is_line_block_end(tokens: &LineTokens) -> bool {
 /// Checks if the line is a middle keyword (needs dedent for itself).
 /// Middle keywords: Иначе, ИначеЕсли, Исключение, standalone Тогда/Цикл,
 /// or continuation lines (ИЛИ/И) ending with Тогда/Цикл.
-fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
+pub(crate) fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
     // Standard middle keywords (start of line)
     let starts_middle = matches!(
         tokens.first,
@@ -340,7 +340,7 @@ fn is_line_middle_keyword(tokens: &LineTokens) -> bool {
 }
 
 /// Checks if the line starts a block (increases indent for following lines).
-fn is_line_block_start(tokens: &LineTokens) -> bool {
+pub(crate) fn is_line_block_start(tokens: &LineTokens) -> bool {
     let first = tokens.first;
 
     // Procedure/Function

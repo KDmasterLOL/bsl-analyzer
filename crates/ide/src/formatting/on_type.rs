@@ -7,7 +7,9 @@
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use super::config::FormattingConfig;
-use super::engine::TextEdit;
+use super::engine::{
+    analyze_line_tokens, is_line_block_end, is_line_block_start, is_line_middle_keyword, TextEdit,
+};
 
 /// Result of on-type formatting.
 #[derive(Debug, Clone)]
@@ -91,10 +93,10 @@ fn on_newline_typed(
     // Calculate indent for the new line based on previous line
     let mut indent_level = calculate_indent_for_line(root, prev_line_start, prev_line);
 
-    let prev_upper = prev_line.trim().to_uppercase();
+    let tokens = analyze_line_tokens(prev_line.trim());
 
     // Increase indent after block-starting keywords
-    if is_line_starts_block(&prev_upper) && !is_line_ends_block(&prev_upper) {
+    if is_line_block_start(&tokens) && !is_line_block_end(&tokens) {
         indent_level += 1;
     }
 
@@ -154,91 +156,19 @@ fn calculate_indent_for_line(root: &SyntaxNode, line_start: TextSize, line: &str
     }
 
     // Adjust for keywords on this line
-    let line_upper = line.trim().to_uppercase();
+    let tokens = analyze_line_tokens(line.trim());
 
     // Block end keywords reduce indent for themselves
-    if is_line_ends_block(&line_upper) {
+    if is_line_block_end(&tokens) {
         indent = indent.saturating_sub(1);
     }
 
     // Middle keywords (Иначе, Исключение) are at same level as their block start
-    if is_line_middle(&line_upper) {
+    if is_line_middle_keyword(&tokens) {
         indent = indent.saturating_sub(1);
     }
 
     indent
-}
-
-/// Checks if line starts a block.
-fn is_line_starts_block(line_upper: &str) -> bool {
-    (line_upper.starts_with("ЕСЛИ") || line_upper.starts_with("IF"))
-        && (line_upper.contains("ТОГДА") || line_upper.contains("THEN"))
-        || (line_upper.starts_with("ИНАЧЕЕСЛИ")
-            || line_upper.starts_with("ELSIF")
-            || line_upper.starts_with("ELSEIF"))
-            && (line_upper.contains("ТОГДА") || line_upper.contains("THEN"))
-        || line_upper.starts_with("ИНАЧЕ")
-        || line_upper.starts_with("ELSE")
-        || (line_upper.starts_with("ДЛЯ") || line_upper.starts_with("FOR"))
-            && (line_upper.contains("ЦИКЛ") || line_upper.contains("DO"))
-        || (line_upper.starts_with("ПОКА") || line_upper.starts_with("WHILE"))
-            && (line_upper.contains("ЦИКЛ") || line_upper.contains("DO"))
-        || line_upper.starts_with("ПОПЫТКА")
-        || line_upper.starts_with("TRY")
-        || line_upper.starts_with("ИСКЛЮЧЕНИЕ")
-        || line_upper.starts_with("EXCEPT")
-        || line_upper.starts_with("ПРОЦЕДУРА")
-        || line_upper.starts_with("PROCEDURE")
-        || line_upper.starts_with("ФУНКЦИЯ")
-        || line_upper.starts_with("FUNCTION")
-        || line_upper.starts_with("#ОБЛАСТЬ")
-        || line_upper.starts_with("#REGION")
-        || line_upper.starts_with("#ЕСЛИ")
-        || line_upper.starts_with("#IF")
-        || line_upper.starts_with("#ИНАЧЕ")
-        || line_upper.starts_with("#ELSE")
-        || line_upper.starts_with("#ВСТАВКА")
-        || line_upper.starts_with("#INSERT")
-        || line_upper.starts_with("#УДАЛЕНИЕ")
-        || line_upper.starts_with("#DELETE")
-}
-
-/// Checks if line ends a block.
-fn is_line_ends_block(line_upper: &str) -> bool {
-    line_upper.starts_with("КОНЕЦПРОЦЕДУРЫ")
-        || line_upper.starts_with("ENDPROCEDURE")
-        || line_upper.starts_with("КОНЕЦФУНКЦИИ")
-        || line_upper.starts_with("ENDFUNCTION")
-        || line_upper.starts_with("КОНЕЦЕСЛИ")
-        || line_upper.starts_with("ENDIF")
-        || line_upper.starts_with("КОНЕЦЦИКЛА")
-        || line_upper.starts_with("ENDDO")
-        || line_upper.starts_with("КОНЕЦПОПЫТКИ")
-        || line_upper.starts_with("ENDTRY")
-        || line_upper.starts_with("#КОНЕЦОБЛАСТИ")
-        || line_upper.starts_with("#ENDREGION")
-        || line_upper.starts_with("#КОНЕЦЕСЛИ")
-        || line_upper.starts_with("#ENDIF")
-        || line_upper.starts_with("#КОНЕЦВСТАВКИ")
-        || line_upper.starts_with("#ENDINSERT")
-        || line_upper.starts_with("#КОНЕЦУДАЛЕНИЯ")
-        || line_upper.starts_with("#ENDDELETE")
-}
-
-/// Checks if line is a middle keyword (Иначе, ИначеЕсли, Исключение).
-fn is_line_middle(line_upper: &str) -> bool {
-    line_upper.starts_with("ИНАЧЕ")
-        || line_upper.starts_with("ELSE")
-        || line_upper.starts_with("ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("ELSIF")
-        || line_upper.starts_with("ELSEIF")
-        || line_upper.starts_with("ИСКЛЮЧЕНИЕ")
-        || line_upper.starts_with("EXCEPT")
-        || line_upper.starts_with("#ИНАЧЕ")
-        || line_upper.starts_with("#ELSE")
-        || line_upper.starts_with("#ИНАЧЕЕСЛИ")
-        || line_upper.starts_with("#ELSIF")
-        || line_upper.starts_with("#ELSEIF")
 }
 
 #[cfg(test)]
@@ -264,18 +194,20 @@ mod tests {
 
     #[test]
     fn test_is_line_starts_block() {
-        assert!(is_line_starts_block("ЕСЛИ А ТОГДА"));
-        assert!(is_line_starts_block("IF A THEN"));
-        assert!(is_line_starts_block("ПРОЦЕДУРА ТЕСТ()"));
-        assert!(is_line_starts_block("ПОПЫТКА"));
-        assert!(!is_line_starts_block("А = 1;"));
+        let check = |s: &str| is_line_block_start(&analyze_line_tokens(s));
+        assert!(check("Если А Тогда"));
+        assert!(check("If A Then"));
+        assert!(check("Процедура Тест()"));
+        assert!(check("Попытка"));
+        assert!(!check("А = 1;"));
     }
 
     #[test]
     fn test_is_line_ends_block() {
-        assert!(is_line_ends_block("КОНЕЦПРОЦЕДУРЫ"));
-        assert!(is_line_ends_block("ENDPROCEDURE"));
-        assert!(is_line_ends_block("КОНЕЦЕСЛИ;"));
-        assert!(!is_line_ends_block("А = 1;"));
+        let check = |s: &str| is_line_block_end(&analyze_line_tokens(s));
+        assert!(check("КонецПроцедуры"));
+        assert!(check("EndProcedure"));
+        assert!(check("КонецЕсли;"));
+        assert!(!check("А = 1;"));
     }
 }
