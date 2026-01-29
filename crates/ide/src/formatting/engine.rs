@@ -255,9 +255,10 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
         state.enter_block();
     }
 
-    // Track parentheses for continuation
-    let open_parens = trimmed.chars().filter(|&c| c == '(').count();
-    let close_parens = trimmed.chars().filter(|&c| c == ')').count();
+    // Track parentheses for continuation (token-based, ignores parens inside strings)
+    let all_tokens = tokenize(trimmed);
+    let open_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::LParen).count();
+    let close_parens = all_tokens.iter().filter(|t| t.kind == TokenKind::RParen).count();
     if open_parens > close_parens {
         state.enter_expression();
     } else if close_parens > open_parens {
