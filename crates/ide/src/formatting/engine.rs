@@ -264,9 +264,14 @@ fn format_line_simple(line: &str, state: &mut IndentState, config: &FormattingCo
         state.leave_expression();
     }
 
-    // Reset expression on semicolon
-    if trimmed.ends_with(';') {
+    // Handle continuation for incomplete statements (token-based, not char-based)
+    let ends_with_semicolon = matches!(tokens.last, Some(TokenKind::Semicolon));
+    if ends_with_semicolon || is_block_start {
+        // Statement complete: either ends with ; token or block keyword (Тогда/Цикл)
         state.reset_expression();
+    } else if !is_block_end && state.expression == 0 {
+        // Incomplete statement, no ; token → next line needs continuation indent
+        state.enter_expression();
     }
 
     format!("{}{}", indent, content)
