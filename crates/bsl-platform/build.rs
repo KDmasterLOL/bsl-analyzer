@@ -87,19 +87,18 @@ fn main() {
         // If extraction failed, fall through to fallback (warnings already printed by extract_both_help_files)
     }
 
-    // Fallback: no platform found or extraction failed
-    if !platform_found {
-        println!("cargo:warning=1C platform not found, building without documentation");
-        println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
-    }
-
-    // Check if bundled platform data exists (committed to repo)
+    // Fallback: use bundled platform data (committed to repo)
     let bundled_path =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("data/platform_data.json");
     if bundled_path.exists() {
         generate_code_from_json(&bundled_path, &generated_path, false);
+    } else if !platform_found {
+        // No 1C and no bundled data - warn and generate empty
+        println!("cargo:warning=1C platform not found and no bundled data available");
+        println!("cargo:warning=Install 1C:Enterprise or add data/platform_data.json");
+        generate_empty_structures(&generated_path);
     } else {
-        // Generate empty structures
+        // 1C found but extraction failed - generate empty
         generate_empty_structures(&generated_path);
     }
 }
