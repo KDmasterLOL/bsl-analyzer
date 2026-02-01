@@ -93,10 +93,11 @@ fn main() {
         println!("cargo:warning=Install 1C:Enterprise to enable platform documentation");
     }
 
-    // Check if minimal data exists
-    let minimal_path = PathBuf::from("data/platform_minimal.json");
-    if minimal_path.exists() {
-        generate_code_from_json(&minimal_path, &generated_path, false);
+    // Check if bundled platform data exists (committed to repo)
+    let bundled_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("data/platform_data.json");
+    if bundled_path.exists() {
+        generate_code_from_json(&bundled_path, &generated_path, false);
     } else {
         // Generate empty structures
         generate_empty_structures(&generated_path);
