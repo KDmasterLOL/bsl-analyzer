@@ -94,8 +94,8 @@ fn main() {
     }
 
     // Check if bundled platform data exists (committed to repo)
-    let bundled_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("data/platform_data.json");
+    let bundled_path =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("data/platform_data.json");
     if bundled_path.exists() {
         generate_code_from_json(&bundled_path, &generated_path, false);
     } else {
