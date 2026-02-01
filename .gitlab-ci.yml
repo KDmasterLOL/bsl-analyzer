@@ -1,47 +1,36 @@
 # GitLab CI/CD для bsl-analyzer
-# Runner: Linux shell executor
-# Требования: установленный Rust toolchain на runner
+# Runner: Docker executor с rust image
+# Stages: test → build → upload → publish
+#
+# Артефакты:
+#   - bsl-analyzer (launcher) - распространяется в репозиториях/IDE
+#   - bsl-analyzer-app (LSP сервер) - скачивается с release-server
 
 stages:
-  - check
   - test
   - build
-
-default:
-  tags:
-    - linux
+  - upload
+  - publish
 
 variables:
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   RUSTFLAGS: "-D warnings"
+  GIT_DEPTH: 1
+  # CI/CD Variables:
+  # RELEASE_SERVER_URL: https://releases.example.com
+  # RELEASE_UPLOAD_TOKEN: <secret>
 
-# Кеширование зависимостей Cargo
-cache:
-  key: ${CI_COMMIT_REF_SLUG}
-  paths:
-    - .cargo/
-    - target/
-
-# Проверка версии Rust перед всеми задачами
-before_script:
-  - rustc --version
-  - cargo --version
-
-# ============================================
-# Stage: check
-# ============================================
-
-fmt:
-  stage: check
-  script:
-    - cargo fmt --all -- --check
-  allow_failure: false
-
-clippy:
-  stage: check
-  script:
-    - cargo clippy --all-targets --all-features -- -D warnings
-  allow_failure: false
+# Кэширование зависимостей Cargo
+.cargo-cache: &cargo-cache
+  cache:
+    key: cargo-${CI_JOB_NAME}
+    fallback_keys:
+      - cargo-test
+    unprotect: true
+    paths:
+      - .cargo/registry/index
+      - .cargo/registry/cache
+      - target/
 
 # ============================================
 # Stage: test
@@ -49,62 +38,163 @@ clippy:
 
 test:
   stage: test
+  image: rust:1.91
+  tags:
+    - rust
+  <<: *cargo-cache
+  before_script:
+    - rustup component add rustfmt clippy
+    - rustc --version
+    - cargo --version
   script:
+    - cargo fmt --all -- --check
+    - cargo clippy --all-targets --all-features -- -D warnings
     - cargo test --all --no-fail-fast
-  artifacts:
-    when: on_failure
-    paths:
-      - target/debug/deps/
-    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
 
 # ============================================
 # Stage: build
 # ============================================
 
-build:debug:
+# Шаблон для сборки
+.build-template: &build-template
   stage: build
+  image: rust:1.91
+  tags:
+    - rust
+  <<: *cargo-cache
+  before_script:
+    - rustup target add ${RUST_TARGET}
   script:
-    - cargo build --all
+    - cargo build --release --target ${RUST_TARGET}
+    - mkdir -p artifacts
+    # Launcher (распространяется в репозиториях)
+    - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-launcher-${PLATFORM_SUFFIX}${BINARY_EXT}
+    # App (скачивается с release-server)
+    - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
+    - ls -la artifacts/
   artifacts:
     paths:
-      - target/debug/bsl-analyzer
-    expire_in: 1 week
-  only:
-    - main
-    - merge_requests
+      - artifacts/
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_TAG
 
-build:release:
-  stage: build
+# Linux AMD64 (static musl build)
+build:linux-amd64:
+  <<: *build-template
+  variables:
+    RUST_TARGET: x86_64-unknown-linux-musl
+    PLATFORM_SUFFIX: linux-amd64
+    BINARY_EXT: ""
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq musl-tools
+    - rustup target add ${RUST_TARGET}
+
+# Windows AMD64 (cross-compilation via mingw)
+build:windows-amd64:
+  <<: *build-template
+  variables:
+    RUST_TARGET: x86_64-pc-windows-gnu
+    PLATFORM_SUFFIX: windows-amd64
+    BINARY_EXT: .exe
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq mingw-w64
+    - rustup target add ${RUST_TARGET}
+
+# macOS builds require local MacBook - see scripts/build-macos.sh
+
+# ============================================
+# Stage: upload
+# ============================================
+
+upload:
+  stage: upload
+  image: curlimages/curl:latest
+  tags:
+    - rust
+  needs:
+    - build:linux-amd64
+    - build:windows-amd64
   script:
-    - cargo build --all --release
-  artifacts:
-    paths:
-      - target/release/bsl-analyzer
-    expire_in: 4 weeks
-  only:
-    - tags
-    - main
+    - |
+      VERSION=${CI_COMMIT_TAG#v}  # v0.1.0 -> 0.1.0
+      echo "Uploading version ${VERSION}"
+
+      for file in artifacts/*; do
+        PLATFORM=$(basename "$file")
+        echo "Uploading ${PLATFORM}..."
+
+        curl -f -X POST "${RELEASE_SERVER_URL}/upload" \
+          -H "Authorization: Bearer ${RELEASE_UPLOAD_TOKEN}" \
+          -H "X-Product: bsl-analyzer" \
+          -H "X-Version: ${VERSION}" \
+          -H "X-Platform: ${PLATFORM}" \
+          --data-binary "@${file}"
+
+        echo "Uploaded ${PLATFORM}"
+      done
+  rules:
+    - if: $CI_COMMIT_TAG && $RELEASE_SERVER_URL
 
 # ============================================
-# Опциональные задачи
+# Stage: publish
 # ============================================
 
-# Проверка документации
+publish:
+  stage: publish
+  image: curlimages/curl:latest
+  tags:
+    - rust
+  needs:
+    - upload
+  script:
+    - |
+      VERSION=${CI_COMMIT_TAG#v}
+      echo "Publishing version ${VERSION}"
+
+      curl -f -X POST "${RELEASE_SERVER_URL}/publish/bsl-analyzer/${VERSION}" \
+        -H "Authorization: Bearer ${RELEASE_UPLOAD_TOKEN}"
+
+      echo "Version ${VERSION} published successfully"
+  rules:
+    - if: $CI_COMMIT_TAG && $RELEASE_SERVER_URL
+
+# GitLab Release
+release:
+  stage: publish
+  image: registry.gitlab.com/gitlab-org/cli:v1.60.0
+  tags:
+    - rust
+  needs:
+    - job: build:linux-amd64
+      artifacts: true
+    - job: build:windows-amd64
+      artifacts: true
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    description: 'Release $CI_COMMIT_TAG'
+  rules:
+    - if: $CI_COMMIT_TAG
+
+# ============================================
+# Optional: documentation
+# ============================================
+
 doc:
-  stage: check
+  stage: test
+  image: rust:1.91
+  tags:
+    - rust
+  <<: *cargo-cache
   script:
     - cargo doc --all --no-deps
   allow_failure: true
-  only:
-    - main
-    - merge_requests
-
-# Аудит безопасности зависимостей (требует cargo-audit)
-# Раскомментировать когда cargo-audit будет установлен на runner
-# audit:
-#   stage: check
-#   script:
-#     - cargo audit
-#   allow_failure: true
-#   only:
-#     - schedules
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

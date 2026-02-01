@@ -9,7 +9,7 @@ rust-version.workspace = true
 doctest = false
 
 [[bin]]
-name = "bsl-analyzer"
+name = "bsl-analyzer-app"
 path = "src/bin/main.rs"
 
 [dependencies]

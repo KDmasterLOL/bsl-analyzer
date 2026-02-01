@@ -43,6 +43,7 @@ test-utils = { path = "crates/test-utils" }
 line-index = { path = "crates/line-index" }
 paths = { path = "crates/paths" }
 vfs-notify = { path = "crates/vfs-notify" }
+bsl-launcher = { path = "crates/bsl-launcher" }
 
 # Salsa for incremental computation
 salsa = { version = "0.25.2", features = ["rayon", "macros"] }
@@ -123,7 +124,15 @@ tempfile = "3.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]
-lto = "thin"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Profile for development with debug info
+[profile.release-with-debug]
+inherits = "release"
+strip = false
 debug = 1
 
 [profile.dev]
