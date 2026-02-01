@@ -111,13 +111,7 @@ const MESSAGES_EN: Messages = Messages {
 
 fn messages() -> &'static Messages {
     get_locale()
-        .map(|l| {
-            if l.starts_with("ru") {
-                &MESSAGES_RU
-            } else {
-                &MESSAGES_EN
-            }
-        })
+        .map(|l| if l.starts_with("ru") { &MESSAGES_RU } else { &MESSAGES_EN })
         .unwrap_or(&MESSAGES_RU)
 }
 
@@ -214,11 +208,7 @@ fn ensure_analyzer() -> Result<PathBuf> {
 
     if current_link.exists() {
         if let Ok(target) = fs::read_link(&current_link) {
-            let full_path = if target.is_absolute() {
-                target
-            } else {
-                cache_dir.join(&target)
-            };
+            let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
 
             if full_path.exists() {
                 check_updates_if_needed(&cache_dir);
@@ -305,17 +295,10 @@ fn verify_installation() -> Result<()> {
 
     let manifest = fetch_and_verify_manifest(version)?;
 
-    let binary_path = if target.is_absolute() {
-        target
-    } else {
-        cache_dir.join(&target)
-    };
+    let binary_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
 
     let platform = get_platform_binary();
-    let expected = manifest
-        .files
-        .get(platform)
-        .context("Platform not found in manifest")?;
+    let expected = manifest.files.get(platform).context("Platform not found in manifest")?;
 
     verify_file_checksum(&binary_path, &expected.sha256)?;
 
@@ -333,17 +316,12 @@ fn self_update_launcher() -> Result<()> {
     let m = messages();
 
     let current_exe = env::current_exe().context("Cannot determine current executable path")?;
-    let launcher_dir = current_exe
-        .parent()
-        .context("Cannot determine launcher directory")?;
+    let launcher_dir = current_exe.parent().context("Cannot determine launcher directory")?;
 
     let latest_version = fetch_latest_version()?;
     let manifest = fetch_and_verify_manifest(&latest_version)?;
 
-    eprintln!(
-        "{}",
-        m.self_update_downloading.replace("{}", &latest_version)
-    );
+    eprintln!("{}", m.self_update_downloading.replace("{}", &latest_version));
 
     let client = create_download_client()?;
     let mut updated_count = 0;
@@ -358,10 +336,7 @@ fn self_update_launcher() -> Result<()> {
         let file_info = match manifest.files.get(*remote_name) {
             Some(info) => info,
             None => {
-                eprintln!(
-                    "  {} -> {} (not in manifest, skipped)",
-                    local_name, remote_name
-                );
+                eprintln!("  {} -> {} (not in manifest, skipped)", local_name, remote_name);
                 continue;
             }
         };
@@ -375,11 +350,7 @@ fn self_update_launcher() -> Result<()> {
             continue;
         }
 
-        eprint!(
-            "  {} ({:.1} MB) ... ",
-            local_name,
-            file_info.size as f64 / 1_048_576.0
-        );
+        eprint!("  {} ({:.1} MB) ... ", local_name, file_info.size as f64 / 1_048_576.0);
 
         let bytes = download_launcher_binary(&client, &latest_version, remote_name, file_info)?;
 
@@ -393,10 +364,7 @@ fn self_update_launcher() -> Result<()> {
     if updated_count > 0 {
         eprintln!("{}", m.self_update_done);
     } else {
-        eprintln!(
-            "{}",
-            m.self_update_up_to_date.replace("{}", &latest_version)
-        );
+        eprintln!("{}", m.self_update_up_to_date.replace("{}", &latest_version));
     }
 
     Ok(())
@@ -409,18 +377,10 @@ fn download_launcher_binary(
     file_info: &FileInfo,
 ) -> Result<Vec<u8>> {
     let m = messages();
-    let url = format!(
-        "{}/{}/{}/{}",
-        get_release_url(),
-        PRODUCT,
-        version,
-        remote_name
-    );
+    let url = format!("{}/{}/{}/{}", get_release_url(), PRODUCT, version, remote_name);
 
-    let response = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("Failed to download from {}", url))?;
+    let response =
+        client.get(&url).send().with_context(|| format!("Failed to download from {}", url))?;
 
     if !response.status().is_success() {
         eprintln!("{}", m.failed);
@@ -430,20 +390,12 @@ fn download_launcher_binary(
     let bytes = response.bytes()?.to_vec();
 
     if bytes.len() as u64 != file_info.size {
-        bail!(
-            "Size mismatch: expected {}, got {}",
-            file_info.size,
-            bytes.len()
-        );
+        bail!("Size mismatch: expected {}, got {}", file_info.size, bytes.len());
     }
 
     let hash = compute_sha256(&bytes);
     if hash != file_info.sha256 {
-        bail!(
-            "Checksum mismatch!\nExpected: {}\nGot: {}",
-            file_info.sha256,
-            hash
-        );
+        bail!("Checksum mismatch!\nExpected: {}\nGot: {}", file_info.sha256, hash);
     }
 
     Ok(bytes)
@@ -514,17 +466,9 @@ fn download_version(cache_dir: &Path, version: &str) -> Result<PathBuf> {
             .replace("{:.1}", &format!("{:.1}", file_info.size as f64 / 1_048_576.0))
     );
     let client = create_download_client()?;
-    let url = format!(
-        "{}/{}/{}/{}",
-        get_release_url(),
-        PRODUCT,
-        version,
-        platform
-    );
-    let response = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("Failed to download from {}", url))?;
+    let url = format!("{}/{}/{}/{}", get_release_url(), PRODUCT, version, platform);
+    let response =
+        client.get(&url).send().with_context(|| format!("Failed to download from {}", url))?;
 
     if !response.status().is_success() {
         eprintln!("{}", m.failed);
@@ -535,20 +479,12 @@ fn download_version(cache_dir: &Path, version: &str) -> Result<PathBuf> {
     eprintln!("{}", m.ok);
 
     if bytes.len() as u64 != file_info.size {
-        bail!(
-            "Size mismatch: expected {}, got {}",
-            file_info.size,
-            bytes.len()
-        );
+        bail!("Size mismatch: expected {}, got {}", file_info.size, bytes.len());
     }
 
     let hash = compute_sha256(&bytes);
     if hash != file_info.sha256 {
-        bail!(
-            "Checksum mismatch!\nExpected: {}\nGot: {}",
-            file_info.sha256,
-            hash
-        );
+        bail!("Checksum mismatch!\nExpected: {}\nGot: {}", file_info.sha256, hash);
     }
 
     fs::write(&binary_path, &bytes)?;
@@ -572,12 +508,7 @@ fn fetch_and_verify_manifest(version: &str) -> Result<Manifest> {
     let client = create_http_client()?;
 
     eprint!("{}", m.fetching_manifest);
-    let manifest_url = format!(
-        "{}/{}/{}/manifest.json",
-        get_release_url(),
-        PRODUCT,
-        version
-    );
+    let manifest_url = format!("{}/{}/{}/manifest.json", get_release_url(), PRODUCT, version);
     let manifest_response = client
         .get(&manifest_url)
         .send()
@@ -585,22 +516,14 @@ fn fetch_and_verify_manifest(version: &str) -> Result<Manifest> {
 
     if !manifest_response.status().is_success() {
         eprintln!("{}", m.failed);
-        bail!(
-            "Failed to fetch manifest: HTTP {}",
-            manifest_response.status()
-        );
+        bail!("Failed to fetch manifest: HTTP {}", manifest_response.status());
     }
 
     let manifest_bytes = manifest_response.bytes()?;
     eprintln!("{}", m.ok);
 
     eprint!("{}", m.fetching_signature);
-    let sig_url = format!(
-        "{}/{}/{}/manifest.sig",
-        get_release_url(),
-        PRODUCT,
-        version
-    );
+    let sig_url = format!("{}/{}/{}/manifest.sig", get_release_url(), PRODUCT, version);
     let sig_response = client
         .get(&sig_url)
         .send()
@@ -608,10 +531,7 @@ fn fetch_and_verify_manifest(version: &str) -> Result<Manifest> {
 
     if !sig_response.status().is_success() {
         eprintln!("{}", m.failed);
-        bail!(
-            "Failed to fetch signature: HTTP {}",
-            sig_response.status()
-        );
+        bail!("Failed to fetch signature: HTTP {}", sig_response.status());
     }
 
     let sig_bytes = sig_response.bytes()?;
@@ -623,11 +543,7 @@ fn fetch_and_verify_manifest(version: &str) -> Result<Manifest> {
         serde_json::from_slice(&manifest_bytes).context("Failed to parse manifest.json")?;
 
     if manifest.version != version {
-        bail!(
-            "Version mismatch in manifest: expected {}, got {}",
-            version,
-            manifest.version
-        );
+        bail!("Version mismatch in manifest: expected {}, got {}", version, manifest.version);
     }
 
     Ok(manifest)
@@ -636,28 +552,23 @@ fn fetch_and_verify_manifest(version: &str) -> Result<Manifest> {
 fn verify_signature(data: &[u8], signature_hex: &[u8]) -> Result<()> {
     let public_key_bytes = hex::decode(PUBLIC_KEY_HEX).context("Invalid public key hex")?;
 
-    let public_key_array: [u8; 32] = public_key_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Public key must be 32 bytes"))?;
+    let public_key_array: [u8; 32] =
+        public_key_bytes.try_into().map_err(|_| anyhow::anyhow!("Public key must be 32 bytes"))?;
 
     let verifying_key =
         VerifyingKey::from_bytes(&public_key_array).context("Invalid public key")?;
 
-    let sig_hex_str = std::str::from_utf8(signature_hex)
-        .context("Signature is not valid UTF-8")?
-        .trim();
+    let sig_hex_str =
+        std::str::from_utf8(signature_hex).context("Signature is not valid UTF-8")?.trim();
 
     let sig_bytes = hex::decode(sig_hex_str).context("Invalid signature hex")?;
 
-    let sig_array: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
+    let sig_array: [u8; 64] =
+        sig_bytes.try_into().map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
 
     let signature = Signature::from_bytes(&sig_array);
 
-    verifying_key
-        .verify(data, &signature)
-        .context("Signature verification failed")?;
+    verifying_key.verify(data, &signature).context("Signature verification failed")?;
 
     Ok(())
 }
@@ -665,10 +576,7 @@ fn verify_signature(data: &[u8], signature_hex: &[u8]) -> Result<()> {
 fn verify_existing_binary(version: &str, path: &Path) -> Result<()> {
     let manifest = fetch_and_verify_manifest(version)?;
     let platform = get_platform_binary();
-    let expected = manifest
-        .files
-        .get(platform)
-        .context("Platform not found in manifest")?;
+    let expected = manifest.files.get(platform).context("Platform not found in manifest")?;
 
     verify_file_checksum(path, &expected.sha256)
 }
@@ -723,10 +631,8 @@ fn fetch_latest_version() -> Result<String> {
 
     let client = create_http_client()?;
     let url = format!("{}/{}/latest", get_release_url(), PRODUCT);
-    let response = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("Failed to connect to {}", url))?;
+    let response =
+        client.get(&url).send().with_context(|| format!("Failed to connect to {}", url))?;
 
     if !response.status().is_success() {
         eprintln!("{}", m.failed);
@@ -743,9 +649,7 @@ fn get_current_version(cache_dir: &Path) -> Option<String> {
     let target = fs::read_link(&current_link).ok()?;
     let file_name = target.file_name()?.to_str()?;
 
-    file_name
-        .strip_prefix("bsl-analyzer-")
-        .map(|s| s.to_string())
+    file_name.strip_prefix("bsl-analyzer-").map(|s| s.to_string())
 }
 
 fn get_platform_binary() -> &'static str {
