@@ -192,3 +192,51 @@ cargo test --all
 - [ ] Нет O(n²) паттернов
 - [ ] Early exit при `is_disabled()`
 - [ ] Тесты покрывают positive и negative cases
+
+---
+
+## Обновление справки платформы 1С
+
+Справка платформы хранится в `crates/bsl-platform/data/platform_data.json` и содержит информацию о типах, методах и глобальных функциях 1С.
+
+### Когда обновлять
+
+- При выходе новой версии платформы 1С с новыми методами/типами
+- При обнаружении ошибок в справке
+
+### Требования
+
+- Установленная платформа 1С:Предприятие (Linux: `/opt/1cv8/x86_64/*/`)
+- Утилита `7z` для распаковки .hbk файлов
+
+### Процедура обновления
+
+```bash
+# 1. Удалить текущий файл (чтобы build.rs извлёк заново)
+rm crates/bsl-platform/data/platform_data.json
+
+# 2. Собрать html-parser (если ещё не собран)
+cargo build --release -p html-parser \
+  --manifest-path crates/bsl-platform/tools/html-parser/Cargo.toml
+
+# 3. Пересобрать bsl-platform (извлечёт данные из 1С)
+cargo clean -p bsl-platform
+cargo build -p bsl-platform
+
+# 4. Скопировать сгенерированный JSON в репозиторий
+cp target/debug/build/bsl-platform-*/out/platform_data.json \
+   crates/bsl-platform/data/platform_data.json
+
+# 5. Проверить тесты
+cargo test -p hir-def --lib -- platform_helpers
+
+# 6. Закоммитить
+git add crates/bsl-platform/data/platform_data.json
+git commit -m "chore: update platform data to version X.X.X"
+```
+
+### Приоритет источников данных (build.rs)
+
+1. `data/platform_data.json` — из репозитория (предпочтительный)
+2. Извлечение из 1С — требует установленную платформу и 7z
+3. Пустые структуры — fallback, тесты platform_helpers упадут

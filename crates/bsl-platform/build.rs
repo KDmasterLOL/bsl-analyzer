@@ -1,7 +1,9 @@
 //! Build script for bsl-platform.
 //!
-//! Detects installed 1C:Enterprise platform and extracts documentation from shcntx_ru.hbk.
-//! If platform is not found, generates minimal data structure without documentation.
+//! Priority for platform data:
+//! 1. data/platform_data.json (committed to repo) - preferred, no external dependencies
+//! 2. Extract from 1C:Enterprise installation - requires 1C and 7z
+//! 3. Empty structures - fallback when nothing available
 
 use std::env;
 use std::fs;
@@ -51,7 +53,17 @@ fn main() {
     let crate_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let timestamp_path = crate_root.join(".platform_cache_timestamp");
 
-    // Check if we can skip regeneration
+    // Priority 1: Check for committed platform data in repo
+    let committed_data_path = crate_root.join("data/platform_data.json");
+    println!("cargo:rerun-if-changed=data/platform_data.json");
+
+    if committed_data_path.exists() {
+        generate_code_from_json(&committed_data_path, &generated_path, true);
+        println!("cargo:rustc-cfg=feature=\"platform_docs\"");
+        return;
+    }
+
+    // Priority 2: Extract from 1C installation
     let platform_found = find_1c_help_file_paths().is_some();
 
     if let Some(hbk_files) = find_1c_help_file_paths() {
@@ -87,20 +99,14 @@ fn main() {
         // If extraction failed, fall through to fallback (warnings already printed by extract_both_help_files)
     }
 
-    // Fallback: use bundled platform data (committed to repo)
-    let bundled_path =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("data/platform_data.json");
-    if bundled_path.exists() {
-        generate_code_from_json(&bundled_path, &generated_path, false);
-    } else if !platform_found {
-        // No 1C and no bundled data - warn and generate empty
-        println!("cargo:warning=1C platform not found and no bundled data available");
-        println!("cargo:warning=Install 1C:Enterprise or add data/platform_data.json");
-        generate_empty_structures(&generated_path);
-    } else {
-        // 1C found but extraction failed - generate empty
-        generate_empty_structures(&generated_path);
+    // Priority 3: Fallback - no platform found or extraction failed
+    if !platform_found {
+        println!("cargo:warning=1C platform not found and data/platform_data.json missing");
+        println!("cargo:warning=See docs/contributing/DEVELOPMENT_RULES.md for instructions");
     }
+
+    // Generate empty structures as last resort
+    generate_empty_structures(&generated_path);
 }
 
 /// Searches for 1C help files in standard installation locations.

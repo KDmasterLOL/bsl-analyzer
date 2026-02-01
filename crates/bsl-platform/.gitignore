@@ -1,7 +1,8 @@
 # Build artifacts
 target/
 
-# Temporary extraction directory
+# Temporary extraction data (platform_data.json is committed)
+/data/platform_full.json
 /data/extracted/
 
 # Build script output
