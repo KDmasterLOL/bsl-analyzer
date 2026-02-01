@@ -526,6 +526,159 @@ impl AnalysisOrchestrator {
             file_results,
         }
     }
+
+    /// Perform batch analysis with JSON Lines streaming output.
+    ///
+    /// Unlike `analyze()`, this method streams results directly to stdout
+    /// in JSON Lines format as they are received, without accumulating them
+    /// in memory. This is designed for SonarQube integration and large codebases.
+    ///
+    /// ## Output Format
+    ///
+    /// ```jsonl
+    /// {"type":"start","total_files":6540,"version":"0.2.0"}
+    /// {"type":"file","path":"src/Module.bsl","diagnostics":[...],"metrics":{...}}
+    /// {"type":"done","elapsed_secs":11.2,"total_files":6540,"total_diagnostics":1234,"failed_files":0}
+    /// ```
+    ///
+    /// ## Parameters
+    ///
+    /// - `files`: List of FileIds to process
+    /// - `file_set`: VFS file set with paths
+    ///
+    /// ## Returns
+    ///
+    /// `JsonlSummary` with statistics (for programmatic access).
+    pub fn analyze_jsonl(
+        &self,
+        files: Vec<FileId>,
+        file_set: FileSet,
+    ) -> Result<super::jsonl::JsonlSummary, OrchestratorError> {
+        use std::time::Instant;
+
+        use super::jsonl::{DoneEvent, StartEvent};
+
+        let _span =
+            tracing::info_span!("orchestrator_analyze_jsonl", num_files = files.len()).entered();
+
+        if files.is_empty() {
+            return Err(OrchestratorError::NoFiles);
+        }
+
+        let start = Instant::now();
+        info!(
+            num_files = files.len(),
+            num_workers = self.num_workers,
+            "Starting JSONL streaming analysis"
+        );
+
+        // Print start event
+        let start_event = StartEvent::new(files.len());
+        println!(
+            "{}",
+            serde_json::to_string(&start_event).expect("StartEvent serialization failed")
+        );
+
+        // Phase 1: Initialization
+        let global_context = self.initialize_global_context(&files, file_set.clone())?;
+
+        // Phase 2: Create SharedState and spawn workers
+        let sorted_files = self.sort_files_by_priority(files, &global_context);
+        let shared_state = SharedState::new(global_context.as_ref().clone(), sorted_files);
+        let provider = Arc::new(StreamingProvider::with_shared_state(
+            global_context,
+            Arc::clone(&shared_state),
+        ));
+
+        // Load diagnostics configuration from project config file
+        let config = Arc::new(self.load_diagnostics_config());
+
+        let (results_tx, results_rx) = unbounded();
+
+        let workers = self.spawn_workers(provider, shared_state.clone(), config, results_tx)?;
+
+        // Phase 3: Stream results
+        let summary = self.stream_jsonl_results(results_rx, workers, &file_set);
+
+        // Print done event
+        let done_event = DoneEvent::new(
+            start.elapsed().as_secs_f64(),
+            summary.total_files,
+            summary.total_diagnostics,
+            summary.failed_files,
+        );
+        println!("{}", serde_json::to_string(&done_event).expect("DoneEvent serialization failed"));
+
+        info!(
+            total_files = summary.total_files,
+            total_diagnostics = summary.total_diagnostics,
+            failed_files = summary.failed_files,
+            elapsed_secs = start.elapsed().as_secs_f64(),
+            "JSONL streaming analysis completed"
+        );
+
+        Ok(summary)
+    }
+
+    /// Stream results as JSON Lines.
+    ///
+    /// This method receives results from workers and immediately outputs them
+    /// as JSON Lines to stdout without accumulating in memory.
+    fn stream_jsonl_results(
+        &self,
+        results_rx: crossbeam_channel::Receiver<FileResult>,
+        workers: Vec<thread::JoinHandle<()>>,
+        file_set: &FileSet,
+    ) -> super::jsonl::JsonlSummary {
+        use super::jsonl::{FileEvent, JsonlSummary};
+
+        let _span = tracing::info_span!("stream_jsonl_results").entered();
+
+        let mut total_diagnostics = 0;
+        let mut total_files = 0;
+        let mut failed_files = 0;
+
+        // Stream results as they arrive
+        for result in results_rx {
+            // Get path from file_set
+            let path = file_set
+                .path_for_file(&result.file_id)
+                .map(|p| p.as_path().display().to_string())
+                .unwrap_or_else(|| format!("file:{}", result.file_id.index()));
+
+            let file_event = FileEvent::new(
+                path,
+                result.diagnostics.clone(),
+                result.metrics.clone(),
+                result.error.as_ref().map(|e| e.to_string()),
+            );
+
+            // Output immediately
+            println!(
+                "{}",
+                serde_json::to_string(&file_event).expect("FileEvent serialization failed")
+            );
+
+            total_diagnostics += result.diagnostics.len();
+            total_files += 1;
+            if result.error.is_some() {
+                failed_files += 1;
+            }
+        }
+
+        info!(total_files, "All JSONL results streamed");
+
+        // Wait for all workers to exit
+        for (idx, handle) in workers.into_iter().enumerate() {
+            if let Err(e) = handle.join() {
+                error!(worker_id = idx, error = ?e, "Worker thread panicked");
+            }
+        }
+
+        info!("All workers exited");
+
+        JsonlSummary { total_files, total_diagnostics, failed_files }
+    }
 }
 
 /// Builder for constructing `AnalysisOrchestrator`.

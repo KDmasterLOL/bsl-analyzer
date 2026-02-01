@@ -39,16 +39,16 @@ pub struct DiagnosticOutput {
     /// Severity level (e.g., "Warning", "Error").
     pub severity: String,
 
-    /// Start line (0-based).
+    /// Start line (0-based, LSP compatible).
     pub start_line: usize,
 
-    /// Start column (0-based).
+    /// Start column (0-based, LSP compatible).
     pub start_column: usize,
 
-    /// End line (0-based).
+    /// End line (0-based, LSP compatible).
     pub end_line: usize,
 
-    /// End column (0-based).
+    /// End column (0-based, LSP compatible).
     pub end_column: usize,
 
     /// Diagnostic tags (e.g., "Unnecessary", "Deprecated").

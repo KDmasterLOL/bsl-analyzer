@@ -22,6 +22,7 @@ bsl-platform.workspace = true
 project-model.workspace = true
 triomphe.workspace = true
 tracing.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel.workspace = true
 thiserror.workspace = true

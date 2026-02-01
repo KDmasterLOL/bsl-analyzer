@@ -1254,6 +1254,7 @@ dependencies = [
  "project-model",
  "rustc-hash 2.1.1",
  "sdbl-hir",
+ "serde",
  "serde_json",
  "smol_str",
  "stdx",

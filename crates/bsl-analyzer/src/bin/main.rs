@@ -4,8 +4,18 @@
 
 use std::{env, error::Error, fs, io, path::PathBuf, process::Command, sync::Arc};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use ide_db::metadata;
+
+/// Output format for analysis results.
+#[derive(Debug, Clone, Default, ValueEnum)]
+enum OutputFormat {
+    /// Console output with reporters (default)
+    #[default]
+    Console,
+    /// JSON Lines streaming output (for SonarQube integration)
+    Jsonl,
+}
 
 #[derive(Parser)]
 #[command(name = "bsl-analyzer")]
@@ -90,6 +100,11 @@ enum Commands {
         /// Number of worker threads for streaming mode (default: CPU cores)
         #[arg(long, requires = "streaming")]
         workers: Option<usize>,
+
+        /// Output format for streaming mode
+        /// jsonl: JSON Lines streaming output (for SonarQube integration)
+        #[arg(long, value_enum, default_value_t = OutputFormat::Console, requires = "streaming")]
+        format: OutputFormat,
     },
 
     /// Check configuration file
@@ -165,6 +180,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             git_diff,
             streaming,
             workers,
+            format,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -177,6 +193,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             git_diff,
             streaming,
             workers,
+            format,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Format { file, write, spaces, indent_size }) => {
@@ -227,6 +244,7 @@ fn analyze(
     _git_diff: Option<String>,
     streaming: bool,
     workers: Option<usize>,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Route to streaming or Salsa mode
     if streaming {
@@ -238,6 +256,7 @@ fn analyze(
             reporters,
             quiet,
             workers,
+            format,
         )
     } else {
         analyze_salsa(source_dir, workspace_dir, output_dir, config_path, reporters, quiet)
@@ -523,22 +542,17 @@ fn analyze_streaming(
     reporters: Vec<String>,
     quiet: bool,
     workers: Option<usize>,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use ide::streaming::AnalysisOrchestrator;
-    use std::time::Instant;
     use vfs::FileId;
     use walkdir::WalkDir;
-
-    use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
 
     let _span = tracing::info_span!("cli_analyze_streaming").entered();
 
     tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
     tracing::info!("Workers: {:?}", workers);
-    tracing::info!("Reporters: {:?}", reporters);
-    tracing::info!("Quiet mode: {}", quiet);
-
-    let start = Instant::now();
+    tracing::info!("Format: {:?}", format);
 
     // Determine workspace and output directories
     let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
@@ -562,7 +576,9 @@ fn analyze_streaming(
 
     if bsl_files.is_empty() {
         tracing::warn!("No BSL files found in {:?}", source_dir);
-        println!("No BSL files found!");
+        if !matches!(format, OutputFormat::Jsonl) {
+            println!("No BSL files found!");
+        }
         return Ok(());
     }
 
@@ -590,83 +606,106 @@ fn analyze_streaming(
 
     let orchestrator = builder.build()?;
 
-    // Show progress message
-    if !quiet {
-        println!("Analyzing {} files with streaming mode...", file_ids.len());
-        if let Some(w) = workers {
-            println!("Using {} worker threads", w);
-        } else {
-            println!(
-                "Using {} worker threads (auto-detected)",
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
-            );
+    // Route to format-specific output
+    match format {
+        OutputFormat::Jsonl => {
+            // JSONL streaming mode - output directly to stdout
+            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
+            let _summary = orchestrator.analyze_jsonl(file_id_vec, file_set)?;
+            // All output already printed to stdout
+            tracing::info!("JSONL streaming analysis complete");
         }
-    }
+        OutputFormat::Console => {
+            // Standard reporter-based output
+            use std::time::Instant;
 
-    // Run analysis
-    let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
-    let streaming_results = orchestrator.analyze(file_id_vec, file_set)?;
+            use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
 
-    let elapsed = start.elapsed();
+            let start = Instant::now();
 
-    if !quiet {
-        println!("Analysis completed in {:.2?}", elapsed);
-        println!("Processed: {} files", streaming_results.total_files);
-        println!("Diagnostics: {}", streaming_results.total_diagnostics);
-        println!("Failed: {} files", streaming_results.failed_files);
-    }
-
-    // Convert streaming results to reporter format
-    // DiagnosticOutput is already in the correct format (DTO from domain layer)
-    let mut all_diagnostics = Vec::new();
-
-    for file_result in &streaming_results.file_results {
-        if !file_result.diagnostics.is_empty() {
-            // Find original path
-            if let Some((_, path)) = file_ids.iter().find(|(id, _)| *id == file_result.file_id) {
-                all_diagnostics.push(FileAnalysis {
-                    path: path.clone(),
-                    relative_path: path.strip_prefix(&workspace_dir).unwrap_or(path).to_path_buf(),
-                    diagnostics: file_result.diagnostics.clone(),
-                });
-            }
-        }
-    }
-
-    let results = AnalysisResults {
-        files_analyzed: bsl_files.len(),
-        files_with_issues: all_diagnostics.len(),
-        total_diagnostics: streaming_results.total_diagnostics,
-        elapsed_secs: elapsed.as_secs_f64(),
-        diagnostics: all_diagnostics,
-        source_dir: source_dir.clone(),
-        workspace_dir: workspace_dir.clone(),
-    };
-
-    // Create output directory if needed
-    std::fs::create_dir_all(&output_dir)?;
-
-    // Run reporters
-    let registry = ReporterRegistry::new();
-    let reporter_keys = if reporters.is_empty() { vec!["console".to_string()] } else { reporters };
-
-    for key in &reporter_keys {
-        match registry.get(key) {
-            Some(reporter) => {
-                if let Err(e) = reporter.report(&results, &output_dir) {
-                    tracing::error!("Reporter '{}' failed: {}", key, e);
-                    eprintln!("Error: Reporter '{}' failed: {}", key, e);
+            // Show progress message
+            if !quiet {
+                println!("Analyzing {} files with streaming mode...", file_ids.len());
+                if let Some(w) = workers {
+                    println!("Using {} worker threads", w);
+                } else {
+                    println!(
+                        "Using {} worker threads (auto-detected)",
+                        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+                    );
                 }
             }
-            None => {
-                eprintln!("Error: Unknown reporter '{}'", key);
-                eprintln!("Valid reporters: {}", registry.keys().join(", "));
-                return Err(format!("Unknown reporter: {}", key).into());
+
+            // Run analysis
+            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
+            let streaming_results = orchestrator.analyze(file_id_vec, file_set)?;
+
+            let elapsed = start.elapsed();
+
+            if !quiet {
+                println!("Analysis completed in {:.2?}", elapsed);
+                println!("Processed: {} files", streaming_results.total_files);
+                println!("Diagnostics: {}", streaming_results.total_diagnostics);
+                println!("Failed: {} files", streaming_results.failed_files);
             }
+
+            // Convert streaming results to reporter format
+            let mut all_diagnostics = Vec::new();
+
+            for file_result in &streaming_results.file_results {
+                if !file_result.diagnostics.is_empty() {
+                    if let Some((_, path)) =
+                        file_ids.iter().find(|(id, _)| *id == file_result.file_id)
+                    {
+                        all_diagnostics.push(FileAnalysis {
+                            path: path.clone(),
+                            relative_path: path
+                                .strip_prefix(&workspace_dir)
+                                .unwrap_or(path)
+                                .to_path_buf(),
+                            diagnostics: file_result.diagnostics.clone(),
+                        });
+                    }
+                }
+            }
+
+            let results = AnalysisResults {
+                files_analyzed: bsl_files.len(),
+                files_with_issues: all_diagnostics.len(),
+                total_diagnostics: streaming_results.total_diagnostics,
+                elapsed_secs: elapsed.as_secs_f64(),
+                diagnostics: all_diagnostics,
+                source_dir: source_dir.clone(),
+                workspace_dir: workspace_dir.clone(),
+            };
+
+            // Create output directory if needed
+            std::fs::create_dir_all(&output_dir)?;
+
+            // Run reporters
+            let registry = ReporterRegistry::new();
+            let reporter_keys =
+                if reporters.is_empty() { vec!["console".to_string()] } else { reporters };
+
+            for key in &reporter_keys {
+                match registry.get(key) {
+                    Some(reporter) => {
+                        if let Err(e) = reporter.report(&results, &output_dir) {
+                            tracing::error!("Reporter '{}' failed: {}", key, e);
+                            eprintln!("Error: Reporter '{}' failed: {}", key, e);
+                        }
+                    }
+                    None => {
+                        eprintln!("Error: Unknown reporter '{}'", key);
+                        eprintln!("Valid reporters: {}", registry.keys().join(", "));
+                        return Err(format!("Unknown reporter: {}", key).into());
+                    }
+                }
+            }
+
+            tracing::info!("Streaming analysis complete");
         }
     }
-
-    tracing::info!("Streaming analysis complete");
 
     Ok(())
 }

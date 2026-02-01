@@ -21,6 +21,8 @@ use ide_diagnostics::DiagnosticsConfig;
 // Re-export DiagnosticOutput DTO for use by CLI and orchestrator
 pub use ide_diagnostics::DiagnosticOutput;
 
+use super::jsonl::FileMetrics;
+
 /// Result of processing a single file.
 #[derive(Debug, Clone)]
 pub struct FileResult {
@@ -32,6 +34,9 @@ pub struct FileResult {
 
     /// Optional error if processing failed.
     pub error: Option<Arc<str>>,
+
+    /// Optional file metrics (functions count, complexity).
+    pub metrics: Option<FileMetrics>,
 }
 
 /// File processor for three-phase processing.
@@ -86,6 +91,7 @@ impl<'a> FileProcessor<'a> {
                     file_id,
                     diagnostics: vec![],
                     error: Some(Arc::from(err.to_string())),
+                    metrics: None,
                 };
             }
         }
@@ -93,13 +99,16 @@ impl<'a> FileProcessor<'a> {
         // Phase 2: Collect diagnostics (status already DiagnosticsInProgress)
         let diagnostics = self.collect_diagnostics(file_id);
 
+        // Calculate metrics from cached ParsedFile (before cleanup)
+        let metrics = self.calculate_metrics(file_id);
+
         // Phase 3: Cleanup - release cached ParsedFile
         self.shared_state.remove_parsed_file(file_id);
 
         self.shared_state.mark_completed(file_id);
         tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "File processing completed");
 
-        FileResult { file_id, diagnostics, error: None }
+        FileResult { file_id, diagnostics, error: None, metrics }
     }
 
     /// Process diagnostics only (Phase 2) for a file that already has SymbolTree.
@@ -122,13 +131,32 @@ impl<'a> FileProcessor<'a> {
         // Phase 2: Collect diagnostics
         let diagnostics = self.collect_diagnostics(file_id);
 
+        // Calculate metrics from cached ParsedFile (before cleanup)
+        let metrics = self.calculate_metrics(file_id);
+
         // Phase 3: Cleanup - release cached ParsedFile
         self.shared_state.remove_parsed_file(file_id);
 
         self.shared_state.mark_completed(file_id);
         tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "Diagnostics-only processing completed");
 
-        FileResult { file_id, diagnostics, error: None }
+        FileResult { file_id, diagnostics, error: None, metrics }
+    }
+
+    /// Calculate file metrics from cached ParsedFile.
+    fn calculate_metrics(&self, file_id: FileId) -> Option<FileMetrics> {
+        let parsed_file = self.shared_state.get_parsed_file(file_id)?;
+        let item_tree = &parsed_file.item_tree;
+
+        let functions = item_tree.procedures().count() + item_tree.functions().count();
+
+        // Complexity: sum for all methods
+        // Note: Detailed complexity calculation would require HIR traversal
+        // For Phase 1, we just count functions as a proxy for complexity
+        let complexity = functions as u32;
+        let cognitive_complexity = functions as u32;
+
+        Some(FileMetrics { functions, complexity, cognitive_complexity })
     }
 
     /// Phase 1: Build and publish SymbolTree.

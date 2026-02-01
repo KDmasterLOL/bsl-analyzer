@@ -150,7 +150,7 @@ pub fn worker_main(
                 // Mark file as failed in SharedState
                 shared_state.mark_failed(file_id, error_msg.clone());
 
-                FileResult { file_id, diagnostics: vec![], error: Some(error_msg) }
+                FileResult { file_id, diagnostics: vec![], error: Some(error_msg), metrics: None }
             }
         };
 
@@ -226,7 +226,7 @@ pub fn worker_main(
                 );
 
                 shared_state.mark_failed(file_id, error_msg.clone());
-                FileResult { file_id, diagnostics: vec![], error: Some(error_msg) }
+                FileResult { file_id, diagnostics: vec![], error: Some(error_msg), metrics: None }
             }
         };
 
