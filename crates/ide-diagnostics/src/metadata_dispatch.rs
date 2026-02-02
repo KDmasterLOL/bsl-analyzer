@@ -2,7 +2,28 @@
 //!
 //! This module collects diagnostics that use module_metadata from HIR.
 
-use crate::{handlers, Diagnostic, DiagnosticsContext};
+use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
+
+/// Diagnostics that use ModuleMetadata from HIR
+const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::CommonModuleInvalidType,
+    DiagnosticCode::CommonModuleNameClient,
+    DiagnosticCode::CommonModuleNameGlobal,
+    DiagnosticCode::CommonModuleNameCached,
+    DiagnosticCode::CommonModuleNameClientServer,
+    DiagnosticCode::CommonModuleNameFullAccess,
+    DiagnosticCode::CommonModuleNameGlobalClient,
+    DiagnosticCode::CommonModuleNameServerCall,
+    DiagnosticCode::CommonModuleNameWords,
+    DiagnosticCode::ExportVariables,
+    DiagnosticCode::SameMetadataObjectAndChildNames,
+    DiagnosticCode::DenyIncompleteValues,
+    DiagnosticCode::ForbiddenMetadataName,
+    DiagnosticCode::MetadataObjectNameLength,
+    DiagnosticCode::WrongDataPathForFormElements,
+    DiagnosticCode::WrongHttpServiceHandler,
+    DiagnosticCode::WrongWebServiceHandler,
+];
 
 /// Collect metadata-based diagnostics using module_metadata from HIR.
 ///
@@ -12,6 +33,11 @@ use crate::{handlers, Diagnostic, DiagnosticsContext};
 ///
 /// Returns empty vec for test contexts where source_root is not set.
 pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(METADATA_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let module_bodies =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
             Ok(bodies) => bodies,

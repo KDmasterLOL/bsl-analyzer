@@ -3,8 +3,89 @@
 //! This module collects diagnostics from HIR lowering and dispatches them
 //! to the appropriate handler's `from_hir()` function.
 
-use crate::{handlers, Diagnostic, DiagnosticsContext};
+use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::BodyDiagnostic;
+
+/// Diagnostics collected during HIR lowering (BodyDiagnostic dispatch)
+const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::AllFunctionPathMustHaveReturn,
+    DiagnosticCode::BeginTransactionBeforeTryCatch,
+    DiagnosticCode::CodeAfterAsyncCall,
+    DiagnosticCode::CognitiveComplexity,
+    DiagnosticCode::CommitTransactionOutsideTryCatch,
+    DiagnosticCode::CommonModuleAssign,
+    DiagnosticCode::CreateQueryInCycle,
+    DiagnosticCode::CyclomaticComplexity,
+    DiagnosticCode::DeletingCollectionItem,
+    DiagnosticCode::DeprecatedAttributes8312,
+    DiagnosticCode::DeprecatedCurrentDate,
+    DiagnosticCode::DeprecatedFind,
+    DiagnosticCode::DeprecatedMessage,
+    DiagnosticCode::DeprecatedMethods8310,
+    DiagnosticCode::DeprecatedMethods8317,
+    DiagnosticCode::DeprecatedMethodCall,
+    DiagnosticCode::DeprecatedTypeManagedForm,
+    DiagnosticCode::DisableSafeMode,
+    DiagnosticCode::EmptyCodeBlock,
+    DiagnosticCode::EmptyRegion,
+    DiagnosticCode::EmptyStatement,
+    DiagnosticCode::ExecuteExternalCode,
+    DiagnosticCode::ExternalAppStarting,
+    DiagnosticCode::ExtraCommas,
+    DiagnosticCode::FileSystemAccess,
+    DiagnosticCode::FormDataToValue,
+    DiagnosticCode::FunctionNameStartsWithGet,
+    DiagnosticCode::FunctionOutParameter,
+    DiagnosticCode::FunctionReturnsSamePrimitive,
+    DiagnosticCode::FunctionShouldHaveReturn,
+    DiagnosticCode::GetFormMethod,
+    DiagnosticCode::GlobalContextMethodCollision8312,
+    DiagnosticCode::IfConditionComplexity,
+    DiagnosticCode::IfElseDuplicatedCodeBlock,
+    DiagnosticCode::IfElseDuplicatedCondition,
+    DiagnosticCode::IfElseIfEndsWithElse,
+    DiagnosticCode::IncorrectUseOfStrTemplate,
+    DiagnosticCode::MagicNumber,
+    DiagnosticCode::MethodSize,
+    DiagnosticCode::MissedRequiredParameter,
+    DiagnosticCode::MissingCommonModuleMethod,
+    DiagnosticCode::NestedStatements,
+    DiagnosticCode::NumberOfOptionalParams,
+    DiagnosticCode::NumberOfParams,
+    DiagnosticCode::OneStatementPerLine,
+    DiagnosticCode::OSUsersMethod,
+    DiagnosticCode::ProcedureReturnsValue,
+    DiagnosticCode::RedundantAccessToObject,
+    DiagnosticCode::RewriteMethodParameter,
+    DiagnosticCode::SelfAssign,
+    DiagnosticCode::SelfInsertion,
+    DiagnosticCode::SemicolonPresence,
+    DiagnosticCode::ServerCallsInFormEvents,
+    DiagnosticCode::SetPrivilegedMode,
+    DiagnosticCode::StyleElementConstructors,
+    DiagnosticCode::TempFilesDir,
+    DiagnosticCode::TernaryOperatorUsage,
+    DiagnosticCode::ThisObjectAssign,
+    DiagnosticCode::TooManyReturns,
+    DiagnosticCode::TryNumber,
+    DiagnosticCode::UnaryPlusInConcatenation,
+    DiagnosticCode::UnsafeFindByCode,
+    DiagnosticCode::UnsafeSafeModeMethodCall,
+    DiagnosticCode::UnusedLocalVariable,
+    DiagnosticCode::UsageWriteLogEvent,
+    DiagnosticCode::UseLessForEach,
+    DiagnosticCode::UseSystemInformation,
+    DiagnosticCode::UsingCancelParameter,
+    DiagnosticCode::UsingExternalCodeTools,
+    DiagnosticCode::UsingFindElementByString,
+    DiagnosticCode::UsingGoto,
+    DiagnosticCode::UsingModalWindows,
+    DiagnosticCode::UsingObjectNotAvailableUnix,
+    DiagnosticCode::UsingSynchronousCalls,
+    DiagnosticCode::UsingThisForm,
+    DiagnosticCode::WrongUseFunctionProceedWithCall,
+    DiagnosticCode::WrongUseOfRollbackTransactionMethod,
+];
 
 /// Collect HIR-based diagnostics from module_bodies().
 ///
@@ -13,6 +94,11 @@ use hir::BodyDiagnostic;
 ///
 /// Returns empty vec for test contexts where source_root is not set.
 pub fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip expensive module_bodies() call if no HIR diagnostics are enabled
+    if !ctx.config.any_enabled(HIR_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let module_bodies =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
             Ok(bodies) => bodies,

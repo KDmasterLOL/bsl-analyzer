@@ -1829,10 +1829,12 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "lexer",
+ "rayon",
  "stdx",
  "syntax",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

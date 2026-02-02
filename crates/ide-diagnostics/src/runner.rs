@@ -40,8 +40,133 @@
 //!
 //! Handlers not yet migrated remain in `collect_syntax_diagnostics` (legacy).
 
-use crate::{handlers, Diagnostic, DiagnosticsContext};
+use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxNode, SyntaxToken};
+
+// ============================================================================
+// Diagnostic code sets for early exit optimization
+// ============================================================================
+
+/// Diagnostics in collect_line_diagnostics
+const LINE_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::ParseError,
+    DiagnosticCode::ConsecutiveEmptyLines,
+    DiagnosticCode::LineLength,
+    DiagnosticCode::CommentedCode,
+    DiagnosticCode::UsingServiceTag,
+    DiagnosticCode::CanonicalSpellingKeywords,
+    DiagnosticCode::IncorrectLineBreak,
+    DiagnosticCode::InvalidCharacterInFile,
+    DiagnosticCode::MissingSpace,
+    DiagnosticCode::SpaceAtStartComment,
+];
+
+/// Diagnostics in collect_syntax_single_pass
+const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::UselessTernaryOperator,
+    DiagnosticCode::DoubleNegatives,
+    DiagnosticCode::UnknownPreprocessorSymbol,
+    DiagnosticCode::BadWords,
+    DiagnosticCode::Typo,
+    DiagnosticCode::NestedTernaryOperator,
+    DiagnosticCode::YoLetterUsage,
+    DiagnosticCode::MagicDate,
+];
+
+/// Diagnostics in collect_syntax_diagnostics (excluding single-pass)
+const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::CodeBlockBeforeSub,
+    DiagnosticCode::CodeOutOfRegion,
+    DiagnosticCode::DuplicateRegion,
+    DiagnosticCode::DuplicateStringLiteral,
+    DiagnosticCode::ExcessiveAutoTestCheck,
+    DiagnosticCode::MultilingualStringHasAllDeclaredLanguages,
+    DiagnosticCode::MultilingualStringUsingWithTemplate,
+    DiagnosticCode::LatinAndCyrillicSymbolInWord,
+    DiagnosticCode::NonStandardRegion,
+];
+
+/// Diagnostics in collect_item_tree_diagnostics
+const ITEM_TREE_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::OrderOfParams,
+    DiagnosticCode::ReservedParameterNames,
+    DiagnosticCode::SeveralCompilerDirectives,
+    DiagnosticCode::NonExportMethodsInApiRegion,
+    DiagnosticCode::CachedPublic,
+    DiagnosticCode::CompilationDirectiveLost,
+    DiagnosticCode::CompilationDirectiveNeedLess,
+    DiagnosticCode::CommandModuleExportMethods,
+    DiagnosticCode::ServerSideExportFormMethod,
+    DiagnosticCode::OrdinaryAppSupport,
+    DiagnosticCode::MissingReturnedValueDescription,
+    DiagnosticCode::MissingParameterDescription,
+    DiagnosticCode::PublicMethodsDescription,
+    DiagnosticCode::MissingVariablesDescription,
+    DiagnosticCode::ExecuteExternalCodeInCommonModule,
+    DiagnosticCode::CommonModuleMissingAPI,
+    DiagnosticCode::PrivilegedModuleMethodCall,
+    DiagnosticCode::SetPermissionsForNewObjects,
+];
+
+/// Diagnostics in collect_module_bodies_diagnostics
+const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::InternetAccess,
+    DiagnosticCode::IsInRoleMethod,
+    DiagnosticCode::PairingBrokenTransaction,
+    DiagnosticCode::TimeoutsInExternalResources,
+    DiagnosticCode::UsingHardcodeSecretInformation,
+    DiagnosticCode::DataExchangeLoading,
+    DiagnosticCode::TransferringParametersBetweenClientAndServer,
+    DiagnosticCode::UnusedLocalMethod,
+    DiagnosticCode::IdenticalExpressions,
+    DiagnosticCode::DuplicatedInsertionIntoCollection,
+    DiagnosticCode::IncorrectUseOfStrTemplate,
+    DiagnosticCode::NumberOfValuesInStructureConstructor,
+    DiagnosticCode::NestedConstructorsInStructureDeclaration,
+    DiagnosticCode::NestedFunctionInParameters,
+    DiagnosticCode::MissingCodeTryCatchEx,
+    DiagnosticCode::UsingHardcodeNetworkAddress,
+];
+
+/// Diagnostics in collect_ast_diagnostics
+const AST_DIAGNOSTICS: &[DiagnosticCode] = &[DiagnosticCode::UsingHardcodePath];
+
+/// Diagnostics in collect_configuration_diagnostics
+const CONFIGURATION_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::ProtectedModule,
+    DiagnosticCode::MissingEventSubscriptionHandler,
+    DiagnosticCode::ScheduledJobHandler,
+];
+
+/// Diagnostics in collect_sdbl_hir_diagnostics
+const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::QueryParseError,
+    DiagnosticCode::AssignAliasFieldsInQuery,
+    DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+    DiagnosticCode::FullOuterJoinQuery,
+    DiagnosticCode::IncorrectUseLikeInQuery,
+    DiagnosticCode::JoinWithSubQuery,
+    DiagnosticCode::JoinWithVirtualTable,
+    DiagnosticCode::LogicalOrInJoinQuerySection,
+    DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+    DiagnosticCode::MultilineStringInQuery,
+    DiagnosticCode::QueryNestedFieldsByDot,
+    DiagnosticCode::QueryToMissingMetadata,
+    DiagnosticCode::RefOveruse,
+    DiagnosticCode::SelectTopWithoutOrderBy,
+    DiagnosticCode::UnionAll,
+    DiagnosticCode::UsingLikeInQuery,
+    DiagnosticCode::VirtualTableCallWithoutParameters,
+];
+
+/// Diagnostics in collect_dataflow_diagnostics
+const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::UnreachableCode,
+    DiagnosticCode::UnusedLocalVariable,
+    DiagnosticCode::UnusedParameters,
+    DiagnosticCode::MissingTemporaryFileDeletion,
+    DiagnosticCode::MissingTempStorageDeletion,
+];
 
 /// Helper to run a diagnostic and log if it's slow (>80ms).
 pub fn run_diagnostic<F>(
@@ -132,6 +257,11 @@ impl DiagnosticState {
 /// Handlers are incrementally migrated from `collect_syntax_diagnostics`.
 /// Once all handlers are migrated, `collect_syntax_diagnostics` will be removed.
 pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(SINGLE_PASS_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let _span = tracing::debug_span!("collect_syntax_single_pass").entered();
     let start = std::time::Instant::now();
 
@@ -205,6 +335,11 @@ fn check_token_handlers(
 ///
 /// Pattern from rust-analyzer: crates/ide-diagnostics/src/lib.rs:336-352
 pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(LINE_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     diagnostics.extend(handlers::parse_error::check(ctx));
@@ -230,6 +365,14 @@ pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// - Single-pass AST traversal (optimized)
 /// - Pure AST diagnostics (parse + descendants)
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    // Check both single-pass and syntax-specific diagnostics
+    if !ctx.config.any_enabled(SINGLE_PASS_DIAGNOSTICS)
+        && !ctx.config.any_enabled(SYNTAX_DIAGNOSTICS)
+    {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // Single-pass handlers (optimized - one traversal for all)
@@ -292,6 +435,11 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// All data sources are cached by Salsa, making these diagnostics efficient.
 pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(ITEM_TREE_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // === Pure ItemTree checks ===
@@ -411,6 +559,11 @@ pub fn collect_item_tree_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic
 /// These diagnostics use `ctx.module_bodies()` which is cached by Salsa.
 /// They analyze HIR expressions and statements, not raw AST.
 pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(MODULE_BODIES_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // Security checks
@@ -513,6 +666,11 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 /// These diagnostics use `ctx.parse().syntax_node().descendants()`.
 /// They should be migrated to HIR or single-pass when possible.
 pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(AST_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // MethodSize moved to HIR (BodyDiagnostic::MethodSize)
@@ -571,6 +729,11 @@ pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 ///
 /// Data source: Configuration XML (ScheduledJobs, EventSubscriptions, CommonModules)
 pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(CONFIGURATION_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // Protected module check (Configuration + CommonModules)
@@ -596,6 +759,11 @@ pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 /// Diagnostics for BSL's SQL-like query language that use SDBL HIR lowering.
 /// Diagnostics are collected during SDBL AST→HIR transformation.
 pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(SDBL_HIR_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     // QueryParseError runs first - detects parse errors at AST level
@@ -680,6 +848,11 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 ///
 /// Diagnostics that use CFG + dataflow analysis (liveness, reaching definitions).
 pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    // Early exit: skip if none of our diagnostics are enabled
+    if !ctx.config.any_enabled(DATAFLOW_DIAGNOSTICS) {
+        return Vec::new();
+    }
+
     let mut diagnostics = Vec::new();
 
     diagnostics.extend(run_diagnostic("UnreachableCode", ctx, handlers::unreachable_code::check));

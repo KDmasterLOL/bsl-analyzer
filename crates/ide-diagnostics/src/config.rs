@@ -265,6 +265,23 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
+    /// Check if ANY of the given diagnostics is enabled.
+    ///
+    /// Used for early exit in collectors - if none of the collector's diagnostics
+    /// are enabled, the entire collector can be skipped.
+    ///
+    /// Returns `true` if at least one diagnostic from the list is enabled.
+    #[inline]
+    pub fn any_enabled(&self, codes: &[DiagnosticCode]) -> bool {
+        // Fast path: if only_enabled is set, check intersection
+        if let Some(ref only) = self.only_enabled {
+            return codes.iter().any(|code| only.contains(code));
+        }
+
+        // Normal mode: at least one must not be disabled
+        codes.iter().any(|code| !self.is_disabled(*code))
+    }
+
     /// Check if a diagnostic is disabled.
     ///
     /// A diagnostic is disabled if:
