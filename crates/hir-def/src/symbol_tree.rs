@@ -16,16 +16,19 @@
 //! - **Arena storage**: Methods and variables stored in Arena for stable indices
 //! - **HashMap index**: Case-insensitive lookup using lowercase keys
 //! - **BSL-specific**: Handles both Cyrillic and Latin identifiers
+//! - **Documentation**: Method docs are parsed once during SymbolTree construction
 //!
 //! ## Reference
 //!
 //! Inspired by bsl-language-server's SymbolTree.java, but adapted to Rust patterns.
 
+use crate::docs::MethodDocs;
 use crate::item_tree::{Annotation, ItemTree, ModItem, Param};
 use crate::{MethodId, ModuleId, Name, VariableId};
 use la_arena::{Arena, Idx};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
+use std::sync::Arc;
 use text_size::TextRange;
 
 /// Symbol tree for a module.
@@ -78,6 +81,12 @@ pub struct MethodSymbol {
 
     /// Source location for navigation.
     pub source_range: TextRange,
+
+    /// Parsed documentation (comments before the method).
+    ///
+    /// Parsed once during SymbolTree construction for efficient access.
+    /// Contains deprecation info, parameter descriptions, return value docs, etc.
+    pub docs: Option<Arc<MethodDocs>>,
 }
 
 /// A module-level variable symbol.
@@ -121,11 +130,23 @@ pub struct ParamSymbol {
 }
 
 impl SymbolTree {
-    /// Build SymbolTree from ItemTree.
+    /// Build SymbolTree from ItemTree with documentation parsing.
     ///
     /// This is the main entry point for constructing a SymbolTree.
-    pub fn from_item_tree(item_tree: &ItemTree, module_id: ModuleId) -> Self {
-        let mut builder = SymbolTreeBuilder::new(module_id);
+    /// Documentation is parsed once here and cached in MethodSymbol.docs.
+    ///
+    /// # Arguments
+    /// * `item_tree` - The ItemTree containing method signatures
+    /// * `module_id` - Module identifier
+    /// * `parse` - Parsed AST (needed for finding method nodes)
+    /// * `source_text` - Source text (needed for extracting comments)
+    pub fn from_item_tree(
+        item_tree: &ItemTree,
+        module_id: ModuleId,
+        parse: &syntax::Parse<syntax::SyntaxNode>,
+        source_text: &str,
+    ) -> Self {
+        let mut builder = SymbolTreeBuilder::new(module_id, parse, source_text, item_tree);
 
         for (idx, item) in item_tree.top_level_items().iter().enumerate() {
             let local_id = idx as u32;
@@ -147,6 +168,82 @@ impl SymbolTree {
         }
 
         builder.build()
+    }
+
+    /// Build SymbolTree from ItemTree without documentation parsing.
+    ///
+    /// This is a simplified version for tests and fallback cases where
+    /// source text is not available. Methods will have `docs: None`.
+    #[cfg(test)]
+    pub fn from_item_tree_no_docs(item_tree: &ItemTree, module_id: ModuleId) -> Self {
+        let mut methods = Arena::new();
+        let mut variables = Arena::new();
+        let mut methods_by_name: FxHashMap<SmolStr, Vec<Idx<MethodSymbol>>> = FxHashMap::default();
+        let mut variables_by_name: FxHashMap<SmolStr, Vec<Idx<VariableSymbol>>> =
+            FxHashMap::default();
+
+        for (idx, item) in item_tree.top_level_items().iter().enumerate() {
+            let local_id = idx as u32;
+
+            match item {
+                ModItem::Procedure(proc_idx) => {
+                    let proc = item_tree.procedure(*proc_idx);
+                    let method_id = MethodId { module: module_id, local_id };
+                    let symbol = MethodSymbol {
+                        id: method_id,
+                        name: proc.name.clone(),
+                        is_function: false,
+                        is_export: proc.is_export,
+                        params: proc.params.iter().map(ParamSymbol::from).collect(),
+                        annotations: proc.annotations.to_vec(),
+                        return_type: crate::Ty::Undefined,
+                        source_range: proc.source_range,
+                        docs: None,
+                    };
+                    let key: SmolStr = symbol.name.as_str().to_lowercase().into();
+                    let idx = methods.alloc(symbol);
+                    methods_by_name.entry(key).or_default().push(idx);
+                }
+                ModItem::Function(func_idx) => {
+                    let func = item_tree.function(*func_idx);
+                    let method_id = MethodId { module: module_id, local_id };
+                    let symbol = MethodSymbol {
+                        id: method_id,
+                        name: func.name.clone(),
+                        is_function: true,
+                        is_export: func.is_export,
+                        params: func.params.iter().map(ParamSymbol::from).collect(),
+                        annotations: func.annotations.to_vec(),
+                        return_type: crate::Ty::Unknown,
+                        source_range: func.source_range,
+                        docs: None,
+                    };
+                    let key: SmolStr = symbol.name.as_str().to_lowercase().into();
+                    let idx = methods.alloc(symbol);
+                    methods_by_name.entry(key).or_default().push(idx);
+                }
+                ModItem::Variable(var_idx) => {
+                    let var = item_tree.variable(*var_idx);
+                    let key: SmolStr = var.name.as_str().to_lowercase().into();
+                    if variables_by_name.contains_key(&key) {
+                        continue;
+                    }
+                    let variable_id = VariableId { module: module_id, local_id };
+                    let symbol = VariableSymbol {
+                        id: variable_id,
+                        name: var.name.clone(),
+                        is_export: var.is_export,
+                        annotations: var.annotations.to_vec(),
+                        source_range: var.source_range,
+                        name_range: var.name_range,
+                    };
+                    let idx = variables.alloc(symbol);
+                    variables_by_name.entry(key).or_default().push(idx);
+                }
+            }
+        }
+
+        SymbolTree { methods, variables, methods_by_name, variables_by_name }
     }
 
     /// Find method by name (case-insensitive).
@@ -195,21 +292,39 @@ impl SymbolTree {
     pub fn exported_variables(&self) -> impl Iterator<Item = &VariableSymbol> {
         self.variables().filter(|v| v.is_export)
     }
+
+    /// Find method by MethodId.
+    ///
+    /// Returns the method with the given ID, or None if not found.
+    pub fn find_method_by_id(&self, method_id: MethodId) -> Option<&MethodSymbol> {
+        self.methods().find(|m| m.id == method_id)
+    }
 }
 
 /// Builder for constructing SymbolTree.
-struct SymbolTreeBuilder {
+struct SymbolTreeBuilder<'a> {
     module_id: ModuleId,
+    parse: &'a syntax::Parse<syntax::SyntaxNode>,
+    source_text: &'a str,
+    item_tree: &'a ItemTree,
     methods: Arena<MethodSymbol>,
     variables: Arena<VariableSymbol>,
     methods_by_name: FxHashMap<SmolStr, Vec<Idx<MethodSymbol>>>,
     variables_by_name: FxHashMap<SmolStr, Vec<Idx<VariableSymbol>>>,
 }
 
-impl SymbolTreeBuilder {
-    fn new(module_id: ModuleId) -> Self {
+impl<'a> SymbolTreeBuilder<'a> {
+    fn new(
+        module_id: ModuleId,
+        parse: &'a syntax::Parse<syntax::SyntaxNode>,
+        source_text: &'a str,
+        item_tree: &'a ItemTree,
+    ) -> Self {
         Self {
             module_id,
+            parse,
+            source_text,
+            item_tree,
             methods: Arena::new(),
             variables: Arena::new(),
             methods_by_name: FxHashMap::default(),
@@ -220,6 +335,9 @@ impl SymbolTreeBuilder {
     fn add_procedure(&mut self, local_id: u32, proc: &crate::item_tree::Procedure) {
         let method_id = MethodId { module: self.module_id, local_id };
 
+        // Parse documentation for this method
+        let docs = self.parse_method_docs(method_id);
+
         let symbol = MethodSymbol {
             id: method_id,
             name: proc.name.clone(),
@@ -229,6 +347,7 @@ impl SymbolTreeBuilder {
             annotations: proc.annotations.to_vec(),
             return_type: crate::Ty::Undefined, // Procedures don't return values
             source_range: proc.source_range,
+            docs,
         };
 
         self.add_method_symbol(symbol);
@@ -236,6 +355,9 @@ impl SymbolTreeBuilder {
 
     fn add_function(&mut self, local_id: u32, func: &crate::item_tree::Function) {
         let method_id = MethodId { module: self.module_id, local_id };
+
+        // Parse documentation for this method
+        let docs = self.parse_method_docs(method_id);
 
         let symbol = MethodSymbol {
             id: method_id,
@@ -246,9 +368,18 @@ impl SymbolTreeBuilder {
             annotations: func.annotations.to_vec(),
             return_type: crate::Ty::Unknown, // TODO: Full type inference in Iteration 12+
             source_range: func.source_range,
+            docs,
         };
 
         self.add_method_symbol(symbol);
+    }
+
+    /// Parse documentation for a method.
+    ///
+    /// Uses the same logic as `compute_method_docs` from `docs.rs`,
+    /// but inlined here for efficiency during SymbolTree construction.
+    fn parse_method_docs(&self, method_id: MethodId) -> Option<Arc<MethodDocs>> {
+        crate::docs::compute_method_docs(self.parse, self.item_tree, method_id, self.source_text)
     }
 
     fn add_method_symbol(&mut self, symbol: MethodSymbol) {
@@ -333,8 +464,11 @@ pub fn symbol_tree_query<'db>(
     let _span = tracing::info_span!("symbol_tree", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
     let item_tree = db.item_tree(file_id);
+    let parse = db.parse(file_id);
+    let file_text = db.file_text_input(file_id);
+    let source_text = file_text.text(db);
     let module_id = crate::ModuleId::new(file_id);
-    std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
+    std::sync::Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &source_text))
 }
 
 #[cfg(test)]
@@ -390,7 +524,7 @@ mod tests {
         item_tree.top_level.push(ModItem::Variable(var_idx));
 
         // Build SymbolTree
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // Verify methods
         assert_eq!(symbol_tree.methods().count(), 2);
@@ -430,7 +564,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // Different cases should all find the same method
         assert!(symbol_tree.find_method(&Name::new("МояПроцедура")).is_some());
@@ -474,7 +608,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Procedure(proc2_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // All methods
         assert_eq!(symbol_tree.methods().count(), 2);
@@ -515,7 +649,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         let method = symbol_tree.find_method(&Name::new("СПараметрами")).unwrap();
         assert_eq!(method.params.len(), 2);
@@ -547,7 +681,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         let method = symbol_tree.find_method(&Name::new("НаКлиенте")).unwrap();
         assert_eq!(method.annotations.len(), 1);
@@ -560,7 +694,7 @@ mod tests {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         assert!(symbol_tree.find_method(&Name::new("НесуществующаяПроцедура")).is_none());
         assert!(symbol_tree.find_variable(&Name::new("НесуществующаяПеременная")).is_none());
@@ -572,7 +706,7 @@ mod tests {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         assert_eq!(symbol_tree.methods().count(), 0);
         assert_eq!(symbol_tree.variables().count(), 0);
@@ -595,7 +729,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Variable(var_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // Different cases
         assert!(symbol_tree.find_variable(&Name::new("МояПеременная")).is_some());
@@ -629,7 +763,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Variable(var2_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // All variables
         assert_eq!(symbol_tree.variables().count(), 2);
@@ -657,7 +791,7 @@ mod tests {
         });
         item_tree.top_level.push(ModItem::Procedure(proc_idx));
 
-        let symbol_tree = SymbolTree::from_item_tree(&item_tree, module_id);
+        let symbol_tree = SymbolTree::from_item_tree_no_docs(&item_tree, module_id);
 
         // find_methods returns Vec
         let methods = symbol_tree.find_methods(&Name::new("Метод"));

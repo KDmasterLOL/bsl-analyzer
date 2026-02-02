@@ -133,7 +133,9 @@ impl AnalysisProvider for StreamingProvider {
 
         // Build on-the-fly if not available
         let item_tree = self.item_tree(module_id.file_id);
-        Arc::new(SymbolTree::from_item_tree(&item_tree, module_id))
+        let parse = self.parse(module_id.file_id);
+        let source_text = self.file_text(module_id.file_id);
+        Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &source_text))
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
@@ -242,7 +244,10 @@ impl AnalysisProvider for StreamingProvider {
             let var_index = dataflow::liveness::VariableIndex::from_body(body);
 
             if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
-                body, cfg, var_index, 10000, // max_iterations
+                body,
+                cfg,
+                var_index,
+                dataflow::DEFAULT_MAX_ITERATIONS,
             ) {
                 results.insert(local_id, Arc::new(liveness_result));
             }
@@ -288,7 +293,7 @@ impl AnalysisProvider for StreamingProvider {
             // Run dataflow analysis
             let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
             let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-            solver.set_max_iterations(10000);
+            solver.set_max_iterations(dataflow::DEFAULT_MAX_ITERATIONS);
             solver.set_bottom_factory(|| {
                 dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
             });
@@ -403,11 +408,10 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn method_docs(&self, method_id: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
-        let parse = self.parse(method_id.module.file_id);
-        let tree = self.item_tree(method_id.module.file_id);
-        let file_text = self.file_text(method_id.module.file_id);
-
-        hir_def::docs::compute_method_docs(&parse, &tree, method_id, &file_text)
+        // Get docs from SymbolTree (parsed once during construction)
+        let symbol_tree = self.symbol_tree(method_id.module);
+        let method = symbol_tree.find_method_by_id(method_id)?;
+        method.docs.clone()
     }
 
     fn reaching_definitions(

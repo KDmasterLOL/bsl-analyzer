@@ -123,6 +123,10 @@ pub struct AnalysisOrchestrator {
 
     /// Optional path to configuration file (.bsl-analyzer.json).
     configuration_path: Option<PathBuf>,
+
+    /// Pre-configured diagnostics config (overrides config file).
+    /// Set via builder.diagnostics_config() method.
+    diagnostics_config: Option<DiagnosticsConfig>,
 }
 
 impl AnalysisOrchestrator {
@@ -255,7 +259,8 @@ impl AnalysisOrchestrator {
 
             // Build SymbolTree
             let module_id = ModuleId::new(file_id);
-            let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+            let symbol_tree =
+                Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
             symbol_trees.insert(file_id, symbol_tree);
         }
@@ -373,7 +378,10 @@ impl AnalysisOrchestrator {
         proj_config.load_metadata(&self.workspace_root).map(Arc::new)
     }
 
-    /// Load diagnostics configuration from project config file.
+    /// Load diagnostics configuration.
+    ///
+    /// If a pre-configured config was set via builder.diagnostics_config(),
+    /// returns that. Otherwise loads from project config file.
     ///
     /// Uses `project_model::ProjectConfig` to load configuration,
     /// then deserializes the `diagnostics` field into `DiagnosticsConfig`.
@@ -393,6 +401,12 @@ impl AnalysisOrchestrator {
     /// }
     /// ```
     fn load_diagnostics_config(&self) -> DiagnosticsConfig {
+        // Use pre-configured config if set (e.g., from CLI flags)
+        if let Some(ref config) = self.diagnostics_config {
+            info!("Using pre-configured DiagnosticsConfig");
+            return config.clone();
+        }
+
         // Load project config via project_model (unified entry point)
         let proj_config = if let Some(ref path) = self.configuration_path {
             project_model::ProjectConfig::load_from_file(path)
@@ -687,6 +701,7 @@ pub struct OrchestratorBuilder {
     num_workers: Option<usize>,
     workspace_root: Option<PathBuf>,
     configuration_path: Option<PathBuf>,
+    diagnostics_config: Option<DiagnosticsConfig>,
 }
 
 impl OrchestratorBuilder {
@@ -710,6 +725,15 @@ impl OrchestratorBuilder {
         self
     }
 
+    /// Set pre-configured diagnostics config.
+    ///
+    /// This overrides the config loaded from the configuration file.
+    /// Useful for applying CLI filters (--only-diagnostic, --disable-diagnostic).
+    pub fn diagnostics_config(mut self, config: DiagnosticsConfig) -> Self {
+        self.diagnostics_config = Some(config);
+        self
+    }
+
     /// Build the orchestrator.
     pub fn build(self) -> Result<AnalysisOrchestrator, OrchestratorError> {
         let workspace_root = self
@@ -726,6 +750,7 @@ impl OrchestratorBuilder {
             num_workers,
             workspace_root,
             configuration_path: self.configuration_path,
+            diagnostics_config: self.diagnostics_config,
         })
     }
 }

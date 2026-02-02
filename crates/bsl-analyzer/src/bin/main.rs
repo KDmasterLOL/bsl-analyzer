@@ -41,6 +41,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // CLI command enum, boxing not appropriate
 enum Commands {
     /// Run static analysis on a project
     Analyze {
@@ -105,6 +106,11 @@ enum Commands {
         /// jsonl: JSON Lines streaming output (for SonarQube integration)
         #[arg(long, value_enum, default_value_t = OutputFormat::Console, requires = "streaming")]
         format: OutputFormat,
+
+        /// Run only this diagnostic (enables profiling output)
+        /// Example: --only-diagnostic IncorrectUseOfStrTemplate
+        #[arg(long)]
+        only_diagnostic: Option<String>,
     },
 
     /// Check configuration file
@@ -181,6 +187,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             streaming,
             workers,
             format,
+            only_diagnostic,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -194,6 +201,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             streaming,
             workers,
             format,
+            only_diagnostic,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Format { file, write, spaces, indent_size }) => {
@@ -245,6 +253,7 @@ fn analyze(
     streaming: bool,
     workers: Option<usize>,
     format: OutputFormat,
+    only_diagnostic: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Route to streaming or Salsa mode
     if streaming {
@@ -257,9 +266,71 @@ fn analyze(
             quiet,
             workers,
             format,
+            only_diagnostic,
         )
     } else {
-        analyze_salsa(source_dir, workspace_dir, output_dir, config_path, reporters, quiet)
+        analyze_salsa(
+            source_dir,
+            workspace_dir,
+            output_dir,
+            config_path,
+            reporters,
+            quiet,
+            only_diagnostic,
+        )
+    }
+}
+
+/// Timing result for a single file (used for profiling).
+struct FileTiming {
+    path: PathBuf,
+    duration: std::time::Duration,
+}
+
+/// Aggregated profiling statistics for --only-diagnostic mode.
+struct ProfilingStats {
+    diagnostic_name: String,
+    total: std::time::Duration,
+    count: usize,
+    max: std::time::Duration,
+    max_file: PathBuf,
+}
+
+impl ProfilingStats {
+    fn from_timings(diagnostic_name: String, timings: Vec<FileTiming>) -> Option<Self> {
+        if timings.is_empty() {
+            return None;
+        }
+
+        let total: std::time::Duration = timings.iter().map(|t| t.duration).sum();
+        let count = timings.len();
+        let max_timing = timings.iter().max_by_key(|t| t.duration)?;
+
+        Some(Self {
+            diagnostic_name,
+            total,
+            count,
+            max: max_timing.duration,
+            max_file: max_timing.path.clone(),
+        })
+    }
+
+    fn average(&self) -> std::time::Duration {
+        if self.count == 0 {
+            std::time::Duration::ZERO
+        } else {
+            self.total / self.count as u32
+        }
+    }
+
+    fn print(&self) {
+        println!();
+        println!("=== Diagnostic Profiling: {} ===", self.diagnostic_name);
+        println!("Files analyzed: {}", self.count);
+        println!("Total time:     {:.3}ms", self.total.as_secs_f64() * 1000.0);
+        println!("Average time:   {:.3}ms", self.average().as_secs_f64() * 1000.0);
+        println!("Max time:       {:.3}ms", self.max.as_secs_f64() * 1000.0);
+        println!("Max file:       {}", self.max_file.display());
     }
 }
 
@@ -271,6 +342,7 @@ fn analyze_salsa(
     config_path: Option<PathBuf>,
     reporters: Vec<String>,
     quiet: bool,
+    only_diagnostic: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use base_db::SourceDatabase;
     use ide::{DiagnosticsConfig, RootDatabaseImpl};
@@ -288,9 +360,15 @@ fn analyze_salsa(
 
     let _span = tracing::info_span!("cli_analyze").entered();
 
+    // Profiling mode enabled when --only-diagnostic is set
+    let profiling_enabled = only_diagnostic.is_some();
+
     tracing::info!("Analyzing project: {:?}", source_dir);
     tracing::info!("Reporters: {:?}", reporters);
     tracing::info!("Quiet mode: {}", quiet);
+    if let Some(ref diag) = only_diagnostic {
+        tracing::info!("Profiling diagnostic: {}", diag);
+    }
 
     let start = Instant::now();
 
@@ -390,10 +468,17 @@ fn analyze_salsa(
     // Salsa's clone creates snapshot with new ZalsaLocal (per-thread state)
 
     // Load diagnostics config from project config (unified with streaming mode)
-    let config: DiagnosticsConfig =
+    let mut config: DiagnosticsConfig =
         serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
+
+    // Apply --only-diagnostic filter (enables profiling mode)
+    if let Some(ref diag_name) = only_diagnostic {
+        config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
+    }
+
     tracing::info!(
         disabled = config.disabled.len(),
+        only_enabled = ?config.only_enabled.as_ref().map(|v| v.len()),
         params = config.parameters.len(),
         "Loaded DiagnosticsConfig"
     );
@@ -405,7 +490,8 @@ fn analyze_salsa(
     let configuration_path_arc = Arc::new(configuration_path);
     // file_set_arc is created above and stored in SourceRoot
 
-    let all_diagnostics: Vec<FileAnalysis> = file_ids
+    // Result type: (Option<FileAnalysis>, Option<FileTiming>)
+    let results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = file_ids
         .par_iter()
         .map_with(db.clone(), |db_snapshot, (file_id, path)| {
             let ctx = DiagnosticsContext {
@@ -423,23 +509,20 @@ fn analyze_salsa(
             let file_start = std::time::Instant::now();
             let diagnostics =
                 match catch_unwind(AssertUnwindSafe(|| ide_diagnostics::diagnostics(&ctx))) {
-                    Ok(diags) => {
-                        let elapsed = file_start.elapsed();
-                        if elapsed.as_millis() > 100 && env::var("BSL_LOG_SLOW_FILES").is_ok() {
-                            // Log slow files (only if BSL_LOG_SLOW_FILES is set)
-                            tracing::warn!(
-                                file = ?path,
-                                elapsed_ms = elapsed.as_millis(),
-                                "Slow file analysis"
-                            );
-                        }
-                        diags
-                    }
+                    Ok(diags) => diags,
                     Err(e) => {
                         tracing::error!("Panic analyzing {:?}: {:?}", path, e);
-                        return None;
+                        return (None, None);
                     }
                 };
+            let elapsed = file_start.elapsed();
+
+            // Collect timing for profiling (only when --only-diagnostic is set)
+            let timing = if profiling_enabled {
+                Some(FileTiming { path: path.clone(), duration: elapsed })
+            } else {
+                None
+            };
 
             // Update progress (lock-free atomic counter)
             let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -451,8 +534,8 @@ fn analyze_salsa(
                 ));
             }
 
-            // Return only if diagnostics found
-            if !diagnostics.is_empty() {
+            // Build file analysis if diagnostics found
+            let file_analysis = if !diagnostics.is_empty() {
                 // Convert Diagnostic → DiagnosticOutput for reporters
                 // Read file text for LineIndex in to_output()
                 let file_text = match fs::read_to_string(path) {
@@ -463,7 +546,7 @@ fn analyze_salsa(
                             path,
                             e
                         );
-                        return None;
+                        return (None, timing);
                     }
                 };
 
@@ -480,9 +563,10 @@ fn analyze_salsa(
                 })
             } else {
                 None
-            }
+            };
+
+            (file_analysis, timing)
         })
-        .flatten() // flatten Option<FileAnalysis> from map_with
         .collect();
 
     // Finish progress bar
@@ -492,10 +576,15 @@ fn analyze_salsa(
 
     let elapsed = start.elapsed();
 
+    // Separate diagnostics and timings
+    let (file_analyses, timings): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+    let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();
+    let all_timings: Vec<FileTiming> = timings.into_iter().flatten().collect();
+
     // Create analysis results
     let total_diagnostics: usize = all_diagnostics.iter().map(|f| f.diagnostics.len()).sum();
 
-    let results = AnalysisResults {
+    let analysis_results = AnalysisResults {
         files_analyzed: bsl_files.len(),
         files_with_issues: all_diagnostics.len(),
         total_diagnostics,
@@ -515,7 +604,7 @@ fn analyze_salsa(
     for key in &reporter_keys {
         match registry.get(key) {
             Some(reporter) => {
-                if let Err(e) = reporter.report(&results, &output_dir) {
+                if let Err(e) = reporter.report(&analysis_results, &output_dir) {
                     tracing::error!("Reporter '{}' failed: {}", key, e);
                     eprintln!("Error: Reporter '{}' failed: {}", key, e);
                 }
@@ -525,6 +614,13 @@ fn analyze_salsa(
                 eprintln!("Valid reporters: {}", registry.keys().join(", "));
                 return Err(format!("Unknown reporter: {}", key).into());
             }
+        }
+    }
+
+    // Print profiling stats if --only-diagnostic was used
+    if let Some(diag_name) = only_diagnostic {
+        if let Some(stats) = ProfilingStats::from_timings(diag_name, all_timings) {
+            stats.print();
         }
     }
 
@@ -543,12 +639,19 @@ fn analyze_streaming(
     quiet: bool,
     workers: Option<usize>,
     format: OutputFormat,
+    only_diagnostic: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use ide::streaming::AnalysisOrchestrator;
     use vfs::FileId;
     use walkdir::WalkDir;
 
     let _span = tracing::info_span!("cli_analyze_streaming").entered();
+
+    // Profiling not supported in streaming mode yet
+    if only_diagnostic.is_some() {
+        eprintln!("Warning: --only-diagnostic profiling is not supported in streaming mode.");
+        eprintln!("Use without --streaming for profiling.");
+    }
 
     tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
     tracing::info!("Workers: {:?}", workers);

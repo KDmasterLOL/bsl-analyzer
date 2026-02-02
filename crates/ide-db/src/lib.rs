@@ -564,10 +564,10 @@ impl DefDatabase for RootDatabaseImpl {
     }
 
     fn method_docs(&self, method: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
-        // Call documentation parsing query
-        // TODO: Make this a proper Salsa tracked query with MethodIdInput
-        // For now, call directly (still benefits from parse() caching)
-        hir_def::docs::method_docs_query(self, method)
+        // Get docs from SymbolTree (parsed once during SymbolTree construction)
+        let symbol_tree = self.symbol_tree(method.module);
+        let method_symbol = symbol_tree.find_method_by_id(method)?;
+        method_symbol.docs.clone()
     }
 
     fn workspace_symbols(

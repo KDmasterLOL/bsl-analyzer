@@ -47,6 +47,15 @@ use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
+/// Default maximum iterations for dataflow analysis.
+///
+/// This is the single source of truth for the default value.
+/// Can be overridden via `DiagnosticsConfig.dataflow_max_iterations`.
+///
+/// Lower values = faster but may skip complex methods.
+/// Higher values = more accurate but slower on pathological cases.
+pub const DEFAULT_MAX_ITERATIONS: usize = 10000;
+
 /// Direction of dataflow analysis.
 ///
 /// ## Forward Analysis
@@ -232,7 +241,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     /// ## Default Settings
     ///
     /// - Direction: Forward
-    /// - Max iterations: 10000 (configurable via DiagnosticsConfig.dataflow_max_iterations)
+    /// - Max iterations: DEFAULT_MAX_ITERATIONS (configurable via DiagnosticsConfig.dataflow_max_iterations)
     pub fn new(cfg: Arc<ControlFlowGraph>, body: Body, transfer: T) -> Self {
         Self {
             cfg,
@@ -240,7 +249,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             transfer,
             block_in: FxHashMap::default(),
             block_out: FxHashMap::default(),
-            max_iterations: 10000, // Default for complex real-world methods (configurable)
+            max_iterations: DEFAULT_MAX_ITERATIONS,
             direction: Direction::Forward, // Default to forward analysis
         }
     }

@@ -797,9 +797,10 @@ mod tests {
 
         // Create minimal parse for SymbolTree
         let module_id = hir_def::ModuleId::new(file_id);
-        let parse = parser::parse(""); // Empty file
+        let text = "";
+        let parse = parser::parse(text); // Empty file
         let item_tree = hir_def::ItemTree::from_parse(&parse);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, text));
 
         // Publish symbol tree
         state.publish_symbol_tree(file_id, symbol_tree.clone());
@@ -821,9 +822,10 @@ mod tests {
         // Claim and publish
         state.try_claim(file_id);
         let module_id = hir_def::ModuleId::new(file_id);
-        let parse = parser::parse(""); // Empty file
+        let text = "";
+        let parse = parser::parse(text); // Empty file
         let item_tree = hir_def::ItemTree::from_parse(&parse);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, text));
         state.publish_symbol_tree(file_id, symbol_tree);
 
         // Mark completed
@@ -938,7 +940,7 @@ mod tests {
         let parse: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(text));
         let item_tree = ItemTree::from_parse(&parse);
         let module_id = ModuleId::new(file_id);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, text));
 
         state.publish_symbol_tree(file_id, symbol_tree);
 

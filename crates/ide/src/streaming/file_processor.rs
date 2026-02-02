@@ -209,7 +209,8 @@ impl<'a> FileProcessor<'a> {
 
         // Build ModuleId and SymbolTree
         let module_id = ModuleId::new(file_id);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let symbol_tree =
+            Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
         // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
         let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
@@ -258,7 +259,8 @@ impl<'a> FileProcessor<'a> {
 
         // Build ModuleId and SymbolTree
         let module_id = ModuleId::new(file_id);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let symbol_tree =
+            Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
         // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
         let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));

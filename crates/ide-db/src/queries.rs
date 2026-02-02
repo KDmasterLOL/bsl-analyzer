@@ -450,7 +450,7 @@ pub fn module_reaching_definitions_query<'db>(
         // Run dataflow analysis
         let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
         let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-        solver.set_max_iterations(10000); // ✅ Fixed! Was 100
+        solver.set_max_iterations(dataflow::DEFAULT_MAX_ITERATIONS);
         solver.set_bottom_factory(|| dataflow::reaching_defs::ReachingDefs::new(def_index.clone()));
         solver.set_initial_state(initial_defs);
 
@@ -540,7 +540,10 @@ pub fn module_liveness_analysis_query<'db>(
 
         // Run liveness analysis
         if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
-            body, cfg, var_index, 10000, // max_iterations
+            body,
+            cfg,
+            var_index,
+            dataflow::DEFAULT_MAX_ITERATIONS,
         ) {
             results.insert(local_id, Arc::new(liveness_result));
         }

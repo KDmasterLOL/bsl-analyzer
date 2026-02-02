@@ -445,27 +445,15 @@ impl<'a> DiagnosticsContext<'a> {
             .unwrap_or_default()
     }
 
-    /// Check if diagnostic is disabled (respects activatedByDefault).
+    /// Check if diagnostic is disabled (respects activatedByDefault and CLI filters).
     ///
     /// A diagnostic is disabled if:
-    /// 1. Explicitly disabled via config, OR
-    /// 2. Has metadata with activatedByDefault=false AND not explicitly enabled
+    /// 1. only_enabled is set (--only-diagnostic) and code is NOT in that list, OR
+    /// 2. Explicitly disabled via config (--disable-diagnostic or config file), OR
+    /// 3. Has metadata with activatedByDefault=false AND not explicitly enabled
     ///
-    /// This replaces the old DISABLED_BY_DEFAULT const check.
+    /// Delegates to config.is_disabled() which handles all cases uniformly.
     pub fn is_disabled_with_metadata(&self, code: crate::DiagnosticCode) -> bool {
-        if self.config.disabled.contains(&code) {
-            return true;
-        }
-
-        if let Some(metadata) = crate::metadata_registry::get_metadata(code) {
-            if !metadata.activated_by_default
-                && !self.config.enabled.contains(&code)
-                && !self.config.parameters.contains_key(&code)
-            {
-                return true;
-            }
-        }
-
-        false
+        self.config.is_disabled(code)
     }
 }

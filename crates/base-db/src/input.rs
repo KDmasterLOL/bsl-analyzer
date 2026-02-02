@@ -179,7 +179,7 @@ pub struct DiagnosticsConfigInput {
     /// Max iterations for dataflow analysis.
     ///
     /// Used by flow-sensitive diagnostics to limit computation.
-    /// Default: 10000.
+    /// Default: 10000 (sync with dataflow::DEFAULT_MAX_ITERATIONS).
     pub dataflow_max_iterations: usize,
 }
 

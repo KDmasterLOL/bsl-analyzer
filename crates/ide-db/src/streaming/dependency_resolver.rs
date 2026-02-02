@@ -161,7 +161,7 @@ fn process_symbol_tree_only(
 
     // Build ModuleId and SymbolTree
     let module_id = ModuleId::new(file_id);
-    let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+    let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
     // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
     let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
@@ -223,7 +223,10 @@ mod tests {
 
         let module_id = ModuleId::new(file_id);
         let item_tree = provider.item_tree(file_id);
-        let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id));
+        let parse = provider.parse(file_id);
+        let text = provider.file_text(file_id);
+        let symbol_tree =
+            Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
         shared_state.publish_symbol_tree(file_id, symbol_tree.clone());
 
         // Test: get_or_process should return immediately (fast path)

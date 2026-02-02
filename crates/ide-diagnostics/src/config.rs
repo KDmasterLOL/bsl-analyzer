@@ -97,7 +97,7 @@ pub struct DiagnosticsConfig {
     pub enabled: Vec<DiagnosticCode>,
     pub parameters: HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
-    /// Maximum iterations for dataflow analysis (default: 10000)
+    /// Maximum iterations for dataflow analysis (default: dataflow::DEFAULT_MAX_ITERATIONS)
     ///
     /// Controls convergence limit for liveness analysis and other dataflow algorithms.
     /// Increase this for very complex methods with deep nesting or many loops.
@@ -108,6 +108,9 @@ pub struct DiagnosticsConfig {
     /// Allows runtime override of compile-time metadata (severity, type, tags, lsp_severity).
     /// Not yet fully implemented - placeholder for Phase 3 completion.
     pub metadata_overrides: HashMap<DiagnosticCode, MetadataOverride>,
+    /// Exclusive mode: if Some, ONLY these diagnostics are enabled.
+    /// Set via --only-diagnostic CLI flag. Overrides disabled/enabled lists.
+    pub only_enabled: Option<Vec<DiagnosticCode>>,
 }
 
 impl Default for DiagnosticsConfig {
@@ -117,8 +120,9 @@ impl Default for DiagnosticsConfig {
             enabled: Vec::new(),
             parameters: HashMap::new(),
             ordinary_app_support: false,
-            dataflow_max_iterations: 10000,
+            dataflow_max_iterations: dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
+            only_enabled: None,
         }
     }
 }
@@ -156,8 +160,9 @@ impl DiagnosticsConfig {
             enabled,
             parameters: HashMap::new(),
             ordinary_app_support: false,
-            dataflow_max_iterations: 10000,
+            dataflow_max_iterations: dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
+            only_enabled: None,
         }
     }
 
@@ -203,7 +208,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                 let mut enabled = Vec::new();
                 let mut parameters = HashMap::new();
                 let mut ordinary_app_support = false;
-                let mut dataflow_max_iterations = 10000usize;
+                let mut dataflow_max_iterations = dataflow::DEFAULT_MAX_ITERATIONS;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -250,6 +255,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                     ordinary_app_support,
                     dataflow_max_iterations,
                     metadata_overrides: HashMap::new(),
+                    only_enabled: None,
                 })
             }
         }
@@ -262,9 +268,15 @@ impl DiagnosticsConfig {
     /// Check if a diagnostic is disabled.
     ///
     /// A diagnostic is disabled if:
-    /// 1. It's explicitly disabled via configuration, OR
-    /// 2. Has metadata with activatedByDefault=false AND not explicitly enabled AND has no parameters
+    /// 1. only_enabled is set and code is NOT in that list (exclusive mode from --only-diagnostic), OR
+    /// 2. It's explicitly disabled via configuration, OR
+    /// 3. Has metadata with activatedByDefault=false AND not explicitly enabled AND has no parameters
     pub fn is_disabled(&self, code: DiagnosticCode) -> bool {
+        // Exclusive mode: if only_enabled is set, ONLY those diagnostics are active
+        if let Some(ref only) = self.only_enabled {
+            return !only.contains(&code);
+        }
+
         if self.disabled.contains(&code) {
             return true;
         }
@@ -348,6 +360,33 @@ impl DiagnosticsConfig {
             ordinary_app_support: input.ordinary_app_support,
             dataflow_max_iterations: input.dataflow_max_iterations,
             metadata_overrides: HashMap::new(),
+            only_enabled: None,
+        }
+    }
+
+    /// Apply CLI filter flags to this config.
+    ///
+    /// - `only_diagnostic`: If non-empty, sets exclusive mode - only these diagnostics run
+    /// - `disable_diagnostic`: Adds these codes to the disabled list
+    ///
+    /// The `only_diagnostic` flag takes precedence over everything else.
+    pub fn apply_cli_filters(&mut self, only_diagnostic: &[String], disable_diagnostic: &[String]) {
+        // Apply --only-diagnostic (exclusive mode)
+        if !only_diagnostic.is_empty() {
+            let codes: Vec<DiagnosticCode> =
+                only_diagnostic.iter().filter_map(|s| s.parse().ok()).collect();
+            if !codes.is_empty() {
+                self.only_enabled = Some(codes);
+            }
+        }
+
+        // Apply --disable-diagnostic (add to disabled list)
+        for code_str in disable_diagnostic {
+            if let Ok(code) = code_str.parse::<DiagnosticCode>() {
+                if !self.disabled.contains(&code) {
+                    self.disabled.push(code);
+                }
+            }
         }
     }
 }
