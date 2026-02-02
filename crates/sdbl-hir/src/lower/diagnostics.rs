@@ -7,7 +7,7 @@ use super::context::LoweringContext;
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::{ExprHir, JoinHir, SdblHir, TableRef};
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     pub(super) fn check_joins_for_unprotected_fields(&mut self, hir: &SdblHir) {
         // Build set of tables that are protected by WHERE IS NOT NULL checks
         // NOTE: Protection is local to this query, NOT inherited from parent or shared with siblings

@@ -742,7 +742,7 @@ fn test_tabular_section_field_resolution() {
     let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
     // Verify table resolved
@@ -779,7 +779,7 @@ fn test_tabular_section_case_insensitive_matching() {
     let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.результатыпроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
     // Should still resolve (case-insensitive matching)
@@ -796,7 +796,7 @@ fn test_tabular_section_bilingual_support() {
     let code = "ВЫБРАТЬ Т.ЗадачаИсполнителя ИЗ БизнесПроцесс.Исполнение.CheckResults КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
     // Should resolve using English name
@@ -818,7 +818,7 @@ fn test_tabular_section_not_found() {
     let code = "ВЫБРАТЬ Т.Поле ИЗ БизнесПроцесс.Исполнение.НесуществующаяТабличнаяЧасть КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&metadata));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata.clone())));
     let hir = single_query_hir(&package);
 
     // Table should not be resolved (tabular section doesn't exist)
@@ -848,7 +848,7 @@ fn test_invalid_mdo_type_for_tabular_section() {
     let code = "ВЫБРАТЬ Т.Поле ИЗ РегистрСведений.ТестовыйРегистр.ТабличнаяЧасть КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
     // Should not resolve (registers don't have tabular sections)
@@ -893,7 +893,7 @@ fn test_tabular_section_task_ref_type_parsing() {
     let code = "ВЫБРАТЬ Т.ЗадачаПроверяющего ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
     // Verify field resolved
@@ -954,7 +954,7 @@ fn test_tabular_section_uuid_type_parsing() {
         "ВЫБРАТЬ Т.ИдентификаторИсполнителя ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
 
     let ast = parser::parse_sdbl(code);
-    let package = lower_sdbl_to_hir(&ast, Some(&config));
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config.clone())));
     let hir = single_query_hir(&package);
 
     // Verify field resolved

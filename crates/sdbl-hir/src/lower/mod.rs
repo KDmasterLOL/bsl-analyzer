@@ -75,7 +75,7 @@ pub struct SdblLowerResult {
 /// ```
 pub fn lower_sdbl_to_hir(
     sdbl_ast: &Parse<syntax::SyntaxNode>,
-    metadata: Option<&Configuration>,
+    metadata: Option<std::sync::Arc<Configuration>>,
 ) -> crate::hir::SdblPackage {
     let _span = tracing::debug_span!("lower_sdbl_to_hir").entered();
 
@@ -87,7 +87,7 @@ pub fn lower_sdbl_to_hir(
         return crate::hir::SdblPackage::empty();
     };
 
-    // Create lowering context
+    // Create lowering context (Arc avoids cloning the large Configuration)
     let mut ctx = LoweringContext::new(metadata);
 
     // Lower ALL SELECT queries in the package
@@ -255,7 +255,7 @@ pub fn lower_sdbl_to_hir(
     crate::hir::SdblPackage { queries: sdbl_queries, source_map: ctx.source_map }
 }
 
-impl LoweringContext<'_> {
+impl LoweringContext {
     /// Lower a single SDBL query (main query or query from UNION).
     ///
     /// This method processes one query from a SELECT statement, which can be:

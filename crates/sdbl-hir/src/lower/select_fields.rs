@@ -6,7 +6,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Lower SELECT field list.
     ///
     /// # Arguments

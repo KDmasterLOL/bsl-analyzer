@@ -6,7 +6,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Lower WHERE clause.
     pub(super) fn lower_where_clause(
         &mut self,

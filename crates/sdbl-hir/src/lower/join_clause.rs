@@ -10,7 +10,7 @@ use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Lower all JOIN clauses (including nested) from query.
     ///
     /// Returns a flat list of all JOINs, recursively collecting nested JOINs.

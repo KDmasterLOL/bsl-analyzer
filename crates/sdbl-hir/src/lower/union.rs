@@ -6,7 +6,7 @@
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     // DEPRECATED: This method is no longer used.
     // UNION queries are now processed in flat list in lower_sdbl_to_hir().
     //

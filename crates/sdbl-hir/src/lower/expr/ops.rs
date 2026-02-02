@@ -4,7 +4,7 @@ use crate::hir::ExprHir;
 use crate::lower::context::LoweringContext;
 use crate::types::SdblType;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     pub(super) fn lower_binary_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::BinaryOp;
         use syntax::SyntaxKind;

@@ -289,12 +289,12 @@ pub fn sdbl_hir_in_file_query<'db>(
     });
 
     // Lower each SDBL query to HIR
-    let config_ref = configuration.as_deref();
+    // Pass Arc<Configuration> directly to avoid cloning the large structure
     let mut result = Vec::with_capacity(sdbl_queries.len());
     for (expr_id, query_info) in sdbl_queries.iter() {
         // Only lower if we have a parsed AST
         if let Some(ref sdbl_ast) = query_info.query_ast {
-            let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+            let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, configuration.clone());
             result.push((*expr_id, Arc::new(sdbl_package)));
         }
     }

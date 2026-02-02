@@ -12,7 +12,7 @@ use text_size::TextRange;
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     pub(in crate::lower) fn lower_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use syntax::SyntaxKind;
 

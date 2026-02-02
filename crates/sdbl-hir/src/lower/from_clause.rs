@@ -10,7 +10,7 @@ use text_size::TextRange;
 
 use super::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Lower FROM clause.
     pub(super) fn lower_from_clause(
         &mut self,
@@ -357,7 +357,7 @@ impl<'a> LoweringContext<'a> {
         };
 
         // Check metadata if available
-        if let Some(metadata) = self.metadata {
+        if let Some(ref metadata) = self.metadata {
             // Check if object exists in metadata
             let exists = match mdo_type {
                 // For registers, check in registers collection
@@ -422,7 +422,7 @@ impl<'a> LoweringContext<'a> {
         );
 
         // Add fields from metadata if available
-        if let Some(_metadata) = self.metadata {
+        if let Some(ref _metadata) = self.metadata {
             self.add_metadata_fields(
                 mdo_type,
                 object_name,
@@ -458,7 +458,7 @@ impl<'a> LoweringContext<'a> {
         full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
-        let Some(metadata) = self.metadata else {
+        let Some(ref metadata) = self.metadata else {
             tracing::debug!("No metadata available for field resolution");
             return;
         };
@@ -588,7 +588,7 @@ impl<'a> LoweringContext<'a> {
         full_name: &str,
         fields: &mut Vec<FieldDef>,
     ) {
-        let Some(metadata) = self.metadata else {
+        let Some(ref metadata) = self.metadata else {
             tracing::debug!("No metadata available for tabular section resolution");
             return;
         };
@@ -704,7 +704,7 @@ impl<'a> LoweringContext<'a> {
             "Resolving ExternalDataSource path"
         );
 
-        let Some(metadata) = self.metadata else {
+        let Some(ref metadata) = self.metadata else {
             tracing::debug!("No metadata available for EDS validation");
             return (Some(MdoType::ExternalDataSource), None);
         };

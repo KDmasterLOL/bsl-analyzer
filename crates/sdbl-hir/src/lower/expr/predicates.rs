@@ -19,7 +19,7 @@ fn is_column_ref_pattern(expr: &ExprHir) -> bool {
     }
 }
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Lower a subquery in IN expression context.
     ///
     /// This properly lowers subqueries in WHERE ... IN (SELECT ...) to collect

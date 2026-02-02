@@ -16,9 +16,9 @@ use crate::source_map::{SdblSourceMap, TokenCategory, TokenInfo};
 /// - Scope for name resolution
 /// - Collected diagnostics
 /// - Source map for semantic highlighting
-pub struct LoweringContext<'a> {
-    /// 1C Configuration metadata (optional).
-    pub(super) metadata: Option<&'a Configuration>,
+pub struct LoweringContext {
+    /// 1C Configuration metadata (optional, Arc-wrapped to avoid cloning).
+    pub(super) metadata: Option<Arc<Configuration>>,
 
     /// Current scope for name resolution.
     pub(super) scope: Scope,
@@ -30,17 +30,15 @@ pub struct LoweringContext<'a> {
     pub(super) source_map: SdblSourceMap,
 }
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     /// Create a new lowering context.
     ///
     /// If metadata is provided, it will be passed to Scope for resolving nested field references.
-    pub fn new(metadata: Option<&'a Configuration>) -> Self {
-        // Convert metadata reference to Arc for Scope
-        let metadata_arc = metadata.map(|m| Arc::new(m.clone()));
-
+    /// Uses Arc to avoid cloning the large Configuration structure.
+    pub fn new(metadata: Option<Arc<Configuration>>) -> Self {
         Self {
+            scope: Scope::new_with_metadata(metadata.clone()),
             metadata,
-            scope: Scope::new_with_metadata(metadata_arc),
             diagnostics: Vec::new(),
             source_map: SdblSourceMap::new(),
         }

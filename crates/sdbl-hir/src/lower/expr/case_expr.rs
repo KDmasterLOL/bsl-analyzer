@@ -6,7 +6,7 @@ use syntax::SyntaxKind;
 
 use crate::lower::context::LoweringContext;
 
-impl<'a> LoweringContext<'a> {
+impl LoweringContext {
     pub(super) fn lower_case_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         // Record CASE keyword
         self.record_keyword_by_text(

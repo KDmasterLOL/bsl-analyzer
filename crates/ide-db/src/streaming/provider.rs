@@ -358,12 +358,12 @@ impl AnalysisProvider for StreamingProvider {
         // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
         let sdbl_queries = self.all_sdbl_in_file(file_id);
         let configuration = self.configuration();
-        let config_ref = configuration.as_deref();
 
         let mut result = Vec::with_capacity(sdbl_queries.len());
         for (sdbl_expr_id, query_info) in sdbl_queries.iter() {
             if let Some(ref sdbl_ast) = query_info.query_ast {
-                let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, config_ref);
+                // Pass Arc<Configuration> directly to avoid cloning
+                let sdbl_package = sdbl_hir::lower_sdbl_to_hir(sdbl_ast, configuration.clone());
                 result.push((*sdbl_expr_id, Arc::new(sdbl_package)));
             }
         }

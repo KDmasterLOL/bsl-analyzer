@@ -131,7 +131,8 @@ impl ParsedFile {
         self.sdbl_hir
             .get_or_init(|| {
                 let module_bodies = self.module_bodies();
-                let config_ref = configuration.map(|c| c.as_ref());
+                // Clone Arc (cheap) to pass to lower_sdbl_to_hir
+                let config_arc = configuration.cloned();
 
                 // Collect queries with position for sorting
                 let mut queries_with_pos: Vec<_> = Vec::new();
@@ -161,11 +162,12 @@ impl ParsedFile {
                 // Sort by position for deterministic output
                 queries_with_pos.sort_by_key(|(pos, _, _)| *pos);
 
-                // Lower to HIR
+                // Lower to HIR (pass Arc directly to avoid cloning Configuration)
                 let result: Vec<_> = queries_with_pos
                     .into_iter()
                     .map(|(_, sdbl_expr_id, sdbl_ast)| {
-                        let sdbl_package = sdbl_hir::lower_sdbl_to_hir(&sdbl_ast, config_ref);
+                        let sdbl_package =
+                            sdbl_hir::lower_sdbl_to_hir(&sdbl_ast, config_arc.clone());
                         (sdbl_expr_id, Arc::new(sdbl_package))
                     })
                     .collect();
