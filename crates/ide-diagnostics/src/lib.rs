@@ -5,6 +5,7 @@
 mod code;
 mod config;
 mod context;
+pub mod docs;
 mod hir_dispatch;
 mod metadata;
 mod metadata_dispatch;
@@ -35,6 +36,12 @@ pub use metadata::{
 pub use metadata_registry::get_metadata;
 pub use query::file_diagnostics_query;
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
+
+/// Returns an iterator over all diagnostic codes.
+pub fn all_diagnostic_codes() -> impl Iterator<Item = DiagnosticCode> {
+    use strum::IntoEnumIterator;
+    DiagnosticCode::iter()
+}
 
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
