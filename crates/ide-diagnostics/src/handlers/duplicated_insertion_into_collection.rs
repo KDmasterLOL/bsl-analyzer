@@ -140,6 +140,66 @@ fn is_insertion_method(name: &Name, allow_add: bool) -> bool {
     }
 }
 
+/// Quick pre-check: does the file text contain any insertion method names?
+///
+/// This is a fast O(n) scan that avoids expensive HIR analysis for files
+/// that don't call any insertion methods. Uses case-insensitive matching
+/// without allocating a lowercase copy of the entire file.
+fn has_insertion_methods(text: &str) -> bool {
+    // Patterns to search for (with leading dot to match method calls)
+    const PATTERNS: &[&str] = &[".добавить(", ".add(", ".вставить(", ".insert("];
+
+    // Scan through the text looking for any pattern
+    let bytes = text.as_bytes();
+
+    for (i, &byte) in bytes.iter().enumerate() {
+        // Quick check: must start with '.'
+        if byte != b'.' {
+            continue;
+        }
+
+        // Check each pattern
+        for pattern in PATTERNS {
+            if matches_case_insensitive(text, i, pattern) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if text at position matches pattern (case-insensitive).
+#[inline]
+fn matches_case_insensitive(text: &str, start: usize, pattern: &str) -> bool {
+    let text_bytes = text.as_bytes();
+    let remaining = text_bytes.len() - start;
+
+    if remaining < pattern.len() {
+        return false;
+    }
+
+    // Get the slice starting at position
+    let text_slice = &text[start..];
+    let mut text_chars = text_slice.chars();
+    let mut pattern_chars = pattern.chars();
+
+    loop {
+        match (pattern_chars.next(), text_chars.next()) {
+            (None, _) => return true,        // Pattern exhausted - match!
+            (Some(_), None) => return false, // Text exhausted before pattern
+            (Some(p), Some(t)) => {
+                // Case-insensitive comparison
+                let p_lower = p.to_lowercase().next().unwrap_or(p);
+                let t_lower = t.to_lowercase().next().unwrap_or(t);
+                if p_lower != t_lower {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 /// Recorded insertion for duplicate detection.
 #[derive(Debug, Clone)]
 struct Insertion {
@@ -1012,6 +1072,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
+    // Early exit: skip files without insertion methods
+    // This avoids expensive HIR analysis for files that can't have duplicated insertions
+    let text = ctx.file_text();
+    if !has_insertion_methods(&text) {
+        return Vec::new();
+    }
+
     let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
@@ -1215,5 +1282,28 @@ mod tests {
         assert_diagnostic_range(code, &sorted_diagnostics[15], 265, 4, 39);
         // Line 269: Коллекция2().Реквизит.Добавить(СтрокаТаблицы2)
         assert_diagnostic_range(code, &sorted_diagnostics[16], 268, 4, 50);
+    }
+
+    #[test]
+    fn test_has_insertion_methods() {
+        use super::has_insertion_methods;
+
+        // Should find: .Добавить( .Add( .Вставить( .Insert(
+        assert!(has_insertion_methods("Массив.Добавить(1)"));
+        assert!(has_insertion_methods("Массив.добавить(1)")); // case-insensitive
+        assert!(has_insertion_methods("Array.Add(1)"));
+        assert!(has_insertion_methods("Array.add(1)")); // case-insensitive
+        assert!(has_insertion_methods("Соответствие.Вставить(К, З)"));
+        assert!(has_insertion_methods("Соответствие.вставить(К, З)"));
+        assert!(has_insertion_methods("Map.Insert(K, V)"));
+        assert!(has_insertion_methods("Map.insert(K, V)"));
+
+        // Should NOT find: no dot prefix, wrong methods
+        assert!(!has_insertion_methods("Добавить(1)")); // no dot
+        assert!(!has_insertion_methods("Процедура Добавить()"));
+        assert!(!has_insertion_methods("Массив.Получить(1)"));
+        assert!(!has_insertion_methods("Массив.Удалить(1)"));
+        assert!(!has_insertion_methods("// комментарий"));
+        assert!(!has_insertion_methods(""));
     }
 }

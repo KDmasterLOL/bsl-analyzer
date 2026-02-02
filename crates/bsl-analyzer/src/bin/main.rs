@@ -641,16 +641,16 @@ fn analyze_streaming(
     format: OutputFormat,
     only_diagnostic: Option<String>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use ide::streaming::AnalysisOrchestrator;
+    use ide::{streaming::AnalysisOrchestrator, DiagnosticsConfig};
     use vfs::FileId;
     use walkdir::WalkDir;
 
     let _span = tracing::info_span!("cli_analyze_streaming").entered();
 
-    // Profiling not supported in streaming mode yet
-    if only_diagnostic.is_some() {
-        eprintln!("Warning: --only-diagnostic profiling is not supported in streaming mode.");
-        eprintln!("Use without --streaming for profiling.");
+    // Profiling mode enabled when --only-diagnostic is set
+    let profiling_enabled = only_diagnostic.is_some();
+    if let Some(ref diag) = only_diagnostic {
+        tracing::info!("Profiling diagnostic (streaming mode): {}", diag);
     }
 
     tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
@@ -660,6 +660,28 @@ fn analyze_streaming(
     // Determine workspace and output directories
     let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+
+    // Load project configuration
+    let proj_config = if let Some(ref cfg) = config_path {
+        project_model::ProjectConfig::load(cfg).unwrap_or_default()
+    } else {
+        project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
+    };
+
+    // Load diagnostics config from project config and apply CLI filters
+    let mut diag_config: DiagnosticsConfig =
+        serde_json::from_value(proj_config.diagnostics.clone()).unwrap_or_default();
+
+    if let Some(ref diag_name) = only_diagnostic {
+        diag_config.apply_cli_filters(std::slice::from_ref(diag_name), &[]);
+    }
+
+    tracing::info!(
+        disabled = diag_config.disabled.len(),
+        only_enabled = ?diag_config.only_enabled.as_ref().map(|v| v.len()),
+        params = diag_config.parameters.len(),
+        "Loaded DiagnosticsConfig (streaming mode)"
+    );
 
     // Find all BSL files
     tracing::info!("Finding BSL files in {:?}", source_dir);
@@ -696,8 +718,9 @@ fn analyze_streaming(
         file_ids.push((file_id, path.clone()));
     }
 
-    // Create orchestrator
-    let mut builder = AnalysisOrchestrator::builder().workspace_root(&source_dir);
+    // Create orchestrator with diagnostics config
+    let mut builder =
+        AnalysisOrchestrator::builder().workspace_root(&source_dir).diagnostics_config(diag_config);
 
     if let Some(w) = workers {
         builder = builder.num_workers(w);
@@ -802,6 +825,26 @@ fn analyze_streaming(
                         eprintln!("Error: Unknown reporter '{}'", key);
                         eprintln!("Valid reporters: {}", registry.keys().join(", "));
                         return Err(format!("Unknown reporter: {}", key).into());
+                    }
+                }
+            }
+
+            // Print profiling stats if --only-diagnostic was used
+            if profiling_enabled {
+                if let Some(diag_name) = only_diagnostic {
+                    // Collect timings from file_results
+                    let timings: Vec<FileTiming> = streaming_results
+                        .file_results
+                        .iter()
+                        .filter_map(|fr| {
+                            file_ids.iter().find(|(id, _)| *id == fr.file_id).map(|(_, path)| {
+                                FileTiming { path: path.clone(), duration: fr.duration }
+                            })
+                        })
+                        .collect();
+
+                    if let Some(stats) = ProfilingStats::from_timings(diag_name, timings) {
+                        stats.print();
                     }
                 }
             }

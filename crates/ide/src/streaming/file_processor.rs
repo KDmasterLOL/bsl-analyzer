@@ -37,6 +37,9 @@ pub struct FileResult {
 
     /// Optional file metrics (functions count, complexity).
     pub metrics: Option<FileMetrics>,
+
+    /// Processing duration (for profiling).
+    pub duration: std::time::Duration,
 }
 
 /// File processor for three-phase processing.
@@ -76,6 +79,7 @@ impl<'a> FileProcessor<'a> {
     /// Returns FileResult with diagnostics and optional error.
     pub fn process_file(&self, file_id: FileId) -> FileResult {
         let _span = tracing::info_span!("process_file", ?file_id).entered();
+        let start = std::time::Instant::now();
 
         // Phase 1: Build SymbolTree and start diagnostics atomically
         // Uses publish_symbol_tree_and_start_diagnostics to skip SymbolTreeReady state
@@ -92,6 +96,7 @@ impl<'a> FileProcessor<'a> {
                     diagnostics: vec![],
                     error: Some(Arc::from(err.to_string())),
                     metrics: None,
+                    duration: start.elapsed(),
                 };
             }
         }
@@ -108,7 +113,7 @@ impl<'a> FileProcessor<'a> {
         self.shared_state.mark_completed(file_id);
         tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "File processing completed");
 
-        FileResult { file_id, diagnostics, error: None, metrics }
+        FileResult { file_id, diagnostics, error: None, metrics, duration: start.elapsed() }
     }
 
     /// Process diagnostics only (Phase 2) for a file that already has SymbolTree.
@@ -127,6 +132,7 @@ impl<'a> FileProcessor<'a> {
     /// - file_status == FileStatus::Completed
     pub fn process_diagnostics_only(&self, file_id: FileId) -> FileResult {
         let _span = tracing::info_span!("process_diagnostics_only", ?file_id).entered();
+        let start = std::time::Instant::now();
 
         // Phase 2: Collect diagnostics
         let diagnostics = self.collect_diagnostics(file_id);
@@ -140,7 +146,7 @@ impl<'a> FileProcessor<'a> {
         self.shared_state.mark_completed(file_id);
         tracing::debug!(file_id = ?file_id, num_diagnostics = diagnostics.len(), "Diagnostics-only processing completed");
 
-        FileResult { file_id, diagnostics, error: None, metrics }
+        FileResult { file_id, diagnostics, error: None, metrics, duration: start.elapsed() }
     }
 
     /// Calculate file metrics from cached ParsedFile.
