@@ -15,9 +15,10 @@
 //! This follows the rust-analyzer pattern where documentation is a first-class
 //! HIR concept, and matches bsl-language-server's MethodDescription approach.
 
+use crate::item_tree::ModItem;
 use crate::{DefDatabase, MethodId};
 use std::sync::Arc;
-use syntax::{extract_leading_comments, SyntaxNode};
+use syntax::{extract_leading_comments_at_offset, SyntaxNode};
 
 /// Parsed documentation for a BSL method (procedure or function).
 ///
@@ -270,16 +271,23 @@ impl TypeDoc {
 /// }
 /// ```
 pub fn method_docs_query(db: &dyn DefDatabase, method: MethodId) -> Option<Arc<MethodDocs>> {
-    let parse = db.parse(method.module.file_id);
     let tree = db.item_tree(method.module.file_id);
 
-    // Find the method's AST node by searching through ItemTree
-    let method_node = find_method_node(&parse, &tree, method)?;
+    // Get method's source_range directly from ItemTree (no AST traversal needed!)
+    let items = tree.top_level_items();
+    let item = items.get(method.local_id as usize)?;
 
-    // Extract leading comments (lines starting with //)
+    let source_range = match item {
+        ModItem::Procedure(idx) => tree.procedure(*idx).source_range,
+        ModItem::Function(idx) => tree.function(*idx).source_range,
+        ModItem::Variable(_) => return None,
+    };
+
+    // Extract leading comments using offset directly (O(1) instead of O(n))
     let file_text = db.file_text_input(method.module.file_id);
     let source_text = file_text.text(db);
-    let comments = extract_leading_comments(&method_node, &source_text)?;
+    let offset: usize = source_range.start().into();
+    let comments = extract_leading_comments_at_offset(offset, &source_text)?;
 
     // Parse documentation from comments
     let docs = parse_method_docs(&comments)?;
@@ -292,44 +300,23 @@ pub fn method_docs_query(db: &dyn DefDatabase, method: MethodId) -> Option<Arc<M
 /// This is a public wrapper around the private `method_docs_query` logic,
 /// allowing StreamingProvider to compute docs without Salsa.
 ///
+/// Optimized: Uses source_range from ItemTree directly, no AST traversal needed.
+///
 /// # Arguments
 ///
-/// * `parse` - Parsed AST for the file
+/// * `_parse` - Unused (kept for API compatibility)
 /// * `tree` - ItemTree for the file
 /// * `method_id` - ID of the method to get docs for
 /// * `file_text` - Source text of the file
 pub fn compute_method_docs(
-    parse: &syntax::Parse<SyntaxNode>,
+    _parse: &syntax::Parse<SyntaxNode>,
     tree: &crate::item_tree::ItemTree,
     method_id: MethodId,
     file_text: &str,
 ) -> Option<Arc<MethodDocs>> {
-    // Find the method's AST node
-    let method_node = find_method_node(parse, tree, method_id)?;
-
-    // Extract leading comments
-    let comments = syntax::extract_leading_comments(&method_node, file_text)?;
-
-    // Parse documentation
-    let docs = parse_method_docs(&comments)?;
-
-    Some(Arc::new(docs))
-}
-
-/// Find the AST node for a given method in the parse tree.
-fn find_method_node(
-    parse: &syntax::Parse<SyntaxNode>,
-    tree: &crate::item_tree::ItemTree,
-    method: MethodId,
-) -> Option<SyntaxNode> {
-    use crate::item_tree::ModItem;
-    use syntax::SyntaxKind;
-
-    let root = parse.syntax_node();
-
-    // Get the method item and its source_range from ItemTree
+    // Get method's source_range directly from ItemTree (no AST traversal needed!)
     let items = tree.top_level_items();
-    let item = items.get(method.local_id as usize)?;
+    let item = items.get(method_id.local_id as usize)?;
 
     let source_range = match item {
         ModItem::Procedure(idx) => tree.procedure(*idx).source_range,
@@ -337,17 +324,14 @@ fn find_method_node(
         ModItem::Variable(_) => return None,
     };
 
-    // Find AST node by exact source_range match
-    for node in root.descendants() {
-        let kind = node.kind();
-        if (kind == SyntaxKind::PROCEDURE_DEF || kind == SyntaxKind::FUNCTION_DEF)
-            && node.text_range() == source_range
-        {
-            return Some(node);
-        }
-    }
+    // Extract leading comments using offset directly (O(1) instead of O(n))
+    let offset: usize = source_range.start().into();
+    let comments = extract_leading_comments_at_offset(offset, file_text)?;
 
-    None
+    // Parse documentation
+    let docs = parse_method_docs(&comments)?;
+
+    Some(Arc::new(docs))
 }
 
 /// Parse method documentation from comment lines.

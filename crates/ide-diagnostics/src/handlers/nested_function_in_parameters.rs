@@ -205,36 +205,75 @@ fn check_body(
 /// Find the name token range in a call/method call/new expression (hybrid AST approach).
 ///
 /// Returns the text range of the method/constructor name token.
+///
+/// Optimized: Uses covering_element instead of iterating all descendants.
+/// Time complexity: O(tree_depth) instead of O(n_nodes).
 fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange {
-    // Strategy: Find the ARG_LIST whose end matches this expression's end
-    // For chained calls like Obj.Method1().Method2(), the outermost ARG_LIST ends at expr_range.end()
+    // Strategy: Use covering_element to find the node at expr_range directly,
+    // then walk up to find CALL_EXPR/CALL_STMT/NEW_EXPR
+    //
+    // For chained calls like Obj.Method1().Method2(), we need to find the correct
+    // parent whose range matches expr_range.
 
-    let end_offset = expr_range.end();
+    // Get the element covering this expression range
+    let covering = root.covering_element(expr_range);
 
-    // Find ARG_LIST whose end matches our expression end
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::ARG_LIST {
+    // Walk up ancestors to find the call/new expression
+    let start_node = match covering {
+        syntax::NodeOrToken::Node(node) => node,
+        syntax::NodeOrToken::Token(token) => match token.parent() {
+            Some(parent) => parent,
+            None => return expr_range,
+        },
+    };
+
+    // Walk up until we find a CALL_EXPR/CALL_STMT/NEW_EXPR that matches our range
+    for ancestor in start_node.ancestors() {
+        let ancestor_range = ancestor.text_range();
+
+        // Skip if this ancestor doesn't match our expression range
+        // (important for chained calls)
+        if ancestor_range != expr_range {
+            // If ancestor is larger than our range, we've gone too far
+            if ancestor_range.contains_range(expr_range) && ancestor_range != expr_range {
+                // Check if this ancestor contains the right ARG_LIST
+                // by looking for ARG_LIST that ends at expr_range.end()
+                if let Some(arg_list) = ancestor.children().find(|c| {
+                    c.kind() == SyntaxKind::ARG_LIST && c.text_range().end() == expr_range.end()
+                }) {
+                    match ancestor.kind() {
+                        SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
+                            if let Some(name_token) =
+                                find_last_ident_before_node(&ancestor, &arg_list)
+                            {
+                                return name_token.text_range();
+                            }
+                        }
+                        SyntaxKind::NEW_EXPR => {
+                            if let Some(name_token) = find_type_name_or_new_keyword(&ancestor) {
+                                return name_token.text_range();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             continue;
         }
 
-        // Check if this ARG_LIST ends at the same position as our expression
-        if node.text_range().end() == end_offset {
-            // Found the ARG_LIST that belongs to this expression
-            if let Some(parent) = node.parent() {
-                match parent.kind() {
-                    SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
-                        if let Some(name_token) = find_last_ident_before_arg_list(&parent) {
-                            return name_token.text_range();
-                        }
-                    }
-                    SyntaxKind::NEW_EXPR => {
-                        if let Some(name_token) = find_type_name_or_new_keyword(&parent) {
-                            return name_token.text_range();
-                        }
-                    }
-                    _ => {}
+        // Exact match - this is our expression
+        match ancestor.kind() {
+            SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
+                if let Some(name_token) = find_last_ident_before_arg_list(&ancestor) {
+                    return name_token.text_range();
                 }
             }
+            SyntaxKind::NEW_EXPR => {
+                if let Some(name_token) = find_type_name_or_new_keyword(&ancestor) {
+                    return name_token.text_range();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -248,6 +287,42 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
 
     // Ultimate fallback
     expr_range
+}
+
+/// Find the last IDENT token before a specific node in a parent.
+fn find_last_ident_before_node(parent: &SyntaxNode, target: &SyntaxNode) -> Option<SyntaxToken> {
+    let target_start = target.text_range().start();
+
+    let mut last_ident: Option<SyntaxToken> = None;
+    for child in parent.children_with_tokens() {
+        match child {
+            syntax::NodeOrToken::Token(token) => {
+                if token.text_range().start() >= target_start {
+                    break;
+                }
+                if token.kind() == SyntaxKind::IDENT {
+                    last_ident = Some(token);
+                }
+            }
+            syntax::NodeOrToken::Node(node) => {
+                if node.text_range().start() >= target_start {
+                    break;
+                }
+                // Recurse into child nodes to find IDENTs
+                for descendant in node.descendants_with_tokens() {
+                    if let syntax::NodeOrToken::Token(token) = descendant {
+                        if token.text_range().start() >= target_start {
+                            break;
+                        }
+                        if token.kind() == SyntaxKind::IDENT {
+                            last_ident = Some(token);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    last_ident
 }
 
 /// Find the last IDENT token before ARG_LIST in a call expression.

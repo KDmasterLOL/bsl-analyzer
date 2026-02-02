@@ -28,11 +28,28 @@ use crate::SyntaxNode;
 /// # Returns
 /// `Some(Vec<String>)` if there are comments before the node, `None` otherwise.
 pub fn extract_leading_comments(node: &SyntaxNode, source_text: &str) -> Option<Vec<String>> {
-    let node_range = node.text_range();
-    let node_start: usize = node_range.start().into();
+    let node_start: usize = node.text_range().start().into();
+    extract_leading_comments_at_offset(node_start, source_text)
+}
+
+/// Extract leading comments before a given offset in source text.
+///
+/// This is the optimized version that doesn't require AST node lookup.
+/// Use this when you already have the offset (e.g., from ItemTree.source_range).
+///
+/// # Arguments
+/// * `offset` - Byte offset in source text where the construct starts
+/// * `source_text` - The complete source text of the file
+///
+/// # Returns
+/// `Some(Vec<String>)` if there are comments before the offset, `None` otherwise.
+pub fn extract_leading_comments_at_offset(offset: usize, source_text: &str) -> Option<Vec<String>> {
+    if offset > source_text.len() {
+        return None;
+    }
 
     // Find the line where the node starts
-    let text_before_node = &source_text[..node_start];
+    let text_before_node = &source_text[..offset];
 
     // Split into lines and work backwards
     let lines: Vec<&str> = text_before_node.lines().collect();
