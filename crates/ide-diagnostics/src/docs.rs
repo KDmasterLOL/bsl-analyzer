@@ -26,7 +26,8 @@ mod tests {
 
     #[test]
     fn test_documented_codes_not_empty() {
-        assert!(!DOCUMENTED_CODES.is_empty(), "Should have documented codes");
+        // Check that we have a reasonable number of documented codes
+        assert!(DOCUMENTED_CODES.len() >= 170, "Should have at least 170 documented codes");
     }
 
     #[test]
