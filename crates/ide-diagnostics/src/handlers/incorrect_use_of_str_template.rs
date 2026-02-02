@@ -69,6 +69,23 @@ use hir_def::{
 };
 use ide_db::TextRange;
 
+/// Quick pre-check: does the file text contain StrTemplate method calls?
+///
+/// This is a fast O(n) scan that avoids expensive HIR/dataflow analysis
+/// for files that don't use StrTemplate at all.
+fn has_str_template_calls(text: &str) -> bool {
+    // Patterns to search for (case-insensitive)
+    const PATTERNS: &[&str] = &["стршаблон", "strtemplate"];
+
+    let text_lower = text.to_lowercase();
+    for pattern in PATTERNS {
+        if text_lower.contains(pattern) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Post-HIR check for variable resolution cases.
 ///
 /// This function complements the HIR lowering validation by resolving variables
@@ -88,23 +105,23 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return vec![];
     }
 
+    // Early exit: skip files without StrTemplate calls
+    let text = ctx.file_text();
+    if !has_str_template_calls(&text) {
+        return vec![];
+    }
+
     let mut diagnostics = Vec::new();
     let module_id = ModuleId { file_id: ctx.file_id };
 
     // Get module bodies
     let module_bodies = ctx.module_bodies();
 
-    // Check each method
+    // Check each method - collect candidates first, then resolve lazily
     for (local_id, body, source_map) in module_bodies.method_bodies() {
-        let method_id = MethodId { module: module_id, local_id };
+        // First pass: find StrTemplate calls with variable arguments (no dataflow yet)
+        let mut candidates: Vec<(StmtId, ExprId, usize)> = Vec::new();
 
-        // Get reaching definitions for this method
-        let reaching_defs = match ctx.reaching_definitions(method_id) {
-            Some(defs) => defs,
-            None => continue, // Analysis didn't converge, skip
-        };
-
-        // Scan for StrTemplate calls with variable arguments
         for (stmt_id, stmt) in body.stmts_iter() {
             // Check both Expr and Assign statements (assignment RHS can have Call)
             let expr_id = match stmt {
@@ -148,28 +165,45 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     continue;
                 }
 
-                // Try to resolve template to string literal
-                if let Some(template_string) =
-                    resolve_expr_to_string(template_expr_id, body, &reaching_defs, stmt_id)
-                {
-                    // Validate template (reuse logic from lowering)
-                    if is_wrong_str_template(&template_string, param_count) {
-                        // Get source range for diagnostic
-                        if let Some(range) = source_map.expr_range(template_expr_id) {
-                            diagnostics.push(Diagnostic {
-                                code,
-                                message: format!(
-                                    "Template '{}' requires {} parameters but {} provided",
-                                    template_string.chars().take(50).collect::<String>(),
-                                    count_required_params(&template_string),
-                                    param_count
-                                ),
-                                severity: ctx.severity(code),
-                                range,
-                                tags: ctx.tags(code),
-                                fixes: vec![],
-                            });
-                        }
+                // Found a candidate - variable argument that needs resolution
+                candidates.push((stmt_id, template_expr_id, param_count));
+            }
+        }
+
+        // Skip methods without candidates (no dataflow analysis needed)
+        if candidates.is_empty() {
+            continue;
+        }
+
+        // Second pass: resolve variables using reaching definitions (lazy computation)
+        let method_id = MethodId { module: module_id, local_id };
+        let reaching_defs = match ctx.reaching_definitions(method_id) {
+            Some(defs) => defs,
+            None => continue, // Analysis didn't converge, skip
+        };
+
+        for (stmt_id, template_expr_id, param_count) in candidates {
+            // Try to resolve template to string literal
+            if let Some(template_string) =
+                resolve_expr_to_string(template_expr_id, body, &reaching_defs, stmt_id)
+            {
+                // Validate template
+                if is_wrong_str_template(&template_string, param_count) {
+                    // Get source range for diagnostic
+                    if let Some(range) = source_map.expr_range(template_expr_id) {
+                        diagnostics.push(Diagnostic {
+                            code,
+                            message: format!(
+                                "Template '{}' requires {} parameters but {} provided",
+                                template_string.chars().take(50).collect::<String>(),
+                                count_required_params(&template_string),
+                                param_count
+                            ),
+                            severity: ctx.severity(code),
+                            range,
+                            tags: ctx.tags(code),
+                            fixes: vec![],
+                        });
                     }
                 }
             }
@@ -280,78 +314,138 @@ fn resolve_definition(
 
 /// Validate template string against parameter count.
 ///
-/// Reused from hir-def lowering logic.
+/// Checks for:
+/// - Mismatch between placeholders and provided parameters
+/// - Invalid placeholders (%0, %11+)
 fn is_wrong_str_template(template_string: &str, used_params_count: usize) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    static TWO_PERCENT_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("%%").unwrap());
-
+    // First check without removing %% escapes
     let is_wrong_call = compare_template_and_params(template_string, used_params_count);
     if !is_wrong_call {
         return false;
     }
 
     // Remove %% escapes and check again
-    let str = TWO_PERCENT_PATTERN.replace_all(template_string, "");
-    compare_template_and_params(&str, used_params_count)
+    // This handles cases like "100%%" which should not be treated as %% + placeholder
+    let cleaned = remove_double_percent(template_string);
+    compare_template_and_params(&cleaned, used_params_count)
+}
+
+/// Remove %% escape sequences from template string.
+fn remove_double_percent(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'%' && bytes[i + 1] == b'%' {
+            // Skip both %% characters
+            i += 2;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Parse a placeholder at position, returns (number, length) or None.
+/// Handles both %N and %(N) formats where N is a number.
+fn parse_placeholder(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if pos >= bytes.len() || bytes[pos] != b'%' {
+        return None;
+    }
+
+    let start = pos + 1;
+    if start >= bytes.len() {
+        return None;
+    }
+
+    // Check for %(N) format
+    if bytes[start] == b'(' {
+        let num_start = start + 1;
+        let mut num_end = num_start;
+        while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+            num_end += 1;
+        }
+        if num_end > num_start && num_end < bytes.len() && bytes[num_end] == b')' {
+            let num_str = std::str::from_utf8(&bytes[num_start..num_end]).ok()?;
+            let num: usize = num_str.parse().ok()?;
+            return Some((num, num_end - pos + 1)); // Include closing )
+        }
+        return None;
+    }
+
+    // Check for %N format (one or more digits)
+    let mut num_end = start;
+    while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+        num_end += 1;
+    }
+    if num_end > start {
+        let num_str = std::str::from_utf8(&bytes[start..num_end]).ok()?;
+        let num: usize = num_str.parse().ok()?;
+        return Some((num, num_end - pos));
+    }
+
+    None
+}
+
+/// Check if placeholder number is valid (1-10).
+fn is_valid_placeholder(num: usize) -> bool {
+    (1..=10).contains(&num)
 }
 
 #[allow(clippy::nonminimal_bool)]
 fn compare_template_and_params(template_string: &str, used_params_count: usize) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    static PARAMS_PATTERN_INNER: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
-
-    static WRONG_NUMBERS_PATTERN_INNER: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"%(?:(1[1-9]\d*|[2-9]\d+|0|10\d+)|\((1[1-9]\d*|[2-9]\d+|0|10\d+)\))").unwrap()
-    });
-
-    let have_params = used_params_count > 0;
-    let matches = PARAMS_PATTERN_INNER.is_match(template_string);
-
-    (matches && !have_params)
-        || (!matches && have_params)
-        || (matches && various_params(used_params_count, template_string))
-        || WRONG_NUMBERS_PATTERN_INNER.is_match(template_string)
-}
-
-fn various_params(used_params_count: usize, template_string: &str) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    static PARAMS_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
-
-    let mut template_params = HashSet::new();
     let bytes = template_string.as_bytes();
+    let have_params = used_params_count > 0;
 
-    for cap in PARAMS_PATTERN.captures_iter(template_string) {
-        let match_obj = cap.get(0).unwrap();
-        let pos = match_obj.start();
+    let mut has_valid_placeholder = false;
+    let mut has_wrong_number = false;
+    let mut used_placeholders = [false; 11]; // Index 1-10
 
-        // Skip if this is part of %% escape sequence
-        if pos > 0 && bytes.get(pos - 1) == Some(&b'%') {
-            continue;
-        }
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // Skip %% escape sequences
+            if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                i += 2;
+                continue;
+            }
 
-        let group = cap.get(1).or_else(|| cap.get(2));
-        if let Some(g) = group {
-            if let Ok(index) = g.as_str().parse::<usize>() {
-                if index > used_params_count {
-                    return true;
+            if let Some((num, len)) = parse_placeholder(bytes, i) {
+                if is_valid_placeholder(num) {
+                    has_valid_placeholder = true;
+                    used_placeholders[num] = true;
+                    if num > used_params_count {
+                        return true; // Placeholder exceeds provided params
+                    }
+                } else {
+                    // %0 or %11+ are invalid
+                    has_wrong_number = true;
                 }
-                template_params.insert(index);
+                i += len;
+                continue;
             }
         }
+        i += 1;
     }
 
-    for i in 1..=used_params_count {
-        if !template_params.contains(&i) {
-            return true;
+    // Check conditions
+    if has_wrong_number {
+        return true;
+    }
+    if has_valid_placeholder && !have_params {
+        return true;
+    }
+    if !has_valid_placeholder && have_params {
+        return true;
+    }
+
+    // Check if all parameters 1..=used_params_count are used
+    if has_valid_placeholder {
+        for &used in used_placeholders.iter().take(used_params_count + 1).skip(1) {
+            if !used {
+                return true; // Parameter not used in template
+            }
         }
     }
 
@@ -359,30 +453,27 @@ fn various_params(used_params_count: usize, template_string: &str) -> bool {
 }
 
 fn count_required_params(template_string: &str) -> usize {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    static PARAMS_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
-
-    let mut max_param = 0;
     let bytes = template_string.as_bytes();
+    let mut max_param = 0;
 
-    for cap in PARAMS_PATTERN.captures_iter(template_string) {
-        let match_obj = cap.get(0).unwrap();
-        let pos = match_obj.start();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // Skip %% escape sequences
+            if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                i += 2;
+                continue;
+            }
 
-        // Skip if this is part of %% escape sequence
-        if pos > 0 && bytes.get(pos - 1) == Some(&b'%') {
-            continue;
-        }
-
-        let group = cap.get(1).or_else(|| cap.get(2));
-        if let Some(g) = group {
-            if let Ok(index) = g.as_str().parse::<usize>() {
-                max_param = max_param.max(index);
+            if let Some((num, len)) = parse_placeholder(bytes, i) {
+                if is_valid_placeholder(num) {
+                    max_param = max_param.max(num);
+                }
+                i += len;
+                continue;
             }
         }
+        i += 1;
     }
 
     max_param
