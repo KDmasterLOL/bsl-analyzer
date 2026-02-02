@@ -33,7 +33,7 @@ use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
 
 static DICTIONARIES: Lazy<RwLock<Option<Arc<Dictionaries>>>> = Lazy::new(|| RwLock::new(None));
@@ -304,6 +304,74 @@ fn remove_quotes(text: &str) -> String {
     }
 }
 
+/// Check an identifier token for typos and emit diagnostics.
+fn check_ident_token(
+    token: &SyntaxToken,
+    acc: &mut Vec<Diagnostic>,
+    ctx: &DiagnosticsContext,
+    config: &Config,
+    dictionaries: &Dictionaries,
+) {
+    let code = DiagnosticCode::Typo;
+    let text = token.text().to_string();
+    let words = split_camel_case(&text);
+
+    for (word, offset) in words {
+        if word.len() < config.min_word_length {
+            continue;
+        }
+
+        if config.should_ignore(&word) {
+            continue;
+        }
+
+        if !is_valid_word(&word, dictionaries) {
+            let start: u32 = token.text_range().start().into();
+            let word_start = start + offset as u32;
+            let word_end = word_start + word.len() as u32;
+
+            acc.push(Diagnostic {
+                code,
+                message: format!("Возможная опечатка в \"{}\"", word),
+                severity: ctx.severity(code),
+                range: TextRange::new(word_start.into(), word_end.into()),
+                tags: ctx.tags(code).to_vec(),
+                fixes: vec![],
+            });
+        }
+    }
+}
+
+/// Find the first IDENT token in a node.
+///
+/// Used for:
+/// - Method names in PROCEDURE_DEF/FUNCTION_DEF
+/// - Variable names in VAR_DEF
+/// - Parameter names in PARAM
+fn find_first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|token| token.kind() == SyntaxKind::IDENT)
+}
+
+/// Find lValue IDENT token in ASSIGN_STMT (left side of assignment).
+///
+/// The lValue is the first IDENT token before the '=' sign.
+fn find_lvalue_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    for element in node.children_with_tokens() {
+        if let SyntaxElement::Token(token) = element {
+            if token.kind() == SyntaxKind::IDENT {
+                return Some(token);
+            }
+            // Stop at '=' - we only want the left side
+            if token.kind() == SyntaxKind::EQ {
+                return None;
+            }
+        }
+    }
+    None
+}
+
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::Typo;
 
@@ -314,47 +382,48 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     let config = Config::from_context(ctx);
     let dictionaries = get_dictionaries();
 
-    if let Some(token) = node.first_token() {
-        match token.kind() {
-            SyntaxKind::STRING => {
-                let text = remove_quotes(token.text());
-
-                if is_format_string(&text) {
-                    return;
-                }
-
-                check_text(&text, token.text_range().start(), acc, ctx, &config, &dictionaries);
+    match node.kind() {
+        // Check method names in procedure/function definitions
+        SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+            if let Some(token) = find_first_ident_token(node) {
+                check_ident_token(&token, acc, ctx, &config, &dictionaries);
             }
-            SyntaxKind::IDENT => {
-                let text = token.text().to_string();
-                let words = split_camel_case(&text);
-
-                for (word, offset) in words {
-                    if word.len() < config.min_word_length {
-                        continue;
-                    }
-
-                    if config.should_ignore(&word) {
-                        continue;
-                    }
-
-                    if !is_valid_word(&word, &dictionaries) {
-                        let start: u32 = token.text_range().start().into();
-                        let word_start = start + offset as u32;
-                        let word_end = word_start + word.len() as u32;
-
-                        acc.push(Diagnostic {
-                            code,
-                            message: format!("Возможная опечатка в \"{}\"", word),
-                            severity: ctx.severity(code),
-                            range: TextRange::new(word_start.into(), word_end.into()),
-                            tags: ctx.tags(code).to_vec(),
-                            fixes: vec![],
-                        });
+        }
+        // Check variable names in declarations
+        SyntaxKind::VAR_DEF => {
+            if let Some(token) = find_first_ident_token(node) {
+                check_ident_token(&token, acc, ctx, &config, &dictionaries);
+            }
+        }
+        // Check parameter names
+        SyntaxKind::PARAM => {
+            if let Some(token) = find_first_ident_token(node) {
+                check_ident_token(&token, acc, ctx, &config, &dictionaries);
+            }
+        }
+        // Check left side of assignments (lValue)
+        SyntaxKind::ASSIGN_STMT => {
+            if let Some(token) = find_lvalue_ident_token(node) {
+                check_ident_token(&token, acc, ctx, &config, &dictionaries);
+            }
+        }
+        // Check string literals
+        _ => {
+            if let Some(token) = node.first_token() {
+                if token.kind() == SyntaxKind::STRING {
+                    let text = remove_quotes(token.text());
+                    if !is_format_string(&text) {
+                        check_text(
+                            &text,
+                            token.text_range().start(),
+                            acc,
+                            ctx,
+                            &config,
+                            &dictionaries,
+                        );
                     }
                 }
             }
-            _ => {}
         }
     }
 }
@@ -418,11 +487,18 @@ mod tests {
     use crate::test_utils::check_ast_diagnostic_with_config;
     use crate::{DiagnosticCode, DiagnosticsConfig};
 
+    /// Helper to create config with Typo explicitly enabled (since it's disabled by default).
+    fn config_with_typo_enabled() -> DiagnosticsConfig {
+        let mut config = DiagnosticsConfig::default();
+        config.enabled.push(DiagnosticCode::Typo);
+        config
+    }
+
     #[test]
     fn test_typo_basic() {
         let code = include_str!("../test_data/TypoDiagnostic.bsl");
 
-        let config = DiagnosticsConfig::default();
+        let config = config_with_typo_enabled();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert!(diagnostics.len() >= 3, "Should detect at least 3 typos (Атмена, Варинаты, ыть)");
@@ -435,7 +511,7 @@ mod tests {
     fn test_typo_with_min_word_length() {
         let code = include_str!("../test_data/TypoDiagnostic.bsl");
 
-        let mut config = DiagnosticsConfig::default();
+        let mut config = config_with_typo_enabled();
         config.parameters.insert(
             DiagnosticCode::Typo,
             serde_json::json!({
@@ -455,7 +531,7 @@ mod tests {
     fn test_typo_with_user_words_to_ignore() {
         let code = include_str!("../test_data/TypoDiagnostic.bsl");
 
-        let mut config = DiagnosticsConfig::default();
+        let mut config = config_with_typo_enabled();
         config.parameters.insert(
             DiagnosticCode::Typo,
             serde_json::json!({
@@ -473,7 +549,7 @@ mod tests {
     fn test_typo_case_insensitive() {
         let code = include_str!("../test_data/TypoDiagnostic.bsl");
 
-        let mut config = DiagnosticsConfig::default();
+        let mut config = config_with_typo_enabled();
         config.parameters.insert(
             DiagnosticCode::Typo,
             serde_json::json!({
@@ -489,5 +565,68 @@ mod tests {
             !has_varinaty,
             "Should NOT detect 'Варинаты' (case-insensitive match with 'ваРинаты')"
         );
+    }
+
+    #[test]
+    fn test_dictionary_common_bsl_words() {
+        use super::{get_dictionaries, is_valid_word};
+
+        let dictionaries = get_dictionaries();
+
+        // Common Russian words that should be valid
+        let should_be_valid = [
+            // Basic words
+            "Функция",
+            "Процедура",
+            "Возврат",
+            "Если",
+            "Тогда",
+            // Common nouns
+            "Результат",
+            "Значение",
+            "Параметр",
+            "Строка",
+            "Число",
+            // Verbs
+            "Возвращает",
+            "Получает",
+            "Устанавливает",
+            "Проверяет",
+            // Adjectives
+            "текущее",
+            "новый",
+            "старый",
+            "первый",
+        ];
+
+        let mut failed = Vec::new();
+        for word in should_be_valid {
+            if !is_valid_word(word, &dictionaries) {
+                failed.push(word);
+            }
+        }
+
+        println!("Words that should be valid but Hunspell rejects:");
+        for word in &failed {
+            println!("  - {}", word);
+        }
+
+        // Words in genitive/other cases that BSL commonly uses
+        let case_forms = [
+            "Сеансов",
+            "Заданий",
+            "Параметров",
+            "Базы",
+            "Данных",
+            "пользователя",
+            "документа",
+            "справочника",
+        ];
+
+        println!("\nCase forms (may fail due to limited morphology):");
+        for word in case_forms {
+            let valid = is_valid_word(word, &dictionaries);
+            println!("  {} -> {}", word, if valid { "OK" } else { "REJECTED" });
+        }
     }
 }

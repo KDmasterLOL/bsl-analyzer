@@ -3685,7 +3685,7 @@ const TYPO: DiagnosticMetadata = DiagnosticMetadata {
     scope: DiagnosticScope::All,
     modules: &[],
     minutes_to_fix: 1,
-    activated_by_default: true,
+    activated_by_default: false, // Disabled: Hunspell generates too many false positives
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Badpractice],
     can_locate_on_project: false,
