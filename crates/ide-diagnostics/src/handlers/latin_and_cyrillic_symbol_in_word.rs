@@ -106,8 +106,42 @@ fn is_latin_upper(c: char) -> bool {
     c.is_ascii_uppercase()
 }
 
+/// Quick byte-level check to detect pure scripts without char iteration.
+/// Returns Some(false) if definitely not mixed (pure Cyrillic or pure Latin).
+/// Returns None if we need a full char-level check.
+///
+/// Optimized for BSL where most identifiers are pure Cyrillic.
+#[inline]
+fn quick_mixed_check(text: &str) -> Option<bool> {
+    let bytes = text.as_bytes();
+
+    // Fast path 1: Pure Cyrillic (most common in BSL)
+    // Cyrillic letters are multi-byte UTF-8 (bytes >= 0x80)
+    // If no ASCII letters present, can't be mixed
+    let has_ascii_letter = bytes.iter().any(|&b| b.is_ascii_alphabetic());
+    if !has_ascii_letter {
+        return Some(false); // Pure Cyrillic (or no letters at all)
+    }
+
+    // Fast path 2: Pure Latin
+    // If no high bytes (>= 0x80), no multi-byte chars, so no Cyrillic
+    let has_high_byte = bytes.iter().any(|&b| b >= 0x80);
+    if !has_high_byte {
+        return Some(false); // Pure ASCII/Latin
+    }
+
+    // Has both ASCII letters and high bytes - need full check
+    None
+}
+
 /// Checks if text contains both Latin and Cyrillic characters
 fn has_mixed_scripts(text: &str) -> bool {
+    // Try quick byte-level check first
+    if let Some(result) = quick_mixed_check(text) {
+        return result;
+    }
+
+    // Full char-level check for ambiguous cases
     let mut has_cyrillic = false;
     let mut has_latin = false;
 
@@ -303,62 +337,65 @@ fn extract_assign_lvalue(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
 
     None
 }
-
-/// Collects annotation parameter names from annotation node
-fn collect_annotation_params(annotation_node: &syntax::SyntaxNode) -> Vec<IdentifierInfo> {
-    let mut params = Vec::new();
-
-    for child in annotation_node.descendants() {
-        if child.kind() == SyntaxKind::ANNOTATION_PARAM {
-            for element in child.children_with_tokens() {
-                if let Some(token) = element.as_token() {
-                    if token.kind() == SyntaxKind::IDENT {
-                        params.push(IdentifierInfo {
-                            text: token.text().to_string(),
-                            range: token.text_range(),
-                        });
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    params
+/// Check if token text is a candidate for mixed scripts (quick pre-filter).
+/// Only allocates String if this returns true.
+#[inline]
+fn is_mixed_candidate(text: &str) -> bool {
+    text.len() >= 2 && has_mixed_scripts(text)
 }
 
-/// Collects all identifiers from the syntax tree
-fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
+/// Process a single IDENT token: check if mixed and add to results
+#[inline]
+fn process_ident_token(
+    token: &syntax::SyntaxToken,
+    config: &Config,
+    diagnostics: &mut Vec<Diagnostic>,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) {
+    let text = token.text();
+    if !is_mixed_candidate(text) {
+        return;
+    }
+    // Only allocate String after passing quick check
+    let text_owned = text.to_string();
+    if is_excluded(&text_owned, &config.exclude_words) {
+        return;
+    }
+    let id = IdentifierInfo { text: text_owned, range: token.text_range() };
+    if should_report(&id, config) {
+        diagnostics.push(Diagnostic {
+            code,
+            message: format!(
+                "Identifier '{}' contains mixed Latin and Cyrillic characters",
+                id.text
+            ),
+            severity: ctx.severity(code),
+            range: id.range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+}
+
+/// Collects and filters identifiers in a single pass (avoids intermediate allocations)
+fn collect_and_check(
+    ctx: &DiagnosticsContext,
+    config: &Config,
+    code: DiagnosticCode,
+) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
-    let mut identifiers = Vec::new();
+    let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
         match node.kind() {
             // 1. Function names
-            SyntaxKind::FUNCTION_DEF => {
+            SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF => {
                 for element in node.children_with_tokens() {
                     if let Some(token) = element.as_token() {
                         if token.kind() == SyntaxKind::IDENT {
-                            identifiers.push(IdentifierInfo {
-                                text: token.text().to_string(),
-                                range: token.text_range(),
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // 2. Procedure names
-            SyntaxKind::PROCEDURE_DEF => {
-                for element in node.children_with_tokens() {
-                    if let Some(token) = element.as_token() {
-                        if token.kind() == SyntaxKind::IDENT {
-                            identifiers.push(IdentifierInfo {
-                                text: token.text().to_string(),
-                                range: token.text_range(),
-                            });
+                            process_ident_token(token, config, &mut diagnostics, code, ctx);
                             break;
                         }
                     }
@@ -370,10 +407,7 @@ fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
                 for element in node.descendants_with_tokens() {
                     if let Some(token) = element.as_token() {
                         if token.kind() == SyntaxKind::IDENT {
-                            identifiers.push(IdentifierInfo {
-                                text: token.text().to_string(),
-                                range: token.text_range(),
-                            });
+                            process_ident_token(token, config, &mut diagnostics, code, ctx);
                         }
                     }
                 }
@@ -384,10 +418,7 @@ fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
                 for element in node.children_with_tokens() {
                     if let Some(token) = element.as_token() {
                         if token.kind() == SyntaxKind::IDENT {
-                            identifiers.push(IdentifierInfo {
-                                text: token.text().to_string(),
-                                range: token.text_range(),
-                            });
+                            process_ident_token(token, config, &mut diagnostics, code, ctx);
                             break;
                         }
                     }
@@ -401,43 +432,116 @@ fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
                         if token.kind() == SyntaxKind::ANN_CUSTOM {
                             let text = token.text();
                             if let Some(name) = text.strip_prefix('&') {
-                                identifiers.push(IdentifierInfo {
-                                    text: name.to_string(),
-                                    range: TextRange::new(
-                                        (u32::from(token.text_range().start()) + 1).into(),
-                                        token.text_range().end(),
-                                    ),
-                                });
+                                if is_mixed_candidate(name) {
+                                    let text_owned = name.to_string();
+                                    if !is_excluded(&text_owned, &config.exclude_words) {
+                                        let range = TextRange::new(
+                                            (u32::from(token.text_range().start()) + 1).into(),
+                                            token.text_range().end(),
+                                        );
+                                        let id = IdentifierInfo { text: text_owned, range };
+                                        if should_report(&id, config) {
+                                            diagnostics.push(Diagnostic {
+                                                code,
+                                                message: format!(
+                                                    "Identifier '{}' contains mixed Latin and Cyrillic characters",
+                                                    id.text
+                                                ),
+                                                severity: ctx.severity(code),
+                                                range: id.range,
+                                                tags: ctx.tags(code),
+                                                fixes: vec![],
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         } else if token.kind() == SyntaxKind::IDENT {
-                            identifiers.push(IdentifierInfo {
-                                text: token.text().to_string(),
-                                range: token.text_range(),
-                            });
+                            process_ident_token(token, config, &mut diagnostics, code, ctx);
                         }
                     }
                 }
-                identifiers.extend(collect_annotation_params(&node));
+                // Annotation parameters
+                for child in node.descendants() {
+                    if child.kind() == SyntaxKind::ANNOTATION_PARAM {
+                        for element in child.children_with_tokens() {
+                            if let Some(token) = element.as_token() {
+                                if token.kind() == SyntaxKind::IDENT {
+                                    process_ident_token(token, config, &mut diagnostics, code, ctx);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 6. Region names
             SyntaxKind::PRE_REGION_DIR => {
-                if let Some(info) = extract_region_name(&node) {
-                    identifiers.push(info);
+                if let Some(id) = extract_region_name(&node) {
+                    if id.text.len() >= 2
+                        && has_mixed_scripts(&id.text)
+                        && !is_excluded(&id.text, &config.exclude_words)
+                        && should_report(&id, config)
+                    {
+                        diagnostics.push(Diagnostic {
+                            code,
+                            message: format!(
+                                "Identifier '{}' contains mixed Latin and Cyrillic characters",
+                                id.text
+                            ),
+                            severity: ctx.severity(code),
+                            range: id.range,
+                            tags: ctx.tags(code),
+                            fixes: vec![],
+                        });
+                    }
                 }
             }
 
             // 7. Goto labels
             SyntaxKind::GOTO_STMT => {
-                if let Some(info) = extract_goto_label(&node) {
-                    identifiers.push(info);
+                if let Some(id) = extract_goto_label(&node) {
+                    if id.text.len() >= 2
+                        && has_mixed_scripts(&id.text)
+                        && !is_excluded(&id.text, &config.exclude_words)
+                        && should_report(&id, config)
+                    {
+                        diagnostics.push(Diagnostic {
+                            code,
+                            message: format!(
+                                "Identifier '{}' contains mixed Latin and Cyrillic characters",
+                                id.text
+                            ),
+                            severity: ctx.severity(code),
+                            range: id.range,
+                            tags: ctx.tags(code),
+                            fixes: vec![],
+                        });
+                    }
                 }
             }
 
             // 8. Assignment left-hand side
             SyntaxKind::ASSIGN_STMT => {
-                if let Some(info) = extract_assign_lvalue(&node) {
-                    identifiers.push(info);
+                if let Some(id) = extract_assign_lvalue(&node) {
+                    if id.text.len() >= 2
+                        && has_mixed_scripts(&id.text)
+                        && !is_excluded(&id.text, &config.exclude_words)
+                        && should_report(&id, config)
+                    {
+                        diagnostics.push(Diagnostic {
+                            code,
+                            message: format!(
+                                "Identifier '{}' contains mixed Latin and Cyrillic characters",
+                                id.text
+                            ),
+                            severity: ctx.severity(code),
+                            range: id.range,
+                            tags: ctx.tags(code),
+                            fixes: vec![],
+                        });
+                    }
                 }
             }
 
@@ -445,7 +549,7 @@ fn collect_identifiers(ctx: &DiagnosticsContext) -> Vec<IdentifierInfo> {
         }
     }
 
-    identifiers
+    diagnostics
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -456,31 +560,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let identifiers = collect_identifiers(ctx);
 
-    // Filter order optimized for performance:
-    // 1. Length check (cheapest, no allocation)
-    // 2. Mixed scripts check (char iteration, no allocation)
-    // 3. Exclusion check (allocates to_lowercase, but only for mixed-script ids)
-    // 4. Trailing pattern check (allocates Vec<char>, only for non-excluded mixed ids)
-    identifiers
-        .into_iter()
-        .filter(|id| id.text.len() >= 2)
-        .filter(|id| has_mixed_scripts(&id.text))
-        .filter(|id| !is_excluded(&id.text, &config.exclude_words))
-        .filter(|id| should_report(id, &config))
-        .map(|id| Diagnostic {
-            code,
-            message: format!(
-                "Identifier '{}' contains mixed Latin and Cyrillic characters",
-                id.text
-            ),
-            severity: ctx.severity(code),
-            range: id.range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        })
-        .collect()
+    // Single-pass collection and filtering to minimize allocations
+    collect_and_check(ctx, &config, code)
 }
 
 #[cfg(test)]
