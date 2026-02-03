@@ -416,7 +416,13 @@ fn load_charts_of_accounts_parallel(dir: &Path) -> Vec<MetadataObject> {
     load_metadata_objects_parallel(dir, xml_parser::parse_chart_of_accounts_xml)
 }
 
-/// Generic parallel loader for metadata objects with directory structure.
+/// Generic parallel loader for metadata objects.
+///
+/// Loads metadata from XML files. Supports two cases:
+/// 1. Directory + XML file (e.g., `Catalogs/Номенклатура/` + `Catalogs/Номенклатура.xml`)
+/// 2. XML file only (e.g., `Catalogs/ПоставляемыеДополнительныеОтчетыИОбработки.xml` without directory)
+///
+/// Some metadata objects (catalogs, documents without forms/modules) may only have XML files.
 fn load_metadata_objects_parallel<F>(dir: &Path, parser: F) -> Vec<MetadataObject>
 where
     F: Fn(&str) -> Result<MetadataObject> + Sync,
@@ -430,23 +436,49 @@ where
         Err(_) => return Vec::new(),
     };
 
+    // Collect names of directories (to avoid duplicates when processing XML files)
+    let dir_names: std::collections::HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                path.file_name()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
     entries
         .into_iter()
         .filter_map(|entry| {
-            let obj_dir = entry.path();
-            if !obj_dir.is_dir() {
-                return None;
+            let path = entry.path();
+
+            if path.is_dir() {
+                // Case 1: Directory exists, look for corresponding XML file
+                let name = path.file_name()?.to_str()?;
+                let xml_path = dir.join(format!("{}.xml", name));
+
+                if !xml_path.exists() {
+                    return None;
+                }
+
+                let xml = fs::read_to_string(&xml_path).ok()?;
+                parser(&xml).ok()
+            } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
+                // Case 2: XML file without directory
+                let file_stem = path.file_stem()?.to_str()?;
+
+                // Skip if there's already a directory with this name (already processed above)
+                if dir_names.contains(file_stem) {
+                    return None;
+                }
+
+                let xml = fs::read_to_string(&path).ok()?;
+                parser(&xml).ok()
+            } else {
+                None
             }
-
-            let name = obj_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-
-            if !xml_path.exists() {
-                return None;
-            }
-
-            let xml = fs::read_to_string(&xml_path).ok()?;
-            parser(&xml).ok()
         })
         .collect()
 }
@@ -996,5 +1028,39 @@ mod tests {
         } else {
             panic!("❌ Register 'ЗначенияДействийПриОбработкеПисем' not found in loaded configuration!");
         }
+    }
+
+    /// Test to verify that catalogs without directories (XML-only) are loaded correctly.
+    ///
+    /// Some metadata objects like catalogs without forms/modules exist only as XML files.
+    /// The loader must handle this case.
+    #[test]
+    #[ignore] // Only run when doc3 project is available
+    fn test_catalog_xml_only_without_directory() {
+        let doc3_path = concat!(env!("HOME"), "/src/doc3/src/cf");
+
+        if !std::path::Path::new(doc3_path).exists() {
+            eprintln!("Skipping test: doc3 project not found at {}", doc3_path);
+            return;
+        }
+
+        let config = load_from_directory(doc3_path).expect("Failed to load doc3 configuration");
+
+        // This catalog exists only as XML file without a subdirectory
+        let catalog_name = "ПоставляемыеДополнительныеОтчетыИОбработки";
+
+        // Verify XML exists but directory doesn't
+        let xml_path = format!("{}/Catalogs/{}.xml", doc3_path, catalog_name);
+        let dir_path = format!("{}/Catalogs/{}", doc3_path, catalog_name);
+        assert!(std::path::Path::new(&xml_path).exists(), "XML file should exist");
+        assert!(
+            !std::path::Path::new(&dir_path).exists(),
+            "Directory should NOT exist (this is the test case)"
+        );
+
+        // Catalog should be loaded from XML file only
+        let exists =
+            config.has_metadata_object(crate::metadata_object::MdoType::Catalog, catalog_name);
+        assert!(exists, "Catalog '{}' should be loaded from XML-only file", catalog_name);
     }
 }
