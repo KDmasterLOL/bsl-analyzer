@@ -83,16 +83,37 @@ test:
   rules:
     - if: $CI_COMMIT_TAG
 
-# Linux AMD64 (static musl build)
+# Linux AMD64 (glibc build on Ubuntu 22.04 for compatibility with Ubuntu 22.04+)
+# Note: musl build is 10x slower due to allocator performance
 build:linux-amd64:
-  <<: *build-template
+  stage: build
+  image: ubuntu:22.04
+  tags:
+    - rust
+  <<: *cargo-cache
   variables:
-    RUST_TARGET: x86_64-unknown-linux-musl
+    RUST_TARGET: x86_64-unknown-linux-gnu
     PLATFORM_SUFFIX: linux-amd64
     BINARY_EXT: ""
+    DEBIAN_FRONTEND: noninteractive
   before_script:
-    - apt-get update -qq && apt-get install -y -qq musl-tools
-    - rustup target add ${RUST_TARGET}
+    - apt-get update -qq && apt-get install -y -qq curl build-essential
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.91
+    - . "$HOME/.cargo/env"
+    - rustc --version
+  script:
+    - . "$HOME/.cargo/env"
+    - cargo build --release --target ${RUST_TARGET}
+    - mkdir -p artifacts
+    - cp target/${RUST_TARGET}/release/bsl-analyzer artifacts/bsl-launcher-${PLATFORM_SUFFIX}
+    - cp target/${RUST_TARGET}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}
+    - ls -la artifacts/
+  artifacts:
+    paths:
+      - artifacts/
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_TAG
 
 # Windows AMD64 (cross-compilation via mingw)
 build:windows-amd64:
