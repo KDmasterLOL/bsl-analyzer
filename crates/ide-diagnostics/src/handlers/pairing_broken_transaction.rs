@@ -2,8 +2,13 @@
 //!
 //! Checks that transaction method calls are properly paired **across all execution paths**:
 //! - `BeginTransaction()`/`НачатьТранзакцию()` must be paired with
-//! - `CommitTransaction()`/`ЗафиксироватьТранзакцию()` or
+//! - `CommitTransaction()`/`ЗафиксироватьТранзакцию()` **or**
 //! - `RollbackTransaction()`/`ОтменитьТранзакцию()`
+//!
+//! A transaction is considered "closed" if it has EITHER Commit OR Rollback on each path.
+//! This is important for try-except patterns where:
+//! - Try block contains Commit (normal path)
+//! - Except block contains Rollback (error path)
 //!
 //! ## CFG-based approach advantage
 //!
@@ -28,9 +33,9 @@
 //! 2. DFS through all paths from entry to exit
 //! 3. Track `transaction_level` per path:
 //!    - BeginTransaction → level++
-//!    - CommitTransaction/RollbackTransaction → level--
+//!    - CommitTransaction OR RollbackTransaction → level--
 //! 4. If level < 0 at any point → orphaned commit/rollback
-//! 5. If level > 0 at exit → orphaned begin
+//! 5. If level > 0 at exit → orphaned begin (missing Commit OR Rollback)
 //!
 //! Ported from:
 //! - PairingBrokenTransactionDiagnostic.java (bsl-language-server) - logic reference
@@ -98,26 +103,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             None => continue,
         };
 
-        // Check Begin-Commit pairing
-        let issues = check_transaction_pairing_cfg(
-            body,
-            source_map,
-            cfg,
-            PairingMode::BeginCommit,
-            max_level,
-        );
-        for issue in issues {
-            diagnostics.push(create_diagnostic(issue, code, ctx));
-        }
-
-        // Check Begin-Rollback pairing
-        let issues = check_transaction_pairing_cfg(
-            body,
-            source_map,
-            cfg,
-            PairingMode::BeginRollback,
-            max_level,
-        );
+        // Check transaction pairing - Begin must be paired with EITHER Commit OR Rollback
+        let issues = check_transaction_pairing_cfg(body, source_map, cfg, max_level);
         for issue in issues {
             diagnostics.push(create_diagnostic(issue, code, ctx));
         }
@@ -126,30 +113,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Pairing mode determines which transaction types are checked together.
-#[derive(Debug, Clone, Copy)]
-enum PairingMode {
-    BeginCommit,
-    BeginRollback,
-}
-
-impl PairingMode {
-    fn end_type(&self) -> TransactionType {
+impl TransactionType {
+    /// Returns the pair method name for error messages.
+    fn pair_method(&self) -> &'static str {
         match self {
-            PairingMode::BeginCommit => TransactionType::Commit,
-            PairingMode::BeginRollback => TransactionType::Rollback,
+            TransactionType::Begin => "ЗафиксироватьТранзакцию/ОтменитьТранзакцию",
+            TransactionType::Commit | TransactionType::Rollback => "НачатьТранзакцию",
         }
-    }
-
-    fn pair_method_for_begin(&self) -> &'static str {
-        match self {
-            PairingMode::BeginCommit => "ЗафиксироватьТранзакцию",
-            PairingMode::BeginRollback => "ОтменитьТранзакцию",
-        }
-    }
-
-    fn pair_method_for_end(&self) -> &'static str {
-        "НачатьТранзакцию"
     }
 }
 
@@ -169,11 +139,13 @@ impl PathState {
 }
 
 /// Check transaction pairing using CFG-based DFS path analysis.
+///
+/// A transaction is considered properly paired if Begin is matched with EITHER
+/// Commit OR Rollback on every execution path.
 fn check_transaction_pairing_cfg(
     body: &Body,
     source_map: &BodySourceMap,
     cfg: &ControlFlowGraph,
-    mode: PairingMode,
     max_level: i32,
 ) -> Vec<TransactionIssue> {
     let entry = match cfg.entry_point() {
@@ -181,10 +153,10 @@ fn check_transaction_pairing_cfg(
         None => return vec![],
     };
 
-    // Pre-compute transaction calls per CFG node for efficiency
-    let node_tx_calls = precompute_transaction_calls(body, source_map, cfg, mode);
+    // Pre-compute ALL transaction calls per CFG node (Begin, Commit, and Rollback)
+    let node_tx_calls = precompute_transaction_calls(body, source_map, cfg);
 
-    let dfs_ctx = DfsContext { cfg, node_tx_calls: &node_tx_calls, mode, max_level };
+    let dfs_ctx = DfsContext { cfg, node_tx_calls: &node_tx_calls, max_level };
 
     let mut issues = Vec::new();
     let mut visited_states: FxHashMap<NodeIndex, FxHashSet<i32>> = FxHashMap::default();
@@ -198,12 +170,11 @@ fn check_transaction_pairing_cfg(
     issues
 }
 
-/// Pre-compute transaction calls for each CFG node.
+/// Pre-compute ALL transaction calls for each CFG node.
 fn precompute_transaction_calls(
     body: &Body,
     source_map: &BodySourceMap,
     cfg: &ControlFlowGraph,
-    mode: PairingMode,
 ) -> FxHashMap<NodeIndex, Vec<TransactionCall>> {
     let mut result: FxHashMap<NodeIndex, Vec<TransactionCall>> = FxHashMap::default();
 
@@ -212,7 +183,7 @@ fn precompute_transaction_calls(
 
         if let CfgVertex::BasicBlock(block) = vertex {
             for &stmt_id in block.statements() {
-                if let Some(call) = check_transaction_call(body, stmt_id, source_map, mode) {
+                if let Some(call) = check_transaction_call(body, stmt_id, source_map) {
                     calls.push(call);
                 }
             }
@@ -230,11 +201,12 @@ fn precompute_transaction_calls(
 struct DfsContext<'a> {
     cfg: &'a ControlFlowGraph,
     node_tx_calls: &'a FxHashMap<NodeIndex, Vec<TransactionCall>>,
-    mode: PairingMode,
     max_level: i32,
 }
 
 /// DFS traversal checking transaction pairing on all paths.
+///
+/// A transaction is considered "closed" if Begin is followed by EITHER Commit OR Rollback.
 fn dfs_check_paths(
     node: NodeIndex,
     mut state: PathState,
@@ -262,6 +234,7 @@ fn dfs_check_paths(
                     state.level += 1;
                     state.begin_stack.push(call.clone());
                 }
+                // Both Commit and Rollback "close" a transaction
                 TransactionType::Commit | TransactionType::Rollback => {
                     state.level -= 1;
                     if state.level < 0 {
@@ -269,7 +242,7 @@ fn dfs_check_paths(
                         issues.push(TransactionIssue {
                             range: call.range,
                             method_name: call.method_name.clone(),
-                            pair_method: ctx.mode.pair_method_for_end(),
+                            pair_method: call.tx_type.pair_method(),
                         });
                         // Reset level to 0 to continue checking (don't cascade errors)
                         state.level = 0;
@@ -288,7 +261,7 @@ fn dfs_check_paths(
             issues.push(TransactionIssue {
                 range: begin_call.range,
                 method_name: begin_call.method_name.clone(),
-                pair_method: ctx.mode.pair_method_for_begin(),
+                pair_method: begin_call.tx_type.pair_method(),
             });
         }
         return;
@@ -306,7 +279,6 @@ fn check_transaction_call(
     body: &Body,
     stmt_id: StmtId,
     source_map: &BodySourceMap,
-    mode: PairingMode,
 ) -> Option<TransactionCall> {
     let stmt = body.stmt(stmt_id);
 
@@ -316,7 +288,7 @@ fn check_transaction_call(
         _ => return None,
     };
 
-    check_expr_transaction_call(body, expr_id, source_map, mode)
+    check_expr_transaction_call(body, expr_id, source_map)
 }
 
 /// Check if an expression is a transaction method call.
@@ -324,7 +296,6 @@ fn check_expr_transaction_call(
     body: &Body,
     expr_id: ExprId,
     source_map: &BodySourceMap,
-    mode: PairingMode,
 ) -> Option<TransactionCall> {
     let expr = body.expr(expr_id);
 
@@ -335,15 +306,12 @@ fn check_expr_transaction_call(
         if let Expr::Path(name) = callee_expr {
             let method_name = name.as_str();
             if let Some(tx_type) = get_transaction_type(method_name) {
-                // Filter by mode: only include Begin and the relevant end type
-                if tx_type == TransactionType::Begin || tx_type == mode.end_type() {
-                    let range = source_map.expr_range(expr_id)?;
-                    return Some(TransactionCall {
-                        tx_type,
-                        method_name: method_name.to_string(),
-                        range,
-                    });
-                }
+                let range = source_map.expr_range(expr_id)?;
+                return Some(TransactionCall {
+                    tx_type,
+                    method_name: method_name.to_string(),
+                    range,
+                });
             }
         }
     }
@@ -392,7 +360,46 @@ mod tests {
     use crate::DiagnosticCode;
 
     #[test]
-    fn test_valid_pairing() {
+    fn test_valid_pairing_with_commit() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Действие();
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+        assert_eq!(pairing_diags.len(), 0, "Valid pairing with commit should have no diagnostics");
+    }
+
+    #[test]
+    fn test_valid_pairing_with_rollback() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Действие();
+    ОтменитьТранзакцию();
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Valid pairing with rollback should have no diagnostics"
+        );
+    }
+
+    /// Rollback followed by Commit is invalid - Commit is orphaned
+    #[test]
+    fn test_rollback_then_commit_is_invalid() {
         let code = r#"
 Процедура Тест()
     НачатьТранзакцию();
@@ -406,7 +413,12 @@ mod tests {
             .iter()
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
-        assert_eq!(pairing_diags.len(), 0, "Valid pairing should have no diagnostics");
+        // Rollback closes the transaction, then Commit has no matching Begin
+        assert_eq!(
+            pairing_diags.len(),
+            1,
+            "Rollback then Commit should produce orphaned Commit diagnostic"
+        );
     }
 
     #[test]
@@ -438,8 +450,9 @@ mod tests {
             .iter()
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
-        // Should have 2 diagnostics: one for missing Commit, one for missing Rollback
-        assert_eq!(pairing_diags.len(), 2, "Orphaned begin should have 2 diagnostics");
+        // Now: 1 diagnostic for Begin without Commit OR Rollback
+        // (transaction can be closed by either, so one error instead of two)
+        assert_eq!(pairing_diags.len(), 1, "Orphaned begin should have 1 diagnostic");
     }
 
     #[test]
@@ -457,12 +470,11 @@ mod tests {
             .iter()
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
-        // First Begin has no matching Commit (second Begin's Commit is used for second Begin)
-        // Plus both Begins have no Rollback
-        assert!(
-            pairing_diags.len() >= 2,
-            "Nested incomplete transactions should have diagnostics, got {}",
-            pairing_diags.len()
+        // First Begin has no matching end (Commit is consumed by second Begin)
+        assert_eq!(
+            pairing_diags.len(),
+            1,
+            "Nested incomplete transactions should have 1 diagnostic for first Begin"
         );
     }
 
@@ -492,6 +504,270 @@ mod tests {
             pairing_diags.len() >= 2,
             "Branch imbalance should catch both orphaned begin and commit, got {}",
             pairing_diags.len()
+        );
+    }
+
+    // =========================================================================
+    // TRY-EXCEPT TRANSACTION PATTERN TESTS
+    // =========================================================================
+    // These tests cover the canonical 1C transaction patterns with try-except.
+    // A transaction is considered properly paired if Begin is followed by
+    // EITHER Commit OR Rollback on every execution path.
+
+    /// Standard try-except transaction pattern - the canonical 1C pattern:
+    /// - НачатьТранзакцию() before try
+    /// - ЗафиксироватьТранзакцию() inside try (normal path)
+    /// - ОтменитьТранзакцию() inside except (error path)
+    /// - ВызватьИсключение to re-raise after rollback
+    #[test]
+    fn test_standard_try_except_transaction_pattern() {
+        let code = r#"
+Процедура ОбновитьПоЗадаче(Задача)
+
+    НачатьТранзакцию();
+    Попытка
+
+        Блокировка = Новый БлокировкаДанных;
+        Блокировка.Заблокировать();
+
+        НаборЗаписей = СоздатьНаборЗаписей();
+        НаборЗаписей.Записать();
+
+        ЗафиксироватьТранзакцию();
+
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Standard try-except transaction pattern should have NO diagnostics, got {}",
+            pairing_diags.len()
+        );
+    }
+
+    /// Try-except with commit in try and rollback in except - correct pattern
+    /// Simpler version without the raise
+    #[test]
+    fn test_try_except_commit_rollback_no_raise() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        Действие();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Try-except with commit/rollback should have NO diagnostics"
+        );
+    }
+
+    /// Try-except with only rollback in except (no commit in try) - INVALID
+    /// Normal path exits without closing transaction
+    #[test]
+    fn test_try_except_only_rollback_invalid() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        Действие();
+        // Missing ЗафиксироватьТранзакцию here!
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // Normal path: Begin -> no end -> orphaned Begin
+        assert_eq!(
+            pairing_diags.len(),
+            1,
+            "Try-except with only rollback should produce 1 orphaned Begin diagnostic"
+        );
+    }
+
+    /// Try-except with only commit in try (no rollback in except) - INVALID
+    /// Exception path exits without closing transaction
+    #[test]
+    fn test_try_except_only_commit_invalid() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        Действие();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        // Missing ОтменитьТранзакцию here!
+        ЗаписатьОшибку();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // Exception path: Begin -> no end -> orphaned Begin
+        assert_eq!(
+            pairing_diags.len(),
+            1,
+            "Try-except with only commit should produce 1 orphaned Begin diagnostic"
+        );
+    }
+
+    /// Nested try-except with transactions - valid pattern
+    #[test]
+    fn test_nested_try_except_valid() {
+        let code = r#"
+Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        Попытка
+            Действие();
+        Исключение
+            ОбработатьОшибку();
+        КонецПопытки;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Nested try-except with proper transaction handling should have NO diagnostics"
+        );
+    }
+
+    /// Multiple sequential transactions - each properly paired
+    #[test]
+    fn test_multiple_sequential_transactions_valid() {
+        let code = r#"
+Процедура Тест()
+    // First transaction
+    НачатьТранзакцию();
+    Попытка
+        Действие1();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+
+    // Second transaction
+    НачатьТранзакцию();
+    Попытка
+        Действие2();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Multiple sequential transactions properly paired should have NO diagnostics"
+        );
+    }
+
+    /// Transaction with conditional inside try - valid if all paths close
+    #[test]
+    fn test_conditional_inside_try_valid() {
+        let code = r#"
+Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Попытка
+        Если Условие Тогда
+            Действие1();
+        Иначе
+            Действие2();
+        КонецЕсли;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Conditional inside try with commit after should have NO diagnostics"
+        );
+    }
+
+    /// Early return in try block before commit - INVALID
+    #[test]
+    fn test_early_return_before_commit_invalid() {
+        let code = r#"
+Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Попытка
+        Если Условие Тогда
+            Возврат;  // Early return without commit!
+        КонецЕсли;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // Path with early return: Begin -> Return -> exit without end
+        assert!(
+            !pairing_diags.is_empty(),
+            "Early return before commit should produce orphaned Begin diagnostic"
         );
     }
 
