@@ -392,12 +392,12 @@ mod tests {
 
     #[test]
     fn test_not_neq_russian() {
-        // Pattern `Не Отказ <> Ложь` without parentheses
-        // NOW DETECTED after parser improvements (typed expression nodes)
+        // Паттерн `Не Отказ <> Ложь` без скобок
+        // Обнаруживается после улучшений парсера (типизированные узлы выражений)
         let code = "А = Не Отказ <> Ложь;";
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Parser improvement: now detects this pattern!
+        // Улучшение парсера: теперь обнаруживает этот паттерн!
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_not_equal_not_detected() {
-        // Uses = instead of <>, should NOT detect
+        // Использует = вместо <>, НЕ должно обнаруживаться
         let code = "А = Не Отказ = Ложь;";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn test_with_logical_operators_inside() {
-        // AND inside NOT expression, should skip
+        // И внутри выражения НЕ — пропускаем
         let code = "А = Не (А <> Неопределено и Б = 5);";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_double_not_with_and_inside() {
-        // AND inside double NOT, should skip
+        // И внутри двойного НЕ — пропускаем
         let code = "Б = Не (Не Значение И ДругоеЗначение);";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 0);
@@ -437,39 +437,39 @@ mod tests {
         let code = include_str!("../../test_data/DoubleNegativesDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Debug: Print all detected diagnostics with line numbers and text
-        eprintln!("\n=== Detected {} diagnostics ===", diagnostics.len());
+        // Отладка: вывод всех обнаруженных диагностик с номерами строк и текстом
+        eprintln!("\n=== Обнаружено {} диагностик ===", diagnostics.len());
         for (i, diag) in diagnostics.iter().enumerate() {
             let start_offset: usize = diag.range.start().into();
             let end_offset: usize = diag.range.end().into();
 
-            // Calculate line number (1-indexed)
+            // Вычисление номера строки (начиная с 1)
             let line_num = code[..start_offset].lines().count();
 
-            // Extract the text
+            // Извлечение текста
             let text = &code[start_offset..end_offset];
-            eprintln!("#{}: Line {} - {:?}", i + 1, line_num, text);
+            eprintln!("#{}: Строка {} - {:?}", i + 1, line_num, text);
         }
         eprintln!("=================================\n");
 
-        // Expected 12 diagnostics based on comments in test file:
-        // Line 2:  Не ТаблицаЗначений.Найти(...) <> Неопределено
-        // Line 6:  Не Отказ <> Ложь
-        // Line 7:  Не (Отказ <> Ложь)
-        // Line 8:  Не НекотороеЗначение() <> Неопределено
-        // Line 9:  Не Неопределено <> НекотороеЗначение()
-        // Line 10: Не (А <> Неопределено)
-        // Line 11: Не А <> Неопределено (part of larger expression)
-        // Line 16: Не Таблица.Данные <> Неопределено
-        // Line 20: Не Б <> Неопределено (nested in OR expression)
-        // Line 29: Не (Отказ <> НеЛитерал)
-        // Line 30: Не СложнаяФункция() <> НеЛитерал
-        // Line 36: Не (Не Значение)
+        // Ожидается 12 диагностик согласно комментариям в тестовом файле:
+        // Строка 2:  Не ТаблицаЗначений.Найти(...) <> Неопределено
+        // Строка 6:  Не Отказ <> Ложь
+        // Строка 7:  Не (Отказ <> Ложь)
+        // Строка 8:  Не НекотороеЗначение() <> Неопределено
+        // Строка 9:  Не Неопределено <> НекотороеЗначение()
+        // Строка 10: Не (А <> Неопределено)
+        // Строка 11: Не А <> Неопределено (часть большего выражения)
+        // Строка 16: Не Таблица.Данные <> Неопределено
+        // Строка 20: Не Б <> Неопределено (вложено в выражение ИЛИ)
+        // Строка 29: Не (Отказ <> НеЛитерал)
+        // Строка 30: Не СложнаяФункция() <> НеЛитерал
+        // Строка 36: Не (Не Значение)
 
         assert_eq!(
             diagnostics.len(),
             12,
-            "Expected exactly 12 diagnostics matching Java bsl-language-server"
+            "Ожидается ровно 12 диагностик, как в Java bsl-language-server"
         );
     }
 }
