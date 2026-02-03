@@ -934,8 +934,22 @@ impl LoweringContext {
         }
 
         // Case 3: "Alias.Ссылка.Field" (Ссылка in middle, followed by field access)
-        // This is always an error - accessing field through .Ссылка
+        // This is usually an error - accessing field through .Ссылка
+        //
+        // EXCEPTION: For tabular sections, "ТЧ.Ссылка.Field" accesses owner's field
+        // through the built-in back-reference. This does NOT cause an extra JOIN
+        // because the relationship with owner is structural, not via a reference field.
         if ref_index < last_index {
+            // Check if this is "Alias.Ссылка.Field" pattern (ref_index == 1)
+            // where Alias is a tabular section
+            if ref_index == 1 && effective_parts.len() >= 3 {
+                let alias = effective_parts[0].to_lowercase();
+                if tabular_section_aliases.contains(&alias) {
+                    // Tabular section accessing owner's field - NOT an error
+                    return;
+                }
+            }
+
             self.diagnostics.push(SdblDiagnostic::RefOveruse { range });
             return;
         }

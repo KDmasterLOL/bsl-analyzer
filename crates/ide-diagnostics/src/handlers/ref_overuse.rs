@@ -214,7 +214,15 @@ mod tests {
 
     #[test]
     fn test_ref_overuse_nested_in_case() {
-        // Error inside CASE expression
+        // Error inside CASE expression (from tabular section)
+        //
+        // Source: Справочник.Пользователи.ДополнительныеРеквизиты (tabular section)
+        // Alias: Пользователи
+        //
+        // Patterns analyzed:
+        // - Пользователи.Ссылка.ПометкаУдаления: ТЧ.Ссылка.Поле (owner field) = OK
+        // - Пользователи.Ссылка.ТекущееПодразделение: ТЧ.Ссылка.Поле (owner field) = OK
+        // - Пользователи.Ссылка.ТекущееПодразделение.Ссылка: .Ссылка at end on ТекущееПодразделение = ERROR
         let code = r#"
 Процедура Тест()
     Запрос = Новый Запрос;
@@ -230,14 +238,56 @@ mod tests {
 "#;
         let diagnostics = check_sdbl_diagnostic(code, check);
 
-        // Should detect:
-        // - Пользователи.Ссылка.ПометкаУдаления (Ссылка in middle)
-        // - Пользователи.Ссылка.ТекущееПодразделение.Ссылка (Ссылка in middle AND at end)
-        // - Пользователи.Ссылка.ТекущееПодразделение (Ссылка in middle)
+        // Only 1 error: Пользователи.Ссылка.ТекущееПодразделение.Ссылка
+        // The other patterns (ТЧ.Ссылка.Поле) are accessing owner's fields - OK
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for .Ссылка at end of path");
+    }
+
+    #[test]
+    fn test_tabular_section_ref_to_owner_field() {
+        // БизнесПроцесс.Согласование.Исполнители - табличная часть
+        // Исполнители.Ссылка.НомерИтерации - обращение к реквизиту ВЛАДЕЛЬЦА через .Ссылка
+        // Это НЕ ошибка, т.к. связь с владельцем встроена в структуру ТЧ и не вызывает JOIN.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+    |   Исполнители.Ссылка КАК Ссылка,
+    |   Исполнители.Ссылка.НомерИтерации КАК НомерИтерации
+    |ИЗ
+    |   БизнесПроцесс.Согласование.Исполнители КАК Исполнители";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+
         assert!(
-            diagnostics.len() >= 2,
-            "Expected at least 2 diagnostics for CASE expression, got {}",
-            diagnostics.len()
+            diagnostics.is_empty(),
+            "Tabular section .Ссылка.Field (owner's field) should NOT trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_tabular_section_ref_to_owner_nested_field_is_error() {
+        // Но если после .Ссылка.Поле идёт ещё одно разыменование, это уже ошибка
+        // Пример: ТЧ.Ссылка.Организация.ИНН - обращение к полю ОРГАНИЗАЦИИ через ссылку
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+    |   Товары.Ссылка.Организация.ИНН КАК ИННОрганизации
+    |ИЗ
+    |   Документ.Заказ.Товары КАК Товары";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+
+        // Здесь .Ссылка.Организация - ок (владелец), но .Организация.ИНН - уже JOIN
+        // Но наша диагностика RefOveruse ловит только .Ссылка, а не вложенные разыменования.
+        // QueryNestedFieldsByDot должна поймать это.
+        // RefOveruse здесь НЕ должна срабатывать, т.к. .Ссылка для ТЧ - это ок.
+        assert!(
+            diagnostics.is_empty(),
+            "RefOveruse should not trigger for ТЧ.Ссылка.Field pattern (but QueryNestedFieldsByDot should)"
         );
     }
 }
