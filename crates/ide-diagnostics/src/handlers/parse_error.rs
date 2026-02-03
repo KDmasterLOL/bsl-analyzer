@@ -103,4 +103,25 @@ HHH
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
         assert!(!parse_errors.is_empty(), "Expected parse error for EOF fixture with 'HHH'");
     }
+
+    #[test]
+    fn test_no_parse_error_for_bom() {
+        // UTF-8 BOM at start of file should not trigger ParseError
+        let code = "\u{FEFF}Процедура Тест()\n    А = 1;\nКонецПроцедуры";
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(parse_errors.is_empty(), "BOM should not trigger parse error");
+    }
+
+    #[test]
+    fn test_no_parse_error_for_bom_with_region() {
+        // UTF-8 BOM + CRLF + #Область (common in 1C exports)
+        let code =
+            "\u{FEFF}\r\n#Область Test\r\nПроцедура Тест()\r\nКонецПроцедуры\r\n#КонецОбласти";
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(parse_errors.is_empty(), "BOM with region should not trigger parse error");
+    }
 }

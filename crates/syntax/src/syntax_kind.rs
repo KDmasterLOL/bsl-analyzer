@@ -25,6 +25,7 @@ pub enum SyntaxKind {
     WHITESPACE,
     NEWLINE,
     COMMENT,
+    BOM, // UTF-8 BOM (Byte Order Mark)
 
     // Procedure/Function keywords
     KW_PROCEDURE,
@@ -291,9 +292,12 @@ pub enum SyntaxKind {
 }
 
 impl SyntaxKind {
-    /// Returns true if this is a trivia token (whitespace or comment).
+    /// Returns true if this is a trivia token (whitespace, comment, or BOM).
     pub fn is_trivia(self) -> bool {
-        matches!(self, SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::NEWLINE)
+        matches!(
+            self,
+            SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::NEWLINE | SyntaxKind::BOM
+        )
     }
 
     /// Returns true if this is a keyword token.

@@ -157,6 +157,73 @@ mod tests {
     }
 
     #[test]
+    fn test_sink_with_bom() {
+        // UTF-8 BOM at start of file
+        let source = "\u{FEFF}Процедура Тест() КонецПроцедуры";
+        let tokens = lexer::tokenize(source);
+
+        eprintln!("=== Tokens with BOM ===");
+        for (i, token) in tokens.iter().enumerate() {
+            eprintln!("{}: {:?} @ {} = {:?}", i, token.kind, token.offset, token.text);
+        }
+
+        let mut parser = crate::Parser::new(&tokens);
+        grammar::source_file(&mut parser);
+        let events = parser.finish();
+
+        let sink = Sink::new(&tokens);
+        let builder = sink.finish(events);
+        let parse = builder.finish();
+
+        eprintln!("=== Syntax tree ===");
+        eprintln!("{:#?}", parse.syntax_node());
+
+        // Should parse without errors (BOM is trivia)
+        assert!(!parse.has_errors(), "File with BOM should parse without errors");
+        let root = parse.syntax_node();
+        assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
+
+        // Check that there are no ERROR nodes
+        let error_nodes: Vec<_> =
+            root.descendants().filter(|n| n.kind() == syntax::SyntaxKind::ERROR).collect();
+        assert!(error_nodes.is_empty(), "Should have no ERROR nodes, found: {:?}", error_nodes);
+    }
+
+    #[test]
+    fn test_sink_with_bom_and_region() {
+        // UTF-8 BOM + CRLF + #Область (like real 1C files)
+        let source =
+            "\u{FEFF}\r\n#Область Test\r\nПроцедура Тест()\r\nКонецПроцедуры\r\n#КонецОбласти";
+        let tokens = lexer::tokenize(source);
+
+        eprintln!("=== Tokens with BOM+CRLF+Region ===");
+        for (i, token) in tokens.iter().enumerate() {
+            eprintln!("{}: {:?} @ {} = {:?}", i, token.kind, token.offset, token.text);
+        }
+
+        let mut parser = crate::Parser::new(&tokens);
+        grammar::source_file(&mut parser);
+        let events = parser.finish();
+
+        let sink = Sink::new(&tokens);
+        let builder = sink.finish(events);
+        let parse = builder.finish();
+
+        eprintln!("=== Syntax tree ===");
+        eprintln!("{:#?}", parse.syntax_node());
+
+        // Should parse without errors (BOM is trivia)
+        assert!(!parse.has_errors(), "File with BOM+CRLF+Region should parse without errors");
+        let root = parse.syntax_node();
+        assert_eq!(root.kind(), syntax::SyntaxKind::SOURCE_FILE);
+
+        // Check that there are no ERROR nodes
+        let error_nodes: Vec<_> =
+            root.descendants().filter(|n| n.kind() == syntax::SyntaxKind::ERROR).collect();
+        assert!(error_nodes.is_empty(), "Should have no ERROR nodes, found: {:?}", error_nodes);
+    }
+
+    #[test]
     fn test_sink_multiple_variables() {
         let source = r#"
 Перем Первая;

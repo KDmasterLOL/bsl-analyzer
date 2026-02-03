@@ -254,6 +254,7 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Whitespace => SK::WHITESPACE,
         TokenKind::Newline => SK::NEWLINE,
         TokenKind::Comment => SK::COMMENT,
+        TokenKind::Bom => SK::BOM,
 
         // Error fallback
         TokenKind::Error => SK::ERROR,

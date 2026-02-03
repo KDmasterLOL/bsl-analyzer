@@ -252,6 +252,7 @@ fn token_to_syntax_kind(kind: TokenKind) -> SyntaxKind {
         TokenKind::Whitespace => SyntaxKind::WHITESPACE,
         TokenKind::Newline => SyntaxKind::NEWLINE,
         TokenKind::Comment => SyntaxKind::COMMENT,
+        TokenKind::Bom => SyntaxKind::BOM,
 
         // Error
         TokenKind::Error => SyntaxKind::ERROR,

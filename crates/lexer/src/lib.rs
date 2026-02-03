@@ -360,6 +360,11 @@ pub enum TokenKind {
     #[regex(r"[ \t\r]+", priority = 0)]
     Whitespace,
 
+    // UTF-8 BOM (Byte Order Mark) - treated as trivia
+    // Common in BSL files exported from 1C platform
+    #[token("\u{FEFF}")]
+    Bom,
+
     // Error token for unrecognized input
     Error,
 }
@@ -711,5 +716,23 @@ mod tests {
             r#"" (""#,
             "First string should be entire ' (' with quotes"
         );
+    }
+
+    #[test]
+    fn test_bom() {
+        // UTF-8 BOM at start of file
+        let input = "\u{FEFF}Процедура Тест() КонецПроцедуры";
+        let tokens = tokenize(input);
+
+        eprintln!("Tokens with BOM:");
+        for (i, tok) in tokens.iter().enumerate() {
+            eprintln!("  [{}] {:?}: {:?}", i, tok.kind, tok.text);
+        }
+
+        // First token should be BOM
+        assert_eq!(tokens[0].kind, TokenKind::Bom, "First token should be BOM");
+        assert_eq!(tokens[0].text.as_str(), "\u{FEFF}");
+        // Second token should be keyword
+        assert_eq!(tokens[1].kind, TokenKind::KwProcedure);
     }
 }

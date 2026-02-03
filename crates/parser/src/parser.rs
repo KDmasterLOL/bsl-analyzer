@@ -141,11 +141,14 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    /// Skips whitespace and comments.
+    /// Skips whitespace, comments, and BOM.
     pub fn skip_trivia(&mut self) {
         while let Some(kind) = self.current() {
             match kind {
-                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline => self.bump(),
+                TokenKind::Whitespace
+                | TokenKind::Comment
+                | TokenKind::Newline
+                | TokenKind::Bom => self.bump(),
                 _ => break,
             }
         }
