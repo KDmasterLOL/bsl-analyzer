@@ -327,15 +327,16 @@ fn preproc_logical_expression(p: &mut Parser) {
     let m = p.start();
 
     preproc_logical_operand(p);
+    p.skip_trivia();
 
     while matches!(p.current(), Some(TokenKind::KwAnd) | Some(TokenKind::KwOr)) {
         p.check_iteration_limit();
-        p.skip_trivia();
         let op_m = p.start();
         p.bump(); // AND/OR
         op_m.complete(p, NodeKind::PreBoolOp);
         p.skip_trivia();
         preproc_logical_operand(p);
+        p.skip_trivia();
     }
 
     m.complete(p, NodeKind::PreLogicalExpr);
