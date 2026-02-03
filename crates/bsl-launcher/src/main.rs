@@ -26,6 +26,7 @@ use sys_locale::get_locale;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_millis(300);
 
 // URL сервера релизов (переопределяется через BSL_RELEASE_URL)
 const DEFAULT_RELEASE_URL: &str = "https://dev.runsystems.ru/releases";
@@ -59,6 +60,11 @@ struct Messages {
     help_version: &'static str,
     help_update: &'static str,
     help_verify: &'static str,
+    help_use: &'static str,
+    help_cleanup: &'static str,
+    cleanup_removed: &'static str,
+    cleanup_error: &'static str,
+    cleanup_done: &'static str,
 }
 
 const MESSAGES_RU: Messages = Messages {
@@ -83,6 +89,11 @@ const MESSAGES_RU: Messages = Messages {
     help_version: "Показать версию лаунчера",
     help_update: "Обновить bsl-analyzer",
     help_verify: "Проверить целостность установки",
+    help_use: "Использовать указанную версию (или 'latest')",
+    help_cleanup: "Удалить старые версии (--keep=N для сохранения N версий)",
+    cleanup_removed: "удалён",
+    cleanup_error: "ошибка удаления",
+    cleanup_done: "Удалено версий: {}",
 };
 
 const MESSAGES_EN: Messages = Messages {
@@ -107,6 +118,11 @@ const MESSAGES_EN: Messages = Messages {
     help_version: "Show launcher version",
     help_update: "Update bsl-analyzer",
     help_verify: "Verify installation integrity",
+    help_use: "Use specified version (or 'latest')",
+    help_cleanup: "Remove old versions (--keep=N to keep N versions)",
+    cleanup_removed: "removed",
+    cleanup_error: "removal error",
+    cleanup_done: "Versions removed: {}",
 };
 
 fn messages() -> &'static Messages {
@@ -160,19 +176,30 @@ fn main() -> Result<()> {
         }
         Some("--launcher-verify") => return verify_installation(),
         Some("--launcher-self-update") => return self_update_launcher(),
+        Some("--launcher-cleanup") => return cleanup_versions(&args),
         Some("--help" | "-h") if args.len() == 1 => {
             return show_help_with_launcher_commands();
         }
         _ => {}
     }
 
+    // Извлекаем --launcher-use если есть
+    let (requested_version, remaining_args) = extract_launcher_use(&args);
+
+    // Приоритет: --launcher-use > BSL_ANALYZER_VERSION > авто
+    let requested_version = requested_version
+        .or_else(|| env::var("BSL_ANALYZER_VERSION").ok().filter(|s| !s.is_empty()));
+
     // Находим или скачиваем bsl-analyzer
-    let analyzer_path = ensure_analyzer()?;
+    let analyzer_path = match requested_version {
+        Some(ver) => ensure_specific_version(&ver)?,
+        None => ensure_analyzer()?,
+    };
 
     // Запускаем bsl-analyzer с переданными аргументами
     // Важно: для LSP нужно наследовать stdin/stdout/stderr
     let status = Command::new(&analyzer_path)
-        .args(&args)
+        .args(&remaining_args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -180,6 +207,109 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to execute bsl-analyzer at {:?}", analyzer_path))?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn extract_launcher_use(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut version = None;
+    let mut remaining = Vec::new();
+    let mut skip_next = false;
+
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if arg == "--launcher-use" {
+            if let Some(ver) = args.get(i + 1) {
+                version = Some(ver.clone());
+                skip_next = true;
+            }
+        } else if let Some(ver) = arg.strip_prefix("--launcher-use=") {
+            version = Some(ver.to_string());
+        } else {
+            remaining.push(arg.clone());
+        }
+    }
+
+    (version, remaining)
+}
+
+fn ensure_specific_version(version: &str) -> Result<PathBuf> {
+    let cache_dir = get_cache_dir()?;
+
+    // "latest" → резолвим в конкретную версию
+    let resolved_version =
+        if version == "latest" { fetch_latest_version()? } else { version.to_string() };
+
+    let binary_name = format!("bsl-analyzer-{}", resolved_version);
+    let binary_path = cache_dir.join(&binary_name);
+
+    if binary_path.exists() {
+        if verify_existing_binary(&resolved_version, &binary_path).is_ok() {
+            return Ok(binary_path);
+        }
+        let _ = fs::remove_file(&binary_path);
+    }
+
+    // Скачиваем указанную версию (НЕ обновляем симлинк current)
+    download_version_without_linking(&cache_dir, &resolved_version)
+}
+
+fn download_version_without_linking(cache_dir: &Path, version: &str) -> Result<PathBuf> {
+    let binary_name = format!("bsl-analyzer-{}", version);
+    let binary_path = cache_dir.join(&binary_name);
+
+    let m = messages();
+    eprintln!("{}", m.downloading.replace("{}", version));
+
+    let manifest = fetch_and_verify_manifest(version)?;
+
+    let platform = get_platform_binary();
+    let file_info = manifest
+        .files
+        .get(platform)
+        .context(format!("Platform {} not found in manifest", platform))?;
+
+    eprint!(
+        "{}",
+        m.downloading_binary
+            .replace("{:.1}", &format!("{:.1}", file_info.size as f64 / 1_048_576.0))
+    );
+    let client = create_download_client()?;
+    let url = format!("{}/{}/{}/{}", get_release_url(), PRODUCT, version, platform);
+    let response =
+        client.get(&url).send().with_context(|| format!("Failed to download from {}", url))?;
+
+    if !response.status().is_success() {
+        eprintln!("{}", m.failed);
+        bail!("Download failed: HTTP {}", response.status());
+    }
+
+    let bytes = response.bytes()?;
+    eprintln!("{}", m.ok);
+
+    if bytes.len() as u64 != file_info.size {
+        bail!("Size mismatch: expected {}, got {}", file_info.size, bytes.len());
+    }
+
+    let hash = compute_sha256(&bytes);
+    if hash != file_info.sha256 {
+        bail!("Checksum mismatch!\nExpected: {}\nGot: {}", file_info.sha256, hash);
+    }
+
+    fs::write(&binary_path, &bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&binary_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&binary_path, perms)?;
+    }
+
+    eprintln!("{}", m.installed.replace("{}", version));
+    Ok(binary_path)
 }
 
 fn show_help_with_launcher_commands() -> Result<()> {
@@ -194,10 +324,14 @@ fn show_help_with_launcher_commands() -> Result<()> {
     print!("{}", String::from_utf8_lossy(&output.stdout));
 
     println!("\n{}", m.launcher_commands);
+    println!("  {:30} {}", "--launcher-use <VERSION>", m.help_use);
     println!("  {:30} {}", "--launcher-self-update", m.help_self_update);
     println!("  {:30} {}", "--launcher-version", m.help_version);
     println!("  {:30} {}", "--launcher-update", m.help_update);
     println!("  {:30} {}", "--launcher-verify", m.help_verify);
+    println!("  {:30} {}", "--launcher-cleanup", m.help_cleanup);
+    println!();
+    println!("  BSL_ANALYZER_VERSION=<VERSION>  {}", m.help_use);
 
     Ok(())
 }
@@ -228,16 +362,13 @@ fn get_cache_dir() -> Result<PathBuf> {
 }
 
 fn check_updates_if_needed(cache_dir: &Path) {
-    let marker = cache_dir.join(".last_check");
+    let Ok(latest_version) = try_fetch_latest_version_fast() else {
+        return;
+    };
 
-    if let Ok(metadata) = fs::metadata(&marker) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                if elapsed.as_secs() < 86400 {
-                    return;
-                }
-            }
-        }
+    let current_version = get_current_version(cache_dir);
+    if Some(&latest_version) == current_version.as_ref() {
+        return;
     }
 
     if let Ok(exe) = env::current_exe() {
@@ -248,8 +379,22 @@ fn check_updates_if_needed(cache_dir: &Path) {
             .stderr(Stdio::null())
             .spawn();
     }
+}
 
-    let _ = fs::write(&marker, "");
+fn try_fetch_latest_version_fast() -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(UPDATE_CHECK_TIMEOUT)
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()?;
+
+    let url = format!("{}/{}/latest", get_release_url(), PRODUCT);
+    let response = client.get(&url).send()?;
+
+    if !response.status().is_success() {
+        bail!("HTTP {}", response.status());
+    }
+
+    Ok(response.text()?.trim().to_string())
 }
 
 fn update_analyzer() -> Result<()> {
@@ -272,6 +417,59 @@ fn update_analyzer() -> Result<()> {
     );
     download_version(&cache_dir, &latest_version)?;
 
+    Ok(())
+}
+
+fn cleanup_versions(args: &[String]) -> Result<()> {
+    let cache_dir = get_cache_dir()?;
+    let m = messages();
+
+    // Парсим --keep=N
+    let keep_count = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--keep="))
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1);
+
+    let current_version = get_current_version(&cache_dir);
+
+    // Собираем все версии
+    let mut versions: Vec<(String, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&cache_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(version) = name.to_str().and_then(|n| n.strip_prefix("bsl-analyzer-")) {
+            versions.push((version.to_string(), entry.path()));
+        }
+    }
+
+    // Сортируем по времени модификации (новые первыми)
+    versions.sort_by(|a, b| {
+        let time_a = fs::metadata(&a.1).and_then(|m| m.modified()).ok();
+        let time_b = fs::metadata(&b.1).and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a)
+    });
+
+    // Удаляем старые версии, сохраняя keep_count и current
+    let mut kept = 0;
+    let mut removed = 0;
+    for (version, path) in &versions {
+        let is_current = current_version.as_ref() == Some(version);
+
+        if is_current || kept < keep_count {
+            eprintln!("  {} {}", version, if is_current { "(current)" } else { "" });
+            if !is_current {
+                kept += 1;
+            }
+        } else if let Err(e) = fs::remove_file(path) {
+            eprintln!("  {} - {} {}: {}", version, m.cleanup_error, path.display(), e);
+        } else {
+            eprintln!("  {} - {}", version, m.cleanup_removed);
+            removed += 1;
+        }
+    }
+
+    eprintln!("{}", m.cleanup_done.replace("{}", &removed.to_string()));
     Ok(())
 }
 
