@@ -190,10 +190,13 @@ fn main() -> Result<()> {
     let requested_version = requested_version
         .or_else(|| env::var("BSL_ANALYZER_VERSION").ok().filter(|s| !s.is_empty()));
 
+    // Для analyze режима — синхронное обновление перед анализом
+    let is_analyze_mode = remaining_args.first().map(|s| s.as_str()) == Some("analyze");
+
     // Находим или скачиваем bsl-analyzer
     let analyzer_path = match requested_version {
         Some(ver) => ensure_specific_version(&ver)?,
-        None => ensure_analyzer()?,
+        None => ensure_analyzer(is_analyze_mode)?,
     };
 
     // Запускаем bsl-analyzer с переданными аргументами
@@ -313,7 +316,7 @@ fn download_version_without_linking(cache_dir: &Path, version: &str) -> Result<P
 }
 
 fn show_help_with_launcher_commands() -> Result<()> {
-    let analyzer_path = ensure_analyzer()?;
+    let analyzer_path = ensure_analyzer(false)?;
     let m = messages();
 
     let output = Command::new(&analyzer_path)
@@ -336,7 +339,7 @@ fn show_help_with_launcher_commands() -> Result<()> {
     Ok(())
 }
 
-fn ensure_analyzer() -> Result<PathBuf> {
+fn ensure_analyzer(sync_update: bool) -> Result<PathBuf> {
     let cache_dir = get_cache_dir()?;
     let current_link = cache_dir.join("current");
 
@@ -345,7 +348,20 @@ fn ensure_analyzer() -> Result<PathBuf> {
             let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
 
             if full_path.exists() {
-                check_updates_if_needed(&cache_dir);
+                check_updates_if_needed(&cache_dir, sync_update)?;
+                // После синхронного обновления current мог измениться
+                if sync_update {
+                    if let Ok(new_target) = fs::read_link(&current_link) {
+                        let new_path = if new_target.is_absolute() {
+                            new_target
+                        } else {
+                            cache_dir.join(&new_target)
+                        };
+                        if new_path.exists() {
+                            return Ok(new_path);
+                        }
+                    }
+                }
                 return Ok(full_path);
             }
         }
@@ -361,24 +377,32 @@ fn get_cache_dir() -> Result<PathBuf> {
     Ok(cache_dir)
 }
 
-fn check_updates_if_needed(cache_dir: &Path) {
-    let Ok(latest_version) = try_fetch_latest_version_fast() else {
-        return;
-    };
+fn check_updates_if_needed(cache_dir: &Path, sync_update: bool) -> Result<()> {
+    if sync_update {
+        // Синхронное обновление для analyze режима
+        let Ok(latest_version) = try_fetch_latest_version_fast() else {
+            return Ok(());
+        };
 
-    let current_version = get_current_version(cache_dir);
-    if Some(&latest_version) == current_version.as_ref() {
-        return;
-    }
+        let current_version = get_current_version(cache_dir);
+        if Some(&latest_version) == current_version.as_ref() {
+            return Ok(());
+        }
 
-    if let Ok(exe) = env::current_exe() {
-        let _ = Command::new(exe)
-            .arg("--launcher-update")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        // Скачиваем и обновляем синхронно
+        download_version(cache_dir, &latest_version)?;
+    } else {
+        // Полностью фоновая проверка и обновление для LSP/других команд
+        if let Ok(exe) = env::current_exe() {
+            let _ = Command::new(exe)
+                .arg("--launcher-update")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        }
     }
+    Ok(())
 }
 
 fn try_fetch_latest_version_fast() -> Result<String> {
