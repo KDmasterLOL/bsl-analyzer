@@ -91,4 +91,21 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
         assert_eq!(diags.len(), 0, "Labels should not require semicolons");
     }
+
+    #[test]
+    fn test_return_without_semicolon_before_endif() {
+        // BSL allows omitting semicolon before КонецЕсли, but it's bad practice
+        // SemicolonPresence should warn about missing semicolon
+        let code = r#"Процедура Тест()
+    Если Истина Тогда
+        Возврат
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::SemicolonPresence).collect();
+        assert_eq!(diags.len(), 1, "Should detect missing semicolon after Возврат");
+        // Возврат is on line 2 (0-indexed), columns 8-15 (Возврат = 7 chars)
+        assert_diagnostic_range(code, diags[0], 2, 8, 15);
+    }
 }

@@ -74,6 +74,27 @@ mod tests {
     }
 
     #[test]
+    fn test_procedure_return_without_semicolon_before_endif() {
+        // BSL allows omitting semicolon before КонецЕсли
+        // This should NOT trigger ProcedureReturnsValue diagnostic
+        let code = r#"Процедура Тест()
+    Если Истина Тогда
+        Возврат
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
+            .collect();
+        assert_eq!(
+            diags.len(),
+            0,
+            "Return without semicolon before КонецЕсли should not trigger diagnostic"
+        );
+    }
+
+    #[test]
     fn test_function_with_return_value_ok() {
         let code = r#"Функция Тест()
     Возврат 42;

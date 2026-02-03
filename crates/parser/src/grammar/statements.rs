@@ -89,9 +89,12 @@ fn return_stmt(p: &mut Parser) {
     p.skip_trivia();
 
     // Optional return value
+    // Note: KwEndIf is included because BSL allows omitting semicolon before КонецЕсли:
+    //   Если Истина Тогда Возврат КонецЕсли;
     if !p.at(TokenKind::Semicolon)
         && !p.at(TokenKind::KwEndFunction)
         && !p.at(TokenKind::KwEndProcedure)
+        && !p.at(TokenKind::KwEndIf)
     {
         expressions::expression(p);
     }
