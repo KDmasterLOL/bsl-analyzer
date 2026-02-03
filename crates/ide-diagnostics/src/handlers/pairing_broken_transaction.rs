@@ -771,6 +771,98 @@ mod tests {
         );
     }
 
+    /// Raise inside try block should transfer control to except block.
+    /// Transaction is properly closed because except contains Rollback.
+    #[test]
+    fn test_raise_inside_try_transfers_to_except() {
+        let code = r#"
+Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Попытка
+        Если Условие Тогда
+            ВызватьИсключение "Ошибка";
+        КонецЕсли;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // All paths are covered:
+        // - Normal path: Begin -> Commit -> end
+        // - Raise path: Begin -> Raise -> Except -> Rollback -> Raise -> exit
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Raise inside try should transfer to except, transaction is properly paired"
+        );
+    }
+
+    /// Raise inside nested try should transfer to innermost except block.
+    #[test]
+    fn test_raise_inside_nested_try() {
+        let code = r#"
+Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Попытка
+        Попытка
+            Если Условие Тогда
+                ВызватьИсключение "Внутренняя ошибка";
+            КонецЕсли;
+        Исключение
+            // Inner except - does NOT rollback, just logs
+            ЗаписатьОшибку();
+        КонецПопытки;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // Raise in inner try goes to inner except, then continues to Commit
+        // All paths close the transaction
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Nested try-except with raise should be properly handled"
+        );
+    }
+
+    /// Raise outside try should still go to exit (uncaught exception).
+    #[test]
+    fn test_raise_outside_try_goes_to_exit() {
+        let code = r#"
+Процедура Тест(Условие)
+    НачатьТранзакцию();
+    Если Условие Тогда
+        ВызватьИсключение "Ошибка без try";
+    КонецЕсли;
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        // Path with Raise: Begin -> Raise -> exit (no Commit/Rollback)
+        assert_eq!(pairing_diags.len(), 1, "Raise outside try leaves transaction open");
+    }
+
     #[test]
     fn test_fixture() {
         let code = include_str!("../../test_data/PairingBrokenTransactionDiagnostic.bsl");

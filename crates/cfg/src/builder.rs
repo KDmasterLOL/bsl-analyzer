@@ -43,12 +43,22 @@ pub struct CfgBuilder {
     /// Whether to produce loop iteration edges (back edges)
     /// Used for configuration: loopsExecutedAtLeastOnce
     produce_loop_iterations: bool,
+
+    /// Stack of except block indices for modeling exception flow.
+    /// When Raise is encountered inside a Try block, control transfers
+    /// to the corresponding except block instead of the function exit.
+    except_stack: Vec<NodeIndex>,
 }
 
 impl CfgBuilder {
     /// Create a new CFG builder
     pub fn new() -> Self {
-        Self { cfg: ControlFlowGraph::new(), current_block: None, produce_loop_iterations: true }
+        Self {
+            cfg: ControlFlowGraph::new(),
+            current_block: None,
+            produce_loop_iterations: true,
+            except_stack: Vec::new(),
+        }
     }
 
     /// Set whether to produce loop iteration edges
@@ -348,15 +358,25 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR raise statement (Phase 6.2)
+    ///
+    /// If inside a try block, transfers control to the corresponding except block.
+    /// Otherwise, transfers control to the function exit (uncaught exception).
     fn walk_raise_statement_hir(&mut self, stmt_id: StmtIdx, _body: &Body) {
         // Add raise statement to current block
         self.add_to_current_block_hir(stmt_id);
 
         if let Some(block_idx) = self.current_block {
-            let exit = self.cfg.exit_point();
+            // Determine target: except block if inside try, otherwise function exit
+            let target = if let Some(&except_block) = self.except_stack.last() {
+                // Inside a try block - transfer to except handler
+                except_block
+            } else {
+                // Outside try - uncaught exception terminates the function
+                self.cfg.exit_point()
+            };
 
-            // Connect current block to exit
-            let _ = self.cfg.add_edge(block_idx, exit, CfgEdgeType::Direct);
+            // Connect current block to target
+            let _ = self.cfg.add_edge(block_idx, target, CfgEdgeType::Direct);
 
             // Create new unreachable block for any dead code after raise
             let dead_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
@@ -1118,6 +1138,8 @@ impl CfgBuilder {
     }
 
     /// Walk a HIR try statement (Phase 6.2)
+    ///
+    /// Models exception flow: Raise inside try block transfers control to except block.
     fn walk_try_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::TryExceptVertex;
 
@@ -1133,20 +1155,27 @@ impl CfgBuilder {
             // Create try body block
             let try_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
             let _ = self.cfg.add_edge(try_vertex, try_block, CfgEdgeType::TrueBranch);
-            self.current_block = Some(try_block);
 
-            // Walk try body (try_body is Box<[StmtId]> - no searching!)
+            // Create except body block BEFORE walking try body
+            // (needed for exception flow modeling)
+            let except_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
+            let _ = self.cfg.add_edge(try_vertex, except_block, CfgEdgeType::FalseBranch);
+
+            // Push except block to stack so Raise knows where to jump
+            self.except_stack.push(except_block);
+
+            // Walk try body
+            self.current_block = Some(try_block);
             for &try_stmt_id in try_body.iter() {
                 self.walk_statement_hir(try_stmt_id, body);
             }
 
             let try_exit = self.current_block;
 
-            // Create except body block
-            let except_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
-            let _ = self.cfg.add_edge(try_vertex, except_block, CfgEdgeType::FalseBranch);
+            // Pop except block from stack (leaving try scope)
+            self.except_stack.pop();
 
-            // Walk except body (except is Box<[StmtId]> - no searching!)
+            // Walk except body
             self.current_block = Some(except_block);
             for &except_stmt_id in except.iter() {
                 self.walk_statement_hir(except_stmt_id, body);
