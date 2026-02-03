@@ -1043,34 +1043,56 @@ fn analyze_streaming(
             use std::time::Instant;
 
             use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
+            use indicatif::{ProgressBar, ProgressStyle};
 
             let start = Instant::now();
+            let total_files = file_ids.len();
 
-            // Show progress message
-            if !quiet {
-                println!("Analyzing {} files with streaming mode...", file_ids.len());
-                if let Some(w) = workers {
-                    println!("Using {} worker threads", w);
-                } else {
-                    println!(
-                        "Using {} worker threads (auto-detected)",
-                        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
-                    );
-                }
-            }
+            // Setup progress bar (same style as Salsa mode)
+            let progress = if !quiet {
+                let pb = ProgressBar::new(total_files as u64);
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template(
+                            "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}",
+                        )
+                        .unwrap()
+                        .progress_chars("#>-"),
+                );
+                Some(pb)
+            } else {
+                None
+            };
 
-            // Run analysis
+            // Clone progress for closure
+            let progress_clone = progress.clone();
+            let start_clone = start;
+
+            // Run analysis with progress callback
             let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
-            let streaming_results = orchestrator.analyze(file_id_vec, file_set)?;
+            let streaming_results = orchestrator.analyze_with_progress(
+                file_id_vec,
+                file_set,
+                |processed, _total| {
+                    if let Some(ref pb) = progress_clone {
+                        pb.set_position(processed as u64);
+                        let elapsed_secs = start_clone.elapsed().as_secs_f64();
+                        if elapsed_secs > 0.0 {
+                            pb.set_message(format!(
+                                "{:.0} files/sec",
+                                processed as f64 / elapsed_secs
+                            ));
+                        }
+                    }
+                },
+            )?;
+
+            // Finish progress bar
+            if let Some(ref pb) = progress {
+                pb.finish_with_message("Analysis complete");
+            }
 
             let elapsed = start.elapsed();
-
-            if !quiet {
-                println!("Analysis completed in {:.2?}", elapsed);
-                println!("Processed: {} files", streaming_results.total_files);
-                println!("Diagnostics: {}", streaming_results.total_diagnostics);
-                println!("Failed: {} files", streaming_results.failed_files);
-            }
 
             // Convert streaming results to reporter format
             let mut all_diagnostics = Vec::new();

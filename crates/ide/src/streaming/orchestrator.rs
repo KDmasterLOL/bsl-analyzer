@@ -204,6 +204,66 @@ impl AnalysisOrchestrator {
         Ok(results)
     }
 
+    /// Perform batch analysis with progress callback.
+    ///
+    /// Similar to `analyze()`, but calls the progress callback after each file is processed.
+    /// This allows showing a progress bar or other UI feedback.
+    ///
+    /// ## Parameters
+    ///
+    /// - `files`: List of FileIds to process
+    /// - `file_set`: VFS file set with paths
+    /// - `on_progress`: Callback called with (processed_count, total_count) after each file
+    pub fn analyze_with_progress<F>(
+        &self,
+        files: Vec<FileId>,
+        file_set: FileSet,
+        mut on_progress: F,
+    ) -> Result<AnalysisResults, OrchestratorError>
+    where
+        F: FnMut(usize, usize),
+    {
+        let _span = tracing::info_span!("orchestrator_analyze", num_files = files.len()).entered();
+
+        if files.is_empty() {
+            return Err(OrchestratorError::NoFiles);
+        }
+
+        let total_files = files.len();
+        info!(num_files = total_files, num_workers = self.num_workers, "Starting batch analysis");
+
+        // Phase 1: Initialization
+        let global_context = self.initialize_global_context(&files, file_set)?;
+
+        // Phase 2: Create SharedState and spawn workers
+        let sorted_files = self.sort_files_by_priority(files, &global_context);
+        let shared_state = SharedState::new(global_context.as_ref().clone(), sorted_files.clone());
+        let provider = Arc::new(StreamingProvider::with_shared_state(
+            global_context,
+            Arc::clone(&shared_state),
+        ));
+
+        // Load diagnostics configuration from project config file
+        let config = Arc::new(self.load_diagnostics_config());
+
+        let (results_tx, results_rx) = unbounded();
+
+        let workers = self.spawn_workers(provider, shared_state, config, results_tx)?;
+
+        // Phase 3: Collect results with progress callback
+        let results =
+            self.collect_results_with_progress(results_rx, workers, total_files, &mut on_progress);
+
+        info!(
+            total_files = results.total_files,
+            total_diagnostics = results.total_diagnostics,
+            failed_files = results.failed_files,
+            "Batch analysis completed"
+        );
+
+        Ok(results)
+    }
+
     /// Phase 1: Initialize GlobalContext.
     ///
     /// This phase loads configuration and builds all shared data structures:
@@ -520,6 +580,59 @@ impl AnalysisOrchestrator {
 
             total_diagnostics += result.diagnostics.len();
             file_results.push(result);
+        }
+
+        info!(collected_files = file_results.len(), expected_files, "All results collected");
+
+        // Wait for all workers to exit
+        for (idx, handle) in workers.into_iter().enumerate() {
+            if let Err(e) = handle.join() {
+                error!(worker_id = idx, error = ?e, "Worker thread panicked");
+            }
+        }
+
+        info!("All workers exited");
+
+        AnalysisResults {
+            total_files: file_results.len(),
+            total_diagnostics,
+            failed_files,
+            file_results,
+        }
+    }
+
+    /// Collect results with progress callback.
+    ///
+    /// Same as `collect_results`, but calls `on_progress(processed, total)` after each file.
+    fn collect_results_with_progress<F>(
+        &self,
+        results_rx: crossbeam_channel::Receiver<FileResult>,
+        workers: Vec<thread::JoinHandle<()>>,
+        expected_files: usize,
+        on_progress: &mut F,
+    ) -> AnalysisResults
+    where
+        F: FnMut(usize, usize),
+    {
+        let _span = tracing::info_span!("collect_results_with_progress").entered();
+
+        info!(expected_files, "Collecting results with progress");
+
+        let mut file_results = Vec::with_capacity(expected_files);
+        let mut total_diagnostics = 0;
+        let mut failed_files = 0;
+
+        // Collect all results with progress callback
+        for result in results_rx {
+            if result.error.is_some() {
+                failed_files += 1;
+            }
+
+            total_diagnostics += result.diagnostics.len();
+            file_results.push(result);
+
+            // Call progress callback
+            on_progress(file_results.len(), expected_files);
         }
 
         info!(collected_files = file_results.len(), expected_files, "All results collected");

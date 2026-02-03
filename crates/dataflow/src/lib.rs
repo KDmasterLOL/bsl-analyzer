@@ -497,7 +497,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 let max_visits = block_visit_count.values().max().copied().unwrap_or(0);
                 let avg_visits = iterations as f64 / num_blocks as f64;
 
-                tracing::warn!(
+                tracing::debug!(
                     "Backward dataflow analysis exceeded max iterations: {} iterations, {} blocks, max visits per block: {}, avg visits: {:.1}",
                     iterations,
                     num_blocks,
