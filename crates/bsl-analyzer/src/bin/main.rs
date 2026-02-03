@@ -295,7 +295,8 @@ fn lang_is_russian() -> bool {
 
 fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
     use ide_diagnostics::{
-        all_diagnostic_codes, docs, get_metadata, DiagnosticSeverityLevel, DiagnosticType,
+        all_diagnostic_codes, docs, get_metadata, CleanCodeAttribute, DiagnosticSeverityLevel,
+        DiagnosticType, ImpactSeverity, SoftwareQuality,
     };
 
     let is_ru = lang == "ru";
@@ -324,6 +325,46 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
                 DiagnosticSeverityLevel::Info => "INFO",
             };
 
+            // Convert Clean Code attribute to SonarQube format
+            let clean_code_attribute = match metadata.clean_code_attribute {
+                CleanCodeAttribute::Formatted => "FORMATTED",
+                CleanCodeAttribute::Conventional => "CONVENTIONAL",
+                CleanCodeAttribute::Identifiable => "IDENTIFIABLE",
+                CleanCodeAttribute::Clear => "CLEAR",
+                CleanCodeAttribute::Complete => "COMPLETE",
+                CleanCodeAttribute::Efficient => "EFFICIENT",
+                CleanCodeAttribute::Logical => "LOGICAL",
+                CleanCodeAttribute::Distinct => "DISTINCT",
+                CleanCodeAttribute::Focused => "FOCUSED",
+                CleanCodeAttribute::Modular => "MODULAR",
+                CleanCodeAttribute::Tested => "TESTED",
+                CleanCodeAttribute::Lawful => "LAWFUL",
+                CleanCodeAttribute::Respectful => "RESPECTFUL",
+                CleanCodeAttribute::Trustworthy => "TRUSTWORTHY",
+            };
+
+            // Convert impacts to SonarQube format
+            let impacts: Vec<serde_json::Value> = metadata
+                .impacts
+                .iter()
+                .map(|impact| {
+                    let software_quality = match impact.software_quality {
+                        SoftwareQuality::Maintainability => "MAINTAINABILITY",
+                        SoftwareQuality::Reliability => "RELIABILITY",
+                        SoftwareQuality::Security => "SECURITY",
+                    };
+                    let severity = match impact.severity {
+                        ImpactSeverity::Low => "LOW",
+                        ImpactSeverity::Medium => "MEDIUM",
+                        ImpactSeverity::High => "HIGH",
+                    };
+                    serde_json::json!({
+                        "softwareQuality": software_quality,
+                        "severity": severity
+                    })
+                })
+                .collect();
+
             // Convert description from Markdown to HTML (simple conversion)
             let html_description = markdown_to_html(description);
 
@@ -336,6 +377,8 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
                 "description": html_description,
                 "type": sonar_type,
                 "severity": sonar_severity,
+                "cleanCodeAttribute": clean_code_attribute,
+                "impacts": impacts,
                 "active": metadata.activated_by_default,
                 "effortMinutes": metadata.minutes_to_fix,
                 "tags": tags

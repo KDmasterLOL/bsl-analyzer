@@ -10,6 +10,84 @@
 use crate::metadata::*;
 use crate::DiagnosticCode;
 
+/// Helper macro to create DiagnosticMetadata with auto-derived Clean Code attributes.
+///
+/// Automatically derives `clean_code_attribute` from the first tag and diagnostic type,
+/// and `impacts` from the diagnostic type and severity level.
+///
+/// Use the variant with `clean_code_attribute:` to explicitly set the attribute.
+macro_rules! metadata {
+    // Variant with explicit clean_code_attribute
+    (
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        scope: $scope:expr,
+        modules: $modules:expr,
+        minutes_to_fix: $mtf:expr,
+        activated_by_default: $abd:expr,
+        compatibility_mode: $cm:expr,
+        tags: $tags:expr,
+        can_locate_on_project: $clop:expr,
+        extra_min_for_complexity: $emfc:expr,
+        lsp_severity_override: $lso:expr,
+        clean_code_attribute: $cca:expr $(,)?
+    ) => {{
+        const IMPACT: Impact = derive_primary_impact($dtype, $severity);
+
+        DiagnosticMetadata {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $scope,
+            modules: $modules,
+            minutes_to_fix: $mtf,
+            activated_by_default: $abd,
+            compatibility_mode: $cm,
+            tags: $tags,
+            can_locate_on_project: $clop,
+            extra_min_for_complexity: $emfc,
+            lsp_severity_override: $lso,
+            clean_code_attribute: $cca,
+            impacts: &[IMPACT],
+        }
+    }};
+    // Variant with auto-derived clean_code_attribute
+    (
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        scope: $scope:expr,
+        modules: $modules:expr,
+        minutes_to_fix: $mtf:expr,
+        activated_by_default: $abd:expr,
+        compatibility_mode: $cm:expr,
+        tags: $tags:expr,
+        can_locate_on_project: $clop:expr,
+        extra_min_for_complexity: $emfc:expr,
+        lsp_severity_override: $lso:expr $(,)?
+    ) => {{
+        // Extract first tag for clean code attribute derivation
+        const FIRST_TAG: MetadataTag =
+            if $tags.is_empty() { MetadataTag::Badpractice } else { $tags[0] };
+        const CCA: CleanCodeAttribute = derive_clean_code_attribute(FIRST_TAG, $dtype);
+        const IMPACT: Impact = derive_primary_impact($dtype, $severity);
+
+        DiagnosticMetadata {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $scope,
+            modules: $modules,
+            minutes_to_fix: $mtf,
+            activated_by_default: $abd,
+            compatibility_mode: $cm,
+            tags: $tags,
+            can_locate_on_project: $clop,
+            extra_min_for_complexity: $emfc,
+            lsp_severity_override: $lso,
+            clean_code_attribute: CCA,
+            impacts: &[IMPACT],
+        }
+    }};
+}
+
 /// Get metadata for a diagnostic code.
 ///
 /// Returns `None` if metadata is not yet defined for this diagnostic.
@@ -251,7 +329,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
 ///   activatedByDefault = false,
 ///   tags = { DESIGN }
 /// )
-const BAD_WORDS: DiagnosticMetadata = DiagnosticMetadata {
+const BAD_WORDS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -274,7 +352,7 @@ const BAD_WORDS: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   activatedByDefault = false (default)
 /// )
-const CODE_AFTER_ASYNC_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const CODE_AFTER_ASYNC_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -299,7 +377,7 @@ const CODE_AFTER_ASYNC_CALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   canLocateOnProject = true
 /// )
-const DENY_INCOMPLETE_VALUES: DiagnosticMetadata = DiagnosticMetadata {
+const DENY_INCOMPLETE_VALUES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -324,7 +402,7 @@ const DENY_INCOMPLETE_VALUES: DiagnosticMetadata = DiagnosticMetadata {
 ///   modules = { ManagerModule, ObjectModule, ValueManagerModule, SessionModule },
 ///   canLocateOnProject = true
 /// )
-const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = DiagnosticMetadata {
+const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -341,6 +419,7 @@ const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// FieldsFromJoinsWithoutIsNull diagnostic metadata.
@@ -352,7 +431,7 @@ const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = DiagnosticMetadata {
 ///   activatedByDefault = false,
 ///   tags = { SQL, SUSPICIOUS, UNPREDICTABLE }
 /// )
-const FIELDS_FROM_JOINS_WITHOUT_IS_NULL: DiagnosticMetadata = DiagnosticMetadata {
+const FIELDS_FROM_JOINS_WITHOUT_IS_NULL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -376,7 +455,7 @@ const FIELDS_FROM_JOINS_WITHOUT_IS_NULL: DiagnosticMetadata = DiagnosticMetadata
 ///   scope = BSL,
 ///   activatedByDefault = false
 /// )
-const FILE_SYSTEM_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
+const FILE_SYSTEM_ACCESS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -399,7 +478,7 @@ const FILE_SYSTEM_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
 ///   activatedByDefault = false,
 ///   tags = { STANDARD }
 /// )
-const FUNCTION_NAME_STARTS_WITH_GET: DiagnosticMetadata = DiagnosticMetadata {
+const FUNCTION_NAME_STARTS_WITH_GET: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -422,7 +501,7 @@ const FUNCTION_NAME_STARTS_WITH_GET: DiagnosticMetadata = DiagnosticMetadata {
 ///   activatedByDefault = false,
 ///   tags = { DESIGN }
 /// )
-const FUNCTION_OUT_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
+const FUNCTION_OUT_PARAMETER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -445,7 +524,7 @@ const FUNCTION_OUT_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   activatedByDefault = false
 /// )
-const INTERNET_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
+const INTERNET_ACCESS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -468,7 +547,7 @@ const INTERNET_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { STANDARD, PERFORMANCE, BADPRACTICE },
 ///   activatedByDefault = false
 /// )
-const MISSING_TEMP_STORAGE_DELETION: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_TEMP_STORAGE_DELETION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -491,7 +570,7 @@ const MISSING_TEMP_STORAGE_DELETION: DiagnosticMetadata = DiagnosticMetadata {
 ///   activatedByDefault = false,
 ///   tags = { BRAINOVERLOAD }
 /// )
-const TERNARY_OPERATOR_USAGE: DiagnosticMetadata = DiagnosticMetadata {
+const TERNARY_OPERATOR_USAGE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -514,7 +593,7 @@ const TERNARY_OPERATOR_USAGE: DiagnosticMetadata = DiagnosticMetadata {
 ///   activatedByDefault = false,
 ///   tags = { BRAINOVERLOAD }
 /// )
-const TOO_MANY_RETURNS: DiagnosticMetadata = DiagnosticMetadata {
+const TOO_MANY_RETURNS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -532,7 +611,7 @@ const TOO_MANY_RETURNS: DiagnosticMetadata = DiagnosticMetadata {
 // Tier 1 diagnostics (syntax-only) - 39 total
 // ============================================================================
 
-const PARSE_ERROR: DiagnosticMetadata = DiagnosticMetadata {
+const PARSE_ERROR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -546,7 +625,7 @@ const PARSE_ERROR: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const CANONICAL_SPELLING_KEYWORDS: DiagnosticMetadata = DiagnosticMetadata {
+const CANONICAL_SPELLING_KEYWORDS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -560,7 +639,7 @@ const CANONICAL_SPELLING_KEYWORDS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const CONSECUTIVE_EMPTY_LINES: DiagnosticMetadata = DiagnosticMetadata {
+const CONSECUTIVE_EMPTY_LINES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -574,7 +653,7 @@ const CONSECUTIVE_EMPTY_LINES: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const LINE_LENGTH: DiagnosticMetadata = DiagnosticMetadata {
+const LINE_LENGTH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -586,9 +665,10 @@ const LINE_LENGTH: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Formatted,
 };
 
-const MISSING_SPACE: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_SPACE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -602,7 +682,7 @@ const MISSING_SPACE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const ONE_STATEMENT_PER_LINE: DiagnosticMetadata = DiagnosticMetadata {
+const ONE_STATEMENT_PER_LINE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -616,7 +696,7 @@ const ONE_STATEMENT_PER_LINE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const SEMICOLON_PRESENCE: DiagnosticMetadata = DiagnosticMetadata {
+const SEMICOLON_PRESENCE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -630,7 +710,7 @@ const SEMICOLON_PRESENCE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const SPACE_AT_START_COMMENT: DiagnosticMetadata = DiagnosticMetadata {
+const SPACE_AT_START_COMMENT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -644,7 +724,7 @@ const SPACE_AT_START_COMMENT: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const INCORRECT_LINE_BREAK: DiagnosticMetadata = DiagnosticMetadata {
+const INCORRECT_LINE_BREAK: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -656,9 +736,10 @@ const INCORRECT_LINE_BREAK: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Formatted,
 };
 
-const INCORRECT_USE_OF_STR_TEMPLATE: DiagnosticMetadata = DiagnosticMetadata {
+const INCORRECT_USE_OF_STR_TEMPLATE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -672,7 +753,7 @@ const INCORRECT_USE_OF_STR_TEMPLATE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const EXTRA_COMMAS: DiagnosticMetadata = DiagnosticMetadata {
+const EXTRA_COMMAS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -686,7 +767,7 @@ const EXTRA_COMMAS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const COMMENTED_CODE: DiagnosticMetadata = DiagnosticMetadata {
+const COMMENTED_CODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -700,7 +781,7 @@ const COMMENTED_CODE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const EMPTY_CODE_BLOCK: DiagnosticMetadata = DiagnosticMetadata {
+const EMPTY_CODE_BLOCK: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -714,7 +795,7 @@ const EMPTY_CODE_BLOCK: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const EMPTY_REGION: DiagnosticMetadata = DiagnosticMetadata {
+const EMPTY_REGION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -728,7 +809,7 @@ const EMPTY_REGION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const EMPTY_STATEMENT: DiagnosticMetadata = DiagnosticMetadata {
+const EMPTY_STATEMENT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -742,7 +823,7 @@ const EMPTY_STATEMENT: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const UNREACHABLE_CODE: DiagnosticMetadata = DiagnosticMetadata {
+const UNREACHABLE_CODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -756,7 +837,7 @@ const UNREACHABLE_CODE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const CODE_BLOCK_BEFORE_SUB: DiagnosticMetadata = DiagnosticMetadata {
+const CODE_BLOCK_BEFORE_SUB: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -770,7 +851,7 @@ const CODE_BLOCK_BEFORE_SUB: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const CODE_OUT_OF_REGION: DiagnosticMetadata = DiagnosticMetadata {
+const CODE_OUT_OF_REGION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -784,7 +865,7 @@ const CODE_OUT_OF_REGION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const MAGIC_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
+const MAGIC_NUMBER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -798,7 +879,7 @@ const MAGIC_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const MAGIC_DATE: DiagnosticMetadata = DiagnosticMetadata {
+const MAGIC_DATE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -812,7 +893,7 @@ const MAGIC_DATE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const YO_LETTER_USAGE: DiagnosticMetadata = DiagnosticMetadata {
+const YO_LETTER_USAGE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -826,7 +907,7 @@ const YO_LETTER_USAGE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const LATIN_AND_CYRILLIC_SYMBOL_IN_WORD: DiagnosticMetadata = DiagnosticMetadata {
+const LATIN_AND_CYRILLIC_SYMBOL_IN_WORD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -838,9 +919,10 @@ const LATIN_AND_CYRILLIC_SYMBOL_IN_WORD: DiagnosticMetadata = DiagnosticMetadata
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
-const INVALID_CHARACTER_IN_FILE: DiagnosticMetadata = DiagnosticMetadata {
+const INVALID_CHARACTER_IN_FILE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -854,7 +936,7 @@ const INVALID_CHARACTER_IN_FILE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const DOUBLE_NEGATIVES: DiagnosticMetadata = DiagnosticMetadata {
+const DOUBLE_NEGATIVES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -868,7 +950,7 @@ const DOUBLE_NEGATIVES: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const NESTED_TERNARY_OPERATOR: DiagnosticMetadata = DiagnosticMetadata {
+const NESTED_TERNARY_OPERATOR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -882,7 +964,7 @@ const NESTED_TERNARY_OPERATOR: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const NON_EXPORT_METHODS_IN_API_REGION: DiagnosticMetadata = DiagnosticMetadata {
+const NON_EXPORT_METHODS_IN_API_REGION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -896,7 +978,7 @@ const NON_EXPORT_METHODS_IN_API_REGION: DiagnosticMetadata = DiagnosticMetadata 
     lsp_severity_override: "",
 };
 
-const UNARY_PLUS_IN_CONCATENATION: DiagnosticMetadata = DiagnosticMetadata {
+const UNARY_PLUS_IN_CONCATENATION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -910,7 +992,7 @@ const UNARY_PLUS_IN_CONCATENATION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USELESS_TERNARY_OPERATOR: DiagnosticMetadata = DiagnosticMetadata {
+const USELESS_TERNARY_OPERATOR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -924,7 +1006,7 @@ const USELESS_TERNARY_OPERATOR: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const DUPLICATE_STRING_LITERAL: DiagnosticMetadata = DiagnosticMetadata {
+const DUPLICATE_STRING_LITERAL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -938,7 +1020,7 @@ const DUPLICATE_STRING_LITERAL: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const DUPLICATE_REGION: DiagnosticMetadata = DiagnosticMetadata {
+const DUPLICATE_REGION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -952,7 +1034,7 @@ const DUPLICATE_REGION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const NON_STANDARD_REGION: DiagnosticMetadata = DiagnosticMetadata {
+const NON_STANDARD_REGION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -966,7 +1048,7 @@ const NON_STANDARD_REGION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const DUPLICATED_INSERTION_INTO_COLLECTION: DiagnosticMetadata = DiagnosticMetadata {
+const DUPLICATED_INSERTION_INTO_COLLECTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -980,7 +1062,7 @@ const DUPLICATED_INSERTION_INTO_COLLECTION: DiagnosticMetadata = DiagnosticMetad
     lsp_severity_override: "",
 };
 
-const EXCESSIVE_AUTO_TEST_CHECK: DiagnosticMetadata = DiagnosticMetadata {
+const EXCESSIVE_AUTO_TEST_CHECK: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -999,7 +1081,7 @@ const EXCESSIVE_AUTO_TEST_CHECK: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const IDENTICAL_EXPRESSIONS: DiagnosticMetadata = DiagnosticMetadata {
+const IDENTICAL_EXPRESSIONS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1013,7 +1095,7 @@ const IDENTICAL_EXPRESSIONS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const IF_ELSE_DUPLICATED_CODE_BLOCK: DiagnosticMetadata = DiagnosticMetadata {
+const IF_ELSE_DUPLICATED_CODE_BLOCK: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1027,7 +1109,7 @@ const IF_ELSE_DUPLICATED_CODE_BLOCK: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const IF_ELSE_DUPLICATED_CONDITION: DiagnosticMetadata = DiagnosticMetadata {
+const IF_ELSE_DUPLICATED_CONDITION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1041,7 +1123,7 @@ const IF_ELSE_DUPLICATED_CONDITION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const IF_ELSE_IF_ENDS_WITH_ELSE: DiagnosticMetadata = DiagnosticMetadata {
+const IF_ELSE_IF_ENDS_WITH_ELSE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1055,7 +1137,7 @@ const IF_ELSE_IF_ENDS_WITH_ELSE: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const MULTILINGUAL_STRING_HAS_ALL_DECLARED_LANGUAGES: DiagnosticMetadata = DiagnosticMetadata {
+const MULTILINGUAL_STRING_HAS_ALL_DECLARED_LANGUAGES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -1069,7 +1151,7 @@ const MULTILINGUAL_STRING_HAS_ALL_DECLARED_LANGUAGES: DiagnosticMetadata = Diagn
     lsp_severity_override: "",
 };
 
-const MULTILINGUAL_STRING_USING_WITH_TEMPLATE: DiagnosticMetadata = DiagnosticMetadata {
+const MULTILINGUAL_STRING_USING_WITH_TEMPLATE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -1083,7 +1165,7 @@ const MULTILINGUAL_STRING_USING_WITH_TEMPLATE: DiagnosticMetadata = DiagnosticMe
     lsp_severity_override: "",
 };
 
-const NESTED_CONSTRUCTORS_IN_STRUCTURE_DECLARATION: DiagnosticMetadata = DiagnosticMetadata {
+const NESTED_CONSTRUCTORS_IN_STRUCTURE_DECLARATION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1097,7 +1179,7 @@ const NESTED_CONSTRUCTORS_IN_STRUCTURE_DECLARATION: DiagnosticMetadata = Diagnos
     lsp_severity_override: "",
 };
 
-const NESTED_FUNCTION_IN_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
+const NESTED_FUNCTION_IN_PARAMETERS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1123,7 +1205,7 @@ const NESTED_FUNCTION_IN_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { UNPREDICTABLE, BADPRACTICE, SUSPICIOUS }
 /// )
-const ALL_FUNCTION_PATH_MUST_HAVE_RETURN: DiagnosticMetadata = DiagnosticMetadata {
+const ALL_FUNCTION_PATH_MUST_HAVE_RETURN: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1145,7 +1227,7 @@ const ALL_FUNCTION_PATH_MUST_HAVE_RETURN: DiagnosticMetadata = DiagnosticMetadat
 ///   minutesToFix = 10,
 ///   tags = { SUSPICIOUS, UNPREDICTABLE }
 /// )
-const FUNCTION_SHOULD_HAVE_RETURN: DiagnosticMetadata = DiagnosticMetadata {
+const FUNCTION_SHOULD_HAVE_RETURN: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1167,7 +1249,7 @@ const FUNCTION_SHOULD_HAVE_RETURN: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { ERROR }
 /// )
-const PROCEDURE_RETURNS_VALUE: DiagnosticMetadata = DiagnosticMetadata {
+const PROCEDURE_RETURNS_VALUE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -1189,7 +1271,7 @@ const PROCEDURE_RETURNS_VALUE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { DESIGN, BADPRACTICE }
 /// )
-const FUNCTION_RETURNS_SAME_PRIMITIVE: DiagnosticMetadata = DiagnosticMetadata {
+const FUNCTION_RETURNS_SAME_PRIMITIVE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1211,7 +1293,7 @@ const FUNCTION_RETURNS_SAME_PRIMITIVE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 30,
 ///   tags = { STANDARD, BRAINOVERLOAD }
 /// )
-const NUMBER_OF_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
+const NUMBER_OF_PARAMS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1233,7 +1315,7 @@ const NUMBER_OF_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 30,
 ///   tags = { STANDARD, BRAINOVERLOAD }
 /// )
-const NUMBER_OF_OPTIONAL_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
+const NUMBER_OF_OPTIONAL_PARAMS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1256,7 +1338,7 @@ const NUMBER_OF_OPTIONAL_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { STANDARD, BRAINOVERLOAD }
 /// )
-const NUMBER_OF_VALUES_IN_STRUCTURE_CONSTRUCTOR: DiagnosticMetadata = DiagnosticMetadata {
+const NUMBER_OF_VALUES_IN_STRUCTURE_CONSTRUCTOR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1278,7 +1360,7 @@ const NUMBER_OF_VALUES_IN_STRUCTURE_CONSTRUCTOR: DiagnosticMetadata = Diagnostic
 ///   minutesToFix = 30,
 ///   tags = { STANDARD, DESIGN }
 /// )
-const ORDER_OF_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
+const ORDER_OF_PARAMS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1300,7 +1382,7 @@ const ORDER_OF_PARAMS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { ERROR }
 /// )
-const MISSED_REQUIRED_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
+const MISSED_REQUIRED_PARAMETER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1323,7 +1405,7 @@ const MISSED_REQUIRED_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { DESIGN, UNUSED }
 /// )
-const UNUSED_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
+const UNUSED_PARAMETERS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Os,
@@ -1345,7 +1427,7 @@ const UNUSED_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const MISSING_PARAMETER_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_PARAMETER_DESCRIPTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1367,7 +1449,7 @@ const MISSING_PARAMETER_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const MISSING_RETURNED_VALUE_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_RETURNED_VALUE_DESCRIPTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1389,7 +1471,7 @@ const MISSING_RETURNED_VALUE_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadat
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const RESERVED_PARAMETER_NAMES: DiagnosticMetadata = DiagnosticMetadata {
+const RESERVED_PARAMETER_NAMES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1411,7 +1493,7 @@ const RESERVED_PARAMETER_NAMES: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 2,
 ///   tags = { SUSPICIOUS }
 /// )
-const REWRITE_METHOD_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
+const REWRITE_METHOD_PARAMETER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1434,7 +1516,7 @@ const REWRITE_METHOD_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, SUSPICIOUS, UNUSED }
 /// )
-const UNUSED_LOCAL_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const UNUSED_LOCAL_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1457,7 +1539,7 @@ const UNUSED_LOCAL_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = ALL,
 ///   tags = { STANDARD, DESIGN, UNPREDICTABLE }
 /// )
-const EXPORT_VARIABLES: DiagnosticMetadata = DiagnosticMetadata {
+const EXPORT_VARIABLES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1479,7 +1561,7 @@ const EXPORT_VARIABLES: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD }
 /// )
-const MISSING_VARIABLES_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_VARIABLES_DESCRIPTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1501,7 +1583,7 @@ const MISSING_VARIABLES_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { SUSPICIOUS }
 /// )
-const SELF_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
+const SELF_ASSIGN: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1526,7 +1608,7 @@ const SELF_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_3,
 ///   tags = { ERROR }
 /// )
-const THIS_OBJECT_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
+const THIS_OBJECT_ASSIGN: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -1549,7 +1631,7 @@ const THIS_OBJECT_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { BRAINOVERLOAD },
 ///   extraMinForComplexity = 1
 /// )
-const CYCLOMATIC_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
+const CYCLOMATIC_COMPLEXITY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1572,7 +1654,7 @@ const CYCLOMATIC_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { BRAINOVERLOAD },
 ///   extraMinForComplexity = 1
 /// )
-const COGNITIVE_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
+const COGNITIVE_COMPLEXITY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1595,7 +1677,7 @@ const COGNITIVE_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 30,
 ///   tags = { BADPRACTICE, BRAINOVERLOAD }
 /// )
-const NESTED_STATEMENTS: DiagnosticMetadata = DiagnosticMetadata {
+const NESTED_STATEMENTS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1607,6 +1689,7 @@ const NESTED_STATEMENTS: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Clear,
 };
 
 /// MethodSize diagnostic metadata.
@@ -1617,7 +1700,7 @@ const NESTED_STATEMENTS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 30,
 ///   tags = { BADPRACTICE }
 /// )
-const METHOD_SIZE: DiagnosticMetadata = DiagnosticMetadata {
+const METHOD_SIZE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1629,6 +1712,7 @@ const METHOD_SIZE: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Focused,
 };
 
 /// IfConditionComplexity diagnostic metadata.
@@ -1639,7 +1723,7 @@ const METHOD_SIZE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { BRAINOVERLOAD }
 /// )
-const IF_CONDITION_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
+const IF_CONDITION_COMPLEXITY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -1661,7 +1745,7 @@ const IF_CONDITION_COMPLEXITY: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 15,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const MISSING_CODE_TRY_CATCH_EX: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_CODE_TRY_CATCH_EX: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1673,6 +1757,7 @@ const MISSING_CODE_TRY_CATCH_EX: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Complete,
 };
 
 /// MissingTemporaryFileDeletion diagnostic metadata.
@@ -1683,7 +1768,7 @@ const MISSING_CODE_TRY_CATCH_EX: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { BADPRACTICE, STANDARD }
 /// )
-const MISSING_TEMPORARY_FILE_DELETION: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_TEMPORARY_FILE_DELETION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1705,7 +1790,7 @@ const MISSING_TEMPORARY_FILE_DELETION: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 2,
 ///   tags = { CLUMSY }
 /// )
-const USE_LESS_FOR_EACH: DiagnosticMetadata = DiagnosticMetadata {
+const USE_LESS_FOR_EACH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1727,7 +1812,7 @@ const USE_LESS_FOR_EACH: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const USING_GOTO: DiagnosticMetadata = DiagnosticMetadata {
+const USING_GOTO: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1749,7 +1834,7 @@ const USING_GOTO: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { STANDARD }
 /// )
-const BEGIN_TRANSACTION_BEFORE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetadata {
+const BEGIN_TRANSACTION_BEFORE_TRY_CATCH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1761,6 +1846,7 @@ const BEGIN_TRANSACTION_BEFORE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetadat
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// CommitTransactionOutsideTryCatch diagnostic metadata.
@@ -1771,7 +1857,7 @@ const BEGIN_TRANSACTION_BEFORE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetadat
 ///   minutesToFix = 10,
 ///   tags = { STANDARD }
 /// )
-const COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetadata {
+const COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1783,6 +1869,7 @@ const COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetad
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// CompilationDirectiveLost diagnostic metadata.
@@ -1795,7 +1882,7 @@ const COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH: DiagnosticMetadata = DiagnosticMetad
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, UNPREDICTABLE }
 /// )
-const COMPILATION_DIRECTIVE_LOST: DiagnosticMetadata = DiagnosticMetadata {
+const COMPILATION_DIRECTIVE_LOST: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -1822,7 +1909,7 @@ const COMPILATION_DIRECTIVE_LOST: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { CLUMSY, STANDARD, UNPREDICTABLE }
 /// )
-const COMPILATION_DIRECTIVE_NEED_LESS: DiagnosticMetadata = DiagnosticMetadata {
+const COMPILATION_DIRECTIVE_NEED_LESS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -1855,7 +1942,7 @@ const COMPILATION_DIRECTIVE_NEED_LESS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 20,
 ///   tags = { PERFORMANCE }
 /// )
-const CREATE_QUERY_IN_CYCLE: DiagnosticMetadata = DiagnosticMetadata {
+const CREATE_QUERY_IN_CYCLE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1877,7 +1964,7 @@ const CREATE_QUERY_IN_CYCLE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, ERROR }
 /// )
-const DELETING_COLLECTION_ITEM: DiagnosticMetadata = DiagnosticMetadata {
+const DELETING_COLLECTION_ITEM: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1889,6 +1976,7 @@ const DELETING_COLLECTION_ITEM: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// SelfInsertion diagnostic metadata.
@@ -1899,7 +1987,7 @@ const DELETING_COLLECTION_ITEM: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { STANDARD, UNPREDICTABLE, PERFORMANCE }
 /// )
-const SELF_INSERTION: DiagnosticMetadata = DiagnosticMetadata {
+const SELF_INSERTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -1911,6 +1999,7 @@ const SELF_INSERTION: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// SeveralCompilerDirectives diagnostic metadata.
@@ -1921,7 +2010,7 @@ const SELF_INSERTION: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { UNPREDICTABLE, ERROR }
 /// )
-const SEVERAL_COMPILER_DIRECTIVES: DiagnosticMetadata = DiagnosticMetadata {
+const SEVERAL_COMPILER_DIRECTIVES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -1944,7 +2033,7 @@ const SEVERAL_COMPILER_DIRECTIVES: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const STYLE_ELEMENT_CONSTRUCTORS: DiagnosticMetadata = DiagnosticMetadata {
+const STYLE_ELEMENT_CONSTRUCTORS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -1967,7 +2056,7 @@ const STYLE_ELEMENT_CONSTRUCTORS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, DEPRECATED, UNPREDICTABLE }
 /// )
-const DEPRECATED_CURRENT_DATE: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_CURRENT_DATE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -1991,7 +2080,7 @@ const DEPRECATED_CURRENT_DATE: DiagnosticMetadata = DiagnosticMetadata {
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_6,
 ///   tags = { DEPRECATED }
 /// )
-const DEPRECATED_FIND: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_FIND: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -2014,7 +2103,7 @@ const DEPRECATED_FIND: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 2,
 ///   tags = { STANDARD, DEPRECATED }
 /// )
-const DEPRECATED_MESSAGE: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_MESSAGE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -2038,7 +2127,7 @@ const DEPRECATED_MESSAGE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, DEPRECATED }
 /// )
-const DEPRECATED_TYPE_MANAGED_FORM: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_TYPE_MANAGED_FORM: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2062,7 +2151,7 @@ const DEPRECATED_TYPE_MANAGED_FORM: DiagnosticMetadata = DiagnosticMetadata {
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_10,
 ///   tags = { DEPRECATED }
 /// )
-const DEPRECATED_METHODS_8310: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_METHODS_8310: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2086,7 +2175,7 @@ const DEPRECATED_METHODS_8310: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { DEPRECATED }
 /// )
-const DEPRECATED_METHODS_8317: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_METHODS_8317: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2110,7 +2199,7 @@ const DEPRECATED_METHODS_8317: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { DEPRECATED }
 /// )
-const DEPRECATED_ATTRIBUTES_8312: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_ATTRIBUTES_8312: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2132,7 +2221,7 @@ const DEPRECATED_ATTRIBUTES_8312: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 3,
 ///   tags = { DEPRECATED, DESIGN }
 /// )
-const DEPRECATED_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const DEPRECATED_METHOD_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::All,
@@ -2155,7 +2244,7 @@ const DEPRECATED_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   scope = BSL
 /// )
-const DISABLE_SAFE_MODE: DiagnosticMetadata = DiagnosticMetadata {
+const DISABLE_SAFE_MODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2178,7 +2267,7 @@ const DISABLE_SAFE_MODE: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   scope = BSL
 /// )
-const EXTERNAL_APP_STARTING: DiagnosticMetadata = DiagnosticMetadata {
+const EXTERNAL_APP_STARTING: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2201,7 +2290,7 @@ const EXTERNAL_APP_STARTING: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   tags = { SUSPICIOUS }
 /// )
-const OS_USERS_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const OS_USERS_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -2224,7 +2313,7 @@ const OS_USERS_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const TEMP_FILES_DIR: DiagnosticMetadata = DiagnosticMetadata {
+const TEMP_FILES_DIR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2247,7 +2336,7 @@ const TEMP_FILES_DIR: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { BADPRACTICE }
 /// )
-const FORM_DATA_TO_VALUE: DiagnosticMetadata = DiagnosticMetadata {
+const FORM_DATA_TO_VALUE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2270,7 +2359,7 @@ const FORM_DATA_TO_VALUE: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   tags = { ERROR }
 /// )
-const GET_FORM_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const GET_FORM_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2293,7 +2382,7 @@ const GET_FORM_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { ERROR, UNPREDICTABLE },
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_12
 /// )
-const GLOBAL_CONTEXT_METHOD_COLLISION_8312: DiagnosticMetadata = DiagnosticMetadata {
+const GLOBAL_CONTEXT_METHOD_COLLISION_8312: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -2316,7 +2405,7 @@ const GLOBAL_CONTEXT_METHOD_COLLISION_8312: DiagnosticMetadata = DiagnosticMetad
 ///   minutesToFix = 5,
 ///   tags = { ERROR }
 /// )
-const IS_IN_ROLE_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const IS_IN_ROLE_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2338,7 +2427,7 @@ const IS_IN_ROLE_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 15,
 ///   tags = { STANDARD }
 /// )
-const PAIRING_BROKEN_TRANSACTION: DiagnosticMetadata = DiagnosticMetadata {
+const PAIRING_BROKEN_TRANSACTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -2350,6 +2439,7 @@ const PAIRING_BROKEN_TRANSACTION: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// WrongUseOfRollbackTransactionMethod diagnostic metadata.
@@ -2361,7 +2451,7 @@ const PAIRING_BROKEN_TRANSACTION: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   tags = { STANDARD }
 /// )
-const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -2373,6 +2463,7 @@ const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = DiagnosticM
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// TimeoutsInExternalResources diagnostic metadata.
@@ -2383,7 +2474,7 @@ const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = DiagnosticM
 ///   minutesToFix = 5,
 ///   tags = { UNPREDICTABLE, STANDARD }
 /// )
-const TIMEOUTS_IN_EXTERNAL_RESOURCES: DiagnosticMetadata = DiagnosticMetadata {
+const TIMEOUTS_IN_EXTERNAL_RESOURCES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -2405,7 +2496,7 @@ const TIMEOUTS_IN_EXTERNAL_RESOURCES: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 2,
 ///   tags = { STANDARD }
 /// )
-const TRY_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
+const TRY_NUMBER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -2427,7 +2518,7 @@ const TRY_NUMBER: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, ERROR }
 /// )
-const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = DiagnosticMetadata {
+const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -2439,9 +2530,10 @@ const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
-const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -2469,7 +2561,7 @@ const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { UNPREDICTABLE }
 /// )
-const WRONG_DATA_PATH_FOR_FORM_ELEMENTS: DiagnosticMetadata = DiagnosticMetadata {
+const WRONG_DATA_PATH_FOR_FORM_ELEMENTS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -2494,7 +2586,7 @@ const WRONG_DATA_PATH_FOR_FORM_ELEMENTS: DiagnosticMetadata = DiagnosticMetadata
 ///   minutesToFix = 10,
 ///   tags = { SUSPICIOUS, ERROR }
 /// )
-const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -2516,7 +2608,7 @@ const WRONG_HTTP_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { SUSPICIOUS, ERROR }
 /// )
-const WRONG_WEB_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+const WRONG_WEB_SERVICE_HANDLER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -2539,7 +2631,7 @@ const WRONG_WEB_SERVICE_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   tags = { ERROR, SUSPICIOUS }
 /// )
-const WRONG_USE_FUNCTION_PROCEED_WITH_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const WRONG_USE_FUNCTION_PROCEED_WITH_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -2562,7 +2654,7 @@ const WRONG_USE_FUNCTION_PROCEED_WITH_CALL: DiagnosticMetadata = DiagnosticMetad
 ///   scope = BSL,
 ///   tags = { STANDARD, SQL, BADPRACTICE }
 /// )
-const ASSIGN_ALIAS_FIELDS_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const ASSIGN_ALIAS_FIELDS_IN_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2586,7 +2678,7 @@ const ASSIGN_ALIAS_FIELDS_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, DESIGN }
 /// )
-const CACHED_PUBLIC: DiagnosticMetadata = DiagnosticMetadata {
+const CACHED_PUBLIC: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2598,6 +2690,7 @@ const CACHED_PUBLIC: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Focused,
 };
 
 /// CommandModuleExportMethods diagnostic metadata.
@@ -2610,7 +2703,7 @@ const CACHED_PUBLIC: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, CLUMSY }
 /// )
-const COMMAND_MODULE_EXPORT_METHODS: DiagnosticMetadata = DiagnosticMetadata {
+const COMMAND_MODULE_EXPORT_METHODS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2632,7 +2725,7 @@ const COMMAND_MODULE_EXPORT_METHODS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 2,
 ///   tags = { ERROR }
 /// )
-const COMMON_MODULE_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_ASSIGN: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::All,
@@ -2656,7 +2749,7 @@ const COMMON_MODULE_ASSIGN: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, UNPREDICTABLE, DESIGN }
 /// )
-const COMMON_MODULE_INVALID_TYPE: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_INVALID_TYPE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2680,7 +2773,7 @@ const COMMON_MODULE_INVALID_TYPE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { BRAINOVERLOAD, SUSPICIOUS }
 /// )
-const COMMON_MODULE_MISSING_API: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_MISSING_API: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -2704,7 +2797,7 @@ const COMMON_MODULE_MISSING_API: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, UNPREDICTABLE }
 /// )
-const COMMON_MODULE_NAME_CACHED: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_CACHED: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2716,6 +2809,7 @@ const COMMON_MODULE_NAME_CACHED: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameClient diagnostic metadata.
@@ -2728,7 +2822,7 @@ const COMMON_MODULE_NAME_CACHED: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, UNPREDICTABLE }
 /// )
-const COMMON_MODULE_NAME_CLIENT: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_CLIENT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -2740,6 +2834,7 @@ const COMMON_MODULE_NAME_CLIENT: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameClientServer diagnostic metadata.
@@ -2752,7 +2847,7 @@ const COMMON_MODULE_NAME_CLIENT: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, UNPREDICTABLE }
 /// )
-const COMMON_MODULE_NAME_CLIENT_SERVER: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_CLIENT_SERVER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2764,6 +2859,7 @@ const COMMON_MODULE_NAME_CLIENT_SERVER: DiagnosticMetadata = DiagnosticMetadata 
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameFullAccess diagnostic metadata.
@@ -2776,7 +2872,7 @@ const COMMON_MODULE_NAME_CLIENT_SERVER: DiagnosticMetadata = DiagnosticMetadata 
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, UNPREDICTABLE }
 /// )
-const COMMON_MODULE_NAME_FULL_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_FULL_ACCESS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2800,7 +2896,7 @@ const COMMON_MODULE_NAME_FULL_ACCESS: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, BRAINOVERLOAD }
 /// )
-const COMMON_MODULE_NAME_GLOBAL: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_GLOBAL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2812,6 +2908,7 @@ const COMMON_MODULE_NAME_GLOBAL: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameGlobalClient diagnostic metadata.
@@ -2824,7 +2921,7 @@ const COMMON_MODULE_NAME_GLOBAL: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD }
 /// )
-const COMMON_MODULE_NAME_GLOBAL_CLIENT: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_GLOBAL_CLIENT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2836,6 +2933,7 @@ const COMMON_MODULE_NAME_GLOBAL_CLIENT: DiagnosticMetadata = DiagnosticMetadata 
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameServerCall diagnostic metadata.
@@ -2848,7 +2946,7 @@ const COMMON_MODULE_NAME_GLOBAL_CLIENT: DiagnosticMetadata = DiagnosticMetadata 
 ///   minutesToFix = 5,
 ///   tags = { STANDARD, BADPRACTICE, UNPREDICTABLE }
 /// )
-const COMMON_MODULE_NAME_SERVER_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_SERVER_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -2860,6 +2958,7 @@ const COMMON_MODULE_NAME_SERVER_CALL: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// CommonModuleNameWords diagnostic metadata.
@@ -2872,7 +2971,7 @@ const COMMON_MODULE_NAME_SERVER_CALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { STANDARD }
 /// )
-const COMMON_MODULE_NAME_WORDS: DiagnosticMetadata = DiagnosticMetadata {
+const COMMON_MODULE_NAME_WORDS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -2884,6 +2983,7 @@ const COMMON_MODULE_NAME_WORDS: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// FullOuterJoinQuery diagnostic metadata.
@@ -2895,7 +2995,7 @@ const COMMON_MODULE_NAME_WORDS: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SQL, STANDARD, PERFORMANCE },
 ///   scope = BSL
 /// )
-const FULL_OUTER_JOIN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const FULL_OUTER_JOIN_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2918,7 +3018,7 @@ const FULL_OUTER_JOIN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { STANDARD, SQL, UNPREDICTABLE },
 ///   scope = BSL
 /// )
-const INCORRECT_USE_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const INCORRECT_USE_LIKE_IN_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2941,7 +3041,7 @@ const INCORRECT_USE_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SQL, STANDARD, PERFORMANCE },
 ///   scope = BSL
 /// )
-const JOIN_WITH_SUB_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const JOIN_WITH_SUB_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2964,7 +3064,7 @@ const JOIN_WITH_SUB_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SQL, STANDARD, PERFORMANCE },
 ///   scope = BSL
 /// )
-const JOIN_WITH_VIRTUAL_TABLE: DiagnosticMetadata = DiagnosticMetadata {
+const JOIN_WITH_VIRTUAL_TABLE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -2986,7 +3086,7 @@ const JOIN_WITH_VIRTUAL_TABLE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 15,
 ///   tags = { SQL, PERFORMANCE, UNPREDICTABLE }
 /// )
-const LOGICAL_OR_IN_JOIN_QUERY_SECTION: DiagnosticMetadata = DiagnosticMetadata {
+const LOGICAL_OR_IN_JOIN_QUERY_SECTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -3009,7 +3109,7 @@ const LOGICAL_OR_IN_JOIN_QUERY_SECTION: DiagnosticMetadata = DiagnosticMetadata 
 ///   tags = { SQL, PERFORMANCE, STANDARD },
 ///   scope = BSL
 /// )
-const LOGICAL_OR_IN_THE_WHERE_SECTION_OF_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const LOGICAL_OR_IN_THE_WHERE_SECTION_OF_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3033,7 +3133,7 @@ const LOGICAL_OR_IN_THE_WHERE_SECTION_OF_QUERY: DiagnosticMetadata = DiagnosticM
 ///   tags = { STANDARD },
 ///   canLocateOnProject = true
 /// )
-const METADATA_OBJECT_NAME_LENGTH: DiagnosticMetadata = DiagnosticMetadata {
+const METADATA_OBJECT_NAME_LENGTH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3045,6 +3145,7 @@ const METADATA_OBJECT_NAME_LENGTH: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// MissingCommonModuleMethod diagnostic metadata.
@@ -3056,7 +3157,7 @@ const METADATA_OBJECT_NAME_LENGTH: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { ERROR }
 /// )
-const MISSING_COMMON_MODULE_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_COMMON_MODULE_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -3080,7 +3181,7 @@ const MISSING_COMMON_MODULE_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   modules = { SessionModule }
 /// )
-const MISSING_EVENT_SUBSCRIPTION_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+const MISSING_EVENT_SUBSCRIPTION_HANDLER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -3103,7 +3204,7 @@ const MISSING_EVENT_SUBSCRIPTION_HANDLER: DiagnosticMetadata = DiagnosticMetadat
 ///   tags = { BADPRACTICE, SUSPICIOUS, UNPREDICTABLE },
 ///   scope = BSL
 /// )
-const MULTILINE_STRING_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const MULTILINE_STRING_IN_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3127,7 +3228,7 @@ const MULTILINE_STRING_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, UNPREDICTABLE }
 /// )
-const ORDINARY_APP_SUPPORT: DiagnosticMetadata = DiagnosticMetadata {
+const ORDINARY_APP_SUPPORT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3150,7 +3251,7 @@ const ORDINARY_APP_SUPPORT: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   scope = BSL
 /// )
-const PRIVILEGED_MODULE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
+const PRIVILEGED_MODULE_METHOD_CALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3175,7 +3276,7 @@ const PRIVILEGED_MODULE_METHOD_CALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   canLocateOnProject = true
 /// )
-const PROTECTED_MODULE: DiagnosticMetadata = DiagnosticMetadata {
+const PROTECTED_MODULE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3197,7 +3298,7 @@ const PROTECTED_MODULE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, BRAINOVERLOAD, BADPRACTICE }
 /// )
-const PUBLIC_METHODS_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
+const PUBLIC_METHODS_DESCRIPTION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -3209,6 +3310,7 @@ const PUBLIC_METHODS_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Clear,
 };
 
 /// QueryNestedFieldsByDot diagnostic metadata.
@@ -3219,7 +3321,7 @@ const PUBLIC_METHODS_DESCRIPTION: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 10,
 ///   tags = { STANDARD, SQL, PERFORMANCE }
 /// )
-const QUERY_NESTED_FIELDS_BY_DOT: DiagnosticMetadata = DiagnosticMetadata {
+const QUERY_NESTED_FIELDS_BY_DOT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -3242,7 +3344,7 @@ const QUERY_NESTED_FIELDS_BY_DOT: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { STANDARD, SQL, BADPRACTICE },
 ///   scope = BSL
 /// )
-const QUERY_PARSE_ERROR: DiagnosticMetadata = DiagnosticMetadata {
+const QUERY_PARSE_ERROR: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3254,6 +3356,7 @@ const QUERY_PARSE_ERROR: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// QueryToMissingMetadata diagnostic metadata.
@@ -3265,7 +3368,7 @@ const QUERY_PARSE_ERROR: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { SUSPICIOUS, SQL }
 /// )
-const QUERY_TO_MISSING_METADATA: DiagnosticMetadata = DiagnosticMetadata {
+const QUERY_TO_MISSING_METADATA: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -3288,7 +3391,7 @@ const QUERY_TO_MISSING_METADATA: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { SQL, PERFORMANCE }
 /// )
-const REF_OVERUSE: DiagnosticMetadata = DiagnosticMetadata {
+const REF_OVERUSE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3311,7 +3414,7 @@ const REF_OVERUSE: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { STANDARD, SQL, SUSPICIOUS },
 ///   scope = BSL
 /// )
-const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = DiagnosticMetadata {
+const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3323,6 +3426,7 @@ const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
 /// UnionAll diagnostic metadata.
@@ -3334,7 +3438,7 @@ const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { STANDARD, SQL, PERFORMANCE },
 ///   scope = BSL
 /// )
-const UNION_ALL: DiagnosticMetadata = DiagnosticMetadata {
+const UNION_ALL: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,
@@ -3346,6 +3450,7 @@ const UNION_ALL: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Efficient,
 };
 
 /// UsingLikeInQuery diagnostic metadata.
@@ -3358,7 +3463,7 @@ const UNION_ALL: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   activatedByDefault = false
 /// )
-const USING_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
+const USING_LIKE_IN_QUERY: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3370,6 +3475,7 @@ const USING_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Efficient,
 };
 
 /// VirtualTableCallWithoutParameters diagnostic metadata.
@@ -3381,7 +3487,7 @@ const USING_LIKE_IN_QUERY: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SQL, STANDARD, PERFORMANCE },
 ///   scope = BSL
 /// )
-const VIRTUAL_TABLE_CALL_WITHOUT_PARAMETERS: DiagnosticMetadata = DiagnosticMetadata {
+const VIRTUAL_TABLE_CALL_WITHOUT_PARAMETERS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3405,7 +3511,7 @@ const VIRTUAL_TABLE_CALL_WITHOUT_PARAMETERS: DiagnosticMetadata = DiagnosticMeta
 ///   scope = BSL,
 ///   canLocateOnProject = true
 /// )
-const SCHEDULED_JOB_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
+const SCHEDULED_JOB_HANDLER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3429,7 +3535,7 @@ const SCHEDULED_JOB_HANDLER: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 15,
 ///   tags = { DESIGN }
 /// )
-const SERVER_CALLS_IN_FORM_EVENTS: DiagnosticMetadata = DiagnosticMetadata {
+const SERVER_CALLS_IN_FORM_EVENTS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3453,7 +3559,7 @@ const SERVER_CALLS_IN_FORM_EVENTS: DiagnosticMetadata = DiagnosticMetadata {
 ///   scope = BSL,
 ///   modules = { FormModule }
 /// )
-const SERVER_SIDE_EXPORT_FORM_METHOD: DiagnosticMetadata = DiagnosticMetadata {
+const SERVER_SIDE_EXPORT_FORM_METHOD: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Blocker,
     scope: DiagnosticScope::Bsl,
@@ -3477,7 +3583,7 @@ const SERVER_SIDE_EXPORT_FORM_METHOD: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, BADPRACTICE, DESIGN }
 /// )
-const SET_PERMISSIONS_FOR_NEW_OBJECTS: DiagnosticMetadata = DiagnosticMetadata {
+const SET_PERMISSIONS_FOR_NEW_OBJECTS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3500,7 +3606,7 @@ const SET_PERMISSIONS_FOR_NEW_OBJECTS: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { SUSPICIOUS },
 ///   scope = BSL
 /// )
-const SET_PRIVILEGED_MODE: DiagnosticMetadata = DiagnosticMetadata {
+const SET_PRIVILEGED_MODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3523,7 +3629,7 @@ const SET_PRIVILEGED_MODE: DiagnosticMetadata = DiagnosticMetadata {
 ///   tags = { BADPRACTICE, PERFORMANCE, STANDARD },
 ///   scope = BSL
 /// )
-const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = DiagnosticMetadata {
+const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3535,6 +3641,7 @@ const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = Di
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Efficient,
 };
 
 // ============================================================================
@@ -3544,7 +3651,7 @@ const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = Di
 /// DataExchangeLoading diagnostic metadata.
 ///
 /// Ported from Java: DataExchangeLoadingDiagnostic.java
-const DATA_EXCHANGE_LOADING: DiagnosticMetadata = DiagnosticMetadata {
+const DATA_EXCHANGE_LOADING: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3566,7 +3673,7 @@ const DATA_EXCHANGE_LOADING: DiagnosticMetadata = DiagnosticMetadata {
 ///
 /// Ported from Java: ExecuteExternalCodeDiagnostic.java
 /// Note: HTTPServiceModule not available in Rust implementation
-const EXECUTE_EXTERNAL_CODE: DiagnosticMetadata = DiagnosticMetadata {
+const EXECUTE_EXTERNAL_CODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3589,7 +3696,7 @@ const EXECUTE_EXTERNAL_CODE: DiagnosticMetadata = DiagnosticMetadata {
 /// ExecuteExternalCodeInCommonModule diagnostic metadata.
 ///
 /// Ported from Java: ExecuteExternalCodeInCommonModuleDiagnostic.java
-const EXECUTE_EXTERNAL_CODE_IN_COMMON_MODULE: DiagnosticMetadata = DiagnosticMetadata {
+const EXECUTE_EXTERNAL_CODE_IN_COMMON_MODULE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3606,7 +3713,7 @@ const EXECUTE_EXTERNAL_CODE_IN_COMMON_MODULE: DiagnosticMetadata = DiagnosticMet
 /// RedundantAccessToObject diagnostic metadata.
 ///
 /// Ported from Java: RedundantAccessToObjectDiagnostic.java
-const REDUNDANT_ACCESS_TO_OBJECT: DiagnosticMetadata = DiagnosticMetadata {
+const REDUNDANT_ACCESS_TO_OBJECT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -3624,12 +3731,13 @@ const REDUNDANT_ACCESS_TO_OBJECT: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Distinct,
 };
 
 /// SameMetadataObjectAndChildNames diagnostic metadata.
 ///
 /// Ported from Java: SameMetadataObjectAndChildNamesDiagnostic.java
-const SAME_METADATA_OBJECT_AND_CHILD_NAMES: DiagnosticMetadata = DiagnosticMetadata {
+const SAME_METADATA_OBJECT_AND_CHILD_NAMES: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3645,12 +3753,13 @@ const SAME_METADATA_OBJECT_AND_CHILD_NAMES: DiagnosticMetadata = DiagnosticMetad
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Identifiable,
 };
 
 /// UnusedLocalVariable diagnostic metadata.
 ///
 /// Ported from Java: UnusedLocalVariableDiagnostic.java
-const UNUSED_LOCAL_VARIABLE: DiagnosticMetadata = DiagnosticMetadata {
+const UNUSED_LOCAL_VARIABLE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
@@ -3679,7 +3788,7 @@ const UNUSED_LOCAL_VARIABLE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { BADPRACTICE }
 /// )
-const TYPO: DiagnosticMetadata = DiagnosticMetadata {
+const TYPO: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -3701,7 +3810,7 @@ const TYPO: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { DESIGN, SUSPICIOUS }
 /// )
-const UNSAFE_FIND_BY_CODE: DiagnosticMetadata = DiagnosticMetadata {
+const UNSAFE_FIND_BY_CODE: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3723,7 +3832,7 @@ const UNSAFE_FIND_BY_CODE: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 1,
 ///   tags = { STANDARD, BADPRACTICE }
 /// )
-const USAGE_WRITE_LOG_EVENT: DiagnosticMetadata = DiagnosticMetadata {
+const USAGE_WRITE_LOG_EVENT: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::Bsl,
@@ -3746,7 +3855,7 @@ const USAGE_WRITE_LOG_EVENT: DiagnosticMetadata = DiagnosticMetadata {
 ///   minutesToFix = 5,
 ///   tags = { SUSPICIOUS }
 /// )
-const USE_SYSTEM_INFORMATION: DiagnosticMetadata = DiagnosticMetadata {
+const USE_SYSTEM_INFORMATION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3760,7 +3869,7 @@ const USE_SYSTEM_INFORMATION: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_CANCEL_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
+const USING_CANCEL_PARAMETER: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3779,7 +3888,7 @@ const USING_CANCEL_PARAMETER: DiagnosticMetadata = DiagnosticMetadata {
 /// Ported from Java: UsingExternalCodeToolsDiagnostic.java
 /// Detects usage of external code execution mechanisms (ExternalDataProcessors,
 /// ExternalReports, ConfigurationExtensions) with Create/Connect methods.
-const USING_EXTERNAL_CODE_TOOLS: DiagnosticMetadata = DiagnosticMetadata {
+const USING_EXTERNAL_CODE_TOOLS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3793,7 +3902,7 @@ const USING_EXTERNAL_CODE_TOOLS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = DiagnosticMetadata {
+const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3805,9 +3914,10 @@ const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Logical,
 };
 
-const USING_HARDCODE_NETWORK_ADDRESS: DiagnosticMetadata = DiagnosticMetadata {
+const USING_HARDCODE_NETWORK_ADDRESS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::All,
@@ -3821,7 +3931,7 @@ const USING_HARDCODE_NETWORK_ADDRESS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_HARDCODE_PATH: DiagnosticMetadata = DiagnosticMetadata {
+const USING_HARDCODE_PATH: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3835,7 +3945,7 @@ const USING_HARDCODE_PATH: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_HARDCODE_SECRET_INFORMATION: DiagnosticMetadata = DiagnosticMetadata {
+const USING_HARDCODE_SECRET_INFORMATION: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3859,7 +3969,7 @@ const USING_HARDCODE_SECRET_INFORMATION: DiagnosticMetadata = DiagnosticMetadata
 ///   tags = { STANDARD },
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_3
 /// )
-const USING_MODAL_WINDOWS: DiagnosticMetadata = DiagnosticMetadata {
+const USING_MODAL_WINDOWS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3873,7 +3983,7 @@ const USING_MODAL_WINDOWS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_SYNCHRONOUS_CALLS: DiagnosticMetadata = DiagnosticMetadata {
+const USING_SYNCHRONOUS_CALLS: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::Bsl,
@@ -3887,7 +3997,7 @@ const USING_SYNCHRONOUS_CALLS: DiagnosticMetadata = DiagnosticMetadata {
     lsp_severity_override: "",
 };
 
-const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = DiagnosticMetadata {
+const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::Error,
     severity: DiagnosticSeverityLevel::Critical,
     scope: DiagnosticScope::Bsl,
@@ -3899,9 +4009,10 @@ const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = DiagnosticMetadata {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Modular,
 };
 
-const USING_SERVICE_TAG: DiagnosticMetadata = DiagnosticMetadata {
+const USING_SERVICE_TAG: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Info,
     scope: DiagnosticScope::All,
@@ -3926,7 +4037,7 @@ const USING_SERVICE_TAG: DiagnosticMetadata = DiagnosticMetadata {
 ///   compatibilityMode = COMPATIBILITY_MODE_8_3_3,
 ///   tags = { STANDARD, DEPRECATED }
 /// )
-const USING_THIS_FORM: DiagnosticMetadata = DiagnosticMetadata {
+const USING_THIS_FORM: DiagnosticMetadata = metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Minor,
     scope: DiagnosticScope::Bsl,

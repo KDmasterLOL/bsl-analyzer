@@ -30,8 +30,8 @@ pub use code::DiagnosticCode;
 pub use config::{DiagnosticsConfig, EffectiveMetadata, MetadataOverride};
 pub use context::DiagnosticsContext;
 pub use metadata::{
-    DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope, DiagnosticSeverityLevel,
-    DiagnosticType, MetadataTag,
+    CleanCodeAttribute, DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope,
+    DiagnosticSeverityLevel, DiagnosticType, Impact, ImpactSeverity, MetadataTag, SoftwareQuality,
 };
 pub use metadata_registry::get_metadata;
 pub use query::file_diagnostics_query;
