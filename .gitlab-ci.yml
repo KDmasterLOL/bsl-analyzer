@@ -98,11 +98,13 @@ build:linux-amd64:
     DEBIAN_FRONTEND: noninteractive
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl build-essential
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.91
-    - . "$HOME/.cargo/env"
+    - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
+    - export PATH="${CARGO_HOME}/bin:${PATH}"
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.91 --no-modify-path
     - rustc --version
   script:
-    - . "$HOME/.cargo/env"
+    - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
+    - export PATH="${CARGO_HOME}/bin:${PATH}"
     - cargo build --release --target ${RUST_TARGET}
     - mkdir -p artifacts
     - cp target/${RUST_TARGET}/release/bsl-analyzer artifacts/bsl-launcher-${PLATFORM_SUFFIX}
