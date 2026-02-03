@@ -130,13 +130,24 @@ fn is_special_value(body: &Body, expr_id: ExprId) -> bool {
     }
 }
 
-/// Check if a method name is an insertion method.
-fn is_insertion_method(name: &Name, allow_add: bool) -> bool {
+/// Type of insertion method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertionMethodKind {
+    /// Добавить/Add - adds element to collection (Array, ValueList)
+    /// For duplicates: compare ALL arguments
+    Add,
+    /// Вставить/Insert - inserts by key (Map, Structure)
+    /// For duplicates: compare only FIRST argument (key)
+    Insert,
+}
+
+/// Check if a method name is an insertion method and return its kind.
+fn get_insertion_method_kind(name: &Name, allow_add: bool) -> Option<InsertionMethodKind> {
     let lower = name.as_str().to_lowercase();
-    if allow_add {
-        matches!(lower.as_str(), "добавить" | "add" | "вставить" | "insert")
-    } else {
-        matches!(lower.as_str(), "вставить" | "insert")
+    match lower.as_str() {
+        "вставить" | "insert" => Some(InsertionMethodKind::Insert),
+        "добавить" | "add" if allow_add => Some(InsertionMethodKind::Add),
+        _ => None,
     }
 }
 
@@ -225,8 +236,8 @@ struct Insertion {
 struct InsertionKey {
     /// Hash of the collection expression (with variable generations)
     collection_hash: u64,
-    /// Hash of the first argument expression (with variable generations)
-    first_arg_hash: u64,
+    /// Hash of all argument expressions (with variable generations)
+    all_args_hash: u64,
 }
 
 /// Variable generation tracker.
@@ -501,6 +512,7 @@ impl<'a> InsertionTracker<'a> {
         args: &[ExprId],
         call_range: TextRange,
         scope_depth: usize,
+        kind: InsertionMethodKind,
     ) {
         if args.is_empty() {
             return;
@@ -512,9 +524,22 @@ impl<'a> InsertionTracker<'a> {
         }
 
         let collection_hash = self.hash_expr(receiver);
-        let first_arg_hash = self.hash_expr(args[0]);
 
-        let key = InsertionKey { collection_hash, first_arg_hash };
+        // Hash arguments based on method kind:
+        // - Add: hash ALL arguments (different presentations = different elements)
+        // - Insert: hash only FIRST argument (key), different values for same key is an error
+        let all_args_hash = match kind {
+            InsertionMethodKind::Add => {
+                let mut args_hasher = FxHasher::default();
+                for arg in args {
+                    self.hash_expr_into(*arg, &mut args_hasher);
+                }
+                args_hasher.finish()
+            }
+            InsertionMethodKind::Insert => self.hash_expr(args[0]),
+        };
+
+        let key = InsertionKey { collection_hash, all_args_hash };
 
         let breaker_context = self.last_breaker.map(|(offset, _)| offset);
         let local_breaker_context = self.last_local_breaker.map(|(offset, _)| offset);
@@ -980,24 +1005,28 @@ fn check_expr_for_insertion(
 ) {
     match body.expr(expr_id) {
         Expr::MethodCall { receiver, method, args } => {
-            if is_insertion_method(method, allow_add) && !args.is_empty() {
-                if let Some(range) = source_map.expr_range(expr_id) {
-                    let receiver_id = ExprId::from_idx(*receiver);
-                    let args_vec: Vec<ExprId> =
-                        args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
-                    tracker.record_insertion(receiver_id, &args_vec, range, scope_depth);
+            if let Some(kind) = get_insertion_method_kind(method, allow_add) {
+                if !args.is_empty() {
+                    if let Some(range) = source_map.expr_range(expr_id) {
+                        let receiver_id = ExprId::from_idx(*receiver);
+                        let args_vec: Vec<ExprId> =
+                            args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
+                        tracker.record_insertion(receiver_id, &args_vec, range, scope_depth, kind);
+                    }
                 }
             }
         }
         // Pattern 2: Call with Field as callee (common for method calls in BSL)
         Expr::Call { callee, args } => {
             if let Expr::Field { base, field } = body.expr(ExprId::from_idx(*callee)) {
-                if is_insertion_method(field, allow_add) && !args.is_empty() {
-                    if let Some(range) = source_map.expr_range(expr_id) {
-                        let base_id = ExprId::from_idx(*base);
-                        let args_vec: Vec<ExprId> =
-                            args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
-                        tracker.record_insertion(base_id, &args_vec, range, scope_depth);
+                if let Some(kind) = get_insertion_method_kind(field, allow_add) {
+                    if !args.is_empty() {
+                        if let Some(range) = source_map.expr_range(expr_id) {
+                            let base_id = ExprId::from_idx(*base);
+                            let args_vec: Vec<ExprId> =
+                                args.iter().map(|&idx| ExprId::from_idx(idx)).collect();
+                            tracker.record_insertion(base_id, &args_vec, range, scope_depth, kind);
+                        }
                     }
                 }
             }
@@ -1024,7 +1053,7 @@ fn check_expr_for_side_effects(
             if let Expr::Field { base: _, field } = body.expr(ExprId::from_idx(*callee)) {
                 // If it's an insertion method, don't track side effects for args
                 // (we handle those separately in check_expr_for_insertion)
-                if is_insertion_method(field, allow_add) {
+                if get_insertion_method_kind(field, allow_add).is_some() {
                     return;
                 }
             }
@@ -1042,7 +1071,7 @@ fn check_expr_for_side_effects(
         // Direct method call: obj.Method(args)
         Expr::MethodCall { receiver: _, method, args } => {
             // Don't track side effects for insertion methods
-            if is_insertion_method(method, allow_add) {
+            if get_insertion_method_kind(method, allow_add).is_some() {
                 return;
             }
 
@@ -1236,12 +1265,14 @@ mod tests {
         let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Expected: 17 diagnostics matching Java behavior
+        // Expected: 16 diagnostics
         // Note: Line 59 (inside #Если/#Иначе) is NOT detected because HIR does not analyze
         // code inside preprocessor directives. This is a known limitation.
+        // Note: Line 172 is NOT detected because Добавить compares ALL arguments,
+        // and (ИмяКоманды, 1) != (ИмяКоманды, 9, Истина).
         // Note: Line 197 has empty first arg (Missing), so is_special_value returns true
         // and the call is not tracked for duplicates (correct behavior per fixture comment).
-        assert_eq!(diagnostics.len(), 17, "Expected 17 diagnostics");
+        assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics");
 
         // Sort diagnostics by position for consistent ordering
         let mut sorted_diagnostics = diagnostics.clone();
@@ -1276,12 +1307,11 @@ mod tests {
         assert_diagnostic_range(code, &sorted_diagnostics[12], 157, 4, 27);
         // Line 162: Описания2.Добавить(Часть1.Часть2)
         assert_diagnostic_range(code, &sorted_diagnostics[13], 161, 4, 37);
-        // Line 172: Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 9, Истина)
-        assert_diagnostic_range(code, &sorted_diagnostics[14], 171, 4, 65);
+        // Line 172: NOT detected - Добавить compares ALL args, (ИмяКоманды, 1) != (ИмяКоманды, 9, Истина)
         // Line 266: Коллекция().Добавить(СтрокаТаблицы)
-        assert_diagnostic_range(code, &sorted_diagnostics[15], 265, 4, 39);
+        assert_diagnostic_range(code, &sorted_diagnostics[14], 265, 4, 39);
         // Line 269: Коллекция2().Реквизит.Добавить(СтрокаТаблицы2)
-        assert_diagnostic_range(code, &sorted_diagnostics[16], 268, 4, 50);
+        assert_diagnostic_range(code, &sorted_diagnostics[15], 268, 4, 50);
     }
 
     #[test]
