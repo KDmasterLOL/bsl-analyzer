@@ -10,7 +10,7 @@ use crate::body::{
 use crate::hir::{BinaryOp, Expr, ExprIdx, Literal, UnaryOp};
 use crate::{Name, QualifiedName};
 
-use super::diagnostics::is_deprecated_method;
+use super::diagnostics::{is_deprecated_method, is_followed_by_loop_exit};
 use super::utils::{extract_string_content, looks_like_sdbl};
 use super::LoweringCtx;
 
@@ -879,10 +879,14 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
                 if let Some(receiver_id) = receiver {
                     if let Some(collection_text) = ctx.matches_foreach_collection(receiver_id) {
-                        ctx.emit(BodyDiagnostic::DeletingCollectionItem {
-                            collection_text: collection_text.to_string(),
-                            range: node.text_range(),
-                        });
+                        // Skip if Delete is followed by Break or Return - this is a safe pattern
+                        // Example: Delete(item); Break; - iteration stops immediately
+                        if !is_followed_by_loop_exit(node) {
+                            ctx.emit(BodyDiagnostic::DeletingCollectionItem {
+                                collection_text: collection_text.to_string(),
+                                range: node.text_range(),
+                            });
+                        }
                     }
                 }
             }

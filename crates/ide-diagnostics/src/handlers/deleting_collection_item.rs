@@ -200,4 +200,102 @@ EndProcedure
         assert_diagnostic_range(code, diags[6], 50, 4, 37);
         assert_diagnostic_range(code, diags[7], 55, 4, 39);
     }
+
+    #[test]
+    fn test_break_after_delete_simple() {
+        // Простой тест: Delete + Прервать в ForEach - безопасный паттерн
+        // Simple test: Delete + Break in ForEach - safe pattern
+        let code = r#"
+Процедура Тест()
+    Для Каждого Элемент Из Коллекция Цикл
+        Если УсловиеУдаления(Элемент) Тогда
+            Коллекция.Удалить(Элемент);
+            Прервать;
+        КонецЕсли;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+
+        assert_eq!(diags.len(), 0, "Delete + Break should be safe");
+    }
+
+    #[test]
+    fn test_break_after_delete_nested_loops() {
+        // Реальный паттерн из doc3: вложенные циклы с Delete + Break
+        // Real pattern from doc3: nested loops with Delete + Break
+        // Catalogs/ГруппыКонтактовПользователей/Ext/ObjectModule.bsl
+        let code = r#"
+Процедура ПередЗаписью()
+    // Внешний цикл по элементам для удаления
+    Для Каждого Эл Из ДополнительныеСвойства.РабочаяГруппаУдалить Цикл
+        // Внутренний цикл поиска
+        Для Каждого Эл2 Из РабочаяГруппа Цикл
+            Если Эл2.Участник = Эл.Участник Тогда
+                // Удаление + выход - безопасно
+                РабочаяГруппа.Удалить(Эл2);
+                Прервать;
+            КонецЕсли;
+        КонецЦикла;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+
+        assert_eq!(diags.len(), 0, "Delete + Break in nested loops should be safe");
+    }
+
+    #[test]
+    fn test_return_after_delete() {
+        // Delete + Возврат - тоже безопасный паттерн
+        // Delete + Return is also safe
+        let code = r#"
+Процедура Тест()
+    Для Каждого Элемент Из Коллекция Цикл
+        Если НужноУдалить(Элемент) Тогда
+            Коллекция.Удалить(Элемент);
+            Возврат;
+        КонецЕсли;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+
+        assert_eq!(diags.len(), 0, "Delete + Return should be safe");
+    }
+
+    #[test]
+    fn test_delete_without_break_still_error() {
+        // Delete без Break/Return - всё ещё ошибка
+        // Delete without Break/Return - still an error
+        let code = r#"
+Процедура Тест()
+    Для Каждого Элемент Из Коллекция Цикл
+        Если УсловиеУдаления(Элемент) Тогда
+            Коллекция.Удалить(Элемент);
+            // Нет Break - итерация продолжается, это опасно
+        КонецЕсли;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+
+        assert_eq!(diags.len(), 1, "Delete without Break should trigger error");
+    }
 }

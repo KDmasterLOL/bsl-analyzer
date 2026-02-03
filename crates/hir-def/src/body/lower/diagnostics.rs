@@ -903,6 +903,31 @@ fn is_else_clause(node: &SyntaxNode) -> bool {
         .any(|t| matches!(t.kind(), SyntaxKind::KW_ELSIF | SyntaxKind::KW_ELSE))
 }
 
+/// Check if an expression node is followed by Break or Return statement.
+///
+/// Used for DeletingCollectionItem diagnostic - delete followed by break/return is safe
+/// because the loop iteration stops immediately.
+///
+/// # Arguments
+/// * `expr_node` - The expression node (e.g., CALL_EXPR inside a CALL_STMT)
+///
+/// # Returns
+/// `true` if the parent statement's next sibling is BREAK_STMT or RETURN_STMT.
+pub(crate) fn is_followed_by_loop_exit(expr_node: &SyntaxNode) -> bool {
+    // Go up to parent statement (CALL_STMT, EXPR_STMT, etc.)
+    let Some(parent_stmt) = expr_node.parent() else {
+        return false;
+    };
+
+    // Check the next sibling of the statement
+    let Some(next_sibling) = parent_stmt.next_sibling() else {
+        return false;
+    };
+
+    // Check if it's a break or return statement
+    matches!(next_sibling.kind(), SyntaxKind::BREAK_STMT | SyntaxKind::RETURN_STMT)
+}
+
 /// Extend a text range to include the following semicolon token if present.
 ///
 /// Java BSLParser.StatementContext includes the SEMICOLON in the statement range.
