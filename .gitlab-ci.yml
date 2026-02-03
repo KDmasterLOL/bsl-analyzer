@@ -85,12 +85,18 @@ test:
 
 # Linux AMD64 (glibc build on Ubuntu 22.04 for compatibility with Ubuntu 22.04+)
 # Note: musl build is 10x slower due to allocator performance
+# Note: separate cache key to avoid mixing with rust:1.91 image builds
 build:linux-amd64:
   stage: build
   image: ubuntu:22.04
   tags:
     - rust
-  <<: *cargo-cache
+  cache:
+    key: cargo-ubuntu-22.04
+    paths:
+      - .cargo/registry/index
+      - .cargo/registry/cache
+      - target/
   variables:
     RUST_TARGET: x86_64-unknown-linux-gnu
     PLATFORM_SUFFIX: linux-amd64
