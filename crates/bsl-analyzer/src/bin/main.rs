@@ -327,20 +327,10 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
 
             // Convert Clean Code attribute to SonarQube format
             let clean_code_attribute = match metadata.clean_code_attribute {
-                CleanCodeAttribute::Formatted => "FORMATTED",
-                CleanCodeAttribute::Conventional => "CONVENTIONAL",
-                CleanCodeAttribute::Identifiable => "IDENTIFIABLE",
-                CleanCodeAttribute::Clear => "CLEAR",
-                CleanCodeAttribute::Complete => "COMPLETE",
-                CleanCodeAttribute::Efficient => "EFFICIENT",
-                CleanCodeAttribute::Logical => "LOGICAL",
-                CleanCodeAttribute::Distinct => "DISTINCT",
-                CleanCodeAttribute::Focused => "FOCUSED",
-                CleanCodeAttribute::Modular => "MODULAR",
-                CleanCodeAttribute::Tested => "TESTED",
-                CleanCodeAttribute::Lawful => "LAWFUL",
-                CleanCodeAttribute::Respectful => "RESPECTFUL",
-                CleanCodeAttribute::Trustworthy => "TRUSTWORTHY",
+                CleanCodeAttribute::Consistent => "CONSISTENT",
+                CleanCodeAttribute::Intentional => "INTENTIONAL",
+                CleanCodeAttribute::Adaptable => "ADAPTABLE",
+                CleanCodeAttribute::Responsible => "RESPONSIBLE",
             };
 
             // Convert impacts to SonarQube format

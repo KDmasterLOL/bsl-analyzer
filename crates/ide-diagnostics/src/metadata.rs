@@ -10,60 +10,21 @@ use serde::{Deserialize, Serialize};
 // SonarQube Clean Code Taxonomy
 // ============================================================================
 
-/// SonarQube Clean Code Attribute (12 values across 4 categories).
+/// SonarQube Clean Code Attribute (4 categories).
 ///
 /// Used for Generic Issue Import format to categorize issues beyond simple severity.
 /// See: <https://docs.sonarqube.org/latest/project-administration/clean-code/>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CleanCodeAttribute {
-    // Consistent category - code follows standards and conventions
-    /// Code is properly formatted
-    Formatted,
-    /// Code follows naming conventions
-    Conventional,
-    /// Identifiers are meaningful and clear
-    Identifiable,
-
-    // Intentional category - code clearly expresses intent
-    /// Code intent is clear and understandable
-    Clear,
-    /// Implementation is complete (no TODOs, missing cases)
-    Complete,
-    /// Code is efficient and performant
-    Efficient,
-    /// Code logic is correct and sound
-    Logical,
-
-    // Adaptable category - code is easy to change
-    /// No code duplication
-    Distinct,
-    /// Single responsibility principle
-    Focused,
-    /// Proper modularization
-    Modular,
-    /// Code is testable
-    Tested,
-
-    // Responsible category - code respects guidelines and users
-    /// Respects licenses and legal requirements
-    Lawful,
-    /// Respects users (i18n, accessibility)
-    Respectful,
-    /// Secure and trustworthy code
-    Trustworthy,
-}
-
-impl CleanCodeAttribute {
-    /// Returns the category name for this attribute.
-    pub const fn category(&self) -> &'static str {
-        match self {
-            Self::Formatted | Self::Conventional | Self::Identifiable => "CONSISTENT",
-            Self::Clear | Self::Complete | Self::Efficient | Self::Logical => "INTENTIONAL",
-            Self::Distinct | Self::Focused | Self::Modular | Self::Tested => "ADAPTABLE",
-            Self::Lawful | Self::Respectful | Self::Trustworthy => "RESPONSIBLE",
-        }
-    }
+    /// Code follows standards and conventions (formatting, naming)
+    Consistent,
+    /// Code clearly expresses intent (clarity, completeness, logic)
+    Intentional,
+    /// Code is easy to change (design, modularity, no duplication)
+    Adaptable,
+    /// Code respects guidelines and users (security, i18n)
+    Responsible,
 }
 
 /// SonarQube Software Quality dimension.
@@ -115,57 +76,38 @@ pub const fn derive_clean_code_attribute(
     dtype: DiagnosticType,
 ) -> CleanCodeAttribute {
     match (tag, dtype) {
-        // Security issues -> Trustworthy
+        // Security issues -> Responsible
         (_, DiagnosticType::Vulnerability | DiagnosticType::SecurityHotspot) => {
-            CleanCodeAttribute::Trustworthy
+            CleanCodeAttribute::Responsible
         }
 
-        // Standard compliance -> Conventional
-        (MetadataTag::Standard, _) => CleanCodeAttribute::Conventional,
+        // Localization -> Responsible
+        (MetadataTag::Localize, _) => CleanCodeAttribute::Responsible,
 
-        // Deprecated -> Conventional (outdated patterns)
-        (MetadataTag::Deprecated, _) => CleanCodeAttribute::Conventional,
+        // Standard/conventions -> Consistent
+        (MetadataTag::Standard, _) => CleanCodeAttribute::Consistent,
+        (MetadataTag::Deprecated, _) => CleanCodeAttribute::Consistent,
 
-        // Design issues -> Focused (single responsibility)
-        (MetadataTag::Design, _) => CleanCodeAttribute::Focused,
+        // Design/architecture -> Adaptable
+        (MetadataTag::Design, _) => CleanCodeAttribute::Adaptable,
+        (MetadataTag::Performance, _) => CleanCodeAttribute::Adaptable,
+        (MetadataTag::Unused, _) => CleanCodeAttribute::Adaptable,
+        (MetadataTag::Lockinos, _) => CleanCodeAttribute::Adaptable,
 
-        // Performance -> Efficient
-        (MetadataTag::Performance, _) => CleanCodeAttribute::Efficient,
-
-        // Localization -> Respectful
-        (MetadataTag::Localize, _) => CleanCodeAttribute::Respectful,
-
-        // Unused code -> Distinct (no dead code)
-        (MetadataTag::Unused, _) => CleanCodeAttribute::Distinct,
-
-        // Errors in code -> Logical
-        (MetadataTag::Error, DiagnosticType::Error) => CleanCodeAttribute::Logical,
+        // Logic/clarity issues -> Intentional
+        (MetadataTag::Error, _) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Suspicious, _) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Unpredictable, _) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Brainoverload, _) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Clumsy, _) => CleanCodeAttribute::Intentional,
 
         // Bad practice -> depends on type
-        (MetadataTag::Badpractice, DiagnosticType::Error) => CleanCodeAttribute::Logical,
-        (MetadataTag::Badpractice, _) => CleanCodeAttribute::Conventional,
-
-        // Suspicious code -> Logical
-        (MetadataTag::Suspicious, _) => CleanCodeAttribute::Logical,
-
-        // Unpredictable -> Logical
-        (MetadataTag::Unpredictable, _) => CleanCodeAttribute::Logical,
-
-        // Brain overload -> Clear
-        (MetadataTag::Brainoverload, _) => CleanCodeAttribute::Clear,
-
-        // Clumsy code -> Clear
-        (MetadataTag::Clumsy, _) => CleanCodeAttribute::Clear,
+        (MetadataTag::Badpractice, DiagnosticType::Error) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Badpractice, _) => CleanCodeAttribute::Consistent,
 
         // SQL issues -> depends on type
-        (MetadataTag::Sql, DiagnosticType::Error) => CleanCodeAttribute::Logical,
-        (MetadataTag::Sql, _) => CleanCodeAttribute::Efficient,
-
-        // OS-specific -> Modular
-        (MetadataTag::Lockinos, _) => CleanCodeAttribute::Modular,
-
-        // Default for other errors
-        (MetadataTag::Error, _) => CleanCodeAttribute::Complete,
+        (MetadataTag::Sql, DiagnosticType::Error) => CleanCodeAttribute::Intentional,
+        (MetadataTag::Sql, _) => CleanCodeAttribute::Adaptable,
     }
 }
 
@@ -352,7 +294,7 @@ impl Default for DiagnosticMetadata {
             can_locate_on_project: false,
             extra_min_for_complexity: 0.0,
             lsp_severity_override: "",
-            clean_code_attribute: CleanCodeAttribute::Clear,
+            clean_code_attribute: CleanCodeAttribute::Intentional,
             impacts: &[DEFAULT_IMPACT],
         }
     }
@@ -451,78 +393,55 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_code_attribute_category() {
-        assert_eq!(CleanCodeAttribute::Formatted.category(), "CONSISTENT");
-        assert_eq!(CleanCodeAttribute::Conventional.category(), "CONSISTENT");
-        assert_eq!(CleanCodeAttribute::Identifiable.category(), "CONSISTENT");
-
-        assert_eq!(CleanCodeAttribute::Clear.category(), "INTENTIONAL");
-        assert_eq!(CleanCodeAttribute::Complete.category(), "INTENTIONAL");
-        assert_eq!(CleanCodeAttribute::Efficient.category(), "INTENTIONAL");
-        assert_eq!(CleanCodeAttribute::Logical.category(), "INTENTIONAL");
-
-        assert_eq!(CleanCodeAttribute::Distinct.category(), "ADAPTABLE");
-        assert_eq!(CleanCodeAttribute::Focused.category(), "ADAPTABLE");
-        assert_eq!(CleanCodeAttribute::Modular.category(), "ADAPTABLE");
-        assert_eq!(CleanCodeAttribute::Tested.category(), "ADAPTABLE");
-
-        assert_eq!(CleanCodeAttribute::Lawful.category(), "RESPONSIBLE");
-        assert_eq!(CleanCodeAttribute::Respectful.category(), "RESPONSIBLE");
-        assert_eq!(CleanCodeAttribute::Trustworthy.category(), "RESPONSIBLE");
-    }
-
-    #[test]
     fn test_derive_clean_code_attribute() {
-        // Security issues -> Trustworthy
+        // Security issues -> Responsible
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Badpractice, DiagnosticType::Vulnerability),
-            CleanCodeAttribute::Trustworthy
+            CleanCodeAttribute::Responsible
         );
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Error, DiagnosticType::SecurityHotspot),
-            CleanCodeAttribute::Trustworthy
+            CleanCodeAttribute::Responsible
         );
 
-        // Standard -> Conventional
+        // Standard -> Consistent
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Standard, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Conventional
+            CleanCodeAttribute::Consistent
         );
 
-        // Design -> Focused
+        // Design -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Design, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Focused
+            CleanCodeAttribute::Adaptable
         );
 
-        // Performance -> Efficient
+        // Performance -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Performance, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Efficient
+            CleanCodeAttribute::Adaptable
         );
 
-        // Localize -> Respectful
+        // Localize -> Responsible
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Localize, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Respectful
+            CleanCodeAttribute::Responsible
         );
 
-        // Unused -> Distinct
+        // Unused -> Adaptable
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Unused, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Distinct
+            CleanCodeAttribute::Adaptable
         );
 
-        // Error + Error type -> Logical
+        // Error -> Intentional
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Error, DiagnosticType::Error),
-            CleanCodeAttribute::Logical
+            CleanCodeAttribute::Intentional
         );
-
-        // Error + CodeSmell -> Complete
         assert_eq!(
             derive_clean_code_attribute(MetadataTag::Error, DiagnosticType::CodeSmell),
-            CleanCodeAttribute::Complete
+            CleanCodeAttribute::Intentional
         );
     }
 
@@ -563,10 +482,18 @@ mod tests {
 
     #[test]
     fn test_clean_code_attribute_serialization() {
-        assert_eq!(serde_json::to_string(&CleanCodeAttribute::Formatted).unwrap(), "\"FORMATTED\"");
         assert_eq!(
-            serde_json::to_string(&CleanCodeAttribute::Trustworthy).unwrap(),
-            "\"TRUSTWORTHY\""
+            serde_json::to_string(&CleanCodeAttribute::Consistent).unwrap(),
+            "\"CONSISTENT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CleanCodeAttribute::Intentional).unwrap(),
+            "\"INTENTIONAL\""
+        );
+        assert_eq!(serde_json::to_string(&CleanCodeAttribute::Adaptable).unwrap(), "\"ADAPTABLE\"");
+        assert_eq!(
+            serde_json::to_string(&CleanCodeAttribute::Responsible).unwrap(),
+            "\"RESPONSIBLE\""
         );
     }
 

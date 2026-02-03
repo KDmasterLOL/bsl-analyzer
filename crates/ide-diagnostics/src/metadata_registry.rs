@@ -419,7 +419,7 @@ const FORBIDDEN_METADATA_NAME: DiagnosticMetadata = metadata! {
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// FieldsFromJoinsWithoutIsNull diagnostic metadata.
@@ -665,7 +665,7 @@ const LINE_LENGTH: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Formatted,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 const MISSING_SPACE: DiagnosticMetadata = metadata! {
@@ -736,7 +736,7 @@ const INCORRECT_LINE_BREAK: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Formatted,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 const INCORRECT_USE_OF_STR_TEMPLATE: DiagnosticMetadata = metadata! {
@@ -919,7 +919,7 @@ const LATIN_AND_CYRILLIC_SYMBOL_IN_WORD: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 const INVALID_CHARACTER_IN_FILE: DiagnosticMetadata = metadata! {
@@ -1689,7 +1689,7 @@ const NESTED_STATEMENTS: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Clear,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// MethodSize diagnostic metadata.
@@ -1712,7 +1712,7 @@ const METHOD_SIZE: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Focused,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 /// IfConditionComplexity diagnostic metadata.
@@ -1757,7 +1757,7 @@ const MISSING_CODE_TRY_CATCH_EX: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Complete,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// MissingTemporaryFileDeletion diagnostic metadata.
@@ -1846,7 +1846,7 @@ const BEGIN_TRANSACTION_BEFORE_TRY_CATCH: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// CommitTransactionOutsideTryCatch diagnostic metadata.
@@ -1869,7 +1869,7 @@ const COMMIT_TRANSACTION_OUTSIDE_TRY_CATCH: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// CompilationDirectiveLost diagnostic metadata.
@@ -1976,7 +1976,7 @@ const DELETING_COLLECTION_ITEM: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// SelfInsertion diagnostic metadata.
@@ -1999,7 +1999,7 @@ const SELF_INSERTION: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// SeveralCompilerDirectives diagnostic metadata.
@@ -2439,7 +2439,7 @@ const PAIRING_BROKEN_TRANSACTION: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// WrongUseOfRollbackTransactionMethod diagnostic metadata.
@@ -2463,7 +2463,7 @@ const WRONG_USE_OF_ROLLBACK_TRANSACTION_METHOD: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// TimeoutsInExternalResources diagnostic metadata.
@@ -2530,7 +2530,7 @@ const UNKNOWN_PREPROCESSOR_SYMBOL: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 const UNSAFE_SAFE_MODE_METHOD_CALL: DiagnosticMetadata = metadata! {
@@ -2690,7 +2690,7 @@ const CACHED_PUBLIC: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Focused,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 /// CommandModuleExportMethods diagnostic metadata.
@@ -2809,7 +2809,7 @@ const COMMON_MODULE_NAME_CACHED: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameClient diagnostic metadata.
@@ -2834,7 +2834,7 @@ const COMMON_MODULE_NAME_CLIENT: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameClientServer diagnostic metadata.
@@ -2859,7 +2859,7 @@ const COMMON_MODULE_NAME_CLIENT_SERVER: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameFullAccess diagnostic metadata.
@@ -2908,7 +2908,7 @@ const COMMON_MODULE_NAME_GLOBAL: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameGlobalClient diagnostic metadata.
@@ -2933,7 +2933,7 @@ const COMMON_MODULE_NAME_GLOBAL_CLIENT: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameServerCall diagnostic metadata.
@@ -2958,7 +2958,7 @@ const COMMON_MODULE_NAME_SERVER_CALL: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// CommonModuleNameWords diagnostic metadata.
@@ -2983,7 +2983,7 @@ const COMMON_MODULE_NAME_WORDS: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// FullOuterJoinQuery diagnostic metadata.
@@ -3145,7 +3145,7 @@ const METADATA_OBJECT_NAME_LENGTH: DiagnosticMetadata = metadata! {
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// MissingCommonModuleMethod diagnostic metadata.
@@ -3310,7 +3310,7 @@ const PUBLIC_METHODS_DESCRIPTION: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Clear,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// QueryNestedFieldsByDot diagnostic metadata.
@@ -3356,7 +3356,7 @@ const QUERY_PARSE_ERROR: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// QueryToMissingMetadata diagnostic metadata.
@@ -3426,7 +3426,7 @@ const SELECT_TOP_WITHOUT_ORDER_BY: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 /// UnionAll diagnostic metadata.
@@ -3450,7 +3450,7 @@ const UNION_ALL: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Efficient,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 /// UsingLikeInQuery diagnostic metadata.
@@ -3475,7 +3475,7 @@ const USING_LIKE_IN_QUERY: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Efficient,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 /// VirtualTableCallWithoutParameters diagnostic metadata.
@@ -3641,7 +3641,7 @@ const TRANSFERRING_PARAMETERS_BETWEEN_CLIENT_AND_SERVER: DiagnosticMetadata = me
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Efficient,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 // ============================================================================
@@ -3731,7 +3731,7 @@ const REDUNDANT_ACCESS_TO_OBJECT: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Distinct,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 /// SameMetadataObjectAndChildNames diagnostic metadata.
@@ -3753,7 +3753,7 @@ const SAME_METADATA_OBJECT_AND_CHILD_NAMES: DiagnosticMetadata = metadata! {
     can_locate_on_project: true,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Identifiable,
+    clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
 /// UnusedLocalVariable diagnostic metadata.
@@ -3914,7 +3914,7 @@ const USING_FIND_ELEMENT_BY_STRING: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Logical,
+    clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
 const USING_HARDCODE_NETWORK_ADDRESS: DiagnosticMetadata = metadata! {
@@ -4009,7 +4009,7 @@ const USING_OBJECT_NOT_AVAILABLE_UNIX: DiagnosticMetadata = metadata! {
     can_locate_on_project: false,
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
-    clean_code_attribute: CleanCodeAttribute::Modular,
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
 const USING_SERVICE_TAG: DiagnosticMetadata = metadata! {
