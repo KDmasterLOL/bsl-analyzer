@@ -61,8 +61,12 @@ impl Diagnostic {
     ///
     /// This method performs the conversion from internal representation (TextRange)
     /// to external output format (line/column). Requires file text to build LineIndex.
+    ///
+    /// **Important**: Column positions are converted from byte offsets to character positions.
+    /// This is necessary because external tools (SonarQube, editors) expect character positions,
+    /// while internal TextRange uses byte offsets. For Cyrillic text, 1 char = 2 bytes in UTF-8.
     pub fn to_output(&self, file_text: &str) -> DiagnosticOutput {
-        use line_index::LineIndex;
+        use line_index::{LineIndex, LineIndexExt};
 
         let file_len = file_text.len();
         let range_start: u32 = self.range.start().into();
@@ -87,14 +91,19 @@ impl Diagnostic {
         let start = line_index.line_col(self.range.start());
         let end = line_index.line_col(self.range.end());
 
+        // Convert byte columns to character columns for external tools.
+        // Internal TextRange uses byte offsets, but SonarQube/editors expect character positions.
+        let start_char_col = line_index.byte_col_to_char_col(file_text, start.line, start.col);
+        let end_char_col = line_index.byte_col_to_char_col(file_text, end.line, end.col);
+
         DiagnosticOutput {
             code: self.code.as_str().to_string(),
             message: self.message.clone(),
             severity: self.severity.as_str().to_string(),
             start_line: start.line as usize,
-            start_column: start.col as usize,
+            start_column: start_char_col as usize,
             end_line: end.line as usize,
-            end_column: end.col as usize,
+            end_column: end_char_col as usize,
             tags: self.tags.iter().map(|tag| tag.as_str().to_string()).collect(),
         }
     }

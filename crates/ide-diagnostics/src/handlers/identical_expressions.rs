@@ -711,6 +711,30 @@ fn check_preprocessor_split_expressions(
             continue;
         }
 
+        // Check if preprocessor block contains split logical expression (ERROR with KW_OR/KW_AND)
+        // This distinguishes between:
+        // 1. Split expression: "Результат = Истина #Область ИЛИ Истина #КонецОбласти" - ERROR(KW_OR)
+        // 2. Normal code: "X = Var; #Если... Y = Var; #КонецЕсли" - no split expression
+        if !has_split_logical_operator(&next_sibling) {
+            // Also check CALL_STMT siblings after preprocessor
+            let mut found_split = false;
+            let mut current_sibling = next_sibling.next_sibling();
+            while let Some(sibling) = current_sibling {
+                if sibling.kind() == SyntaxKind::CALL_STMT {
+                    if has_split_logical_operator(&sibling) {
+                        found_split = true;
+                        break;
+                    }
+                    current_sibling = sibling.next_sibling();
+                } else {
+                    break;
+                }
+            }
+            if !found_split {
+                continue;
+            }
+        }
+
         // Extract RHS value from assignment
         let Some(assign_rhs) = extract_assign_rhs(&node) else {
             continue;
@@ -757,6 +781,23 @@ fn check_preprocessor_split_expressions(
             }
         }
     }
+}
+
+/// Check if node contains ERROR with KW_OR or KW_AND, indicating a split logical expression.
+fn has_split_logical_operator(node: &SyntaxNode) -> bool {
+    for descendant in node.descendants() {
+        if descendant.kind() == SyntaxKind::ERROR {
+            // Check if ERROR contains logical operator tokens
+            for token in descendant.children_with_tokens() {
+                if let Some(token) = token.as_token() {
+                    if matches!(token.kind(), SyntaxKind::KW_OR | SyntaxKind::KW_AND) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Extract right-hand side value from ASSIGN_STMT
