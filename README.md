@@ -15,6 +15,37 @@ High-performance Language Server for BSL (1C:Enterprise) written in Rust.
 
 See [docs/planning/ROADMAP.md](docs/planning/ROADMAP.md) for detailed development plan.
 
+## Installation
+
+### Linux
+
+```bash
+curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest)/bsl-launcher-linux-amd64 -o ~/.local/bin/bsl-analyzer && chmod +x ~/.local/bin/bsl-analyzer
+```
+
+### Windows (PowerShell)
+
+```powershell
+$v = Invoke-RestMethod https://dev.runsystems.ru/releases/bsl-analyzer/latest
+Invoke-WebRequest "https://dev.runsystems.ru/releases/bsl-analyzer/$v/bsl-launcher-windows-amd64.exe" -OutFile bsl-analyzer.exe
+```
+
+### macOS (Apple Silicon)
+
+```bash
+curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest)/bsl-launcher-darwin-arm64 -o /usr/local/bin/bsl-analyzer && chmod +x /usr/local/bin/bsl-analyzer
+```
+
+### Version Pinning (CI/CD)
+
+```bash
+# Use specific version
+BSL_ANALYZER_VERSION=0.1.3 bsl-analyzer analyze -s ./src
+
+# Or via command line
+bsl-analyzer --launcher-use 0.1.3 analyze -s ./src
+```
+
 ## Architecture
 
 The project follows rust-analyzer architecture:
@@ -44,13 +75,20 @@ cargo build --release
 ### LSP Server Mode
 
 ```bash
-bsl-analyzer
+bsl-analyzer lsp
 ```
 
 ### Analysis Mode (for SonarQube)
 
 ```bash
-bsl-analyzer analyze --project ./my-project --output report.json
+# Console output
+bsl-analyzer analyze -s ./my-project
+
+# SARIF report
+bsl-analyzer analyze -s ./my-project -r sarif -o ./reports
+
+# Streaming mode for large projects (low memory)
+bsl-analyzer analyze -s ./my-project --streaming --format=jsonl > report.jsonl
 ```
 
 ## Configuration
