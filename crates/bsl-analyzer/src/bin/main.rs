@@ -325,12 +325,12 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
                 DiagnosticSeverityLevel::Info => "INFO",
             };
 
-            // Convert Clean Code attribute to SonarQube format
+            // Convert Clean Code attribute to SonarQube format (valid enum values)
             let clean_code_attribute = match metadata.clean_code_attribute {
-                CleanCodeAttribute::Consistent => "CONSISTENT",
-                CleanCodeAttribute::Intentional => "INTENTIONAL",
-                CleanCodeAttribute::Adaptable => "ADAPTABLE",
-                CleanCodeAttribute::Responsible => "RESPONSIBLE",
+                CleanCodeAttribute::Consistent => "CONVENTIONAL",
+                CleanCodeAttribute::Intentional => "CLEAR",
+                CleanCodeAttribute::Adaptable => "FOCUSED",
+                CleanCodeAttribute::Responsible => "TRUSTWORTHY",
             };
 
             // Convert impacts to SonarQube format

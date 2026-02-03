@@ -10,20 +10,29 @@ use serde::{Deserialize, Serialize};
 // SonarQube Clean Code Taxonomy
 // ============================================================================
 
-/// SonarQube Clean Code Attribute (4 categories).
+/// SonarQube Clean Code Attribute (4 categories mapped to default attributes).
 ///
 /// Used for Generic Issue Import format to categorize issues beyond simple severity.
 /// See: <https://docs.sonarqube.org/latest/project-administration/clean-code/>
+///
+/// Categories are mapped to valid SonarQube attribute values:
+/// - Consistent → CONVENTIONAL
+/// - Intentional → CLEAR
+/// - Adaptable → FOCUSED
+/// - Responsible → TRUSTWORTHY
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CleanCodeAttribute {
     /// Code follows standards and conventions (formatting, naming)
+    #[serde(rename = "CONVENTIONAL")]
     Consistent,
     /// Code clearly expresses intent (clarity, completeness, logic)
+    #[serde(rename = "CLEAR")]
     Intentional,
     /// Code is easy to change (design, modularity, no duplication)
+    #[serde(rename = "FOCUSED")]
     Adaptable,
     /// Code respects guidelines and users (security, i18n)
+    #[serde(rename = "TRUSTWORTHY")]
     Responsible,
 }
 
@@ -482,18 +491,16 @@ mod tests {
 
     #[test]
     fn test_clean_code_attribute_serialization() {
+        // Categories serialize to valid SonarQube attribute values
         assert_eq!(
             serde_json::to_string(&CleanCodeAttribute::Consistent).unwrap(),
-            "\"CONSISTENT\""
+            "\"CONVENTIONAL\""
         );
-        assert_eq!(
-            serde_json::to_string(&CleanCodeAttribute::Intentional).unwrap(),
-            "\"INTENTIONAL\""
-        );
-        assert_eq!(serde_json::to_string(&CleanCodeAttribute::Adaptable).unwrap(), "\"ADAPTABLE\"");
+        assert_eq!(serde_json::to_string(&CleanCodeAttribute::Intentional).unwrap(), "\"CLEAR\"");
+        assert_eq!(serde_json::to_string(&CleanCodeAttribute::Adaptable).unwrap(), "\"FOCUSED\"");
         assert_eq!(
             serde_json::to_string(&CleanCodeAttribute::Responsible).unwrap(),
-            "\"RESPONSIBLE\""
+            "\"TRUSTWORTHY\""
         );
     }
 
