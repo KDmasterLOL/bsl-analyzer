@@ -120,7 +120,7 @@ pub fn from_hir(
     // Create diagnostic message
     let param_list =
         missing.iter().map(|name| format!("'{}'", name)).collect::<Vec<_>>().join(", ");
-    let message = format!("Specify a required parameter {}", param_list);
+    let message = format!("Укажите обязательный параметр {}", param_list);
 
     Some(Diagnostic {
         code,
@@ -886,8 +886,8 @@ fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<St
 ///
 /// ## Message Format
 /// Matches Java implementation exactly:
-/// - Single param: "Specify a required parameter 'ParamName'"
-/// - Multiple params: "Specify a required parameter 'Param1', 'Param2'"
+/// - Single param: "Укажите обязательный параметр 'ParamName'"
+/// - Multiple params: "Укажите обязательный параметр 'Param1', 'Param2'"
 ///
 /// Each parameter name is quoted and comma-separated.
 ///
@@ -906,7 +906,7 @@ fn create_diagnostic(
     let param_list =
         missing_params.iter().map(|name| format!("'{}'", name)).collect::<Vec<_>>().join(", ");
 
-    let message = format!("Specify a required parameter {}", param_list);
+    let message = format!("Укажите обязательный параметр {}", param_list);
 
     // Calculate range for Java compatibility
     let is_qualified = is_qualified_call(call_node);
@@ -1526,7 +1526,7 @@ mod tests {
         // Line 3 (0-indexed line 2): Сложение(, 2) - Range(2, 16, 2, 29)
         let diag_line3 = diagnostics
             .iter()
-            .find(|d| d.message.contains("Левый") && d.message.contains("Specify"))
+            .find(|d| d.message.contains("Левый") && d.message.contains("Укажите"))
             .expect("Should find diagnostic for missing 'Левый'");
         assert_diagnostic_range_multiline(code, diag_line3, 2, 16, 2, 29);
 

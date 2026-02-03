@@ -89,8 +89,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
                 diagnostics.push(Diagnostic {
                     code,
-                    message: "Using OR in a join condition leads to low query performance"
-                        .to_string(),
+                    message: "Обнаружен оператор 'ИЛИ' в условии соединения".to_string(),
                     severity: ctx.severity(code),
                     range: bsl_range,
                     tags: ctx.tags(code),
@@ -128,7 +127,7 @@ mod tests {
             assert_eq!(diag.code, DiagnosticCode::LogicalOrInJoinQuerySection);
             // CodeSmell + Major → Warning (per metadata mapping)
             assert_eq!(diag.severity, Severity::Warning);
-            assert!(diag.message.contains("OR"));
+            assert!(diag.message.contains("ИЛИ"));
         }
 
         // Use proper test helpers for position verification

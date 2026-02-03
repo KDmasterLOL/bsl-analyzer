@@ -54,9 +54,9 @@ fn create_diagnostic(
     ctx: &DiagnosticsContext,
 ) -> Diagnostic {
     let message = match char_type {
-        InvalidCharType::IllegalDash => "Correct character to \"-\"",
+        InvalidCharType::IllegalDash => "Нужно исправить на правильный символ \"-\"",
         InvalidCharType::IllegalSpace => {
-            "Replace non-breaking space character with space character"
+            "Нужно заменить символ неразрывного пробела на обычный пробел"
         }
     };
 
@@ -184,7 +184,10 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for en dash");
-        assert_eq!(diagnostics[0].message, "Correct character to \"-\"", "Should use dash message");
+        assert_eq!(
+            diagnostics[0].message, "Нужно исправить на правильный символ \"-\"",
+            "Should use dash message"
+        );
     }
 
     #[test]
@@ -194,7 +197,7 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic for non-breaking space");
         assert_eq!(
-            diagnostics[0].message, "Replace non-breaking space character with space character",
+            diagnostics[0].message, "Нужно заменить символ неразрывного пробела на обычный пробел",
             "Should use space message"
         );
     }
@@ -222,7 +225,7 @@ mod tests {
 
         for diagnostic in &diagnostics {
             assert_eq!(
-                diagnostic.message, "Correct character to \"-\"",
+                diagnostic.message, "Нужно исправить на правильный символ \"-\"",
                 "All should use dash message"
             );
         }
@@ -235,9 +238,12 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");
 
-        assert_eq!(diagnostics[0].message, "Correct character to \"-\"", "First should be dash");
         assert_eq!(
-            diagnostics[1].message, "Replace non-breaking space character with space character",
+            diagnostics[0].message, "Нужно исправить на правильный символ \"-\"",
+            "First should be dash"
+        );
+        assert_eq!(
+            diagnostics[1].message, "Нужно заменить символ неразрывного пробела на обычный пробел",
             "Second should be space"
         );
     }
