@@ -40,7 +40,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
     Some(Diagnostic {
         code,
-        message: "Trailing comma".to_string(),
+        message: "Не используйте запятые для параметров по умолчанию в конце вызова метода"
+            .to_string(),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),
@@ -62,22 +63,22 @@ mod tests {
 
         assert_eq!(extra_diags.len(), 6, "Expected 6 diagnostics");
 
-        // Line 9 (0-indexed line 8): Метод1(Парам1, , Парам2,)
+        // Строка 9 (0-индекс 8): Метод1(Парам1, , Парам2,)
         assert_diagnostic_range(code, extra_diags[0], 8, 35, 36);
 
-        // Line 10: Метод2(Парам1, Парам2,,,)
+        // Строка 10: Метод2(Парам1, Парам2,,,)
         assert_diagnostic_range(code, extra_diags[1], 9, 35, 36);
 
-        // Line 11: Модуль.Метод3(Парам1, Парам2, Парам3,, )
+        // Строка 11: Модуль.Метод3(Парам1, Парам2, Парам3,, )
         assert_diagnostic_range(code, extra_diags[2], 10, 49, 50);
 
-        // Line 12: Модуль.Метод4(Парам1, , Парам2,,,,)
+        // Строка 12: Модуль.Метод4(Парам1, , Парам2,,,,)
         assert_diagnostic_range(code, extra_diags[3], 11, 45, 46);
 
-        // Line 14: Если Метод5(Парам1, , Парам2,,,,) Тогда
+        // Строка 14: Если Метод5(Парам1, , Парам2,,,,) Тогда
         assert_diagnostic_range(code, extra_diags[4], 13, 31, 32);
 
-        // Line 18: Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
+        // Строка 18: Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
         assert_diagnostic_range(code, extra_diags[5], 17, 38, 39);
     }
 
@@ -112,7 +113,7 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
-        // Only first trailing comma is reported
+        // Сообщается только о первой лишней запятой
         assert_eq!(extra_diags.len(), 1);
     }
 
