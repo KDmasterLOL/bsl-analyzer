@@ -48,11 +48,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let check_object_module = ctx.config.get_bool(code, "checkObjectModule").unwrap_or(false);
 
-    if !check_object_module {
-        let metadata = ctx.module_metadata();
-        if metadata.module_type == bsl_metadata::ModuleType::ObjectModule {
-            return Vec::new();
-        }
+    let metadata = ctx.module_metadata();
+
+    if !check_object_module && metadata.module_type == bsl_metadata::ModuleType::ObjectModule {
+        return Vec::new();
     }
 
     let item_tree = ctx.item_tree();
@@ -66,6 +65,17 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     if let Some(module_code) = module_bodies.module_code_result() {
         collect_method_calls(&module_code.body, &mut called_methods);
+    }
+
+    // Add form event and command handlers as "called" methods
+    // These are called by the platform, not by code
+    if let Some(ref form) = metadata.form {
+        for handler in form.event_handlers() {
+            called_methods.insert(handler.to_lowercase());
+        }
+        for handler in form.command_handlers() {
+            called_methods.insert(handler.to_lowercase());
+        }
     }
 
     let mut diagnostics = Vec::new();

@@ -37,7 +37,9 @@ type SdblInFile = Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>;
 
 /// Get metadata for a module (type and execution context).
 ///
-/// This is the actual implementation of module_metadata that has access to VFS.
+/// This Salsa tracked query delegates to `build_module_metadata` for the actual
+/// metadata construction, ensuring a single source of truth.
+///
 /// Loads metadata from 1C Configuration if available, determines module type from file path,
 /// and resolves execution context for CommonModules.
 ///
@@ -68,29 +70,11 @@ pub fn module_metadata_query<'db>(
         Some(path) => path,
         None => {
             tracing::debug!("Could not determine file path for metadata");
-            return Arc::new(hir_def::ModuleMetadata {
-                module_type: bsl_metadata::ModuleType::CommonModule,
-                execution_context: None,
-                common_module: None,
-                mdo: None,
-                register: None,
-                form: None,
-                http_service: None,
-                web_service: None,
-            });
+            return Arc::new(hir_def::ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown));
         }
     };
 
-    let uri = file_path.to_string_lossy().to_string();
-
-    // Parse module path to get MDO type and name
-    let path_info = crate::metadata::parse_module_path(&uri);
-
-    // Determine module type from file URI
-    let module_type = crate::metadata::get_module_type_from_uri(&uri)
-        .unwrap_or(bsl_metadata::ModuleType::CommonModule);
-
-    // Find configuration root
+    // Load configuration (Salsa-cached)
     let config_root = crate::find_configuration_root_for_metadata(db, &file_path);
     let configuration = config_root.map(|root| {
         let config_path_str = root.to_string_lossy().to_string();
@@ -98,84 +82,8 @@ pub fn module_metadata_query<'db>(
         load_configuration(db, path_input)
     });
 
-    // Initialize result fields
-    let mut execution_context = None;
-    let mut common_module = None;
-    let mut mdo = None;
-    let mut register = None;
-    let mut form = None;
-    let mut http_service = None;
-    let mut web_service = None;
-
-    // Load metadata based on module type
-    if let Some(config) = &configuration {
-        match module_type {
-            bsl_metadata::ModuleType::CommonModule => {
-                // Find CommonModule by URI
-                if let Some(cm) = crate::find_common_module_by_uri(config, &file_path) {
-                    execution_context = Some(hir_def::compute_execution_context(&cm));
-                    common_module = Some(Arc::new(cm));
-                }
-            }
-            bsl_metadata::ModuleType::ManagerModule
-            | bsl_metadata::ModuleType::ObjectModule
-            | bsl_metadata::ModuleType::RecordSetModule => {
-                // Load MDO or Register based on path info
-                if let Some(ref info) = path_info {
-                    if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
-                        // Check if this is a register type
-                        if matches!(
-                            mdo_type,
-                            bsl_metadata::MdoType::InformationRegister
-                                | bsl_metadata::MdoType::AccumulationRegister
-                                | bsl_metadata::MdoType::AccountingRegister
-                                | bsl_metadata::MdoType::CalculationRegister
-                        ) {
-                            // Find register by type and name
-                            if let Some(reg) = config.find_register_by_type_and_name(mdo_type, name)
-                            {
-                                register = Some(Arc::new(reg.clone()));
-                            }
-                        } else {
-                            // Find metadata object
-                            if let Some(obj) = config.find_metadata_object(mdo_type, name) {
-                                mdo = Some(Arc::new(obj.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-            bsl_metadata::ModuleType::FormModule => {
-                // Load Form metadata for FormModule
-                form = crate::load_form_from_path(&file_path);
-            }
-            bsl_metadata::ModuleType::HTTPServiceModule => {
-                // Find HTTP service by path
-                http_service = crate::find_http_service_by_path(config, &file_path);
-            }
-            bsl_metadata::ModuleType::WebServiceModule => {
-                // Find Web service by path
-                web_service = crate::find_web_service_by_path(config, &file_path);
-            }
-            _ => {}
-        }
-    }
-
-    // For FormModule without configuration, try to load form from XML directly
-    if module_type == bsl_metadata::ModuleType::FormModule && form.is_none() {
-        form = crate::load_form_from_path(&file_path);
-    }
-
-    Arc::new(hir_def::ModuleMetadata {
-        module_type,
-        execution_context,
-        common_module,
-        mdo,
-        register,
-        form,
-        http_service,
-        web_service,
-    })
+    // Delegate to the single source of truth
+    Arc::new(crate::build_module_metadata(&file_path, configuration.as_deref()))
 }
 
 /// Get all SDBL queries in a file with their SdblExprId.

@@ -8,7 +8,9 @@ use std::sync::{Arc, OnceLock};
 
 use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
-use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, SymbolTree, WorkspaceSymbols};
+use hir_def::{
+    ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree, WorkspaceSymbols,
+};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxBuildHasher;
 use syntax::{Parse, SyntaxNode};
@@ -38,6 +40,9 @@ pub struct ParsedFile {
     /// Module ID for this file.
     module_id: ModuleId,
 
+    /// File path for metadata loading.
+    file_path: Option<Arc<str>>,
+
     /// Lazily computed module bodies (HIR).
     /// Computed on first access during Phase 2.
     module_bodies: OnceLock<Arc<ModuleBodies>>,
@@ -49,6 +54,10 @@ pub struct ParsedFile {
     /// Lazily computed SDBL HIR for all queries.
     /// Computed on first access during Phase 2 (requires configuration for type inference).
     sdbl_hir: OnceLock<crate::SdblHirEntries>,
+
+    /// Lazily computed module metadata (FormModule handlers, CommonModule context, etc.).
+    /// Computed on first access during Phase 2 (requires configuration).
+    module_metadata: OnceLock<Arc<ModuleMetadata>>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -59,26 +68,30 @@ impl std::fmt::Debug for ParsedFile {
             .field("has_bodies", &self.module_bodies.get().is_some())
             .field("has_cfgs", &self.module_cfgs.get().is_some())
             .field("has_sdbl_hir", &self.sdbl_hir.get().is_some())
+            .field("has_metadata", &self.module_metadata.get().is_some())
             .finish()
     }
 }
 
 impl ParsedFile {
-    /// Create a new ParsedFile with lazy HIR/CFG.
+    /// Create a new ParsedFile with lazy HIR/CFG/metadata.
     pub fn new(
         text: Arc<str>,
         parse: Arc<Parse<SyntaxNode>>,
         item_tree: Arc<ItemTree>,
         module_id: ModuleId,
+        file_path: Option<Arc<str>>,
     ) -> Self {
         Self {
             text,
             parse,
             item_tree,
             module_id,
+            file_path,
             module_bodies: OnceLock::new(),
             module_cfgs: OnceLock::new(),
             sdbl_hir: OnceLock::new(),
+            module_metadata: OnceLock::new(),
         }
     }
 
@@ -173,6 +186,32 @@ impl ParsedFile {
                     .collect();
 
                 Arc::new(result)
+            })
+            .clone()
+    }
+
+    /// Get or compute module metadata.
+    ///
+    /// Thread-safe: computed only once even with concurrent access.
+    /// Loads form handlers (for FormModule), execution context (for CommonModule), etc.
+    ///
+    /// # Arguments
+    /// * `configuration` - Optional 1C configuration metadata for module resolution
+    pub fn module_metadata(
+        &self,
+        configuration: Option<&bsl_metadata::Configuration>,
+    ) -> Arc<ModuleMetadata> {
+        self.module_metadata
+            .get_or_init(|| {
+                let file_path = match &self.file_path {
+                    Some(path) => std::path::Path::new(path.as_ref()),
+                    None => {
+                        return Arc::new(ModuleMetadata::unknown(
+                            bsl_metadata::ModuleType::Unknown,
+                        ));
+                    }
+                };
+                Arc::new(crate::build_module_metadata(file_path, configuration))
             })
             .clone()
     }
@@ -908,7 +947,7 @@ mod tests {
         let item_tree: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse));
         let module_id = ModuleId::new(file_id);
 
-        let parsed = Arc::new(ParsedFile::new(text.clone(), parse, item_tree, module_id));
+        let parsed = Arc::new(ParsedFile::new(text.clone(), parse, item_tree, module_id, None));
 
         // Cache it
         state.cache_parsed_file(file_id, Arc::clone(&parsed));
@@ -983,7 +1022,7 @@ mod tests {
         let parse_0: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_0));
         let item_tree_0: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_0));
         let module_id_0 = ModuleId::new(file_0);
-        let parsed_0 = Arc::new(ParsedFile::new(text_0, parse_0, item_tree_0, module_id_0));
+        let parsed_0 = Arc::new(ParsedFile::new(text_0, parse_0, item_tree_0, module_id_0, None));
         state.cache_parsed_file(file_0, parsed_0);
 
         // Verify cache state after first file
@@ -996,7 +1035,7 @@ mod tests {
         let parse_1: Arc<Parse<syntax::SyntaxNode>> = Arc::new(parser::parse(&text_1));
         let item_tree_1: Arc<ItemTree> = Arc::new(ItemTree::from_parse(&parse_1));
         let module_id_1 = ModuleId::new(file_1);
-        let parsed_1 = Arc::new(ParsedFile::new(text_1, parse_1, item_tree_1, module_id_1));
+        let parsed_1 = Arc::new(ParsedFile::new(text_1, parse_1, item_tree_1, module_id_1, None));
         state.cache_parsed_file(file_1, parsed_1);
 
         // Verify cache state after second file

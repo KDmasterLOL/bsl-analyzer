@@ -21,7 +21,7 @@
 //! - [`infer_types_query`] - Type inference for module
 //!
 //! **Metadata:**
-//! - [`module_metadata_query`] - Module type and execution context
+//! - `module_metadata_query` - Module type and execution context (implemented in ide-db)
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use vfs::FileId;
 
 use crate::{
     body::ExternalRef, module_index::ModuleIndex, ty::infer::InferenceResult, DefDatabase,
-    ModuleBodies, ModuleData, ModuleId, ModuleMetadata, WorkspaceSymbols,
+    ModuleBodies, ModuleData, ModuleId, WorkspaceSymbols,
 };
 
 // Re-export query functions from individual modules
@@ -115,46 +115,6 @@ pub fn module_bodies_query<'db>(
     // implementation in ide-db where VFS access is available for loading Configuration.
     // This keeps hir-def independent of VFS.
     Arc::new(result)
-}
-
-/// Get metadata for a module (type and execution context).
-///
-/// Loads metadata from 1C Configuration if available. Used by:
-/// - ModuleBodies query (attaches metadata to bodies)
-/// - Metadata-based diagnostics (naming rules, API requirements)
-///
-/// ## Salsa caching
-/// - LRU: 128 (metadata loading is I/O intensive)
-/// - Invalidation: Automatic when file content or configuration changes
-/// - Shared: load_configuration() is cached separately (LRU=16)
-///
-/// ## Implementation note
-/// This query is implemented in ide-db (not hir-def) because it needs access to:
-/// - VFS for file path resolution
-/// - Configuration loading infrastructure
-///
-/// For now, this is a placeholder. Actual implementation is in RootDatabaseImpl.
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     // Actual query implemented in ide-db
-///     self.module_metadata_impl(file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 128)]
-pub fn module_metadata_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: FileIdInput<'db>,
-) -> Arc<ModuleMetadata> {
-    let _span = tracing::info_span!("module_metadata", ?file_id_input).entered();
-    let _file_id = file_id_input.file_id(db);
-
-    // TODO: This should be moved to ide-db where VFS access is available
-    // For now, return unknown metadata
-    Arc::new(ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown))
 }
 
 /// Salsa tracked query for type inference.

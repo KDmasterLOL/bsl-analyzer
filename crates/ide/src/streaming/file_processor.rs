@@ -218,8 +218,12 @@ impl<'a> FileProcessor<'a> {
         let symbol_tree =
             Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
-        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
-        let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
+        // Get file path for metadata loading
+        let file_path: Option<Arc<str>> = self.provider.file_path(file_id).map(Arc::from);
+
+        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG/metadata)
+        let parsed_file =
+            Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id, file_path));
         self.shared_state.cache_parsed_file(file_id, parsed_file);
 
         // Publish to SharedState
@@ -268,8 +272,12 @@ impl<'a> FileProcessor<'a> {
         let symbol_tree =
             Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
 
-        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG)
-        let parsed_file = Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id));
+        // Get file path for metadata loading
+        let file_path: Option<Arc<str>> = self.provider.file_path(file_id).map(Arc::from);
+
+        // Cache ParsedFile for Phase 2 (with module_id for lazy HIR/CFG/metadata)
+        let parsed_file =
+            Arc::new(ParsedFile::new(text, parse, Arc::clone(&item_tree), module_id, file_path));
         self.shared_state.cache_parsed_file(file_id, parsed_file);
 
         // Publish and immediately transition to DiagnosticsInProgress

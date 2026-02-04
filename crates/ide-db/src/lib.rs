@@ -759,15 +759,129 @@ pub(crate) fn find_common_module_by_uri(
 pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
     use bsl_metadata::xml_parser::parse_form_from_bsl_path;
 
+    tracing::debug!(path = %file_path.display(), "Attempting to load form metadata");
+
     match parse_form_from_bsl_path(file_path) {
         Ok(form) => {
-            tracing::debug!(form_name = %form.name(), form_type = ?form.form_type(), "Loaded form metadata");
+            tracing::debug!(
+                form_name = %form.name(),
+                form_type = ?form.form_type(),
+                event_handlers = form.event_handlers().len(),
+                command_handlers = form.command_handlers().len(),
+                "Loaded form metadata"
+            );
             Some(Arc::new(form))
         }
         Err(e) => {
-            tracing::debug!(?e, "Could not load form metadata");
+            tracing::debug!(?e, path = %file_path.display(), "Could not load form metadata");
             None
         }
+    }
+}
+
+/// Build module metadata from file path and optional configuration.
+///
+/// This is the single source of truth for creating ModuleMetadata.
+/// Used by both Salsa queries and StreamingProvider.
+///
+/// # Arguments
+/// * `file_path` - Path to the BSL module file
+/// * `configuration` - Optional configuration for resolving module-specific metadata
+///
+/// # Returns
+/// ModuleMetadata with all available information filled in.
+pub fn build_module_metadata(
+    file_path: &Path,
+    configuration: Option<&bsl_metadata::Configuration>,
+) -> hir_def::ModuleMetadata {
+    let uri = file_path.to_string_lossy().to_string();
+
+    // Parse module path to get MDO type and name
+    let path_info = metadata::parse_module_path(&uri);
+
+    // Determine module type from file URI
+    let module_type =
+        metadata::get_module_type_from_uri(&uri).unwrap_or(bsl_metadata::ModuleType::CommonModule);
+
+    tracing::debug!(uri = %uri, module_type = ?module_type, "build_module_metadata");
+
+    // Initialize result fields
+    let mut execution_context = None;
+    let mut common_module = None;
+    let mut mdo = None;
+    let mut register = None;
+    let mut form = None;
+    let mut http_service = None;
+    let mut web_service = None;
+
+    // Load metadata based on module type
+    if let Some(config) = configuration {
+        match module_type {
+            bsl_metadata::ModuleType::CommonModule => {
+                // Find CommonModule by URI
+                if let Some(cm) = find_common_module_by_uri(config, file_path) {
+                    execution_context = Some(hir_def::compute_execution_context(&cm));
+                    common_module = Some(Arc::new(cm));
+                }
+            }
+            bsl_metadata::ModuleType::ManagerModule
+            | bsl_metadata::ModuleType::ObjectModule
+            | bsl_metadata::ModuleType::RecordSetModule => {
+                // Load MDO or Register based on path info
+                if let Some(ref info) = path_info {
+                    if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
+                        // Check if this is a register type
+                        if matches!(
+                            mdo_type,
+                            bsl_metadata::MdoType::InformationRegister
+                                | bsl_metadata::MdoType::AccumulationRegister
+                                | bsl_metadata::MdoType::AccountingRegister
+                                | bsl_metadata::MdoType::CalculationRegister
+                        ) {
+                            // Find register by type and name
+                            if let Some(reg) = config.find_register_by_type_and_name(mdo_type, name)
+                            {
+                                register = Some(Arc::new(reg.clone()));
+                            }
+                        } else {
+                            // Find metadata object
+                            if let Some(obj) = config.find_metadata_object(mdo_type, name) {
+                                mdo = Some(Arc::new(obj.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+            bsl_metadata::ModuleType::FormModule => {
+                // Load Form metadata for FormModule
+                form = load_form_from_path(file_path);
+            }
+            bsl_metadata::ModuleType::HTTPServiceModule => {
+                // Find HTTP service by path
+                http_service = find_http_service_by_path(config, file_path);
+            }
+            bsl_metadata::ModuleType::WebServiceModule => {
+                // Find Web service by path
+                web_service = find_web_service_by_path(config, file_path);
+            }
+            _ => {}
+        }
+    }
+
+    // For FormModule without configuration, try to load form from XML directly
+    if module_type == bsl_metadata::ModuleType::FormModule && form.is_none() {
+        form = load_form_from_path(file_path);
+    }
+
+    hir_def::ModuleMetadata {
+        module_type,
+        execution_context,
+        common_module,
+        mdo,
+        register,
+        form,
+        http_service,
+        web_service,
     }
 }
 

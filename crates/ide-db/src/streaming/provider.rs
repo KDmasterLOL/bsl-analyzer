@@ -11,7 +11,6 @@ use rustc_hash::FxHashMap;
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
-use crate::metadata::get_module_type_from_uri;
 use crate::provider::AnalysisProvider;
 
 use super::global_context::GlobalContext;
@@ -152,34 +151,27 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
-        let file_path = self.file_path(module_id.file_id);
-        let module_type = file_path
-            .as_ref()
-            .and_then(|p| get_module_type_from_uri(p))
-            .unwrap_or(bsl_metadata::ModuleType::Unknown);
-
-        // If it's a CommonModule, try to get execution context from configuration
-        if module_type == bsl_metadata::ModuleType::CommonModule {
-            if let (Some(config), Some(path)) = (&self.global.configuration, &file_path) {
-                if let Some(name) = extract_common_module_name(path) {
-                    if let Some(common_module) = config.find_common_module(&name) {
-                        let execution_context = hir_def::compute_execution_context(common_module);
-                        return Arc::new(ModuleMetadata {
-                            module_type,
-                            execution_context: Some(execution_context),
-                            common_module: Some(Arc::new(common_module.clone())),
-                            mdo: None,
-                            register: None,
-                            form: None,
-                            http_service: None,
-                            web_service: None,
-                        });
-                    }
-                }
+        // Check ParsedFile cache (lazy computation via OnceLock)
+        if let Some(ref shared_state) = self.shared_state {
+            if let Some(parsed) = shared_state.get_parsed_file(module_id.file_id) {
+                let configuration = self.global.configuration.as_deref();
+                return parsed.module_metadata(configuration);
             }
         }
 
-        Arc::new(ModuleMetadata::unknown(module_type))
+        // Fallback - compute on-the-fly (when not in streaming mode or cache miss)
+        let file_path_str = match self.file_path(module_id.file_id) {
+            Some(path) => path,
+            None => {
+                tracing::debug!("Could not determine file path for metadata");
+                return Arc::new(ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown));
+            }
+        };
+
+        let file_path = std::path::Path::new(&file_path_str);
+        let configuration = self.global.configuration.as_deref();
+
+        Arc::new(crate::build_module_metadata(file_path, configuration))
     }
 
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
@@ -435,48 +427,11 @@ impl AnalysisProvider for StreamingProvider {
     }
 }
 
-/// Extract CommonModule name from file path.
-fn extract_common_module_name(path: &str) -> Option<String> {
-    let normalized = path.replace('\\', "/");
-
-    // Try English pattern
-    if let Some(idx) = normalized.find("CommonModules/") {
-        let after = &normalized[idx + "CommonModules/".len()..];
-        return after.split('/').next().map(String::from);
-    }
-
-    // Try Russian pattern
-    if let Some(idx) = normalized.find("ОбщиеМодули/") {
-        let after = &normalized[idx + "ОбщиеМодули/".len()..];
-        return after.split('/').next().map(String::from);
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::streaming::{FileReader, GlobalContext};
     use vfs::{file_set::FileSet, VfsPath};
-
-    #[test]
-    fn test_extract_common_module_name_english() {
-        let path = "/project/CommonModules/MyModule/Ext/Module.bsl";
-        assert_eq!(extract_common_module_name(path), Some("MyModule".to_string()));
-    }
-
-    #[test]
-    fn test_extract_common_module_name_russian() {
-        let path = "/project/ОбщиеМодули/МойМодуль/Ext/Module.bsl";
-        assert_eq!(extract_common_module_name(path), Some("МойМодуль".to_string()));
-    }
-
-    #[test]
-    fn test_extract_common_module_name_not_found() {
-        let path = "/project/Catalogs/MyCatalog/Ext/Module.bsl";
-        assert_eq!(extract_common_module_name(path), None);
-    }
 
     #[test]
     fn test_streaming_provider_parse() {

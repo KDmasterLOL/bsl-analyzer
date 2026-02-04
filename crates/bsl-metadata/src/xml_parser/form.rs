@@ -32,6 +32,54 @@ struct FormXmlElement {
     form_type: String,
     #[serde(default)]
     child_items: Option<ChildItems>,
+    /// Form events (OnCreateAtServer, OnOpen, etc.)
+    #[serde(default)]
+    events: Option<FormEvents>,
+    /// Form commands with actions
+    #[serde(default)]
+    commands: Option<FormCommands>,
+}
+
+/// Container for form events
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct FormEvents {
+    #[serde(default)]
+    event: Vec<FormEvent>,
+}
+
+/// Single form event with handler name
+#[allow(dead_code)] // name needed for XML deserialization
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FormEvent {
+    /// Event type (OnCreateAtServer, OnOpen, etc.)
+    #[serde(rename = "@name", default)]
+    name: String,
+    /// Handler method name (text content)
+    #[serde(rename = "$text", default)]
+    handler: String,
+}
+
+/// Container for form commands
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct FormCommands {
+    #[serde(default)]
+    command: Vec<FormCommand>,
+}
+
+/// Single form command with action handler
+#[allow(dead_code)] // name needed for XML deserialization
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FormCommand {
+    /// Command name
+    #[serde(rename = "@name", default)]
+    name: String,
+    /// Action handler method name
+    #[serde(default)]
+    action: String,
 }
 
 /// Form properties
@@ -220,13 +268,44 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         child_items.collect_elements(&mut elements);
     }
 
-    let form = Form::with_elements(name, form_type, uuid, elements);
+    // Collect event handlers
+    let event_handlers: Vec<String> = form_xml
+        .events
+        .as_ref()
+        .map(|events| {
+            events
+                .event
+                .iter()
+                .filter(|e| !e.handler.is_empty())
+                .map(|e| e.handler.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Collect command handlers
+    let command_handlers: Vec<String> = form_xml
+        .commands
+        .as_ref()
+        .map(|commands| {
+            commands
+                .command
+                .iter()
+                .filter(|c| !c.action.is_empty())
+                .map(|c| c.action.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let form =
+        Form::with_handlers(name, form_type, uuid, elements, event_handlers, command_handlers);
 
     tracing::debug!(
         form_name = %form.name(),
         form_type = ?form.form_type(),
         uuid = %form.uuid(),
         elements_count = form.elements().len(),
+        event_handlers_count = form.event_handlers().len(),
+        command_handlers_count = form.command_handlers().len(),
         "parsed form"
     );
 
@@ -238,17 +317,19 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
 /// Given a BSL module path like:
 /// `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
 ///
-/// Derives the form XML path:
-/// `Catalogs/Справочник1/Forms/ФормаЭлемента.xml`
+/// Reads two XML files:
+/// 1. `Catalogs/Справочник1/Forms/ФормаЭлемента.xml` - MetaDataObject with FormType, UUID, Name
+/// 2. `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml` - Form definition with Events, Commands
+///
+/// Combines information from both files.
 pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
     // Path: .../Forms/<FormName>/Ext/Form/Module.bsl
-    // Need: .../Forms/<FormName>.xml
 
-    let mut path = bsl_path.to_path_buf();
+    let mut forms_dir = bsl_path.to_path_buf();
 
     // Go up: Module.bsl -> Form -> Ext -> FormName -> Forms
     for _ in 0..4 {
-        if !path.pop() {
+        if !forms_dir.pop() {
             return Err(crate::error::MetadataError::InvalidFormat(format!(
                 "Invalid form module path: {}",
                 bsl_path.display()
@@ -256,7 +337,7 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
         }
     }
 
-    // Now path points to Forms directory, get form name
+    // Get form name
     let form_name = bsl_path
         .parent() // Module.bsl -> Form
         .and_then(|p| p.parent()) // Form -> Ext
@@ -270,19 +351,107 @@ pub fn parse_form_from_bsl_path(bsl_path: &std::path::Path) -> Result<Form> {
             ))
         })?;
 
-    // Build XML path
-    path.push(format!("{}.xml", form_name));
+    // Path to Ext/Form.xml (contains Events, Commands, ChildItems)
+    let ext_form_xml_path = bsl_path
+        .parent() // Module.bsl -> Form
+        .and_then(|p| p.parent()) // Form -> Ext
+        .map(|p| p.join("Form.xml"))
+        .ok_or_else(|| {
+            crate::error::MetadataError::InvalidFormat(format!(
+                "Cannot build Ext/Form.xml path from: {}",
+                bsl_path.display()
+            ))
+        })?;
 
-    // Read and parse XML
-    let xml = std::fs::read_to_string(&path).map_err(|e| {
+    // Path to Forms/<FormName>.xml (MetaDataObject with FormType)
+    let metadata_xml_path = forms_dir.join(format!("{}.xml", form_name));
+
+    // Read Ext/Form.xml (primary source for Events, Commands, ChildItems)
+    let ext_form_xml = std::fs::read_to_string(&ext_form_xml_path).map_err(|e| {
         crate::error::MetadataError::InvalidFormat(format!(
             "Cannot read form XML at {}: {}",
-            path.display(),
+            ext_form_xml_path.display(),
             e
         ))
     })?;
 
-    parse_form_xml(&xml)
+    // Parse Ext/Form.xml
+    let mut form = parse_form_xml(&ext_form_xml)?;
+
+    // Try to read MetaDataObject for FormType (optional, may not exist)
+    if let Ok(metadata_xml) = std::fs::read_to_string(&metadata_xml_path) {
+        if let Ok(metadata) = parse_form_metadata_xml(&metadata_xml) {
+            // Update form with metadata info
+            form.name = metadata.name;
+            form.form_type = metadata.form_type;
+            form.uuid = metadata.uuid;
+        }
+    }
+
+    Ok(form)
+}
+
+/// Minimal form metadata from MetaDataObject XML.
+struct FormMetadataInfo {
+    name: String,
+    form_type: FormType,
+    uuid: uuid::Uuid,
+}
+
+/// Parse form MetaDataObject XML for FormType information.
+///
+/// MetaDataObject structure:
+/// ```xml
+/// <MetaDataObject>
+///     <Form uuid="...">
+///         <Properties>
+///             <Name>ФормаЭлемента</Name>
+///         </Properties>
+///         <FormType>Managed</FormType>
+///     </Form>
+/// </MetaDataObject>
+/// ```
+fn parse_form_metadata_xml(xml: &str) -> Result<FormMetadataInfo> {
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct MetaDataObjectRoot {
+        form: FormMetadataElement,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct FormMetadataElement {
+        #[serde(rename = "@uuid", default)]
+        uuid: String,
+        #[serde(default)]
+        properties: Option<FormMetadataProperties>,
+        #[serde(default)]
+        form_type: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct FormMetadataProperties {
+        name: String,
+    }
+
+    let root: MetaDataObjectRoot = quick_xml::de::from_str(xml)?;
+
+    let uuid = if root.form.uuid.is_empty() {
+        uuid::Uuid::nil()
+    } else {
+        parse_uuid(&root.form.uuid, "form")?
+    };
+
+    let form_type = if root.form.form_type.is_empty() {
+        FormType::Managed
+    } else {
+        FormType::from_name(&root.form.form_type)
+    };
+
+    let name = root.form.properties.map(|p| p.name).unwrap_or_default();
+
+    Ok(FormMetadataInfo { name, form_type, uuid })
 }
 
 #[cfg(test)]
@@ -391,6 +560,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_form_with_events_and_commands() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <Events>
+        <Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>
+        <Event name="OnOpen">ПриОткрытии</Event>
+    </Events>
+    <Commands>
+        <Command name="Ок" id="1">
+            <Action>Ок</Action>
+        </Command>
+        <Command name="Отмена" id="2">
+            <Action>Отмена</Action>
+        </Command>
+    </Commands>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+
+        // Check event handlers
+        assert_eq!(form.event_handlers().len(), 2);
+        assert!(form.event_handlers().contains(&"ПриСозданииНаСервере".to_string()));
+        assert!(form.event_handlers().contains(&"ПриОткрытии".to_string()));
+
+        // Check command handlers
+        assert_eq!(form.command_handlers().len(), 2);
+        assert!(form.command_handlers().contains(&"Ок".to_string()));
+        assert!(form.command_handlers().contains(&"Отмена".to_string()));
+
+        // Check is_handler method
+        assert!(form.is_handler("ПриСозданииНаСервере"));
+        assert!(form.is_handler("присозданиинасервере")); // case-insensitive
+        assert!(form.is_handler("Ок"));
+        assert!(!form.is_handler("НеСуществующийОбработчик"));
+    }
+
+    #[test]
     fn test_parse_real_form_xml() {
         let xml = include_str!(
             "../../fixtures/designer/Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form.xml"
@@ -403,5 +609,34 @@ mod tests {
         let wrong: Vec<_> = form.elements_with_wrong_data_path().collect();
         assert_eq!(wrong.len(), 1);
         assert_eq!(wrong[0].name, "НесуществующийРеквизит");
+
+        // Form has one event handler
+        assert_eq!(form.event_handlers().len(), 1);
+        assert!(form.is_handler("ПриСозданииНаСервере"));
+    }
+
+    #[test]
+    fn test_parse_form_from_bsl_path() {
+        // Get path to fixtures relative to this source file
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bsl_path = manifest_dir
+            .join("fixtures/designer/Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl");
+
+        // Create a dummy Module.bsl if it doesn't exist (needed for path resolution)
+        let module_dir = bsl_path.parent().unwrap();
+        std::fs::create_dir_all(module_dir).ok();
+        if !bsl_path.exists() {
+            std::fs::write(&bsl_path, "// dummy").ok();
+        }
+
+        let form = parse_form_from_bsl_path(&bsl_path).unwrap();
+
+        // Should have data from both MetaDataObject and Ext/Form.xml
+        assert_eq!(form.name(), "ФормаЭлемента");
+        assert_eq!(form.form_type(), FormType::Managed);
+
+        // Event handlers from Ext/Form.xml
+        assert_eq!(form.event_handlers().len(), 1);
+        assert!(form.is_handler("ПриСозданииНаСервере"));
     }
 }

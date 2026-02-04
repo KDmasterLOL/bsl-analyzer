@@ -146,31 +146,49 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
     }
 
     // CommonModules/<Name>/Ext/Module.bsl
-    if parts.len() >= 4 && parts[0] == "CommonModules" {
-        return Some(bsl_metadata::ModuleType::CommonModule);
+    // Works with both relative and absolute paths
+    if let Some(cm_idx) = parts.iter().position(|&p| p == "CommonModules") {
+        if parts.len() >= cm_idx + 4 {
+            return Some(bsl_metadata::ModuleType::CommonModule);
+        }
     }
 
     // HTTPServices/<Name>/Ext/Module.bsl
-    if parts.len() >= 4 && parts[0] == "HTTPServices" {
-        return Some(bsl_metadata::ModuleType::HTTPServiceModule);
+    if let Some(idx) = parts.iter().position(|&p| p == "HTTPServices") {
+        if parts.len() >= idx + 4 {
+            return Some(bsl_metadata::ModuleType::HTTPServiceModule);
+        }
     }
 
     // WebServices/<Name>/Ext/Module.bsl
-    if parts.len() >= 4 && parts[0] == "WebServices" {
-        return Some(bsl_metadata::ModuleType::WebServiceModule);
+    if let Some(idx) = parts.iter().position(|&p| p == "WebServices") {
+        if parts.len() >= idx + 4 {
+            return Some(bsl_metadata::ModuleType::WebServiceModule);
+        }
     }
 
     // <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl
-    if parts.len() >= 6 && parts[2] == "Commands" && parts[5].ends_with("CommandModule.bsl") {
-        return Some(bsl_metadata::ModuleType::CommandModule);
+    // Check for Commands in path and CommandModule.bsl at end
+    if let Some(cmd_idx) = parts.iter().position(|&p| p == "Commands") {
+        if parts.len() >= cmd_idx + 4 && parts[parts.len() - 1].ends_with("CommandModule.bsl") {
+            return Some(bsl_metadata::ModuleType::CommandModule);
+        }
     }
 
     // <TypePlural>/<Name>/Forms/<Form>/Ext/Form/Module.bsl
-    if parts.len() >= 7 && parts[2] == "Forms" && parts[6].ends_with("Module.bsl") {
-        return Some(bsl_metadata::ModuleType::FormModule);
+    // Check for Forms in path and /Ext/Form/Module.bsl at end
+    if let Some(forms_idx) = parts.iter().position(|&p| p == "Forms") {
+        // Need at least: Forms/<FormName>/Ext/Form/Module.bsl (5 parts after Forms idx)
+        if parts.len() >= forms_idx + 5
+            && parts[parts.len() - 1] == "Module.bsl"
+            && parts[parts.len() - 2] == "Form"
+            && parts[parts.len() - 3] == "Ext"
+        {
+            return Some(bsl_metadata::ModuleType::FormModule);
+        }
     }
 
-    // Простые модули
+    // Простые модули (check last file name)
     if parts.len() >= 4 {
         let module_file = parts[parts.len() - 1];
         return match module_file {
@@ -703,13 +721,23 @@ mod tests {
 
     #[test]
     fn test_get_module_type_common_module() {
+        // Relative path
         let uri = "CommonModules/ГлобальныйМодуль/Ext/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommonModule));
+
+        // Absolute path
+        let uri = "/home/user/project/src/cf/CommonModules/ГлобальныйМодуль/Ext/Module.bsl";
         assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommonModule));
     }
 
     #[test]
     fn test_get_module_type_form_module() {
+        // Relative path
         let uri = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
+
+        // Absolute path (real-world use case)
+        let uri = "/home/user/project/src/cf/BusinessProcesses/Исполнение/Forms/ВводОписанияЗадачиИсполнителя/Ext/Form/Module.bsl";
         assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::FormModule));
     }
 

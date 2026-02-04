@@ -32,7 +32,7 @@ impl FormElement {
 
 /// Form metadata (minimal structure for diagnostics).
 ///
-/// Contains form name, type (Managed/Ordinary), and UUID.
+/// Contains form name, type (Managed/Ordinary), UUID, elements, and event handlers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Form {
     /// Form name
@@ -43,12 +43,28 @@ pub struct Form {
     pub uuid: Uuid,
     /// Form elements with data path bindings
     pub elements: Vec<FormElement>,
+    /// Event handler method names (from `<Events><Event>handler</Event></Events>`)
+    ///
+    /// These are methods called by the platform for form events like
+    /// OnCreateAtServer, OnOpen, BeforeClose, etc.
+    pub event_handlers: Vec<String>,
+    /// Command handler method names (from `<Commands><Command><Action>handler</Action></Command></Commands>`)
+    ///
+    /// These are methods called when form commands are executed.
+    pub command_handlers: Vec<String>,
 }
 
 impl Form {
     /// Create a new Form instance.
     pub fn new(name: String, form_type: FormType, uuid: Uuid) -> Self {
-        Self { name, form_type, uuid, elements: Vec::new() }
+        Self {
+            name,
+            form_type,
+            uuid,
+            elements: Vec::new(),
+            event_handlers: Vec::new(),
+            command_handlers: Vec::new(),
+        }
     }
 
     /// Create a new Form instance with elements.
@@ -58,7 +74,26 @@ impl Form {
         uuid: Uuid,
         elements: Vec<FormElement>,
     ) -> Self {
-        Self { name, form_type, uuid, elements }
+        Self {
+            name,
+            form_type,
+            uuid,
+            elements,
+            event_handlers: Vec::new(),
+            command_handlers: Vec::new(),
+        }
+    }
+
+    /// Create a new Form instance with elements and handlers.
+    pub fn with_handlers(
+        name: String,
+        form_type: FormType,
+        uuid: Uuid,
+        elements: Vec<FormElement>,
+        event_handlers: Vec<String>,
+        command_handlers: Vec<String>,
+    ) -> Self {
+        Self { name, form_type, uuid, elements, event_handlers, command_handlers }
     }
 
     /// Get form elements.
@@ -94,6 +129,29 @@ impl Form {
     /// Check if this is an ordinary form.
     pub fn is_ordinary(&self) -> bool {
         self.form_type == FormType::Ordinary
+    }
+
+    /// Get event handler method names.
+    ///
+    /// These methods are called by the platform for form events.
+    pub fn event_handlers(&self) -> &[String] {
+        &self.event_handlers
+    }
+
+    /// Get command handler method names.
+    ///
+    /// These methods are called when form commands are executed.
+    pub fn command_handlers(&self) -> &[String] {
+        &self.command_handlers
+    }
+
+    /// Check if a method name is a form handler (event or command).
+    ///
+    /// Comparison is case-insensitive.
+    pub fn is_handler(&self, method_name: &str) -> bool {
+        let name_lower = method_name.to_lowercase();
+        self.event_handlers.iter().any(|h| h.to_lowercase() == name_lower)
+            || self.command_handlers.iter().any(|h| h.to_lowercase() == name_lower)
     }
 }
 
