@@ -700,8 +700,10 @@ fn analyze_salsa(
     // Load project configuration
     tracing::info!("Loading project configuration");
     let proj_config = if let Some(ref cfg) = config_path {
-        project_model::ProjectConfig::load(cfg).unwrap_or_default()
+        // -c flag passes file path directly, use load_from_file
+        project_model::ProjectConfig::load_from_file(cfg).unwrap_or_default()
     } else {
+        // No explicit config - search in source_dir
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
@@ -1017,8 +1019,10 @@ fn analyze_streaming(
 
     // Load project configuration
     let proj_config = if let Some(ref cfg) = config_path {
-        project_model::ProjectConfig::load(cfg).unwrap_or_default()
+        // -c flag passes file path directly, use load_from_file
+        project_model::ProjectConfig::load_from_file(cfg).unwrap_or_default()
     } else {
+        // No explicit config - search in source_dir
         project_model::ProjectConfig::load(&source_dir).unwrap_or_default()
     };
 
