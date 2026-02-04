@@ -111,6 +111,12 @@ enum Commands {
         /// Example: --only-diagnostic IncorrectUseOfStrTemplate
         #[arg(long)]
         only_diagnostic: Option<String>,
+
+        /// JSON file with diff information for filtering diagnostics.
+        /// Only diagnostics within changed line ranges will be reported.
+        /// Format: {"base_ref": "...", "head_ref": "...", "files": {"path": {"hunks": [[start, end], ...]}}}
+        #[arg(long)]
+        diff_filter: Option<PathBuf>,
     },
 
     /// Check configuration file
@@ -224,6 +230,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             workers,
             format,
             only_diagnostic,
+            diff_filter,
         }) => analyze(
             source_dir,
             workspace_dir,
@@ -238,6 +245,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             workers,
             format,
             only_diagnostic,
+            diff_filter,
         ),
         Some(Commands::CheckConfig { config }) => check_config(config),
         Some(Commands::Format { file, write, spaces, indent_size }) => {
@@ -551,7 +559,15 @@ fn analyze(
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
+    diff_filter_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Load diff filter if provided
+    let diff_filter = if let Some(ref path) = diff_filter_path {
+        Some(bsl_analyzer::diff_filter::DiffFilter::load(path)?)
+    } else {
+        None
+    };
+
     // Route to streaming or Salsa mode
     if streaming {
         analyze_streaming(
@@ -564,6 +580,7 @@ fn analyze(
             workers,
             format,
             only_diagnostic,
+            diff_filter,
         )
     } else {
         analyze_salsa(
@@ -574,6 +591,7 @@ fn analyze(
             reporters,
             quiet,
             only_diagnostic,
+            diff_filter,
         )
     }
 }
@@ -640,6 +658,7 @@ fn analyze_salsa(
     reporters: Vec<String>,
     quiet: bool,
     only_diagnostic: Option<String>,
+    diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use base_db::SourceDatabase;
     use ide::{DiagnosticsConfig, RootDatabaseImpl};
@@ -666,6 +685,9 @@ fn analyze_salsa(
     if let Some(ref diag) = only_diagnostic {
         tracing::info!("Profiling diagnostic: {}", diag);
     }
+    if diff_filter.is_some() {
+        tracing::info!("Diff filter enabled");
+    }
 
     let start = Instant::now();
 
@@ -687,6 +709,12 @@ fn analyze_salsa(
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
 
+    // Expand XML dependencies in diff filter
+    let mut diff_filter = diff_filter;
+    if let Some(ref mut filter) = diff_filter {
+        filter.expand_xml_deps(&source_dir);
+    }
+
     // Create database
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
@@ -706,6 +734,17 @@ fn analyze_salsa(
     }
 
     tracing::info!("Found {} BSL files", bsl_files.len());
+
+    // Filter files by diff if enabled
+    let total_files = bsl_files.len();
+    if let Some(ref filter) = diff_filter {
+        bsl_files.retain(|path| {
+            // Convert to relative path for matching
+            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+            filter.should_analyze(rel_path)
+        });
+        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
+    }
 
     // Build FileSet with all discovered files for VFS path resolution
     tracing::info!("Loading files into database");
@@ -785,6 +824,7 @@ fn analyze_salsa(
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     let source_dir_arc = Arc::new(source_dir.clone());
     let configuration_path_arc = Arc::new(configuration_path);
+    let diff_filter_arc = Arc::new(diff_filter);
     // file_set_arc is created above and stored in SourceRoot
 
     // Result type: (Option<FileAnalysis>, Option<FileTiming>)
@@ -847,17 +887,30 @@ fn analyze_salsa(
                     }
                 };
 
-                let diagnostic_outputs: Vec<_> =
+                // Convert diagnostics to output format
+                let mut diagnostic_outputs: Vec<_> =
                     diagnostics.iter().map(|d| d.to_output(&file_text)).collect();
 
-                Some(FileAnalysis {
-                    path: path.clone(),
-                    relative_path: path
-                        .strip_prefix(&*workspace_dir_arc)
-                        .unwrap_or(path)
-                        .to_path_buf(),
-                    diagnostics: diagnostic_outputs,
-                })
+                // Filter diagnostics by diff hunks if enabled
+                if let Some(ref filter) = *diff_filter_arc {
+                    let rel_path = path.strip_prefix(&*source_dir_arc).unwrap_or(path);
+                    diagnostic_outputs.retain(|d| {
+                        filter.diagnostic_in_diff(rel_path, d.start_line as u32, d.end_line as u32)
+                    });
+                }
+
+                if diagnostic_outputs.is_empty() {
+                    None
+                } else {
+                    Some(FileAnalysis {
+                        path: path.clone(),
+                        relative_path: path
+                            .strip_prefix(&*workspace_dir_arc)
+                            .unwrap_or(path)
+                            .to_path_buf(),
+                        diagnostics: diagnostic_outputs,
+                    })
+                }
             } else {
                 None
             };
@@ -937,6 +990,7 @@ fn analyze_streaming(
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
+    diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use ide::{streaming::AnalysisOrchestrator, DiagnosticsConfig};
     use vfs::FileId;
@@ -948,6 +1002,9 @@ fn analyze_streaming(
     let profiling_enabled = only_diagnostic.is_some();
     if let Some(ref diag) = only_diagnostic {
         tracing::info!("Profiling diagnostic (streaming mode): {}", diag);
+    }
+    if diff_filter.is_some() {
+        tracing::info!("Diff filter enabled (streaming mode)");
     }
 
     tracing::info!("Analyzing project (streaming mode): {:?}", source_dir);
@@ -980,6 +1037,12 @@ fn analyze_streaming(
         "Loaded DiagnosticsConfig (streaming mode)"
     );
 
+    // Expand XML dependencies in diff filter
+    let mut diff_filter = diff_filter;
+    if let Some(ref mut filter) = diff_filter {
+        filter.expand_xml_deps(&source_dir);
+    }
+
     // Find all BSL files
     tracing::info!("Finding BSL files in {:?}", source_dir);
     let mut bsl_files = Vec::new();
@@ -995,6 +1058,16 @@ fn analyze_streaming(
     }
 
     tracing::info!("Found {} BSL files", bsl_files.len());
+
+    // Filter files by diff if enabled
+    let total_files = bsl_files.len();
+    if let Some(ref filter) = diff_filter {
+        bsl_files.retain(|path| {
+            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+            filter.should_analyze(rel_path)
+        });
+        tracing::info!("After diff filter: {} files (from {} total)", bsl_files.len(), total_files);
+    }
 
     if bsl_files.is_empty() {
         tracing::warn!("No BSL files found in {:?}", source_dir);
@@ -1102,14 +1175,35 @@ fn analyze_streaming(
                     if let Some((_, path)) =
                         file_ids.iter().find(|(id, _)| *id == file_result.file_id)
                     {
-                        all_diagnostics.push(FileAnalysis {
-                            path: path.clone(),
-                            relative_path: path
-                                .strip_prefix(&workspace_dir)
-                                .unwrap_or(path)
-                                .to_path_buf(),
-                            diagnostics: file_result.diagnostics.clone(),
-                        });
+                        // Filter diagnostics by diff hunks if enabled
+                        let filtered_diagnostics = if let Some(ref filter) = diff_filter {
+                            let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                            file_result
+                                .diagnostics
+                                .iter()
+                                .filter(|d| {
+                                    filter.diagnostic_in_diff(
+                                        rel_path,
+                                        d.start_line as u32,
+                                        d.end_line as u32,
+                                    )
+                                })
+                                .cloned()
+                                .collect()
+                        } else {
+                            file_result.diagnostics.clone()
+                        };
+
+                        if !filtered_diagnostics.is_empty() {
+                            all_diagnostics.push(FileAnalysis {
+                                path: path.clone(),
+                                relative_path: path
+                                    .strip_prefix(&workspace_dir)
+                                    .unwrap_or(path)
+                                    .to_path_buf(),
+                                diagnostics: filtered_diagnostics,
+                            });
+                        }
                     }
                 }
             }

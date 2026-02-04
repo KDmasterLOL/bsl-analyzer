@@ -6,6 +6,7 @@ pub mod tracing {
 }
 
 pub mod config;
+pub mod diff_filter;
 pub mod global_state;
 pub mod handlers;
 pub mod lsp;
