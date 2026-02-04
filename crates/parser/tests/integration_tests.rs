@@ -627,6 +627,28 @@ fn debug_tokens_around_68041() {
 }
 
 #[test]
+fn test_keyword_as_method_name() {
+    // Keywords like Перейти (Goto) can be used as method names after dot
+    let input = r#"Процедура Тест()
+    Поток.Перейти(0, ПозицияВПотоке.Начало);
+КонецПроцедуры"#;
+    let result = parse(input);
+    assert!(!result.has_errors(), "Keyword 'Перейти' should be valid as method name after dot");
+
+    // Check ERROR nodes in tree
+    let error_nodes: Vec<_> = result
+        .syntax_node()
+        .descendants()
+        .filter(|node| node.kind().to_string() == "ERROR" && !node.text_range().is_empty())
+        .collect();
+    assert!(
+        error_nodes.is_empty(),
+        "Should have no ERROR nodes, found: {:?}",
+        error_nodes.iter().map(|n| n.text().to_string()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_large_file_performance() {
     // Test file from bsl-parser project (grammar reference)
     // Large real-world BSL module for performance testing
