@@ -379,11 +379,7 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_sdbl_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "IN with multiple VALUE() should not trigger diagnostic"
-        );
+        assert_eq!(diagnostics.len(), 0, "IN with multiple VALUE() should not trigger diagnostic");
     }
 
     #[test]
