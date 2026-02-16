@@ -200,7 +200,7 @@ fn recover_to_delimiter(p: &mut Parser) {
 /// parse_delimited_list(
 ///     p,
 ///     TokenKind::Comma,
-///     &EXPR_RECOVERY,
+///     &LIST_RECOVERY,
 ///     is_expression_start,
 ///     |p| expression(p),
 /// );
@@ -412,11 +412,13 @@ fn predicate_expr(p: &mut Parser) {
                 super::select::subquery(p);
             } else {
                 // Parse value list: expr, expr, ...
-                // Use parse_delimited_list for error recovery (handles empty elements like: IN (1, , 3))
+                // Use LIST_RECOVERY (not EXPR_RECOVERY) because Comma is the delimiter here,
+                // not a recovery point. EXPR_RECOVERY includes Comma which would cause
+                // parse_delimited_list to break before consuming the comma separator.
                 parse_delimited_list(
                     p,
                     TokenKind::Comma,
-                    &super::EXPR_RECOVERY,
+                    &super::LIST_RECOVERY,
                     is_expression_start,
                     expression,
                 );

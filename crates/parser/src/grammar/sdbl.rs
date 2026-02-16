@@ -27,37 +27,19 @@ use lexer::TokenKind;
 // These define "safe" stopping points where the parser can recover from errors.
 
 /// Recovery set for expressions and list elements.
+/// Recovery set for list parsing (SELECT fields, FROM sources, IN value lists, etc.)
 ///
-/// When parsing fails, stop at these tokens to avoid consuming
-/// important delimiters or statement terminators.
-///
-/// Used in:
-/// - Expression parsing inside parentheses (IN predicate values, function arguments)
-/// - Element parsing within lists
-///
-/// **Note:** Includes Comma because when parsing element INSIDE a list,
-/// comma means "stop, this element is done".
-pub(super) const EXPR_RECOVERY: TokenSet = TokenSet::new(&[
-    TokenKind::Comma,     // Element separator (stop parsing current element)
-    TokenKind::RParen,    // End of parenthesized expression/list
-    TokenKind::Semicolon, // End of query/statement
-]);
-
-/// Recovery set for top-level list parsing (SELECT fields, FROM sources, etc.)
-///
-/// **Important:** Does NOT include Comma because comma is the delimiter,
-/// not a recovery point. parse_delimited_list will consume commas explicitly.
+/// Does NOT include Comma because comma is the delimiter in parse_delimited_list,
+/// not a recovery point. Including Comma would cause the list to break before
+/// consuming the comma separator (e.g., `IN (VALUE(...), VALUE(...))` would fail).
 ///
 /// Used in:
 /// - SELECT field list
 /// - FROM data source list
-///
-/// **Difference from EXPR_RECOVERY:**
-/// - EXPR_RECOVERY: for parsing elements WITHIN a list → includes Comma
-/// - LIST_RECOVERY: for parsing the list itself → excludes Comma
+/// - IN predicate value list
 pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[
-    TokenKind::RParen,    // Unexpected closing paren
-    TokenKind::Semicolon, // End of query
+    TokenKind::RParen,    // End of parenthesized expression/list
+    TokenKind::Semicolon, // End of query/statement
 ]);
 
 /// Entry point for SDBL parsing

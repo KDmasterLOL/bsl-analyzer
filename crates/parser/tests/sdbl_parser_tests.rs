@@ -2104,6 +2104,7 @@ fn test_sdbl_constructs_for_false_positive() {
             "ISNULL with CASE inside",
             "ВЫБРАТЬ ЕСТЬNULL(ВЫБОР КОГДА X = 0 ТОГДА 1 ИНАЧЕ X КОНЕЦ, 1) ИЗ T",
         ),
+        ("IN with multiple VALUE", "ВЫБРАТЬ * ИЗ T ГДЕ Поле В (ЗНАЧЕНИЕ(Перечисление.Статусы.Новый), ЗНАЧЕНИЕ(Перечисление.Статусы.Ошибка))"),
         ("Nested NOT IS NULL", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Ссылка ЕСТЬ NULL"),
         ("NOT...NOT IS NULL", "ВЫБРАТЬ * ИЗ T ГДЕ НЕ Назначение.Договор.Ссылка ЕСТЬ NULL"),
         (
