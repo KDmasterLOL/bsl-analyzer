@@ -6,7 +6,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
-use hir_def::ModuleMetadata;
+use hir::ModuleMetadata;
 use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashSet;

@@ -43,7 +43,7 @@
 use cfg_types::{ExprId, IdConversion};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{Body, BodySourceMap, Expr, Name};
+use hir::{Body, BodySourceMap, Expr, Name};
 use crate::define_metadata;
 use crate::metadata::*;
 

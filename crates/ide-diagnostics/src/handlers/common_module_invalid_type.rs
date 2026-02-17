@@ -5,7 +5,7 @@
 //! Ported from: CommonModuleInvalidTypeDiagnostic.java
 
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
-use ide_db::hir_def::ModuleMetadata;
+use hir::ModuleMetadata;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

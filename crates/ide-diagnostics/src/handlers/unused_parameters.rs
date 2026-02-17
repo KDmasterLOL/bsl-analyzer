@@ -10,8 +10,7 @@
 //! - `ПриСозданииОбъекта` / `OnObjectCreate` handlers (lifecycle pattern)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::Expr;
-use hir_def::item_tree::ModItem;
+use hir::{Expr, ModItem};
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
 use crate::define_metadata;

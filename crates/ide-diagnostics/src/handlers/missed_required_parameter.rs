@@ -52,7 +52,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::{MdObject, Module};
-use ide_db::hir_def::{symbol_tree::MethodSymbol, ModuleId, Name};
+use hir::{MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 use vfs::{FileId, VfsPath};

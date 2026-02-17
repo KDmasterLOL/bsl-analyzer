@@ -515,16 +515,6 @@ impl<'a> InferenceContext<'a> {
         // This old AST-based inference is being replaced by HIR-based inference in hir-ty
         // TODO: Remove this entire old inference code in Phase 2
 
-        // Try built-in functions first
-        // DISABLED: builtin module moved to hir-ty
-        // if let Some(sig) = hir_ty::builtin::builtin_functions().get(name) {
-        //     tracing::trace!("resolved {} to builtin function", name);
-        //     return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
-        // }
-
-        // TODO: Try local module methods
-        // TODO: Try variables
-
         tracing::trace!("could not resolve name: {}", name);
         Ty::Unknown
     }

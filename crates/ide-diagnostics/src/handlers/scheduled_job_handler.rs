@@ -40,7 +40,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ScheduledJob, ScheduledJobHandler};
-use ide_db::hir_def::{ModuleId, Name};
+use hir::{ModuleId, Name};
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
 use vfs::FileId;

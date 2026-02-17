@@ -1,5 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{Body, BodySourceMap, Expr, Literal};
+use hir::{Body, BodySourceMap, Expr, Literal};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};

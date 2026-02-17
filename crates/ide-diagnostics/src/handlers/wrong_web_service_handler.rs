@@ -5,7 +5,7 @@
 //! - Handler not found in module
 
 use crate::{Diagnostic, DiagnosticCode};
-use hir_def::{ModuleMetadata, Name};
+use hir::{ModuleMetadata, Name};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

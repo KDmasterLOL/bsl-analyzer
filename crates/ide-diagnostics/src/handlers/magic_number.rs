@@ -47,7 +47,7 @@
 //! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::body::MagicNumberContext;
+use hir::MagicNumberContext;
 use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};

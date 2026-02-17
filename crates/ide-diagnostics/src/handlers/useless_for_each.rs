@@ -37,7 +37,7 @@
 //! - **Minutes to fix:** 2
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::Name;
+use hir::Name;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 use crate::define_metadata;

@@ -26,8 +26,9 @@
 //! - **Memory**: ~10-50 MB per configuration (shared via Arc)
 //! - **LRU eviction**: Only keeps 16 most recent configurations in memory
 
+use bsl_metadata::traits::Module;
 use bsl_metadata::Configuration;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Interned: path to configuration root directory.
@@ -476,6 +477,222 @@ impl ModuleOwner {
             ModuleOwner::MetadataObject(m) => &m.name,
         }
     }
+}
+
+/// Find CommonModule in configuration by matching file URI.
+///
+/// Matches the file path against CommonModule URIs from metadata.
+pub(crate) fn find_common_module_by_uri(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<bsl_metadata::CommonModule> {
+    let file_uri = file_path.to_string_lossy().to_string();
+
+    configuration
+        .common_modules()
+        .iter()
+        .find(|module| {
+            if let Some(module_uri) = module.uri() {
+                // Normalize paths for comparison (case-insensitive on some systems)
+                module_uri.to_lowercase() == file_uri.to_lowercase()
+            } else {
+                false
+            }
+        })
+        .cloned()
+}
+
+/// Load Form metadata from BSL module path.
+///
+/// Given a FormModule BSL path like:
+/// `Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl`
+///
+/// Loads form metadata from corresponding XML:
+/// `Catalogs/Справочник1/Forms/ФормаЭлемента.xml`
+///
+/// Returns None if:
+/// - Path doesn't match FormModule pattern
+/// - XML file doesn't exist
+/// - XML parsing fails
+pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::Form>> {
+    use bsl_metadata::xml_parser::parse_form_from_bsl_path;
+
+    tracing::debug!(path = %file_path.display(), "Attempting to load form metadata");
+
+    match parse_form_from_bsl_path(file_path) {
+        Ok(form) => {
+            tracing::debug!(
+                form_name = %form.name(),
+                form_type = ?form.form_type(),
+                event_handlers = form.event_handlers().len(),
+                command_handlers = form.command_handlers().len(),
+                "Loaded form metadata"
+            );
+            Some(Arc::new(form))
+        }
+        Err(e) => {
+            tracing::debug!(?e, path = %file_path.display(), "Could not load form metadata");
+            None
+        }
+    }
+}
+
+/// Build module metadata from file path and optional configuration.
+///
+/// This is the single source of truth for creating ModuleMetadata.
+/// Used by both Salsa queries and StreamingProvider.
+///
+/// # Arguments
+/// * `file_path` - Path to the BSL module file
+/// * `configuration` - Optional configuration for resolving module-specific metadata
+///
+/// # Returns
+/// ModuleMetadata with all available information filled in.
+pub fn build_module_metadata(
+    file_path: &Path,
+    configuration: Option<&bsl_metadata::Configuration>,
+) -> hir_def::ModuleMetadata {
+    let uri = file_path.to_string_lossy().to_string();
+
+    // Parse module path to get MDO type and name
+    let path_info = parse_module_path(&uri);
+
+    // Determine module type from file URI
+    let module_type =
+        get_module_type_from_uri(&uri).unwrap_or(bsl_metadata::ModuleType::CommonModule);
+
+    tracing::debug!(uri = %uri, module_type = ?module_type, "build_module_metadata");
+
+    // Initialize result fields
+    let mut execution_context = None;
+    let mut common_module = None;
+    let mut mdo = None;
+    let mut register = None;
+    let mut form = None;
+    let mut http_service = None;
+    let mut web_service = None;
+
+    // Load metadata based on module type
+    if let Some(config) = configuration {
+        match module_type {
+            bsl_metadata::ModuleType::CommonModule => {
+                // Find CommonModule by URI
+                if let Some(cm) = find_common_module_by_uri(config, file_path) {
+                    execution_context = Some(hir_def::compute_execution_context(&cm));
+                    common_module = Some(Arc::new(cm));
+                }
+            }
+            bsl_metadata::ModuleType::ManagerModule
+            | bsl_metadata::ModuleType::ObjectModule
+            | bsl_metadata::ModuleType::RecordSetModule => {
+                // Load MDO or Register based on path info
+                if let Some(ref info) = path_info {
+                    if let (Some(mdo_type), Some(ref name)) = (info.mdo_type, &info.name) {
+                        // Check if this is a register type
+                        if matches!(
+                            mdo_type,
+                            bsl_metadata::MdoType::InformationRegister
+                                | bsl_metadata::MdoType::AccumulationRegister
+                                | bsl_metadata::MdoType::AccountingRegister
+                                | bsl_metadata::MdoType::CalculationRegister
+                        ) {
+                            // Find register by type and name
+                            if let Some(reg) = config.find_register_by_type_and_name(mdo_type, name)
+                            {
+                                register = Some(Arc::new(reg.clone()));
+                            }
+                        } else {
+                            // Find metadata object
+                            if let Some(obj) = config.find_metadata_object(mdo_type, name) {
+                                mdo = Some(Arc::new(obj.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+            bsl_metadata::ModuleType::FormModule => {
+                // Load Form metadata for FormModule
+                form = load_form_from_path(file_path);
+            }
+            bsl_metadata::ModuleType::HTTPServiceModule => {
+                // Find HTTP service by path
+                http_service = find_http_service_by_path(config, file_path);
+            }
+            bsl_metadata::ModuleType::WebServiceModule => {
+                // Find Web service by path
+                web_service = find_web_service_by_path(config, file_path);
+            }
+            _ => {}
+        }
+    }
+
+    // For FormModule without configuration, try to load form from XML directly
+    if module_type == bsl_metadata::ModuleType::FormModule && form.is_none() {
+        form = load_form_from_path(file_path);
+    }
+
+    hir_def::ModuleMetadata {
+        module_type,
+        execution_context,
+        common_module,
+        mdo,
+        register,
+        form,
+        http_service,
+        web_service,
+    }
+}
+
+/// Find HTTP service by BSL module path.
+///
+/// Given an HTTPServiceModule path like:
+/// `HTTPServices/HTTPСервис1/Ext/Module.bsl`
+///
+/// Extracts the service name and looks it up in configuration.
+pub(crate) fn find_http_service_by_path(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<Arc<bsl_metadata::HTTPService>> {
+    let file_str = file_path.to_string_lossy();
+
+    // Extract HTTP service name from path: HTTPServices/<Name>/Ext/Module.bsl
+    let parts: Vec<&str> = file_str.split('/').collect();
+    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
+    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
+
+    // Find HTTPServices in path
+    let http_idx = parts.iter().position(|&p| p == "HTTPServices")?;
+
+    // Name should be the next element after HTTPServices
+    let name = parts.get(http_idx + 1)?;
+
+    configuration.find_http_service(name).map(|hs| Arc::new(hs.clone()))
+}
+
+/// Find Web service (SOAP) metadata by file path.
+///
+/// Given a WebServiceModule path like:
+/// `WebServices/WebСервис1/Ext/Module.bsl`
+///
+/// Extracts the service name and looks it up in configuration.
+pub(crate) fn find_web_service_by_path(
+    configuration: &bsl_metadata::Configuration,
+    file_path: &Path,
+) -> Option<Arc<bsl_metadata::WebService>> {
+    let file_str = file_path.to_string_lossy();
+
+    // Extract Web service name from path: WebServices/<Name>/Ext/Module.bsl
+    let parts: Vec<&str> = file_str.split('/').collect();
+    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
+    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
+
+    // Find WebServices in path
+    let ws_idx = parts.iter().position(|&p| p == "WebServices")?;
+
+    // Name should be the next element after WebServices
+    let name = parts.get(ws_idx + 1)?;
+
+    configuration.find_web_service(name).map(|ws| Arc::new(ws.clone()))
 }
 
 #[cfg(test)]

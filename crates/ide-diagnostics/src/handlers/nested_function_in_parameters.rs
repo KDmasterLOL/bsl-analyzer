@@ -42,8 +42,7 @@
 //! - Module-level code coverage (not just methods)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::ExprIdx;
-use hir_def::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
+use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Name};
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 use crate::define_metadata;

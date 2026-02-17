@@ -42,7 +42,7 @@
 use cfg_types::IdConversion;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, Name, Stmt, StmtId};
+use hir::{Body, Expr, ExprId, ModItem, Name, Stmt, StmtId};
 use crate::define_metadata;
 use crate::metadata::*;
 

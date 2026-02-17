@@ -25,8 +25,7 @@
 use bsl_metadata::traits::MdObject;
 
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::body::ExternalRef;
-use hir_def::{ModuleId, PathResolution};
+use hir::{ExternalRef, ModuleId, PathResolution};
 use rustc_hash::FxHashSet;
 use crate::define_metadata;
 use crate::metadata::*;

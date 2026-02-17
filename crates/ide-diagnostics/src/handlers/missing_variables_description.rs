@@ -1,7 +1,7 @@
 //! MissingVariablesDescription diagnostic.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::ModItem;
+use hir::ModItem;
 use syntax::{has_variable_description, SyntaxKind, TextRange};
 use crate::define_metadata;
 use crate::metadata::*;

@@ -4,10 +4,9 @@
 //!
 //! Ported from: CommonModuleNameClientServerDiagnostic.java
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
-use bsl_metadata::traits::MdObject;
-use ide_db::hir_def::ModuleMetadata;
-use ide_db::TextRange;
+use crate::common_module_helpers::{self, check_common_module_name};
+use crate::{Diagnostic, DiagnosticCode};
+use hir::ModuleMetadata;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -30,40 +29,15 @@ pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CommonModuleNameClientServer;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
-        return Vec::new();
-    }
-
-    let module = match &metadata.common_module {
-        Some(m) => m.as_ref(),
-        None => return Vec::new(),
-    };
-
-    if !common_module_helpers::is_client_server(module, ctx.config.ordinary_app_support) {
-        return Vec::new();
-    }
-
-    let name_lower = module.name().to_lowercase();
-    if name_lower.contains("клиентсервер") || name_lower.contains("clientserver") {
-        return Vec::new();
-    }
-
-    vec![Diagnostic {
-        code,
-        message:
-            "Имя клиент-серверного общего модуля должно содержать 'КлиентСервер' или 'ClientServer'"
-                .to_string(),
-        severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    }]
+    check_common_module_name(
+        metadata,
+        ctx,
+        DiagnosticCode::CommonModuleNameClientServer,
+        common_module_helpers::is_client_server,
+        &["клиентсервер", "clientserver"],
+        true,
+        "Имя клиент-серверного общего модуля должно содержать 'КлиентСервер' или 'ClientServer'",
+    )
 }
 
 #[cfg(test)]

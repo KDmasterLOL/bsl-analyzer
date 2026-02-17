@@ -13,11 +13,7 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg_types::IdConversion;
-use hir_def::{
-    hir::{Expr, Stmt},
-    item_tree::AnnotationKind,
-    Name,
-};
+use hir::{AnnotationKind, Expr, Name, Stmt};
 use rustc_hash::FxHashSet;
 use crate::define_metadata;
 use crate::metadata::*;

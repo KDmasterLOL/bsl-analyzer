@@ -44,8 +44,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg::{CfgVertex, ControlFlowGraph, NodeIndex};
 use cfg_types::{ExprId, IdConversion, StmtId};
-use hir_def::hir::{Expr, Stmt};
-use hir_def::{Body, BodySourceMap};
+use hir::{Body, BodySourceMap, Expr, Stmt};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
 use crate::define_metadata;

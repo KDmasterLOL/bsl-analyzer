@@ -58,8 +58,7 @@
 //! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::{Expr, Stmt};
-use hir_def::{ExprId, IdConversion};
+use hir::{Expr, ExprId, IdConversion, Stmt};
 use ide_db::TextRange;
 use std::collections::HashSet;
 use crate::define_metadata;

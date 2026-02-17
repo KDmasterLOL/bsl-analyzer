@@ -46,8 +46,7 @@
 //! - **Tags:** ERROR, PERFORMANCE
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::AnnotationKind;
-use hir_def::Name;
+use hir::{AnnotationKind, Name};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

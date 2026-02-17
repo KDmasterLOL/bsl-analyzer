@@ -5,10 +5,9 @@
 //! Ported from: CommonModuleNameFullAccessDiagnostic.java
 //! Type: SECURITY_HOTSPOT
 
+use crate::common_module_helpers::check_common_module_name;
 use crate::{Diagnostic, DiagnosticCode};
-use bsl_metadata::traits::MdObject;
-use ide_db::hir_def::ModuleMetadata;
-use ide_db::TextRange;
+use hir::ModuleMetadata;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -26,49 +25,19 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Check metadata-based diagnostics using ModuleMetadata.
-///
-/// This is the new metadata-driven version that uses HIR-collected metadata
-/// instead of loading configuration for each file.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CommonModuleNameFullAccess;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    // Only check CommonModules
-    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
-        return Vec::new();
-    }
-
-    let module = match &metadata.common_module {
-        Some(m) => m.as_ref(),
-        None => return Vec::new(),
-    };
-
-    if !module.is_privileged() {
-        return Vec::new();
-    }
-
-    let name_lower = module.name().to_lowercase();
-    if name_lower.contains("полныеправа") || name_lower.contains("fullaccess") {
-        return Vec::new();
-    }
-
-    vec![Diagnostic {
-        code,
-        message:
-            "Имя привилегированного общего модуля должно содержать 'ПолныеПрава' или 'FullAccess'"
-                .to_string(),
-        severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    }]
+    check_common_module_name(
+        metadata,
+        ctx,
+        DiagnosticCode::CommonModuleNameFullAccess,
+        |m, _oas| m.is_privileged(),
+        &["полныеправа", "fullaccess"],
+        true,
+        "Имя привилегированного общего модуля должно содержать 'ПолныеПрава' или 'FullAccess'",
+    )
 }
 
 #[cfg(test)]

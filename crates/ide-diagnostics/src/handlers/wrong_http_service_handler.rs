@@ -6,7 +6,7 @@
 //! - Incorrect handler (wrong number of parameters)
 
 use crate::{Diagnostic, DiagnosticCode};
-use hir_def::{item_tree::ModItem, ModuleMetadata, Name};
+use hir::{ModItem, ModuleMetadata, Name};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

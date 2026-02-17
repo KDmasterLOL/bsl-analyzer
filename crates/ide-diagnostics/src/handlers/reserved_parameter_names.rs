@@ -8,7 +8,7 @@
 //! - **Severity:** MAJOR → Warning
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::ModItem;
+use hir::ModItem;
 use rustc_hash::FxHashSet;
 use crate::define_metadata;
 use crate::metadata::*;

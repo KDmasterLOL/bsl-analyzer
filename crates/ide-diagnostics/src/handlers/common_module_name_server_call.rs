@@ -4,10 +4,9 @@
 //!
 //! Ported from: CommonModuleNameServerCallDiagnostic.java
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
-use bsl_metadata::traits::MdObject;
-use ide_db::hir_def::ModuleMetadata;
-use ide_db::TextRange;
+use crate::common_module_helpers::{self, check_common_module_name};
+use crate::{Diagnostic, DiagnosticCode};
+use hir::ModuleMetadata;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -26,47 +25,19 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
-/// Check metadata-based diagnostics using ModuleMetadata.
-///
-/// This is the new metadata-driven version that uses HIR-collected metadata
-/// instead of loading configuration for each file.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CommonModuleNameServerCall;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    // Only check CommonModules
-    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
-        return Vec::new();
-    }
-
-    let module = match &metadata.common_module {
-        Some(m) => m.as_ref(),
-        None => return Vec::new(),
-    };
-
-    if !common_module_helpers::is_server_call(module) {
-        return Vec::new();
-    }
-
-    let name_lower = module.name().to_lowercase();
-    if name_lower.contains("вызовсервера") || name_lower.contains("servercall") {
-        return Vec::new();
-    }
-
-    vec![Diagnostic {
-        code,
-        message: "Имя серверного модуля для вызова с клиента должно содержать 'ВызовСервера' или 'ServerCall'".to_string(),
-        severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    }]
+    check_common_module_name(
+        metadata,
+        ctx,
+        DiagnosticCode::CommonModuleNameServerCall,
+        |m, _oas| common_module_helpers::is_server_call(m),
+        &["вызовсервера", "servercall"],
+        true,
+        "Имя серверного модуля для вызова с клиента должно содержать 'ВызовСервера' или 'ServerCall'",
+    )
 }
 
 #[cfg(test)]

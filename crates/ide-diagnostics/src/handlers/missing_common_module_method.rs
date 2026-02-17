@@ -55,7 +55,7 @@
 //! - MissingCommonModuleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::hir_def::{Name, PathResolution};
+use hir::{Name, PathResolution};
 use syntax::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

@@ -28,7 +28,7 @@
 //! Applies to FormModule (checks current form's elements).
 
 use crate::{Diagnostic, DiagnosticCode};
-use hir_def::ModuleMetadata;
+use hir::ModuleMetadata;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

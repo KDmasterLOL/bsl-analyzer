@@ -71,7 +71,7 @@
 //! This allows `has_builtin_annotations()` to work by checking if annotations array is non-empty.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{item_tree::Annotation, region_tree::RegionTree, Name};
+use hir::{Annotation, Name, RegionTree};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

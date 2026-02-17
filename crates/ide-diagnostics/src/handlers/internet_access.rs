@@ -71,7 +71,7 @@
 use cfg_types::{ExprId, IdConversion};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::{Expr, Literal};
+use hir::{Expr, Literal};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

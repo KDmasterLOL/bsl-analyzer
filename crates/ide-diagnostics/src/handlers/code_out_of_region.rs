@@ -41,7 +41,7 @@
 //! Uses RegionTree from HIR for efficient region lookup.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::hir_def::RegionTree;
+use hir::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
 use crate::define_metadata;
 use crate::metadata::*;

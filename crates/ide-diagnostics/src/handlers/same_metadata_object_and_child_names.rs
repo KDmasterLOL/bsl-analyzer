@@ -6,7 +6,7 @@
 //! Java equivalent: `SameMetadataObjectAndChildNamesDiagnostic.java`
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::ModuleMetadata;
+use hir::ModuleMetadata;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

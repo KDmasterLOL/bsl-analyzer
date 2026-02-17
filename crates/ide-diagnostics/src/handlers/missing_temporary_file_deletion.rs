@@ -67,8 +67,7 @@
 //! - MissingTemporaryFileDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use cfg_types::{IdConversion, StmtId};
-use hir_def::hir::{Expr, ExprIdx, Stmt};
-use hir_def::{Body, BodySourceMap};
+use hir::{Body, BodySourceMap, Expr, ExprIdx, Stmt};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;

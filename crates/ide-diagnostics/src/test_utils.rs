@@ -4,6 +4,7 @@
 //! including position calculation and assertion helpers.
 
 use crate::Diagnostic;
+use hir_def::DefDatabase;
 use ide_db::TextRange;
 
 /// Convert TextRange (byte offsets) to (line, column) positions.
@@ -175,9 +176,34 @@ pub fn assert_diagnostic_range_multiline(
     );
 }
 
-/// Run AST-based diagnostics on test code.
+/// Create a test database from BSL source code.
 ///
-/// Créates a test database, parses the code, and runs the diagnostic function.
+/// Returns the database and file ID for the test file.
+fn create_test_db(code: &str) -> (ide_db::RootDatabaseImpl, vfs::FileId) {
+    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::RootDatabaseImpl;
+    use test_fixture::Fixture;
+
+    let fixture_text = format!("//- /test.bsl\n{}", code);
+    let fixture = Fixture::parse(&fixture_text);
+    let file_id = fixture.first_file().expect("fixture should have at least one file");
+
+    let mut db = RootDatabaseImpl::new();
+
+    let mut file_set = vfs::FileSet::default();
+    file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+    let source_root = SourceRoot::new_local(file_set);
+    db.set_source_root(SourceRootId(0), source_root);
+    db.set_file_source_root(file_id, SourceRootId(0));
+
+    for (fid, file) in &fixture.files {
+        db.set_file_text(*fid, &file.content);
+    }
+
+    (db, file_id)
+}
+
+/// Run AST-based diagnostics on test code.
 pub fn check_ast_diagnostic<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
@@ -187,11 +213,6 @@ where
 }
 
 /// Run AST-based diagnostics on test code with custom configuration.
-///
-/// # Arguments
-/// * `code` - BSL source code to test
-/// * `config` - Diagnostic configuration
-/// * `check_fn` - Diagnostic check function
 pub fn check_ast_diagnostic_with_config<F>(
     code: &str,
     config: crate::DiagnosticsConfig,
@@ -200,38 +221,12 @@ pub fn check_ast_diagnostic_with_config<F>(
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
-    use test_fixture::Fixture;
-
-    // Create fixture
-    let fixture_text = format!("//- /test.bsl\n{}", code);
-    let fixture = Fixture::parse(&fixture_text);
-    let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-    let mut db = RootDatabaseImpl::new();
-
-    // Set up source root
-    let mut file_set = vfs::FileSet::default();
-    file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
-    let source_root = SourceRoot::new_local(file_set);
-    db.set_source_root(SourceRootId(0), source_root);
-    db.set_file_source_root(file_id, SourceRootId(0));
-
-    // Set file content
-    for (fid, file) in &fixture.files {
-        db.set_file_text(*fid, &file.content);
-    }
-
-    // Run diagnostic
+    let (db, file_id) = create_test_db(code);
     let ctx = crate::DiagnosticsContext::new(&db, &config, file_id);
-
     check_fn(&ctx)
 }
 
 /// Run HIR-based diagnostics on test code with a custom check function.
-///
-/// Similar to `check_ast_diagnostic` but explicitly for HIR-based checks.
 pub fn check_hir_diagnostic_with_fn<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
@@ -239,10 +234,7 @@ where
     check_ast_diagnostic(code, check_fn)
 }
 
-/// Run ALL diagnostics on test code (backward compatibility).
-///
-/// This function runs all registered diagnostics and returns all found issues.
-/// Useful for integration tests that want to verify multiple diagnostics at once.
+/// Run ALL diagnostics on test code.
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
 }
@@ -314,8 +306,6 @@ where
 }
 
 /// Run diagnostics on test code with custom configuration.
-///
-/// Similar to `check_ast_diagnostic` but allows passing custom DiagnosticsConfig.
 pub fn check_hir_diagnostic_with_config<F>(
     code: &str,
     config: crate::DiagnosticsConfig,
@@ -324,32 +314,7 @@ pub fn check_hir_diagnostic_with_config<F>(
 where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
-    use test_fixture::Fixture;
-
-    let fixture_text = format!("//- /test.bsl\n{}", code);
-    let fixture = Fixture::parse(&fixture_text);
-    let file_id = fixture.first_file().unwrap();
-
-    let mut db = RootDatabaseImpl::new();
-
-    // Set up source root for module_bodies to work
-    let mut file_set = vfs::FileSet::default();
-    file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
-    let source_root = SourceRoot::new_local(file_set);
-    db.set_source_root(SourceRootId(0), source_root);
-    db.set_file_source_root(file_id, SourceRootId(0));
-
-    // Set file content
-    for (fid, file) in &fixture.files {
-        db.set_file_text(*fid, &file.content);
-    }
-
-    // Run diagnostic
-    let ctx = crate::DiagnosticsContext::new(&db, &config, file_id);
-
-    check_fn(&ctx)
+    check_ast_diagnostic_with_config(code, config, check_fn)
 }
 
 /// Run diagnostics on test code with custom configuration.
@@ -367,14 +332,174 @@ where
     diagnostics.into_iter().filter(|d| d.code == diagnostic_code).collect()
 }
 
+/// AnalysisProvider that returns custom metadata for testing metadata-based diagnostics.
+struct MetadataTestProvider {
+    db: ide_db::RootDatabaseImpl,
+    metadata: std::sync::Arc<hir_def::ModuleMetadata>,
+}
+
+impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
+    fn configuration(&self) -> Option<std::sync::Arc<bsl_metadata::Configuration>> {
+        None
+    }
+
+    fn workspace_symbols(
+        &self,
+        source_root_id: ide_db::base_db::SourceRootId,
+    ) -> std::sync::Arc<hir_def::WorkspaceSymbols> {
+        self.db.workspace_symbols(source_root_id)
+    }
+
+    fn module_index(
+        &self,
+        source_root_id: ide_db::base_db::SourceRootId,
+    ) -> std::sync::Arc<hir_def::ModuleIndex> {
+        self.db.module_index(source_root_id)
+    }
+
+    fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
+        use ide_db::base_db::RootQueryDb;
+        self.db.parse(file_id)
+    }
+
+    fn file_text(&self, file_id: vfs::FileId) -> String {
+        use ide_db::base_db::SourceDatabase;
+        let input = self.db.file_text_input(file_id);
+        input.text(&self.db).to_string()
+    }
+
+    fn item_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir_def::ItemTree> {
+        use hir_def::DefDatabase;
+        self.db.item_tree(file_id)
+    }
+
+    fn symbol_tree(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> std::sync::Arc<hir_def::SymbolTree> {
+        use hir_def::DefDatabase;
+        self.db.symbol_tree(module_id)
+    }
+
+    fn region_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir_def::RegionTree> {
+        use hir_def::DefDatabase;
+        self.db.region_tree(file_id)
+    }
+
+    fn module_bodies(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> std::sync::Arc<hir_def::ModuleBodies> {
+        use hir_def::DefDatabase;
+        self.db.module_bodies(module_id)
+    }
+
+    fn module_metadata(
+        &self,
+        _module_id: hir_def::ModuleId,
+    ) -> std::sync::Arc<hir_def::ModuleMetadata> {
+        std::sync::Arc::clone(&self.metadata)
+    }
+
+    fn module_liveness_analysis(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<dataflow::liveness::ModuleLiveness> {
+        use ide_db::base_db::FileIdInput;
+        use ide_db::RootDatabase;
+        let input = FileIdInput::new(&self.db, file_id);
+        self.db.module_liveness_analysis(input)
+    }
+
+    fn module_reaching_definitions(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+        use ide_db::base_db::FileIdInput;
+        use ide_db::RootDatabase;
+        let input = FileIdInput::new(&self.db, file_id);
+        self.db.module_reaching_definitions(input)
+    }
+
+    fn reaching_definitions(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<std::sync::Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+        use ide_db::RootDatabase;
+        self.db.reaching_definitions(method_id)
+    }
+
+    fn line_index(&self, file_id: vfs::FileId) -> std::sync::Arc<line_index::LineIndex> {
+        use ide_db::base_db::SourceDatabase;
+        let input = self.db.file_text_input(file_id);
+        std::sync::Arc::new(line_index::LineIndex::new(&input.text(&self.db)))
+    }
+
+    fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
+        None
+    }
+
+    fn file_source_root_id(&self, _file_id: vfs::FileId) -> ide_db::base_db::SourceRootId {
+        ide_db::base_db::SourceRootId(0)
+    }
+
+    fn module_level_regions(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<Vec<ide_db::base_db::RegionInfo>> {
+        use base_db::RootQueryDb;
+        self.db.module_level_regions(file_id)
+    }
+
+    fn sdbl_hir_in_file(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<Vec<(hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>> {
+        use ide_db::RootDatabase;
+        self.db.sdbl_hir_in_file(file_id)
+    }
+
+    fn all_sdbl_in_file(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+        use ide_db::RootDatabase;
+        self.db.all_sdbl_in_file(file_id)
+    }
+
+    fn module_data(
+        &self,
+        module_id: hir_def::ModuleId,
+    ) -> std::sync::Arc<hir_def::ModuleData> {
+        use hir_def::DefDatabase;
+        self.db.module_data(module_id)
+    }
+
+    fn method_docs(
+        &self,
+        method_id: hir_def::MethodId,
+    ) -> Option<std::sync::Arc<hir_def::docs::MethodDocs>> {
+        self.db.method_docs(method_id)
+    }
+
+    fn module_cfgs(&self, file_id: vfs::FileId) -> std::sync::Arc<cfg::ModuleCfgs> {
+        use ide_db::base_db::FileIdInput;
+        use ide_db::RootDatabase;
+        let input = FileIdInput::new(&self.db, file_id);
+        self.db.module_cfgs(input)
+    }
+
+    fn resolve_vfs_path(
+        &self,
+        source_root_id: ide_db::base_db::SourceRootId,
+        path: &vfs::VfsPath,
+    ) -> Option<vfs::FileId> {
+        use ide_db::base_db::SourceDatabase;
+        self.db.resolve_vfs_path(source_root_id, path)
+    }
+}
+
 /// Test helper for module-level metadata diagnostics.
-///
-/// Creates a minimal test environment with custom metadata and runs the check function.
-///
-/// # Arguments
-/// * `metadata` - Module metadata to test with
-/// * `file_text` - Source code content
-/// * `check_fn` - Diagnostic check function that takes (&ModuleMetadata, &DiagnosticsContext)
 pub fn check_metadata_diagnostic<F>(
     metadata: hir_def::ModuleMetadata,
     file_text: &str,
@@ -383,207 +508,11 @@ pub fn check_metadata_diagnostic<F>(
 where
     F: Fn(&hir_def::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    use hir_def::{DefDatabase, ModuleMetadata};
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
-    use std::rc::Rc;
-    use std::sync::Arc;
-    use test_fixture::Fixture;
-
-    // Create fixture
-    let fixture_text = format!("//- /test.bsl\n{}", file_text);
-    let fixture = Fixture::parse(&fixture_text);
-    let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-    let mut db = RootDatabaseImpl::new();
-
-    // Set up source root
-    let mut file_set = vfs::FileSet::default();
-    file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
-    let source_root = SourceRoot::new_local(file_set);
-    db.set_source_root(SourceRootId(0), source_root);
-    db.set_file_source_root(file_id, SourceRootId(0));
-
-    // Set file content
-    for (fid, file) in &fixture.files {
-        db.set_file_text(*fid, &file.content);
-    }
-
-    let metadata_arc = Arc::new(metadata);
-    let config = Rc::new(crate::DiagnosticsConfig::all_enabled());
-
-    // Create custom provider that returns our metadata
-    struct MetadataTestProvider {
-        db: RootDatabaseImpl,
-        metadata: Arc<ModuleMetadata>,
-    }
-
-    impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
-        fn configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-            None
-        }
-
-        fn workspace_symbols(
-            &self,
-            source_root_id: SourceRootId,
-        ) -> Arc<hir_def::WorkspaceSymbols> {
-            self.db.workspace_symbols(source_root_id)
-        }
-
-        fn module_index(&self, source_root_id: SourceRootId) -> Arc<hir_def::ModuleIndex> {
-            self.db.module_index(source_root_id)
-        }
-
-        fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
-            use ide_db::base_db::RootQueryDb;
-            self.db.parse(file_id)
-        }
-
-        fn file_text(&self, file_id: vfs::FileId) -> String {
-            use ide_db::base_db::SourceDatabase;
-            let input = self.db.file_text_input(file_id);
-            input.text(&self.db).to_string()
-        }
-
-        fn item_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::ItemTree> {
-            use hir_def::DefDatabase;
-            self.db.item_tree(file_id)
-        }
-
-        fn symbol_tree(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::SymbolTree> {
-            use hir_def::DefDatabase;
-            self.db.symbol_tree(module_id)
-        }
-
-        fn region_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::RegionTree> {
-            use hir_def::DefDatabase;
-            self.db.region_tree(file_id)
-        }
-
-        fn module_bodies(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleBodies> {
-            use hir_def::DefDatabase;
-            self.db.module_bodies(module_id)
-        }
-
-        fn module_metadata(&self, _module_id: hir_def::ModuleId) -> Arc<ModuleMetadata> {
-            Arc::clone(&self.metadata)
-        }
-
-        fn module_liveness_analysis(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<dataflow::liveness::ModuleLiveness> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_liveness_analysis(input)
-        }
-
-        fn module_reaching_definitions(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_reaching_definitions(input)
-        }
-
-        fn reaching_definitions(
-            &self,
-            method_id: hir_def::MethodId,
-        ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
-            use ide_db::RootDatabase;
-            self.db.reaching_definitions(method_id)
-        }
-
-        fn line_index(&self, file_id: vfs::FileId) -> Arc<line_index::LineIndex> {
-            use ide_db::base_db::SourceDatabase;
-            let input = self.db.file_text_input(file_id);
-            Arc::new(line_index::LineIndex::new(&input.text(&self.db)))
-        }
-
-        fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
-            // For tests, returning None is fine
-            None
-        }
-
-        fn file_source_root_id(&self, _file_id: vfs::FileId) -> SourceRootId {
-            // For tests, return default source root
-            SourceRootId(0)
-        }
-
-        fn module_level_regions(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<ide_db::base_db::RegionInfo>> {
-            use base_db::RootQueryDb;
-            self.db.module_level_regions(file_id)
-        }
-
-        fn sdbl_hir_in_file(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<(hir_def::SdblExprId, Arc<sdbl_hir::SdblPackage>)>> {
-            use ide_db::RootDatabase;
-            self.db.sdbl_hir_in_file(file_id)
-        }
-
-        fn all_sdbl_in_file(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
-            use ide_db::RootDatabase;
-            self.db.all_sdbl_in_file(file_id)
-        }
-
-        fn module_data(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleData> {
-            use hir_def::DefDatabase;
-            self.db.module_data(module_id)
-        }
-
-        fn method_docs(
-            &self,
-            method_id: hir_def::MethodId,
-        ) -> Option<Arc<hir_def::docs::MethodDocs>> {
-            self.db.method_docs(method_id)
-        }
-
-        fn module_cfgs(&self, file_id: vfs::FileId) -> Arc<cfg::ModuleCfgs> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_cfgs(input)
-        }
-
-        fn resolve_vfs_path(
-            &self,
-            source_root_id: SourceRootId,
-            path: &vfs::VfsPath,
-        ) -> Option<vfs::FileId> {
-            use ide_db::base_db::SourceDatabase;
-            self.db.resolve_vfs_path(source_root_id, path)
-        }
-    }
-
-    let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
-
-    // Need to use with_provider to pass custom metadata provider
-    // But we can't because db is moved into provider_impl
-    // So we create the context with a reference to the inner db
-    let ctx = crate::DiagnosticsContext::with_provider(
-        &provider_impl.db,
-        &config,
-        file_id,
-        &provider_impl as &dyn ide_db::provider::AnalysisProvider,
-    );
-
-    check_fn(&metadata_arc, &ctx)
+    let config = crate::DiagnosticsConfig::all_enabled();
+    check_metadata_diagnostic_with_config(metadata, file_text, config, check_fn)
 }
 
 /// Test helper for module-level metadata diagnostics with custom config.
-///
-/// Similar to check_metadata_diagnostic but allows passing custom DiagnosticsConfig.
 pub fn check_metadata_diagnostic_with_config<F>(
     metadata: hir_def::ModuleMetadata,
     file_text: &str,
@@ -593,186 +522,12 @@ pub fn check_metadata_diagnostic_with_config<F>(
 where
     F: Fn(&hir_def::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
-    use hir_def::{DefDatabase, ModuleMetadata};
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use std::sync::Arc;
-    use test_fixture::Fixture;
 
-    // Create fixture
-    let fixture_text = format!("//- /test.bsl\n{}", file_text);
-    let fixture = Fixture::parse(&fixture_text);
-    let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-    let mut db = RootDatabaseImpl::new();
-
-    // Set up source root
-    let mut file_set = vfs::FileSet::default();
-    file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
-    let source_root = SourceRoot::new_local(file_set);
-    db.set_source_root(SourceRootId(0), source_root);
-    db.set_file_source_root(file_id, SourceRootId(0));
-
-    // Set file content
-    for (fid, file) in &fixture.files {
-        db.set_file_text(*fid, &file.content);
-    }
-
+    let (db, file_id) = create_test_db(file_text);
     let metadata_arc = Arc::new(metadata);
     let config_rc = Rc::new(config);
-
-    // Create custom provider that returns our metadata
-    struct MetadataTestProvider {
-        db: RootDatabaseImpl,
-        metadata: Arc<ModuleMetadata>,
-    }
-
-    impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
-        fn configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-            None
-        }
-
-        fn workspace_symbols(
-            &self,
-            source_root_id: SourceRootId,
-        ) -> Arc<hir_def::WorkspaceSymbols> {
-            self.db.workspace_symbols(source_root_id)
-        }
-
-        fn module_index(&self, source_root_id: SourceRootId) -> Arc<hir_def::ModuleIndex> {
-            self.db.module_index(source_root_id)
-        }
-
-        fn parse(&self, file_id: vfs::FileId) -> syntax::Parse<syntax::SyntaxNode> {
-            use ide_db::base_db::RootQueryDb;
-            self.db.parse(file_id)
-        }
-
-        fn file_text(&self, file_id: vfs::FileId) -> String {
-            use ide_db::base_db::SourceDatabase;
-            let input = self.db.file_text_input(file_id);
-            input.text(&self.db).to_string()
-        }
-
-        fn item_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::ItemTree> {
-            use hir_def::DefDatabase;
-            self.db.item_tree(file_id)
-        }
-
-        fn symbol_tree(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::SymbolTree> {
-            use hir_def::DefDatabase;
-            self.db.symbol_tree(module_id)
-        }
-
-        fn region_tree(&self, file_id: vfs::FileId) -> Arc<hir_def::RegionTree> {
-            use hir_def::DefDatabase;
-            self.db.region_tree(file_id)
-        }
-
-        fn module_bodies(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleBodies> {
-            use hir_def::DefDatabase;
-            self.db.module_bodies(module_id)
-        }
-
-        fn module_metadata(&self, _module_id: hir_def::ModuleId) -> Arc<ModuleMetadata> {
-            Arc::clone(&self.metadata)
-        }
-
-        fn module_liveness_analysis(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<dataflow::liveness::ModuleLiveness> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_liveness_analysis(input)
-        }
-
-        fn module_reaching_definitions(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_reaching_definitions(input)
-        }
-
-        fn reaching_definitions(
-            &self,
-            method_id: hir_def::MethodId,
-        ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
-            use ide_db::RootDatabase;
-            self.db.reaching_definitions(method_id)
-        }
-
-        fn line_index(&self, file_id: vfs::FileId) -> Arc<line_index::LineIndex> {
-            use ide_db::base_db::SourceDatabase;
-            let input = self.db.file_text_input(file_id);
-            Arc::new(line_index::LineIndex::new(&input.text(&self.db)))
-        }
-
-        fn file_path(&self, _file_id: vfs::FileId) -> Option<String> {
-            None
-        }
-
-        fn file_source_root_id(&self, _file_id: vfs::FileId) -> SourceRootId {
-            SourceRootId(0)
-        }
-
-        fn module_level_regions(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<ide_db::base_db::RegionInfo>> {
-            use base_db::RootQueryDb;
-            self.db.module_level_regions(file_id)
-        }
-
-        fn sdbl_hir_in_file(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<(hir_def::SdblExprId, Arc<sdbl_hir::SdblPackage>)>> {
-            use ide_db::RootDatabase;
-            self.db.sdbl_hir_in_file(file_id)
-        }
-
-        fn all_sdbl_in_file(
-            &self,
-            file_id: vfs::FileId,
-        ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
-            use ide_db::RootDatabase;
-            self.db.all_sdbl_in_file(file_id)
-        }
-
-        fn module_data(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::ModuleData> {
-            use hir_def::DefDatabase;
-            self.db.module_data(module_id)
-        }
-
-        fn method_docs(
-            &self,
-            method_id: hir_def::MethodId,
-        ) -> Option<Arc<hir_def::docs::MethodDocs>> {
-            self.db.method_docs(method_id)
-        }
-
-        fn module_cfgs(&self, file_id: vfs::FileId) -> Arc<cfg::ModuleCfgs> {
-            use ide_db::base_db::FileIdInput;
-            use ide_db::RootDatabase;
-            let input = FileIdInput::new(&self.db, file_id);
-            self.db.module_cfgs(input)
-        }
-
-        fn resolve_vfs_path(
-            &self,
-            source_root_id: SourceRootId,
-            path: &vfs::VfsPath,
-        ) -> Option<vfs::FileId> {
-            use ide_db::base_db::SourceDatabase;
-            self.db.resolve_vfs_path(source_root_id, path)
-        }
-    }
 
     let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
 

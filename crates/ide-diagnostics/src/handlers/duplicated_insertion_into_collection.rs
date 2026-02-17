@@ -37,9 +37,7 @@
 //! Instead of regex-based text normalization, it compares HIR expression trees directly.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Body, BodySourceMap};
-use hir_def::hir::{Expr, Literal, Stmt};
-use hir_def::{ExprId, IdConversion, Name, StmtId};
+use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, Name, Stmt, StmtId};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;

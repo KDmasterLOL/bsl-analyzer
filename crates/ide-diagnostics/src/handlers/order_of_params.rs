@@ -20,7 +20,7 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::ModItem;
+use hir::ModItem;
 use crate::define_metadata;
 use crate::metadata::*;
 

@@ -62,8 +62,7 @@
 //! - Uses STRUCTURAL HIR EQUALITY for parameter comparison (not string matching)
 //! - This allows matching `Результат.АдресРезультата` correctly
 
-use hir_def::hir::{Expr, ExprIdx};
-use hir_def::{Body, BodySourceMap};
+use hir::{Body, BodySourceMap, Expr, ExprIdx};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;

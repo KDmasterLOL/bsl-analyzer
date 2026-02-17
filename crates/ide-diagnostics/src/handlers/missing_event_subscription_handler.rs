@@ -60,7 +60,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
-use ide_db::hir_def::{ModuleId, Name};
+use hir::{ModuleId, Name};
 use ide_db::TextRange;
 use vfs::FileId;
 use crate::define_metadata;

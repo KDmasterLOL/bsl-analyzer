@@ -61,7 +61,7 @@
 //! Salsa caching and the rust-analyzer architecture pattern.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::MethodId;
+use hir::MethodId;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
@@ -178,7 +178,7 @@ fn check_basic_block_missing_return(
     body: &hir_def::Body,
 ) -> bool {
     use cfg::{CfgEdgeType, CfgVertex};
-    use hir_def::hir::Stmt;
+    use hir::Stmt;
 
     if block.is_empty() {
         // Check incoming edges

@@ -3,8 +3,12 @@
 //! Ported from Java AbstractCommonModuleNameDiagnostic helper methods
 //! Source: bsl-language-server/.../diagnostics/AbstractCommonModuleNameDiagnostic.java
 
-use bsl_metadata::traits::Module;
+use bsl_metadata::traits::{MdObject, Module};
 use bsl_metadata::CommonModule;
+use hir::ModuleMetadata;
+use ide_db::TextRange;
+
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 /// Check if module is Client type:
 /// !serverCall && !server && !externalConnection && (clientOrdinary || clientManaged)
@@ -78,6 +82,53 @@ fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<Strin
     let file_set = source_root.file_set();
     let vfs_path = file_set.path_for_file(&file_id)?;
     Some(vfs_path.as_path().to_string_lossy().to_string())
+}
+
+/// Reusable check for CommonModuleName* diagnostics.
+///
+/// `name_should_contain` = true  — error if name does NOT contain keyword
+/// `name_should_contain` = false — error if name DOES contain keyword (GlobalClient case)
+pub fn check_common_module_name(
+    metadata: &ModuleMetadata,
+    ctx: &DiagnosticsContext,
+    code: DiagnosticCode,
+    predicate: impl Fn(&CommonModule, bool) -> bool,
+    keywords: &[&str],
+    name_should_contain: bool,
+    message: &str,
+) -> Vec<Diagnostic> {
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
+    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
+        return Vec::new();
+    }
+
+    let module = match &metadata.common_module {
+        Some(m) => m.as_ref(),
+        None => return Vec::new(),
+    };
+
+    if !predicate(module, ctx.config.ordinary_app_support) {
+        return Vec::new();
+    }
+
+    let name_lower = module.name().to_lowercase();
+    let contains_keyword = keywords.iter().any(|kw| name_lower.contains(kw));
+
+    if contains_keyword == name_should_contain {
+        return Vec::new();
+    }
+
+    vec![Diagnostic {
+        code,
+        message: message.to_string(),
+        severity: ctx.severity(code),
+        range: TextRange::empty(0.into()),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    }]
 }
 
 #[cfg(test)]

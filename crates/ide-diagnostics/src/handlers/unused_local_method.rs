@@ -22,7 +22,7 @@
 //! Ported from: UnusedLocalMethodDiagnostic.java (bsl-language-server)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::AnnotationKind;
+use hir::AnnotationKind;
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
 use crate::define_metadata;

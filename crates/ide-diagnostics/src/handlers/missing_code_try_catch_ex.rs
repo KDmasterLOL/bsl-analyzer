@@ -49,8 +49,7 @@
 //! - Better error recovery - HIR handles parse errors gracefully
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::Stmt;
-use hir_def::{IdConversion, StmtId};
+use hir::{IdConversion, Stmt, StmtId};
 use syntax::SyntaxKind;
 use crate::define_metadata;
 use crate::metadata::*;

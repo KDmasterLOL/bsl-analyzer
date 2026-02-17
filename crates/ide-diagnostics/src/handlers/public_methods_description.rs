@@ -45,9 +45,7 @@
 //! ```
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::ModItem;
-use hir_def::region_tree::RegionTree;
-use hir_def::MethodId;
+use hir::{MethodId, ModItem, RegionTree};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

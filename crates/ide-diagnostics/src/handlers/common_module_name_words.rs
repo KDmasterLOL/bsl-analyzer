@@ -6,7 +6,7 @@
 
 use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
-use ide_db::hir_def::ModuleMetadata;
+use hir::ModuleMetadata;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

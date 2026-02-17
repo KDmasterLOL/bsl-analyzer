@@ -80,7 +80,7 @@
 //! - RewriteMethodParameterDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{BindingId, ExprId, IdConversion, StmtId};
+use hir::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
@@ -233,7 +233,7 @@ fn parameter_used_before_stmt(
 
 /// Check if statement is a self-assign to the binding (Param = Param).
 fn is_self_assign_to_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
-    use hir_def::hir::{Expr, Stmt};
+    use hir::{Expr, Stmt};
 
     let stmt = body.stmt(stmt_id);
     match stmt {
@@ -258,7 +258,7 @@ fn is_self_assign_to_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: 
 
 /// Check if a statement uses a specific binding anywhere.
 fn stmt_uses_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
-    use hir_def::hir::Stmt;
+    use hir::Stmt;
 
     let stmt = body.stmt(stmt_id);
     match stmt {
@@ -374,7 +374,7 @@ fn parameter_used_in_assignment_rhs(
     stmt_id: StmtId,
     param_id: BindingId,
 ) -> bool {
-    use hir_def::hir::Stmt;
+    use hir::Stmt;
 
     let stmt = body.stmt(stmt_id);
     let value_expr_id = match stmt {
@@ -388,7 +388,7 @@ fn parameter_used_in_assignment_rhs(
 
 /// Recursively check if an expression uses a specific binding.
 fn expr_uses_binding(body: &hir_def::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
-    use hir_def::hir::Expr;
+    use hir::Expr;
 
     let expr = body.expr(expr_id);
     match expr {

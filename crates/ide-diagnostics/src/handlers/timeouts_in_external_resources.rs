@@ -46,8 +46,7 @@
 use cfg_types::{ExprId, IdConversion};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::hir::{Expr, Literal, Stmt};
-use hir_def::Name;
+use hir::{Expr, Literal, Name, Stmt};
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
 use crate::define_metadata;

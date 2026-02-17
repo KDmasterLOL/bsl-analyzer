@@ -4,11 +4,10 @@
 //!
 //! Ported from: CommonModuleNameCachedDiagnostic.java
 
+use crate::common_module_helpers::check_common_module_name;
 use crate::{Diagnostic, DiagnosticCode};
-use bsl_metadata::traits::MdObject;
 use bsl_metadata::ReturnValueReuse;
-use ide_db::hir_def::ModuleMetadata;
-use ide_db::TextRange;
+use hir::ModuleMetadata;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -27,47 +26,19 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
-/// Check metadata-based diagnostics using ModuleMetadata.
 pub fn from_metadata(
     metadata: &ModuleMetadata,
     ctx: &crate::DiagnosticsContext,
 ) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CommonModuleNameCached;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    if !matches!(metadata.module_type, bsl_metadata::ModuleType::CommonModule) {
-        return Vec::new();
-    }
-
-    let module = match &metadata.common_module {
-        Some(m) => m.as_ref(),
-        None => return Vec::new(),
-    };
-
-    if module.return_values_reuse() == ReturnValueReuse::DontUse {
-        return Vec::new();
-    }
-
-    let name_lower = module.name().to_lowercase();
-    if name_lower.contains("повторноеиспользование")
-        || name_lower.contains("повтисп")
-        || name_lower.contains("cached")
-    {
-        return Vec::new();
-    }
-
-    vec![Diagnostic {
-        code,
-        message: "Имя кэшируемого общего модуля должно содержать 'ПовтИсп' или 'Cached'"
-            .to_string(),
-        severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    }]
+    check_common_module_name(
+        metadata,
+        ctx,
+        DiagnosticCode::CommonModuleNameCached,
+        |m, _oas| m.return_values_reuse() != ReturnValueReuse::DontUse,
+        &["повторноеиспользование", "повтисп", "cached"],
+        true,
+        "Имя кэшируемого общего модуля должно содержать 'ПовтИсп' или 'Cached'",
+    )
 }
 
 #[cfg(test)]

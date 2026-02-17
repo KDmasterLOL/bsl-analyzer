@@ -40,7 +40,7 @@
 use cfg_types::{BindingId, IdConversion};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::ModuleId;
+use hir::ModuleId;
 use ide_db::{RootDatabase, TextRange};
 use crate::define_metadata;
 use crate::metadata::*;

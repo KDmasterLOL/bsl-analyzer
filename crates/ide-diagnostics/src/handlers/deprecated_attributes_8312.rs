@@ -48,7 +48,7 @@
 //! Migrated from token-based to HIR-based approach.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::body::DeprecatedKind8312;
+use hir::DeprecatedKind8312;
 use ide_db::TextRange;
 use std::collections::HashMap;
 use crate::define_metadata;

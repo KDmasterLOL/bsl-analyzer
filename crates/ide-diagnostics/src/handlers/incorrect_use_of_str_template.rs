@@ -63,10 +63,7 @@
 use cfg_types::IdConversion;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{
-    hir::{Expr, Literal, Stmt},
-    ExprId, MethodId, ModuleId, StmtId,
-};
+use hir::{Expr, ExprId, Literal, MethodId, ModuleId, Stmt, StmtId};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

@@ -42,7 +42,7 @@
 //! - **Minutes to fix:** 3
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::{MethodId, ModuleId, Name};
+use hir::{MethodId, ModuleId, Name};
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

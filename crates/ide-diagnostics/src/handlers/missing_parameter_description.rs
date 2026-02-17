@@ -1,7 +1,7 @@
 //! MissingParameterDescription diagnostic.
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir_def::item_tree::ModItem;
+use hir::ModItem;
 use ide_db::TextRange;
 use std::collections::HashMap;
 use crate::define_metadata;

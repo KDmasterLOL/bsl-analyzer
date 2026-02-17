@@ -17,7 +17,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ModuleType, ReturnValueReuse};
-use hir_def::RedundantAccessKind;
+use hir::RedundantAccessKind;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;

@@ -84,7 +84,7 @@
 //! - Reusability (same calculation for code lens)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::hir_def::{self, item_tree::ModItem};
+use hir::ModItem;
 use crate::define_metadata;
 use crate::metadata::*;
 

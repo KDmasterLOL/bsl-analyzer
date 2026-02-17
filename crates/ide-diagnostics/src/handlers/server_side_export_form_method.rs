@@ -15,7 +15,7 @@
 //! - Method does NOT have `&НаКлиенте` annotation
 
 use bsl_metadata::{FormType, ModuleType};
-use hir_def::item_tree::AnnotationKind;
+use hir::AnnotationKind;
 use ide_db::TextRange;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
