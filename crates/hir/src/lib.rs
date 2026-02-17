@@ -86,6 +86,14 @@ pub struct Method<'db, DB: ?Sized> {
     id: MethodId,
 }
 
+struct MethodInfo {
+    name: Name,
+    is_export: bool,
+    is_function: bool,
+    source_range: TextRange,
+    name_range: TextRange,
+}
+
 impl<'db, DB: DefDatabase + ?Sized> Method<'db, DB> {
     /// Create a new Method from database and method ID.
     pub fn new(db: &'db DB, id: MethodId) -> Self {
@@ -96,149 +104,62 @@ impl<'db, DB: DefDatabase + ?Sized> Method<'db, DB> {
         self.id
     }
 
+    fn method_info(&self) -> Option<MethodInfo> {
+        let tree = self.db.item_tree(self.id.module.file_id);
+        let item = tree.top_level_items().get(self.id.local_id as usize)?;
+        match item {
+            hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                let proc = tree.procedure(*proc_idx);
+                Some(MethodInfo {
+                    name: proc.name.clone(),
+                    is_export: proc.is_export,
+                    is_function: false,
+                    source_range: proc.source_range,
+                    name_range: proc.name_range,
+                })
+            }
+            hir_def::item_tree::ModItem::Function(func_idx) => {
+                let func = tree.function(*func_idx);
+                Some(MethodInfo {
+                    name: func.name.clone(),
+                    is_export: func.is_export,
+                    is_function: true,
+                    source_range: func.source_range,
+                    name_range: func.name_range,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Get the method name.
     pub fn name(&self) -> Name {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        // Find this method in the ItemTree
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let proc = tree.procedure(*proc_idx);
-                        return proc.name.clone();
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let func = tree.function(*func_idx);
-                        return func.name.clone();
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Name::missing()
+        self.method_info().map_or_else(Name::missing, |i| i.name)
     }
 
     /// Check if this is an export method.
     pub fn is_export(&self) -> bool {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let proc = tree.procedure(*proc_idx);
-                        return proc.is_export;
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let func = tree.function(*func_idx);
-                        return func.is_export;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        false
+        self.method_info().is_some_and(|i| i.is_export)
     }
 
     /// Check if this is a function (as opposed to a procedure).
     pub fn is_function(&self) -> bool {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                return matches!(item, hir_def::item_tree::ModItem::Function(_));
-            }
-        }
-
-        false
+        self.method_info().is_some_and(|i| i.is_function)
     }
 
     /// Get the source range of this method.
-    ///
-    /// Returns the text range where this method is defined.
     pub fn source_range(&self) -> Option<TextRange> {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let proc = tree.procedure(*proc_idx);
-                        return Some(proc.source_range);
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let func = tree.function(*func_idx);
-                        return Some(func.source_range);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        None
+        self.method_info().map(|i| i.source_range)
     }
 
     /// Get the name range of this method.
     ///
     /// Returns the text range of the method name (identifier only).
-    /// This is useful for diagnostics that should highlight only the method name.
     pub fn name_range(&self) -> Option<TextRange> {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                match item {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        let proc = tree.procedure(*proc_idx);
-                        return Some(proc.name_range);
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        let func = tree.function(*func_idx);
-                        return Some(func.name_range);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        None
+        self.method_info().map(|i| i.name_range)
     }
 
     /// Get parsed documentation for this method.
-    ///
-    /// Returns structured documentation containing:
-    /// - Purpose/description
-    /// - Parameter types and descriptions
-    /// - Return value types and descriptions
-    /// - Examples, call options, deprecation info
-    ///
-    /// Returns `None` if the method has no documentation comments.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let docs = method.docs()?;
-    /// println!("Purpose: {}", docs.purpose.unwrap_or_default());
-    ///
-    /// for param in &docs.parameters {
-    ///     let types: Vec<_> = param.types.iter().map(|t| &t.name).collect();
-    ///     println!("  {}: {}", param.name, types.join(" | "));
-    /// }
-    ///
-    /// if !docs.returned_value.is_empty() {
-    ///     println!("Returns:");
-    ///     for type_doc in &docs.returned_value {
-    ///         if let Some(desc) = &type_doc.description {
-    ///             println!("  {} - {}", type_doc.name, desc);
-    ///         } else {
-    ///             println!("  {}", type_doc.name);
-    ///         }
-    ///     }
-    /// }
-    /// ```
     pub fn docs(&self) -> Option<std::sync::Arc<hir_def::docs::MethodDocs>> {
         self.db.method_docs(self.id)
     }
@@ -251,6 +172,12 @@ pub struct Variable<'db, DB: ?Sized> {
     id: VariableId,
 }
 
+struct VariableInfo {
+    name: Name,
+    is_export: bool,
+    source_range: TextRange,
+}
+
 impl<'db, DB: DefDatabase + ?Sized> Variable<'db, DB> {
     pub(crate) fn new(db: &'db DB, id: VariableId) -> Self {
         Self { db, id }
@@ -260,51 +187,33 @@ impl<'db, DB: DefDatabase + ?Sized> Variable<'db, DB> {
         self.id
     }
 
+    fn variable_info(&self) -> Option<VariableInfo> {
+        let tree = self.db.item_tree(self.id.module.file_id);
+        let item = tree.top_level_items().get(self.id.local_id as usize)?;
+        if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
+            let var = tree.variable(*var_idx);
+            Some(VariableInfo {
+                name: var.name.clone(),
+                is_export: var.is_export,
+                source_range: var.source_range,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Get the variable name.
     pub fn name(&self) -> Name {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                    let var = tree.variable(*var_idx);
-                    return var.name.clone();
-                }
-            }
-        }
-
-        Name::missing()
+        self.variable_info().map_or_else(Name::missing, |i| i.name)
     }
 
     /// Check if this is an export variable.
     pub fn is_export(&self) -> bool {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                    let var = tree.variable(*var_idx);
-                    return var.is_export;
-                }
-            }
-        }
-
-        false
+        self.variable_info().is_some_and(|i| i.is_export)
     }
 
     pub fn source_range(&self) -> Option<TextRange> {
-        let tree = self.db.item_tree(self.id.module.file_id);
-
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            if idx == self.id.local_id as usize {
-                if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                    let var = tree.variable(*var_idx);
-                    return Some(var.source_range);
-                }
-            }
-        }
-
-        None
+        self.variable_info().map(|i| i.source_range)
     }
 }
 

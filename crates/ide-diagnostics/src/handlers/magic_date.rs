@@ -34,6 +34,7 @@
 //! Comma-separated list of authorized dates (without quotes).
 //! Default: `"00010101,00010101000000,000101010000"`
 
+use crate::utils::literal_context;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -189,7 +190,7 @@ fn is_excluded_context(token: &SyntaxToken) -> bool {
         debug!("Excluded: in return statement");
         return true;
     }
-    if is_in_default_value(token) {
+    if literal_context::is_in_default_value(token) {
         debug!("Excluded: in default value");
         return true;
     }
@@ -197,11 +198,11 @@ fn is_excluded_context(token: &SyntaxToken) -> bool {
         debug!("Excluded: in structure/correspondence insert");
         return true;
     }
-    if is_in_structure_constructor(token) {
+    if literal_context::is_in_structure_constructor(token, &[]) {
         debug!("Excluded: in structure constructor");
         return true;
     }
-    if is_in_property_assignment(token) {
+    if literal_context::is_in_property_assignment(token) {
         debug!("Excluded: in property assignment");
         return true;
     }
@@ -209,7 +210,7 @@ fn is_excluded_context(token: &SyntaxToken) -> bool {
         debug!("Excluded: in date function simple assignment");
         return true;
     }
-    if is_in_simple_assignment(token) {
+    if literal_context::is_in_simple_assignment(token) {
         debug!("Excluded: in simple assignment");
         return true;
     }
@@ -228,131 +229,18 @@ fn is_in_return_statement(token: &SyntaxToken) -> bool {
     false
 }
 
-/// Check if inside default value (parameter)
-/// Parameters with default values contain the default expression inside PARAM node
-fn is_in_default_value(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::PARAM {
-            // If we're inside a PARAM, we're in a default value
-            // (parameters without defaults wouldn't contain date tokens)
-            return true;
-        }
-        // Stop at function/procedure boundary
-        if matches!(current.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF) {
-            return false;
-        }
-        node = current.parent();
-    }
-    false
-}
-
-/// Find method name in a CALL_STMT or CALL_EXPR node.
-/// For method calls like `obj.Method()`, returns "Method".
-fn find_method_name(node: &syntax::SyntaxNode) -> Option<String> {
-    // Look for FIELD_EXPR which contains the method call structure
-    for child in node.descendants() {
-        if child.kind() == SyntaxKind::FIELD_EXPR {
-            // In FIELD_EXPR, method name is the last IDENT token
-            return child
-                .children_with_tokens()
-                .filter_map(|e| e.into_token())
-                .filter(|t| t.kind() == SyntaxKind::IDENT)
-                .last()
-                .map(|t| t.text().to_string());
-        }
-        // Don't descend into ARG_LIST
-        if child.kind() == SyntaxKind::ARG_LIST {
-            break;
-        }
-    }
-    None
-}
-
 /// Check if inside Structure.Insert() or Correspondence.Insert()
-/// Simplified: exclude ALL parameters in Insert() calls
 fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
     let mut node = token.parent();
 
     while let Some(current) = node {
-        // Check if this is a CALL_STMT or CALL_EXPR (method call like Object.Method())
         if matches!(current.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
-            // Find method name - it's in the FIELD_EXPR (for method calls)
-            // With new AST structure: CALL_STMT > CALL_EXPR > FIELD_EXPR > IDENTs
-            if let Some(method_name) = find_method_name(&current) {
+            if let Some(method_name) = literal_context::find_method_name(&current) {
                 let name = method_name.to_lowercase();
                 if name == "вставить" || name == "insert" {
                     return true;
                 }
             }
-        }
-        node = current.parent();
-    }
-
-    false
-}
-
-/// Check if inside structure constructor: Новый Структура(...) or Новый ФиксированнаяСтруктура(...)
-/// Exclude all params EXCEPT first (first is field names string)
-fn is_in_structure_constructor(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::NEW_EXPR {
-            // Extract type name (IDENT after "Новый")
-            for element in current.children_with_tokens() {
-                if let Some(t) = element.as_token() {
-                    if t.kind() == SyntaxKind::IDENT {
-                        let type_name = t.text().to_lowercase();
-                        if type_name.contains("структура") || type_name.contains("structure")
-                        {
-                            // Simplified: exclude ALL params (including first)
-                            // In Java, first param is checked if it's a string literal
-                            // We simplify for v1
-                            return true;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        node = current.parent();
-    }
-
-    false
-}
-
-/// Check if in property assignment: Структура.Поле = '20250101'
-/// Only excludes DIRECT assignment to property, not dates inside function calls
-/// Excludes: Структура.Поле = '20250101'
-/// Does NOT exclude: Объект.Поле = Новый Тип(Дата('19800101000000'))
-fn is_in_property_assignment(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-
-    // First check if we're inside ARG_LIST (function call argument)
-    // If yes, don't exclude even if it's property assignment
-    let mut check_node = token.parent();
-    while let Some(current) = check_node {
-        if current.kind() == SyntaxKind::ARG_LIST {
-            return false; // Inside function call, don't exclude
-        }
-        if current.kind() == SyntaxKind::ASSIGN_STMT {
-            break; // Reached assignment, stop checking
-        }
-        check_node = current.parent();
-    }
-
-    // Now check if it's a property assignment
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::ASSIGN_STMT {
-            // Property assignment has DOT token: Obj.Property = value
-            // With new AST: ASSIGN_STMT > FIELD_EXPR > DOT
-            // Use descendants to find DOT in nested structure
-            let has_dot = current
-                .descendants_with_tokens()
-                .any(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::DOT));
-
-            return has_dot;
         }
         node = current.parent();
     }
@@ -438,26 +326,6 @@ fn is_in_date_function_simple_assignment(token: &SyntaxToken) -> bool {
     false
 }
 
-/// Check if in simple assignment (not an expression)
-/// Excludes: День = '20250101'  (simple literal)
-/// Does NOT exclude: День = '20250101' + Шаг  (expression)
-fn is_in_simple_assignment(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::ASSIGN_STMT {
-            // Simple assignment has no BINARY_EXPR and no ARG_LIST (not a function call)
-            let has_binary = current.descendants().any(|d| d.kind() == SyntaxKind::BINARY_EXPR);
-            let has_arg_list = current.descendants().any(|d| d.kind() == SyntaxKind::ARG_LIST);
-
-            return !has_binary && !has_arg_list;
-        }
-        node = current.parent();
-    }
-
-    false
-}
-
 /// Single-pass token handler for MagicDate diagnostic.
 #[inline]
 pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
@@ -525,10 +393,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        check, is_in_date_function_simple_assignment, is_in_property_assignment,
-        is_in_simple_assignment,
-    };
+    use super::{check, is_in_date_function_simple_assignment};
+    use crate::utils::literal_context::{is_in_property_assignment, is_in_simple_assignment};
     use crate::test_utils::{
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };

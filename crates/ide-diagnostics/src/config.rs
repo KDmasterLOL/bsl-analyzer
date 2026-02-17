@@ -1,7 +1,7 @@
 //! Diagnostics configuration.
 
 use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
-use crate::metadata_registry;
+use crate::handlers;
 use crate::{DiagnosticCode, Severity};
 use base_db::DiagnosticsConfigInput;
 use std::collections::HashMap;
@@ -148,7 +148,7 @@ impl DiagnosticsConfig {
             DiagnosticCode::UseSystemInformation,
             DiagnosticCode::UsingLikeInQuery,
         ] {
-            if let Some(meta) = metadata_registry::get_metadata(code) {
+            if let Some(meta) = handlers::get_metadata(code) {
                 if !meta.activated_by_default {
                     enabled.push(code);
                 }
@@ -170,7 +170,7 @@ impl DiagnosticsConfig {
     ///
     /// Returns `None` if no metadata is defined for this diagnostic yet.
     pub fn get_effective_metadata(&self, code: DiagnosticCode) -> Option<EffectiveMetadata> {
-        let base = metadata_registry::get_metadata(code)?;
+        let base = handlers::get_metadata(code)?;
         let override_data = self.metadata_overrides.get(&code);
 
         Some(EffectiveMetadata {
@@ -299,7 +299,7 @@ impl DiagnosticsConfig {
         }
 
         // Check metadata for activatedByDefault
-        if let Some(metadata) = metadata_registry::get_metadata(code) {
+        if let Some(metadata) = handlers::get_metadata(code) {
             if !metadata.activated_by_default
                 && !self.enabled.contains(&code)
                 && !self.parameters.contains_key(&code)

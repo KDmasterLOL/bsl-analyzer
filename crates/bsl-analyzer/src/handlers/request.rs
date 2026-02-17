@@ -4,9 +4,7 @@
 //! textDocument/definition, textDocument/references, etc.
 
 use anyhow::Result;
-use base_db::{DiagnosticsConfigId, FileIdInput, SourceDatabase};
 use ide::Location as IdeLocation;
-use ide_diagnostics::file_diagnostics_query;
 use line_index::LineIndex;
 use lsp_types::{
     CodeActionOrCommand, CodeActionParams, CodeActionResponse, CompletionItem, CompletionItemKind,
@@ -68,12 +66,9 @@ pub fn handle_goto_definition(
                 text.clone()
             } else {
                 // Different file - read from MemDocs or database
-                snap.mem_docs.get(&target_url).unwrap_or_else(|| {
-                    // File not in MemDocs - read from database
-                    let db = snap.analysis.database();
-                    let file_text_input = db.file_text_input(nav_target.file_id);
-                    file_text_input.text(db).clone()
-                })
+                snap.mem_docs
+                    .get(&target_url)
+                    .unwrap_or_else(|| snap.analysis.file_text(nav_target.file_id))
             };
 
             let target_line_index = LineIndex::new(&target_text);
@@ -462,10 +457,7 @@ pub fn handle_code_action(
     let line_index = LineIndex::new(&text);
     let range = crate::lsp::text_range(&line_index, &text, params.range)?;
 
-    let db = snap.analysis.database();
-    let file_id_input = FileIdInput::new(db, file_id);
-    let config_id = DiagnosticsConfigId::new(db, snap.diagnostics_config.clone());
-    let diagnostics = file_diagnostics_query(db, file_id_input, config_id);
+    let diagnostics = snap.analysis.file_diagnostics_cached(file_id, snap.diagnostics_config.clone());
 
     let mut actions = Vec::new();
     for diag in diagnostics.iter() {

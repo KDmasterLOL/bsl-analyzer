@@ -113,13 +113,8 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 /// - module_bodies (for hover info)
 /// - diagnostics (for fast diagnostics on dependency navigation)
 fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
-    use base_db::DiagnosticsConfigId;
-    use ide_db::hir_def::{DefDatabase, ModuleId};
-
-    // Get file dependencies (resolved ExternalRefs → FileIds)
     let analysis = state.analysis_host.analysis();
-    let module_id = ModuleId::new(file_id);
-    let deps = analysis.database().file_dependencies(module_id);
+    let deps = analysis.file_dependencies(file_id);
 
     if deps.is_empty() {
         tracing::debug!(file_id = file_id.0, "preload: no dependencies found");
@@ -130,39 +125,13 @@ fn preload_dependencies(state: &GlobalState, file_id: vfs::FileId) {
     let dep_ids: Vec<u32> = deps.iter().map(|f| f.0).collect();
     tracing::debug!(file_id = file_id.0, dep_count, ?dep_ids, "preload: starting background task");
 
-    // Clone what we need for the background task
-    let deps = deps.as_ref().clone();
-    let db = analysis.database().clone();
-    let config = state.diagnostics_config().clone();
+    let task = analysis.warm_caches_task(&deps, state.diagnostics_config().clone());
 
-    // Spawn background task to warm up caches for dependencies
-    // This includes symbol_tree (for GoToDefinition), module_bodies (for hover),
-    // and diagnostics (for fast diagnostics when navigating to dependencies)
     state.task_pool.pool.spawn(move || {
-        tracing::debug!(dep_count = deps.len(), "preload: background task started");
-
-        // Create config ID once for all files (Salsa interns it)
-        let config_id = DiagnosticsConfigId::new(&db, config);
-
-        for dep_file_id in &deps {
-            let dep_module_id = ModuleId::new(*dep_file_id);
-
-            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming symbol_tree");
-            // Warm up symbol_tree (for GoToDefinition resolution)
-            let _ = db.symbol_tree(dep_module_id);
-
-            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming module_bodies");
-            // Warm up module_bodies (for diagnostics, hover info)
-            // This also primes item_tree and other intermediate caches
-            let _ = db.module_bodies(dep_module_id);
-
-            tracing::debug!(dep_file_id = dep_file_id.0, "preload: warming diagnostics");
-            // Warm up diagnostics (so opening a dependency file is instant)
-            let file_id_input = FileIdInput::new(&db, *dep_file_id);
-            let _ = file_diagnostics_query(&db, file_id_input, config_id);
-        }
-        tracing::debug!(dep_count = deps.len(), "preload: background task completed");
-        Task::DependenciesPreloaded { file_id, count: deps.len() }
+        tracing::debug!(dep_count, "preload: background task started");
+        let count = task.run();
+        tracing::debug!(dep_count = count, "preload: background task completed");
+        Task::DependenciesPreloaded { file_id, count }
     });
 }
 

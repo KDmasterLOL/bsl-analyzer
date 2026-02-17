@@ -25,6 +25,7 @@
 //! ## Configuration
 //! - `declaredLanguages` (String, default: `"ru"`) - comma-separated list of required languages
 
+use crate::utils::nstr::extract_language_keys;
 use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode};
@@ -77,49 +78,6 @@ fn is_nstr_call(name: &str) -> bool {
 /// Check if the given name is a StrTemplate call (case-insensitive)
 fn is_template_call(name: &str) -> bool {
     name.eq_ignore_ascii_case("СтрШаблон") || name.eq_ignore_ascii_case("StrTemplate")
-}
-
-/// Extract language keys from NStr string content (without regex).
-/// Looks for patterns like: `ru='text'`, `en = "text"`, etc.
-fn extract_language_keys(text: &str) -> HashSet<String> {
-    let mut keys = HashSet::new();
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        // Look for start of identifier (letter or _)
-        if chars[i].is_alphabetic() || chars[i] == '_' {
-            let start = i;
-            // Collect entire identifier
-            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let ident: String = chars[start..i].iter().collect();
-
-            // Skip whitespace
-            while i < len && chars[i].is_whitespace() {
-                i += 1;
-            }
-
-            // Check for =
-            if i < len && chars[i] == '=' {
-                i += 1;
-                // Skip whitespace
-                while i < len && chars[i].is_whitespace() {
-                    i += 1;
-                }
-                // Check for quote (single or double)
-                if i < len && (chars[i] == '\'' || chars[i] == '"') {
-                    keys.insert(ident.to_lowercase());
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    keys
 }
 
 /// Check if a node has a StrTemplate call in its ancestors

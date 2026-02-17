@@ -17,7 +17,6 @@ ide.workspace = true
 ide-diagnostics.workspace = true
 parser.workspace = true
 ide-db.workspace = true
-hir-def.workspace = true
 cfg.workspace = true
 dataflow.workspace = true
 ide-assists.workspace = true

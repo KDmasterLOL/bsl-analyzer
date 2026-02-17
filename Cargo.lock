@@ -180,7 +180,6 @@ dependencies = [
  "crossbeam-channel",
  "dataflow",
  "expect-test",
- "hir-def",
  "ide",
  "ide-assists",
  "ide-db",

@@ -9,7 +9,6 @@ pub mod docs;
 mod hir_dispatch;
 mod metadata;
 mod metadata_dispatch;
-mod metadata_registry;
 mod query;
 mod runner;
 mod types;
@@ -32,7 +31,7 @@ pub use metadata::{
     CleanCodeAttribute, DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope,
     DiagnosticSeverityLevel, DiagnosticType, Impact, ImpactSeverity, MetadataTag, SoftwareQuality,
 };
-pub use metadata_registry::get_metadata;
+pub use handlers::get_metadata;
 pub use query::file_diagnostics_query;
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
 
