@@ -284,16 +284,6 @@ mod tests {
         let code = include_str!("../../test_data/UsingHardcodeNetworkAddressDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!(
-                "#{}: Line {}, Col {}-{}: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
-
         assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics");
 
         assert_diagnostic_range(code, &diagnostics[0], 2, 15, 31);

@@ -887,11 +887,6 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
 
-        // Debug output
-        for (i, d) in pairing_diags.iter().enumerate() {
-            eprintln!("Diagnostic {}: range={:?}, message={}", i, d.range, d.message);
-        }
-
         // Java produces 21 diagnostics
         // CFG-based approach may find MORE issues due to path analysis
         assert!(

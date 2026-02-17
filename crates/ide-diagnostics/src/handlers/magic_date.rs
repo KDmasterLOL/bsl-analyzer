@@ -393,13 +393,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check, is_in_date_function_simple_assignment};
-    use crate::utils::literal_context::{is_in_property_assignment, is_in_simple_assignment};
+    use super::check;
     use crate::test_utils::{
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-    use syntax::SyntaxKind;
     #[test]
     fn test_line_31_detection() {
         // Line 31: ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));
@@ -408,27 +406,8 @@ mod tests {
     ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));
 КонецПроцедуры"#;
 
-        let parse = parser::parse(code);
-        let root = parse.syntax_node();
-
-        println!("\n=== Testing line 31 ===");
-        for element in root.descendants_with_tokens() {
-            if let Some(token) = element.as_token() {
-                if token.kind() == SyntaxKind::DATE && token.text().contains("1980") {
-                    println!("Found DATE token: {}", token.text());
-                    println!("  is_in_property_assignment: {}", is_in_property_assignment(token));
-                    println!(
-                        "  is_in_date_function_simple_assignment: {}",
-                        is_in_date_function_simple_assignment(token)
-                    );
-                    println!("  is_in_simple_assignment: {}", is_in_simple_assignment(token));
-                }
-            }
-        }
-
         let diagnostics = check_ast_diagnostic(code, check);
 
-        println!("Found {} diagnostics (expected 1)", diagnostics.len());
         assert_eq!(diagnostics.len(), 1, "Should detect the date inside nested function calls");
     }
 
@@ -436,17 +415,6 @@ mod tests {
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MagicDateDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
-
-        // DEBUG: Print all diagnostic positions
-        eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!(
-                "#{}: Line {}, Col {}-{}: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
 
         // NOTE: We detect 16 diagnostics instead of Java's 17 because we skip one edge case:
         // Line 23: '0001-01why not?02' - our lexer produces ERROR tokens for malformed dates

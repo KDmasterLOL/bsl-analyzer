@@ -345,12 +345,8 @@ mod tests {
         let file_id = fixture.first_file().unwrap();
 
         let mut db = RootDatabaseImpl::new();
-        let mut file_content = String::new();
         for (fid, file) in &fixture.files {
             db.set_file_text(*fid, &file.content);
-            if *fid == file_id {
-                file_content = file.content.to_string();
-            }
         }
 
         let parse = db.parse(file_id);
@@ -367,27 +363,13 @@ mod tests {
             })
             .unwrap();
 
-        println!("LITERAL text: {:?}", literal.text());
-        println!("LITERAL range: {:?}", literal.text_range());
-
-        // Get STRING token range
-        let string_range = literal
+        // Get STRING token range - verify it exists
+        let _string_range = literal
             .children_with_tokens()
             .find_map(|elem| {
                 elem.as_token().filter(|t| t.kind() == SyntaxKind::STRING).map(|t| t.text_range())
             })
             .unwrap();
-
-        println!("STRING token range: {:?}", string_range);
-
-        // Convert to line/col
-        let (start_line, start_col, _end_line, end_col) =
-            range_to_line_col(&file_content, literal.text_range());
-        println!("LITERAL position: line {}, col {}-{}", start_line, start_col, end_col);
-
-        let (start_line, start_col, _end_line, end_col) =
-            range_to_line_col(&file_content, string_range);
-        println!("STRING token position: line {}, col {}-{}", start_line, start_col, end_col);
     }
 
     #[test]

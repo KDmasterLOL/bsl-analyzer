@@ -212,11 +212,6 @@ mod tests {
         let exec_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
 
-        eprintln!("Total diagnostics: {}", diagnostics.len());
-        for d in &diagnostics {
-            eprintln!("  - {:?}: {:?}", d.code, d.message);
-        }
-
         // ExecuteExternalCode should catch these too (no client-only annotation)
         assert_eq!(exec_diags.len(), 2, "Should detect both Execute and Eval in CommonModule");
     }

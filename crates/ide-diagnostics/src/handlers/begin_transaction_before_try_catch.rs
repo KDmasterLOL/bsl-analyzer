@@ -97,11 +97,6 @@ fn message_ru() -> String {
     "Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Method 'BeginTransaction' must be outside 'Try-Except' block immediately before 'Try' statement".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::*;

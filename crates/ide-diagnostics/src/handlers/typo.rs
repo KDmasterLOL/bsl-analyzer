@@ -518,9 +518,6 @@ mod tests {
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert!(diagnostics.len() >= 3, "Should detect at least 3 typos (Атмена, Варинаты, ыть)");
-
-        let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
-        println!("Detected typos: {:?}", messages);
     }
 
     #[test]
@@ -614,34 +611,12 @@ mod tests {
             "первый",
         ];
 
-        let mut failed = Vec::new();
         for word in should_be_valid {
-            if !is_valid_word(word, &dictionaries) {
-                failed.push(word);
-            }
-        }
-
-        println!("Words that should be valid but Hunspell rejects:");
-        for word in &failed {
-            println!("  - {}", word);
-        }
-
-        // Words in genitive/other cases that BSL commonly uses
-        let case_forms = [
-            "Сеансов",
-            "Заданий",
-            "Параметров",
-            "Базы",
-            "Данных",
-            "пользователя",
-            "документа",
-            "справочника",
-        ];
-
-        println!("\nCase forms (may fail due to limited morphology):");
-        for word in case_forms {
-            let valid = is_valid_word(word, &dictionaries);
-            println!("  {} -> {}", word, if valid { "OK" } else { "REJECTED" });
+            assert!(
+                is_valid_word(word, &dictionaries),
+                "Word should be valid but Hunspell rejects: {}",
+                word
+            );
         }
     }
 }

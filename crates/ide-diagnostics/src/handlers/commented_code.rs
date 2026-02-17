@@ -563,11 +563,6 @@ fn message_ru() -> String {
     "Программные модули не должны иметь закомментированных фрагментов кода".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Commented code should be removed".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::check;

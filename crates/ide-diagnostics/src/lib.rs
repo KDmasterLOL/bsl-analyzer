@@ -11,12 +11,12 @@ mod metadata;
 mod metadata_dispatch;
 mod query;
 mod runner;
+mod single_pass;
 mod types;
 
 pub mod common_module_helpers;
 pub mod handlers;
 pub mod metadata_diagnostic;
-pub mod method_description;
 pub mod sdbl_utils;
 pub mod utils;
 

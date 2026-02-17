@@ -423,9 +423,6 @@ mod tests {
         let end: usize = range.end().into();
         let highlighted_text = &code[start..end];
 
-        eprintln!("Highlighted text: '{}'", highlighted_text);
-        eprintln!("Expected: 'ПубликацииERP'");
-
         // Should highlight only the function name
         assert_eq!(
             highlighted_text, "ПубликацииERP",

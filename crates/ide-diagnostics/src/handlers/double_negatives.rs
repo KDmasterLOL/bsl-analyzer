@@ -452,21 +452,6 @@ mod tests {
         let code = include_str!("../../test_data/DoubleNegativesDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Отладка: вывод всех обнаруженных диагностик с номерами строк и текстом
-        eprintln!("\n=== Обнаружено {} диагностик ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let start_offset: usize = diag.range.start().into();
-            let end_offset: usize = diag.range.end().into();
-
-            // Вычисление номера строки (начиная с 1)
-            let line_num = code[..start_offset].lines().count();
-
-            // Извлечение текста
-            let text = &code[start_offset..end_offset];
-            eprintln!("#{}: Строка {} - {:?}", i + 1, line_num, text);
-        }
-        eprintln!("=================================\n");
-
         // Ожидается 12 диагностик согласно комментариям в тестовом файле:
         // Строка 2:  Не ТаблицаЗначений.Найти(...) <> Неопределено
         // Строка 6:  Не Отказ <> Ложь

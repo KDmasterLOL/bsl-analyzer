@@ -137,12 +137,6 @@ mod tests {
         //
         // Query 5 (CAST member access):
         // - Line 116: ВЫРАЗИТЬ(...).Валюта.Наценка (2 fields after CAST)
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let offset: usize = diag.range.start().into();
-            let line = code[..offset].matches('\n').count();
-            eprintln!("Diagnostic {}: line {} range={:?}", i, line + 1, diag.range);
-        }
-
         assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics, got {}", diagnostics.len());
 
         for diag in &diagnostics {

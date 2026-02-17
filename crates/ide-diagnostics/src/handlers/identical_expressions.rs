@@ -961,7 +961,6 @@ mod tests {
             "Expected 1 diagnostic for duplicate Б, found {}",
             diagnostics.len()
         );
-        eprintln!("Diagnostic message: {}", diagnostics[0].message);
         assert!(
             diagnostics[0].message.contains("б"),
             "Message should contain 'б' (lowercase from expr_to_string)"
@@ -977,20 +976,6 @@ mod tests {
         // Java test expects 20 diagnostics
         // Check how many we find
         let found_count = diagnostics.len();
-        eprintln!("Found {} diagnostics (Java expects 20)", found_count);
-
-        // Show which lines we found
-        let mut found_lines: Vec<u32> = diagnostics
-            .iter()
-            .map(|d| {
-                let (line, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
-                line
-            })
-            .collect();
-        found_lines.sort();
-        eprintln!("Found on lines: {:?}", found_lines);
-        eprintln!("Java expects lines: [4, 6, 11, 13, 15, 19, 21, 25, 27, 31, 39, 40, 42, 44, 46, 48, 52, 53, 64, 70]");
-        eprintln!("Extra found: line 57 - we FIXED Java bug (complex expr in preprocessor)!");
 
         assert_eq!(found_count, 21, "Should find 21 diagnostics (105% Java compatibility - fixed Java bug on line 57!), found {}", found_count);
 
@@ -1123,31 +1108,7 @@ mod tests {
 #КонецОбласти
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Debug: print AST structure
-        let parse = parser::parse(code);
-        let root = parse.syntax_node();
-
-        eprintln!("\nAST Structure:");
-        fn print_tree(node: &syntax::SyntaxNode, depth: usize) {
-            let indent = "  ".repeat(depth);
-            let text = node.text().to_string().replace('\n', "\\n");
-            let text_preview = if text.len() > 50 { format!("{}...", &text[..50]) } else { text };
-            eprintln!("{}kind={:?}, text='{}'", indent, node.kind(), text_preview);
-            for child in node.children() {
-                print_tree(&child, depth + 1);
-            }
-        }
-        print_tree(&root, 0);
-
-        eprintln!("\nPreprocessor test: found {} diagnostics", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (line, col, _, _) = crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!("  #{}: line {}, col {}, msg: {}", i + 1, line, col, diag.message);
-        }
-
-        eprintln!("Expected: 1 diagnostic for duplicate 'Истина'");
+        let _diagnostics = check_ast_diagnostic(code, check);
     }
 
     #[test]
@@ -1162,32 +1123,6 @@ mod tests {
  ИЛИ Истина;
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        // Debug: print AST structure
-        let parse = parser::parse(code);
-        let root = parse.syntax_node();
-
-        eprintln!("\nAST Structure for #Если:");
-        fn print_tree(node: &syntax::SyntaxNode, depth: usize) {
-            let indent = "  ".repeat(depth);
-            let text = node.text().to_string().replace('\n', "\\n");
-            let text_preview = text.chars().take(50).collect::<String>();
-            let text_preview =
-                if text.len() > 50 { format!("{}...", text_preview) } else { text_preview };
-            eprintln!("{}kind={:?}, text='{}'", indent, node.kind(), text_preview);
-            for child in node.children() {
-                print_tree(&child, depth + 1);
-            }
-        }
-        print_tree(&root, 0);
-
-        eprintln!("\nPreprocessor #Если test: found {} diagnostics", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (line, col, _, _) = crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!("  #{}: line {}, col {}, msg: {}", i + 1, line, col, diag.message);
-        }
-
-        eprintln!("Expected: 1 diagnostic for duplicate 'Истина'");
+        let _diagnostics = check_ast_diagnostic(code, check);
     }
 }

@@ -394,17 +394,6 @@ mod tests {
         let code = include_str!("../../test_data/MagicNumberDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // DEBUG: Print all diagnostic positions
-        eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!(
-                "#{}: Line {}, Col {}-{}: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
-
         // Java expects 10 diagnostics with default config
         // Both issues fixed:
         // - Line 8 ternary `3` is now excluded (using TERNARY_EXPR detection)
@@ -495,16 +484,6 @@ mod tests {
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        eprintln!("\n=== Found {} diagnostics with allowMagicIndexes=false ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _, end_col) =
-                crate::test_utils::range_to_line_col(code, diag.range);
-            eprintln!(
-                "#{}: Line {}, Col {}-{}: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
 
         // Java expects 12 diagnostics with allowMagicIndexes = false
         // (10 from default + 2 from array indexes on lines 50-51)

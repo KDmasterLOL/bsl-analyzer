@@ -229,20 +229,6 @@ EndProcedure
 
         let diagnostics = check_diagnostic(code);
 
-        // Print for debugging
-        for (i, d) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
-
         // Java expects 10 diagnostics (from CodeAfterAsyncCallDiagnosticTest.java)
         assert_eq!(diagnostics.len(), 10, "Should match Java implementation (10 diagnostics)");
 

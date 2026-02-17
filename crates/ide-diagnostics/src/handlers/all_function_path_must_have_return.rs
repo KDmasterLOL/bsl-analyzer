@@ -238,11 +238,6 @@ fn message_ru() -> String {
     "Не все пути выполнения функции возвращают значение".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Not all function execution paths return a value".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
@@ -257,13 +252,6 @@ mod tests {
         let code = include_str!("../../test_data/AllFunctionPathMustHaveReturnDiagnostic.bsl");
 
         let diagnostics = check_hir_diagnostic(code);
-
-        // Debug: print all diagnostics
-        for (i, diag) in diagnostics.iter().enumerate() {
-            if diag.code == DiagnosticCode::AllFunctionPathMustHaveReturn {
-                eprintln!("Diagnostic {}: {:?}", i, diag.range);
-            }
-        }
 
         // Expected: 2 diagnostics with default config (loops executed at least once)
         // Line 0: ОпределитьСтавкуНДС - missing else branch

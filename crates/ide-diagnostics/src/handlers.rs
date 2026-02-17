@@ -33,8 +33,6 @@ pub mod consecutive_empty_lines;
 pub mod create_query_in_cycle;
 pub mod cyclomatic_complexity;
 pub mod data_exchange_loading;
-#[cfg(test)]
-mod debug_test;
 pub mod deleting_collection_item;
 pub mod deny_incomplete_values;
 pub mod deprecated_attributes_8312;

@@ -519,13 +519,6 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Debug: print all diagnostics
-        println!("Got {} diagnostics:", diagnostics.len());
-        for (i, d) in diagnostics.iter().enumerate() {
-            let (line, start_col, _end_line, end_col) = range_to_line_col(code, d.range);
-            println!("  {}: line {} col {}..{}", i + 1, line + 1, start_col, end_col);
-        }
-
         // Expect 12 diagnostics with restrictive configuration
         assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics with restrictive config");
     }
@@ -541,27 +534,14 @@ mod tests {
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
         assert_eq!(diagnostics.len(), 1);
-        let d = &diagnostics[0];
-        println!("Range: {:?}", d.range);
-        println!("Range start: {:?}, end: {:?}", d.range.start(), d.range.end());
-
-        // Find the line
-        let lines: Vec<&str> = code.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if line.contains("ПолучитьИмяВременногоФайла") {
-                println!("Line {}: {}", i + 1, line);
-                println!("Line length: {}", line.len());
-            }
-        }
     }
 
     #[test]
     fn test_debug() {
-        use ide_db::base_db::{RootQueryDb, SourceDatabase};
+        use ide_db::base_db::SourceDatabase;
         use ide_db::{RootDatabase, RootDatabaseImpl};
         use std::rc::Rc;
         use test_fixture::Fixture;
-        // Debug test to see what tokens we're getting
         let code = r#"
             Процедура Тест()
                 ИмяФайла = ПолучитьИмяВременногоФайла("xml");
@@ -575,19 +555,6 @@ mod tests {
             db.set_file_text(*fid, &file.content);
         }
 
-        let parse = db.parse(file_id);
-        let root = parse.syntax_node();
-
-        // Print all tokens to see what we have
-        let tokens: Vec<_> =
-            root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-        println!("\n=== TOKENS ===");
-        for (i, token) in tokens.iter().enumerate() {
-            println!("{}: {:?} = '{}'", i, token.kind(), token.text());
-        }
-
-        // Now run the actual diagnostic
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let config = DiagnosticsConfig::default();
         let ctx = crate::DiagnosticsContext {
@@ -601,12 +568,7 @@ mod tests {
             file_set: None,
         };
 
-        let diagnostics = super::check(&ctx);
-        println!("\n=== DIAGNOSTICS ===");
-        println!("Found {} diagnostics", diagnostics.len());
-        for diag in &diagnostics {
-            println!("{:?}", diag);
-        }
+        let _diagnostics = super::check(&ctx);
     }
 
     #[test]
@@ -682,11 +644,6 @@ mod tests {
         // - ПолучитьИмяВременногоФайла in Новый Файл() (inline)
         // - Standalone ПолучитьИмяВременногоФайла (inline)
         // Total: 4 diagnostics
-
-        println!("Found {} diagnostics:", diagnostics.len());
-        for (i, d) in diagnostics.iter().enumerate() {
-            println!("  {}: {}", i + 1, d.message);
-        }
 
         assert_eq!(diagnostics.len(), 4, "Should find exactly 4 errors (3 inline + 1 no deletion)");
 

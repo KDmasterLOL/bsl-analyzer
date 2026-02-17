@@ -195,7 +195,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        test_utils::{assert_diagnostic_range, range_to_line_col},
+        test_utils::assert_diagnostic_range,
         Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity,
     };
     use parser::parse_sdbl;
@@ -357,16 +357,7 @@ mod tests {
         // Test that SDBL parser handles Russian queries
         let query = "ВЫБРАТЬ Ссылка, Код КАК К ИЗ Справочник.Валюты";
 
-        // Parse SDBL and print debug info
-        let parse = parser::parse_sdbl(query);
-        println!("Parse has errors: {}", parse.has_errors());
-        println!("Parse tree:\n{:#?}", parse.syntax_node());
-
         let diagnostics = check_standalone_query(query);
-        println!("Diagnostics for Russian query: {}", diagnostics.len());
-        for d in &diagnostics {
-            println!("  - {}", d.message);
-        }
         // Should have 1 error: Ссылка without alias
         assert_eq!(diagnostics.len(), 1);
     }
@@ -430,13 +421,6 @@ mod tests {
         }
 
         let sdbl_hirs = db.sdbl_hir_in_file(file_id);
-        eprintln!("Simple query: {} HIRs", sdbl_hirs.len());
-        for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
-            eprintln!("HIR {}: {} diagnostics", i, hir.all_diagnostics().count());
-            for diag in hir.all_diagnostics() {
-                eprintln!("  - {} at {:?}", diag.message(), diag.range());
-            }
-        }
 
         assert_eq!(sdbl_hirs.len(), 1);
         // Should have at least 1 diagnostic (field without alias)
@@ -473,11 +457,6 @@ mod tests {
         }
 
         let sdbl_hirs_wrapped = db.sdbl_hir_in_file(file_id);
-        eprintln!(
-            "Wrapped in procedure: {} HIRs, {} total diagnostics",
-            sdbl_hirs_wrapped.len(),
-            sdbl_hirs_wrapped.iter().map(|(_, h)| h.all_diagnostics().count()).sum::<usize>()
-        );
 
         // Test 2: Code at module level (no procedure)
         let code_unwrapped =
@@ -498,11 +477,6 @@ mod tests {
         }
 
         let sdbl_hirs_unwrapped = db.sdbl_hir_in_file(file_id);
-        eprintln!(
-            "Module-level code: {} HIRs, {} total diagnostics",
-            sdbl_hirs_unwrapped.len(),
-            sdbl_hirs_unwrapped.iter().map(|(_, h)| h.all_diagnostics().count()).sum::<usize>()
-        );
 
         // Both should work
         assert!(!sdbl_hirs_wrapped.is_empty() || !sdbl_hirs_unwrapped.is_empty());
@@ -644,55 +618,6 @@ mod tests {
         let code = include_str!("../../test_data/AssignAliasFieldsInQueryDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
 
-        // Run diagnostic check with debug output
-        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-        use ide_db::{RootDatabase, RootDatabaseImpl};
-        use test_fixture::Fixture;
-        use vfs::VfsPath;
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have at least one file");
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for file_text_input to work (required for SDBL diagnostics)
-        let mut file_set = vfs::FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        // Debug: check how many SDBL queries are extracted
-        let sdbl_queries = db.all_sdbl_in_file(file_id);
-        eprintln!("Total SDBL string literals found: {}", sdbl_queries.len());
-
-        for (i, (_expr_id, query_info)) in sdbl_queries.iter().enumerate() {
-            eprintln!("\nSDdBL String Literal {}:", i);
-            eprintln!(
-                "  Query text (first 200 chars): {:?}",
-                query_info.query_text.chars().take(200).collect::<String>()
-            );
-            eprintln!("  Has AST: {}", query_info.query_ast.is_some());
-            if let Some(ref ast) = query_info.query_ast {
-                eprintln!("  Parse errors: {}", ast.has_errors());
-            }
-        }
-
-        // Debug: check HIR for each SDBL
-        let sdbl_hirs = db.sdbl_hir_in_file(file_id);
-        eprintln!("\nTotal SDBL HIRs generated: {}", sdbl_hirs.len());
-
-        for (i, (_expr_id, hir)) in sdbl_hirs.iter().enumerate() {
-            eprintln!("HIR {}: {} diagnostics", i, hir.all_diagnostics().count());
-            for diag in hir.all_diagnostics() {
-                eprintln!("  - {}", diag.message());
-            }
-        }
-
         // Run diagnostic check
         let (diagnostics, file_content) = check_diagnostic(code, config);
 
@@ -702,17 +627,6 @@ mod tests {
         // - Line 21, cols 3-16 (Валюты.Ссылка without alias)
         // - Line 23, cols 3-17 (Валюты.Код Код without AS)
         // - Line 42, cols 4-17 (Валюты.Ссылка in subquery without alias)
-
-        // Debug: print all diagnostics
-        eprintln!("\nFinal diagnostics returned:");
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) =
-                range_to_line_col(&file_content, diag.range);
-            eprintln!(
-                "Diagnostic {}: line {}, cols {}-{}, message: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
 
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 

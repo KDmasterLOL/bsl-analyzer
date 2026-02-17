@@ -278,12 +278,6 @@ mod tests {
     fn test_false_positive_complex_query_with_comments() {
         let code = include_str!("../../test_data/QueryParseErrorFalsePositive.bsl");
         let diagnostics = check_sdbl_diagnostic(code, check);
-        if !diagnostics.is_empty() {
-            for diag in &diagnostics {
-                let (sl, sc, el, ec) = crate::test_utils::range_to_line_col(code, diag.range);
-                eprintln!("Diagnostic: {} at {}:{}..{}:{}", diag.message, sl, sc, el, ec);
-            }
-        }
         assert_eq!(
             diagnostics.len(),
             0,

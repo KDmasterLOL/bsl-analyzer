@@ -472,7 +472,6 @@ fn check_common_module_call_cached(
 }
 
 /// Phase 3: Check Документы.ПКО.Method() call for missing required parameters
-#[allow(dead_code)]
 fn check_object_method_call(
     ctx: &DiagnosticsContext,
     call_expr: &SyntaxNode,
@@ -621,7 +620,6 @@ fn find_common_module_file(
 ///
 /// ## Performance
 /// - O(1) HashMap lookup in FileSet
-#[allow(dead_code)]
 fn find_manager_module_file(
     ctx: &DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,

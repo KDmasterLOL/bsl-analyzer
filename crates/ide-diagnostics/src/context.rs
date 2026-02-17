@@ -95,6 +95,9 @@ impl<'a> DiagnosticsContext<'a> {
         }
 
         let config_path = self.configuration_path.or(self.workspace_root)?;
+        tracing::warn!(
+            "load_configuration: creating ad-hoc ConfigurationPathInput (breaks Salsa caching)"
+        );
         let config_path_str = config_path.to_string_lossy().to_string();
         let path_input = ide_db::metadata::ConfigurationPathInput::new(self.db, config_path_str);
         Some(ide_db::metadata::load_configuration(self.db, path_input))
@@ -132,7 +135,18 @@ impl<'a> DiagnosticsContext<'a> {
 
     // ========================================================================
     // Helper methods for accessing data
-    // These methods use provider when available, falling back to db
+    // These methods use provider when available, falling back to db.
+    //
+    // Methods by category:
+    //   Text access:            parse, file_text, file_text_input, line_index
+    //   HIR & semantic:         module_bodies, module_metadata, symbol_tree,
+    //                           symbol_tree_for, item_tree, module_data, method_docs
+    //   Source structure:        source_root_id, region_tree, module_level_regions
+    //   Cross-module resolution: workspace_symbols, module_index,
+    //                           resolve_vfs_path, resolve_qualified_path
+    //   SDBL:                   sdbl_hir_in_file, all_sdbl_in_file
+    //   Dataflow:               module_cfgs, module_liveness,
+    //                           module_reaching_defs, reaching_definitions
     // ========================================================================
 
     /// Get parsed AST for current file.

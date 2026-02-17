@@ -79,16 +79,6 @@ mod tests {
         let empty_block_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
 
-        // Debug: print all diagnostics
-        use crate::test_utils::range_to_line_col;
-        for (i, diag) in empty_block_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) = range_to_line_col(code, diag.range);
-            eprintln!(
-                "Diagnostic {}: line {}:{} - {}:{}",
-                i, start_line, start_col, end_line, end_col
-            );
-        }
-
         // Java expects 6 diagnostics at specific positions
         // HIR lowering now matches Java behavior (excludes try/except blocks)
         assert_eq!(empty_block_diags.len(), 6, "Expected 6 diagnostics to match Java");

@@ -417,7 +417,6 @@ fn create_diagnostic(
 /// Called from lib.rs dispatch when `BodyDiagnostic::UnusedVariable` is encountered.
 /// This is the OLD detection path that will be removed in Phase 5.
 /// The NEW detection path is via `check()` function above.
-#[allow(dead_code)]
 pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::UnusedLocalVariable;
     if ctx.is_disabled_with_metadata(code) {
@@ -808,16 +807,6 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // Print all diagnostics for debugging
-        println!("Found {} UnusedLocalVariable diagnostics:", unused_diags.len());
-        for (i, diag) in unused_diags.iter().enumerate() {
-            println!("  {}: {}", i + 1, diag.message);
-        }
-        println!("\nAll diagnostics ({}):", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            println!("  {}: [{:?}] {}", i + 1, diag.code, diag.message);
-        }
-
         // Check that we detect the key cases from Java test
         let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
 
@@ -899,14 +888,6 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
-
-        // Print diagnostics for debugging
-        if !unused_diags.is_empty() {
-            println!("Found {} UnusedLocalVariable diagnostics:", unused_diags.len());
-            for (i, diag) in unused_diags.iter().enumerate() {
-                println!("  {}: {}", i + 1, diag.message);
-            }
-        }
 
         // НайденныеФоновыеЗадания is used in ForEach loop - should NOT trigger diagnostic
         assert!(

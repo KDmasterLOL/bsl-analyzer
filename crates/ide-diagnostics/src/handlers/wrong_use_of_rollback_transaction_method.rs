@@ -39,11 +39,6 @@ fn message_ru() -> String {
     "Вызов 'ОтменитьТранзакцию'/'RollbackTransaction' должен находиться в блоке обработки исключений первым оператором".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Call to 'RollbackTransaction' must be the first statement in the exception handler".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::*;

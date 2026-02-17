@@ -105,9 +105,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let body = &module_result.body;
         let source_map = &module_result.source_map;
 
-        #[cfg(test)]
-        eprintln!("Module body_stmts count: {}", body.body_stmts_typed().len());
-
         // Build CFG for module code
         let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
             body.body_stmts_typed(),
@@ -118,15 +115,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if let Some(entry) = cfg.entry_point() {
             let exit = cfg.exit_point();
             let reachable = compute_reachable_vertices(&cfg, entry);
-
-            #[cfg(test)]
-            {
-                eprintln!("=== Module-level CFG ===");
-                for (idx, vertex) in cfg.vertices() {
-                    let is_reachable = reachable.contains(&idx);
-                    eprintln!("  {:?}: {:?}, reachable={}", idx, vertex, is_reachable);
-                }
-            }
 
             let unreachable_ranges =
                 collect_unreachable_ranges(&cfg, source_map, entry, exit, |idx| {
@@ -389,11 +377,6 @@ fn message_ru() -> String {
     "Недостижимый код".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Unreachable code".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{
@@ -536,19 +519,6 @@ mod tests {
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
 
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
-
         assert_eq!(unreachable_diags.len(), 1);
         assert_diagnostic_range(code, unreachable_diags[0], 5, 4, 27);
     }
@@ -604,20 +574,6 @@ mod tests {
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
 
-        eprintln!("Found {} UnreachableCode diagnostics:", unreachable_diags.len());
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
-
         assert_eq!(
             unreachable_diags.len(),
             17,
@@ -654,21 +610,6 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        eprintln!("Found {} UnreachableCode diagnostics", unreachable_diags.len());
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}, message: {}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col,
-                d.message
-            );
-        }
 
         assert_eq!(
             unreachable_diags.len(),
@@ -709,20 +650,6 @@ mod tests {
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
 
-        eprintln!("Found {} UnreachableCode diagnostics", unreachable_diags.len());
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
-
         assert_eq!(
             unreachable_diags.len(),
             1,
@@ -746,20 +673,6 @@ mod tests {
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
 
-        eprintln!("Found {} UnreachableCode diagnostics", unreachable_diags.len());
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
-
         assert_eq!(unreachable_diags.len(), 1, "Expected unreachable foreach after return");
     }
 
@@ -777,20 +690,6 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, crate::diagnostics);
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
-
-        eprintln!("Found {} UnreachableCode diagnostics", unreachable_diags.len());
-        for (i, d) in unreachable_diags.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) =
-                crate::test_utils::range_to_line_col(code, d.range);
-            eprintln!(
-                "  {}: line {}-{}, col {}-{}",
-                i + 1,
-                start_line,
-                end_line,
-                start_col,
-                end_col
-            );
-        }
 
         assert_eq!(unreachable_diags.len(), 1, "Expected unreachable code in preproc else");
     }

@@ -101,11 +101,6 @@ fn message_ru() -> String {
     "Вызов 'ЗафиксироватьТранзакцию'/'CommitTransaction' должен быть размещен в блоке 'Попытка' с обработчиком 'Исключение'".to_string()
 }
 
-#[allow(dead_code)]
-fn message_en() -> String {
-    "Call to 'CommitTransaction' must be placed in 'Try' block with 'Except' handler".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::*;

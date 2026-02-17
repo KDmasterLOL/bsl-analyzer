@@ -159,19 +159,6 @@ mod tests {
 
         // Java version finds 5 diagnostics
         let found_count = diags.len();
-        eprintln!("Found {} diagnostics (Java expects 5)", found_count);
-
-        // Show which lines we found
-        let mut found_lines: Vec<u32> = diags
-            .iter()
-            .map(|d| {
-                let (line, _, _, _) = range_to_line_col(code, d.range);
-                line
-            })
-            .collect();
-        found_lines.sort();
-        eprintln!("Found on lines: {:?}", found_lines);
-        eprintln!("Expected lines: 10, 27, 40, 41, 54");
 
         assert_eq!(
             found_count, 5,
@@ -185,19 +172,6 @@ mod tests {
             let (line, col, _, _) = range_to_line_col(code, d.range);
             (line, col)
         });
-
-        // Debug: print actual ranges
-        for (i, diag) in sorted_diagnostics.iter().enumerate() {
-            let (start_line, start_col, end_line, end_col) = range_to_line_col(code, diag.range);
-            eprintln!(
-                "Diagnostic {}: Range({}, {}, {}, {})",
-                i + 1,
-                start_line,
-                start_col,
-                end_line,
-                end_col
-            );
-        }
 
         // Test 1: Line 10 (simple if/else duplicate)
         // then-branch STMT_LIST starts on line 11

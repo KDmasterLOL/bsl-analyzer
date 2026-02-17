@@ -458,23 +458,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, range_to_line_col};
+    use crate::test_utils::check_ast_diagnostic_with_config;
     use crate::{DiagnosticCode, DiagnosticsConfig};
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MissingSpaceDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // DEBUG: Print all diagnostic positions
-        eprintln!("\n=== Found {} diagnostics ===", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            let (start_line, start_col, _end_line, end_col) = range_to_line_col(code, diag.range);
-            eprintln!(
-                "#{}: Line {}, Col {}-{}: {}",
-                i, start_line, start_col, end_col, diag.message
-            );
-        }
 
         // Java expects 44 diagnostics with default configuration
         assert_eq!(diagnostics.len(), 44, "Must match Java implementation (44 diagnostics)");

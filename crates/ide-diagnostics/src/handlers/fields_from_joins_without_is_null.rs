@@ -195,15 +195,6 @@ mod tests {
         // one per field for better UX - highlighting the exact field that needs protection.
         // Test8 (FULL JOIN) has 3 unprotected fields: lines 99, 100, 101.
 
-        if diagnostics.len() != 11 {
-            // Debug: print all diagnostic locations
-            eprintln!("\n=== Found {} diagnostics (expected 11) ===", diagnostics.len());
-            for (i, diag) in diagnostics.iter().enumerate() {
-                let start_line = code[..diag.range.start().into()].lines().count();
-                eprintln!("Diagnostic {}: line {} - {}", i, start_line, diag.message);
-            }
-        }
-
         // Per-field implementation: one diagnostic per unprotected field reference.
         assert_eq!(diagnostics.len(), 11, "Expected 11 diagnostics (one per unprotected field)");
     }

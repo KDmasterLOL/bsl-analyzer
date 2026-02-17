@@ -300,10 +300,6 @@ mod tests {
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        eprintln!("Found {} diagnostics:", diagnostics.len());
-        for (i, diag) in diagnostics.iter().enumerate() {
-            eprintln!("  {}: {:?}", i, diag.message);
-        }
         // Should have 0 diagnostics - all comments have space after //
         // If we get false positives on // inside strings, this test will fail
         assert_eq!(diagnostics.len(), 0, "Should not detect // inside strings as comments");

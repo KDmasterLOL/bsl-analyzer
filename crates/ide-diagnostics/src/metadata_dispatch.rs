@@ -5,7 +5,7 @@
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 /// Diagnostics that use ModuleMetadata from HIR
-const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
+pub(crate) const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CommonModuleInvalidType,
     DiagnosticCode::CommonModuleNameClient,
     DiagnosticCode::CommonModuleNameGlobal,

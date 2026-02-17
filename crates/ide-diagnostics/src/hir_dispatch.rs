@@ -7,7 +7,7 @@ use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::BodyDiagnostic;
 
 /// Diagnostics collected during HIR lowering (BodyDiagnostic dispatch)
-const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
+pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::AllFunctionPathMustHaveReturn,
     DiagnosticCode::BeginTransactionBeforeTryCatch,
     DiagnosticCode::CodeAfterAsyncCall,
@@ -120,6 +120,11 @@ pub fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// This is the single source of truth for HIR diagnostic dispatch.
 /// Used by both production code and tests.
+///
+/// The exhaustive match (no wildcard `_` arm) is **by design**: each
+/// `BodyDiagnostic` variant carries unique fields, so the compiler
+/// enforces that every new variant gets a handler. Adding a wildcard
+/// would silently swallow newly-added diagnostics.
 pub fn dispatch_hir_diagnostic(
     body_diag: &BodyDiagnostic,
     method_id: &hir::MethodId,
