@@ -44,12 +44,6 @@ use crate::body::{Body, BodyDiagnostic, BodySourceMap, LowerResult};
 use crate::hir::{Binding, BindingIdx, Expr, ExprIdx, Stmt, StmtIdx};
 use crate::Name;
 
-// Opaque IDs for external API (conversion at boundaries)
-
-// check_missing_return_paths is deprecated - kept for backwards compatibility only
-#[allow(deprecated)]
-pub use control_flow::check_missing_return_paths;
-
 /// Lowering context.
 ///
 /// Holds state during AST → HIR conversion.

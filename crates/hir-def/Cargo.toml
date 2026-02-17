@@ -23,7 +23,7 @@ tracing.workspace = true
 # However, this is acceptable because:
 # 1. Cargo supports circular crate dependencies (not same as type cycles)
 # 2. No circular type dependencies: cfg uses hir-def types (StmtId, ExprId), hir-def uses CFG for analysis
-# 3. Enables check_missing_return_paths() and other CFG-based diagnostics in hir-def
+# 3. Enables CFG-based diagnostics in hir-def
 # TODO: Uncomment after cfg-types refactoring completes
 # cfg.workspace = true
 parser.workspace = true
