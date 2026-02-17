@@ -47,6 +47,22 @@ use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Performance, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Runs the LogicalOrInJoinQuerySection diagnostic.
 ///
@@ -113,7 +129,6 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
     use crate::{DiagnosticCode, Severity};
-
     #[test]
     fn test_logical_or_in_join_query_section() {
         let code = include_str!("../../test_data/LogicalOrInJoinQuerySectionDiagnostic.bsl");

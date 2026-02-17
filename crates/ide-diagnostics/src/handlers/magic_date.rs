@@ -37,6 +37,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_AUTHORIZED_DATES: &str = "00010101,00010101000000,000101010000";
 
@@ -518,7 +534,6 @@ mod tests {
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use syntax::SyntaxKind;
-
     #[test]
     fn test_line_31_detection() {
         // Line 31: ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));

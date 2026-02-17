@@ -82,6 +82,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{BindingId, ExprId, IdConversion, StmtId};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -480,7 +496,6 @@ mod tests {
     #[test]
     fn test_java_fixture_all_16_cases() {
         use crate::test_utils::assert_diagnostic_range;
-
         // Load Java test fixture with all 16 test cases
         let code = include_str!("../../test_data/RewriteMethodParameterDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);

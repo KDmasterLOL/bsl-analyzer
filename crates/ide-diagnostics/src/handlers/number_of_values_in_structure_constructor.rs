@@ -18,6 +18,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{Body, BodySourceMap, Expr, Name};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_MAX_VALUES_COUNT: i64 = 3;
 
@@ -115,7 +131,6 @@ fn is_structure_or_fixed_structure(type_name: &Option<Name>) -> bool {
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-
     #[test]
     fn test_no_diagnostic_for_empty_structure() {
         let code = r#"

@@ -32,6 +32,22 @@ use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Standard, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     use std::time::Instant;
@@ -92,7 +108,6 @@ mod tests {
     #[test]
     fn test_join_with_virtual_table_from_fixture() {
         use crate::test_utils::assert_diagnostic_range;
-
         let code = include_str!("../../test_data/JoinWithVirtualTableDiagnostic.bsl");
         let diagnostics = check_sdbl_diagnostic(code, check);
 

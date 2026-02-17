@@ -43,6 +43,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::RegionTree;
 use syntax::{ast, ast::AstNode, SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Compatibility8320,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CodeOutOfRegion;
@@ -242,7 +258,6 @@ mod tests {
     use crate::test_utils::{
         assert_diagnostic_range, assert_diagnostic_range_multiline, check_ast_diagnostic,
     };
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CodeOutOfRegionDiagnostic.bsl");

@@ -54,6 +54,35 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use std::collections::HashMap;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const DEPRECATED_METHODS_8310: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_10,
+    tags: &[MetadataTag::Deprecated],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+pub const DEPRECATED_METHODS_8317: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_17,
+    tags: &[MetadataTag::Deprecated],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -183,7 +212,6 @@ fn get_message(method_name: &str, replacement: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::check_hir_diagnostic;
-
     #[test]
     fn test_deprecated_8310_russian() {
         let code = r#"

@@ -35,6 +35,22 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: false, // Disabled: Hunspell generates too many false positives
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 static DICTIONARIES: Lazy<RwLock<Option<Arc<Dictionaries>>>> = Lazy::new(|| RwLock::new(None));
 
@@ -570,7 +586,6 @@ mod tests {
     #[test]
     fn test_dictionary_common_bsl_words() {
         use super::{get_dictionaries, is_valid_word};
-
         let dictionaries = get_dictionaries();
 
         // Common Russian words that should be valid

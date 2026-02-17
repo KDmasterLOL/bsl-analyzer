@@ -52,6 +52,23 @@
 use crate::utils::preprocessor_symbols;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 /// Single-pass node handler for UnknownPreprocessorSymbol diagnostic.
 #[inline]
@@ -95,7 +112,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/UnknownPreprocessorSymbolDiagnostic.bsl");

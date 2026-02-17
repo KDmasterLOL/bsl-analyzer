@@ -66,6 +66,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::base_db::RegionInfo;
 use ide_db::TextRange;
 use std::collections::HashMap;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Compatibility8320,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicateRegion::check").entered();
@@ -169,7 +185,6 @@ fn report_duplicates(
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/DuplicateRegionDiagnostic.bsl");

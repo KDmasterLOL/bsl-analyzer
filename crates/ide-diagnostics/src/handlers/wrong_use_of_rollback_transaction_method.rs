@@ -1,5 +1,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::WrongUseOfRollbackTransactionMethod;
@@ -31,7 +48,6 @@ fn message_en() -> String {
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
-
     #[test]
     fn test_valid_first_in_except() {
         let code = r#"Процедура Тест()

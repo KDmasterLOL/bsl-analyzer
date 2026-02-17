@@ -42,6 +42,29 @@ use cfg_types::{BindingId, IdConversion};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::ModuleId;
 use ide_db::{RootDatabase, TextRange};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[
+        bsl_metadata::ModuleType::CommandModule,
+        bsl_metadata::ModuleType::CommonModule,
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::ValueManagerModule,
+        bsl_metadata::ModuleType::SessionModule,
+        bsl_metadata::ModuleType::Unknown,
+    ],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload, MetadataTag::Badpractice, MetadataTag::Unused],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Collect UnusedLocalVariable diagnostics using liveness analysis.
 ///

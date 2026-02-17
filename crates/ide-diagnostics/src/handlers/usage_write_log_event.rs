@@ -28,6 +28,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_platform::PlatformData;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
 
@@ -811,7 +827,6 @@ EndProcedure
     #[test]
     fn test_hir_detection_correct_usage() {
         use crate::test_utils::check_hir_diagnostic;
-
         let code = r#"
 Процедура Тест()
     ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Информация, , , "Комментарий");

@@ -53,6 +53,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_12,
+    tags: &[MetadataTag::Error, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -85,7 +101,6 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
-
     /// Integration test matching Java test structure.
     ///
     /// Based on GlobalContextMethodCollision8312DiagnosticTest.java

@@ -25,6 +25,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::AnnotationKind;
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[bsl_metadata::ModuleType::CommonModule, bsl_metadata::ModuleType::ObjectModule],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Suspicious, MetadataTag::Unused],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_ATTACHABLE_PREFIXES: &str = "подключаемый_,attachable_";
 
@@ -201,7 +217,6 @@ mod tests {
         assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_java_fixture() {
         let code = include_str!("../../test_data/UnusedLocalMethodDiagnostic.bsl");

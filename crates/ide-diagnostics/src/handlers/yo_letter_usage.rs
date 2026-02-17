@@ -7,6 +7,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxToken};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 fn contains_yo_letter(text: &str) -> bool {
     text.chars().any(|c| c == 'ё' || c == 'Ё')
@@ -58,7 +74,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/YoLetterUsageDiagnostic.bsl");

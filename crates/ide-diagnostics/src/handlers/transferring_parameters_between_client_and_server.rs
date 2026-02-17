@@ -19,6 +19,23 @@ use hir_def::{
     Name,
 };
 use rustc_hash::FxHashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Performance, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
+};
 
 const SERVER_ANNOTATIONS: &[AnnotationKind] =
     &[AnnotationKind::AtServer, AnnotationKind::AtServerNoContext];
@@ -293,7 +310,6 @@ fn check_expr_for_call(expr: &Expr, target_method_lower: &str, body: &hir_def::B
 mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-
     #[test]
     fn test_by_ref_param_in_server_method_called_from_client() {
         let code = include_str!(

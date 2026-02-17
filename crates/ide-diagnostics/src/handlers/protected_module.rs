@@ -26,6 +26,22 @@ use bsl_metadata::traits::{MdObject, Module};
 use ide_db::TextRange;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::SessionModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Suspicious],
+    can_locate_on_project: true,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ProtectedModule;
@@ -88,7 +104,6 @@ mod tests {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use vfs::{FileId, FileSet, VfsPath};
-
     #[test]
     fn test_not_session_module_returns_empty() {
         let code = r#"

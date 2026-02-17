@@ -59,6 +59,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Check a single syntax node for nested ternary operators (node-based API).
 ///
@@ -180,7 +196,6 @@ mod tests {
         assert_diagnostic_range_multiline, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NestedTernaryOperatorDiagnostic.bsl");

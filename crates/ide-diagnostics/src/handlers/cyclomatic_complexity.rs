@@ -66,6 +66,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{self, item_tree::ModItem};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 25,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 1.0,
+    lsp_severity_override: "",
+};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -258,7 +274,6 @@ mod tests {
     use ide_db::{RootDatabase, RootDatabaseImpl};
     use std::rc::Rc;
     use test_fixture::Fixture;
-
     #[test]
     fn test_simple_function() {
         let code = r#"Функция ПростаяФункция(Параметр)

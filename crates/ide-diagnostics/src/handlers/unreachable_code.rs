@@ -43,6 +43,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg::CfgVertex;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Design, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UnreachableCode;
@@ -609,7 +625,6 @@ mod tests {
         );
 
         use crate::test_utils::{assert_diagnostic_range, assert_diagnostic_range_multiline};
-
         assert_diagnostic_range(code, unreachable_diags[0], 12, 12, 19);
         assert_diagnostic_range(code, unreachable_diags[1], 21, 12, 19);
         assert_diagnostic_range(code, unreachable_diags[2], 30, 12, 19);

@@ -20,6 +20,22 @@ use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious, MetadataTag::Sql],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Runs the QueryToMissingMetadata diagnostic.
 ///
@@ -82,7 +98,6 @@ mod tests {
     use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
     use crate::{DiagnosticCode, Severity};
-
     #[test]
     fn test_no_metadata_no_diagnostics() {
         let code = r#"

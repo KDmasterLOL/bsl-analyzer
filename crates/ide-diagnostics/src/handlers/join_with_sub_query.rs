@@ -35,6 +35,22 @@ use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Standard, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Runs the JoinWithSubQuery diagnostic.
 ///
@@ -103,7 +119,6 @@ mod tests {
     use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
     use crate::{DiagnosticCode, Severity};
-
     #[test]
     fn test_join_with_sub_query_from_fixture() {
         let code = include_str!("../../test_data/JoinWithSubQueryDiagnostic.bsl");

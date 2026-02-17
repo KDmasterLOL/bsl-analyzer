@@ -309,6 +309,88 @@ impl Default for DiagnosticMetadata {
     }
 }
 
+/// Helper macro to create DiagnosticMetadata with auto-derived Clean Code attributes.
+///
+/// Automatically derives `clean_code_attribute` from the first tag and diagnostic type,
+/// and `impacts` from the diagnostic type and severity level.
+///
+/// Use the variant with `clean_code_attribute:` to explicitly set the attribute.
+#[macro_export]
+macro_rules! define_metadata {
+    // Variant with explicit clean_code_attribute
+    (
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        scope: $scope:expr,
+        modules: $modules:expr,
+        minutes_to_fix: $mtf:expr,
+        activated_by_default: $abd:expr,
+        compatibility_mode: $cm:expr,
+        tags: $tags:expr,
+        can_locate_on_project: $clop:expr,
+        extra_min_for_complexity: $emfc:expr,
+        lsp_severity_override: $lso:expr,
+        clean_code_attribute: $cca:expr $(,)?
+    ) => {{
+        const IMPACT: $crate::metadata::Impact =
+            $crate::metadata::derive_primary_impact($dtype, $severity);
+
+        $crate::metadata::DiagnosticMetadata {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $scope,
+            modules: $modules,
+            minutes_to_fix: $mtf,
+            activated_by_default: $abd,
+            compatibility_mode: $cm,
+            tags: $tags,
+            can_locate_on_project: $clop,
+            extra_min_for_complexity: $emfc,
+            lsp_severity_override: $lso,
+            clean_code_attribute: $cca,
+            impacts: &[IMPACT],
+        }
+    }};
+    // Variant with auto-derived clean_code_attribute
+    (
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        scope: $scope:expr,
+        modules: $modules:expr,
+        minutes_to_fix: $mtf:expr,
+        activated_by_default: $abd:expr,
+        compatibility_mode: $cm:expr,
+        tags: $tags:expr,
+        can_locate_on_project: $clop:expr,
+        extra_min_for_complexity: $emfc:expr,
+        lsp_severity_override: $lso:expr $(,)?
+    ) => {{
+        // Extract first tag for clean code attribute derivation
+        const FIRST_TAG: $crate::metadata::MetadataTag =
+            if $tags.is_empty() { $crate::metadata::MetadataTag::Badpractice } else { $tags[0] };
+        const CCA: $crate::metadata::CleanCodeAttribute =
+            $crate::metadata::derive_clean_code_attribute(FIRST_TAG, $dtype);
+        const IMPACT: $crate::metadata::Impact =
+            $crate::metadata::derive_primary_impact($dtype, $severity);
+
+        $crate::metadata::DiagnosticMetadata {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $scope,
+            modules: $modules,
+            minutes_to_fix: $mtf,
+            activated_by_default: $abd,
+            compatibility_mode: $cm,
+            tags: $tags,
+            can_locate_on_project: $clop,
+            extra_min_for_complexity: $emfc,
+            lsp_severity_override: $lso,
+            clean_code_attribute: CCA,
+            impacts: &[IMPACT],
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

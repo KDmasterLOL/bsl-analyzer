@@ -8,6 +8,27 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::ModuleMetadata;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::SessionModule,
+    ],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Design],
+    can_locate_on_project: true,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Consistent,
+};
 
 /// Supported module types for this diagnostic.
 const SUPPORTED_MODULE_TYPES: &[bsl_metadata::ModuleType] = &[
@@ -155,7 +176,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use uuid::Uuid;
-
     fn make_metadata_with_mdo(mdo: bsl_metadata::MetadataObject) -> ModuleMetadata {
         ModuleMetadata {
             module_type: bsl_metadata::ModuleType::ManagerModule,

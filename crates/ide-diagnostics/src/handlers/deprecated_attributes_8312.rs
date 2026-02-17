@@ -51,6 +51,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::body::DeprecatedKind8312;
 use ide_db::TextRange;
 use std::collections::HashMap;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_12,
+    tags: &[MetadataTag::Deprecated],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -212,7 +228,6 @@ fn get_replacements() -> HashMap<String, &'static str> {
 mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
-
     #[test]
     fn test_chart_plot_area_russian() {
         let code = r#"

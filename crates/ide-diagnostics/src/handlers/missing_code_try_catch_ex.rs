@@ -52,6 +52,23 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::hir::Stmt;
 use hir_def::{IdConversion, StmtId};
 use syntax::SyntaxKind;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 /// Main entry point for MissingCodeTryCatchEx diagnostic.
 ///
@@ -333,7 +350,6 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_missing_code_try_catch_ex() {
         let code = include_str!("../../test_data/MissingCodeTryCatchExDiagnostic.bsl");

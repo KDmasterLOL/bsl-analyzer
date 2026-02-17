@@ -28,6 +28,22 @@ use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContex
 use hir_def::body::ExternalRef;
 use hir_def::{ModuleId, PathResolution};
 use rustc_hash::FxHashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 60,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_VALIDATE_NESTED_CALLS: bool = true;
 
@@ -119,7 +135,6 @@ mod tests {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use vfs::{FileId, FileSet, VfsPath};
-
     #[test]
     fn test_no_metadata_returns_empty() {
         let code = r#"

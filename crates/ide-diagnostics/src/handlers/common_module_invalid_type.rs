@@ -7,6 +7,22 @@
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Unpredictable, MetadataTag::Design],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Check metadata-based diagnostics using ModuleMetadata.
 ///
@@ -57,7 +73,6 @@ pub fn from_metadata(
 mod tests {
     use super::*;
     use crate::DiagnosticsConfig;
-
     #[test]
     fn test_from_metadata_invalid_type() {
         let module = bsl_metadata::CommonModule::builder().name("InvalidModule").build();

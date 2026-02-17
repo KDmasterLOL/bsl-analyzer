@@ -8,6 +8,23 @@ use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use ide_db::hir_def::ModuleMetadata;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Consistent,
+};
 
 const DEFAULT_WORDS: &str = r"процедуры|procedures|функции|functions|обработчики|handlers|модуль|module|функциональность|functionality";
 
@@ -57,7 +74,6 @@ pub fn from_metadata(
 mod tests {
     use super::*;
     use crate::DiagnosticsConfig;
-
     #[test]
     fn test_from_metadata_with_forbidden_russian_word() {
         let module = bsl_metadata::CommonModule::builder().name("МойМодуль").build();

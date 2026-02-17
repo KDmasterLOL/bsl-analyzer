@@ -40,6 +40,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::Name;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Clumsy],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn from_hir(
     iterator_name: &str,
@@ -343,7 +359,6 @@ mod tests {
     #[test]
     fn test_hir_used_iterator() {
         use crate::test_utils::check_hir_diagnostic;
-
         let code = r#"
 Процедура Тест()
     Для Каждого Элемент Из Коллекция Цикл

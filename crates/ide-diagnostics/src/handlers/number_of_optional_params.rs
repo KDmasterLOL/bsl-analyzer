@@ -31,6 +31,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_MAX_OPTIONAL_PARAMS: i64 = 3;
 
@@ -147,7 +163,6 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NumberOfOptionalParamsDiagnostic.bsl");

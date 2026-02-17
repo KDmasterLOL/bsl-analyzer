@@ -63,6 +63,23 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 const DEFAULT_MAX_ALLOWED_LEVEL: usize = 4;
 
@@ -207,7 +224,6 @@ mod tests {
         check_hir_diagnostic,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_no_nesting() {
         let code = r#"Процедура Тест()

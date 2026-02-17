@@ -63,6 +63,22 @@ use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use ide_db::hir_def::{ModuleId, Name};
 use ide_db::TextRange;
 use vfs::FileId;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: crate::metadata::DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::SessionModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Main entry point for MissingEventSubscriptionHandler diagnostic.
 ///
@@ -366,7 +382,6 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::path::PathBuf;
     use vfs::{FileId, FileSet, VfsPath};
-
     fn check_diagnostic(code: &str, fixtures_dir: &str) -> (Vec<Diagnostic>, String) {
         // Setup database with VFS
         let mut db = RootDatabaseImpl::new();

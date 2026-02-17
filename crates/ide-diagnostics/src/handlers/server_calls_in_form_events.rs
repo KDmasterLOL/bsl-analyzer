@@ -49,6 +49,22 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::AnnotationKind;
 use hir_def::Name;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::FormModule],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Design],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Server annotations that trigger the diagnostic.
 const SERVER_ANNOTATIONS: &[AnnotationKind] =
@@ -109,7 +125,6 @@ pub fn from_hir(callee: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opt
 mod tests {
     use super::*;
     use crate::test_utils::check_hir_diagnostic;
-
     #[test]
     fn test_server_annotations_contains_expected() {
         assert!(SERVER_ANNOTATIONS.contains(&AnnotationKind::AtServer));

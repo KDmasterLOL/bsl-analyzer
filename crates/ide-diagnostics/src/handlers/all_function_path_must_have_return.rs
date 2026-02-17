@@ -63,6 +63,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::MethodId;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Unpredictable, MetadataTag::Badpractice, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 ///
@@ -231,7 +247,6 @@ fn message_en() -> String {
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
-
     /// Integration test matching AllFunctionPathMustHaveReturnDiagnosticTest.java
     ///
     /// Uses the same test file: AllFunctionPathMustHaveReturnDiagnostic.bsl

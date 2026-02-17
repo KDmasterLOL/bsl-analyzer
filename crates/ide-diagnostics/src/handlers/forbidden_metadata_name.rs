@@ -10,6 +10,28 @@ use hir_def::ModuleMetadata;
 use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::ValueManagerModule,
+        bsl_metadata::ModuleType::SessionModule,
+    ],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Design],
+    can_locate_on_project: true,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Consistent,
+};
 
 static FORBIDDEN_NAMES: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     [

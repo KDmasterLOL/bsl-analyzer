@@ -68,6 +68,22 @@ use hir_def::{
     ExprId, MethodId, ModuleId, StmtId,
 };
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload, MetadataTag::Suspicious, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Quick pre-check: does the file text contain StrTemplate method calls?
 ///
@@ -953,7 +969,6 @@ mod tests {
         };
         use std::sync::Arc;
         use test_fixture::Fixture;
-
         let code = r#"
 Процедура Тест()
     Если Условие Тогда

@@ -1,5 +1,21 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Check a single syntax node for useless ternary operators (node-based API).
 ///
@@ -111,7 +127,6 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     use crate::DiagnosticCode;
-
     #[test]
     fn test_direct_ternary() {
         let code = "А = ?(Б = 1, Истина, Ложь);";

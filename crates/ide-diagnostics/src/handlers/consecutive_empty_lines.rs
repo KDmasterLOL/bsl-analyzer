@@ -11,6 +11,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::LineIndex;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_ALLOWED_EMPTY_LINES: usize = 1;
 
@@ -146,7 +162,6 @@ fn create_diagnostic(
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
-
     #[test]
     fn test_empty_file() {
         let code = "";

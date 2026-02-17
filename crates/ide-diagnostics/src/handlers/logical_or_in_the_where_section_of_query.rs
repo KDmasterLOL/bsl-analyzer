@@ -38,6 +38,22 @@ use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Sql, MetadataTag::Performance, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Runs the LogicalOrInTheWhereSectionOfQuery diagnostic.
 ///
@@ -103,7 +119,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
-
     #[test]
     fn test_from_java_fixture() {
         let code = include_str!("../../test_data/LogicalOrInTheWhereSectionOfQueryDiagnostic.bsl");

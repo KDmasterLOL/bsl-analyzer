@@ -29,6 +29,22 @@
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Suspicious, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Runs the MultilineStringInQuery diagnostic.
 ///
@@ -121,7 +137,6 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
     use crate::{DiagnosticCode, Severity};
-
     #[test]
     fn test_multiline_string_in_query() {
         let code = include_str!("../../test_data/MultilineStringInQueryDiagnostic.bsl");

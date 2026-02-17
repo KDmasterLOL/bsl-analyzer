@@ -30,6 +30,25 @@
 use crate::{Diagnostic, DiagnosticCode};
 use hir_def::ModuleMetadata;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::FormModule,
+        bsl_metadata::ModuleType::ManagedApplicationModule,
+    ],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Collect diagnostics from module metadata.
 ///
@@ -87,7 +106,6 @@ mod tests {
     use super::*;
     use crate::DiagnosticsConfig;
     use std::sync::Arc;
-
     fn make_metadata_with_form(form: bsl_metadata::Form) -> ModuleMetadata {
         ModuleMetadata {
             module_type: bsl_metadata::ModuleType::FormModule,

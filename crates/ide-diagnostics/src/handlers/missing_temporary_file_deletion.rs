@@ -72,6 +72,22 @@ use hir_def::{Body, BodySourceMap};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Default deletion methods pattern
 const DEFAULT_SEARCH_DELETE_FILE_METHOD: &str =
@@ -546,7 +562,6 @@ mod tests {
         use ide_db::{RootDatabase, RootDatabaseImpl};
         use std::rc::Rc;
         use test_fixture::Fixture;
-
         // Debug test to see what tokens we're getting
         let code = r#"
             Процедура Тест()

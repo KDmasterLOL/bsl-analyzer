@@ -27,6 +27,22 @@
 use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 2,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error, MetadataTag::Localize],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const DEFAULT_DECLARED_LANGUAGES: &str = "ru";
 
@@ -375,7 +391,6 @@ mod tests {
     use super::*;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic_with_config};
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_extract_language_keys() {
         let keys = extract_language_keys("ru='Привет'; en='Hello'");

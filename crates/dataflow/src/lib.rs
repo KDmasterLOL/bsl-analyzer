@@ -19,7 +19,6 @@
 //! struct MyLattice { /* ... */ }
 //!
 //! impl Lattice for MyLattice {
-//!     fn bottom() -> Self { /* ... */ }
 //!     fn join(&self, other: &Self) -> Self { /* ... */ }
 //! }
 //!
@@ -33,7 +32,8 @@
 //! }
 //!
 //! // 3. Run analysis
-//! let solver = DataflowSolver::new(cfg, body, MyTransfer);
+//! let mut solver = DataflowSolver::new(cfg, body, MyTransfer);
+//! solver.set_bottom_factory(|| MyLattice { /* ... */ });
 //! let result = solver.solve();
 //! ```
 
@@ -84,18 +84,17 @@ pub enum Direction {
 /// A lattice defines the abstract domain for dataflow analysis.
 /// It must form a partial order with join (least upper bound) operation.
 ///
+/// The bottom element (⊥) is provided via `DataflowSolver::set_bottom_factory()`,
+/// which must be called before `solve()`. This allows lattices that require
+/// runtime context (e.g., `Arc<DefinitionIndex>`) to construct their bottom.
+///
 /// ## Laws
 ///
 /// 1. **Idempotence**: `a.join(a) == a`
 /// 2. **Commutativity**: `a.join(b) == b.join(a)`
 /// 3. **Associativity**: `a.join(b.join(c)) == (a.join(b)).join(c)`
-/// 4. **Bottom**: `bottom().join(a) == a`
+/// 4. **Bottom**: `bottom.join(a) == a` (where bottom is from factory)
 pub trait Lattice: Clone + PartialEq + Eq {
-    /// The bottom element (⊥) - least informative value.
-    ///
-    /// Bottom represents "no information" or the start of analysis.
-    fn bottom() -> Self;
-
     /// Join operation (⊔) - computes least upper bound.
     ///
     /// Merges information from two lattice values.
@@ -198,7 +197,7 @@ pub trait Transfer<L: Lattice> {
 ///
 /// ## Algorithm
 ///
-/// 1. Initialize all blocks to bottom (⊥)
+/// 1. Initialize all blocks via `set_bottom_factory()` (must be called before `solve()`)
 /// 2. Add all blocks to worklist
 /// 3. While worklist is not empty:
 ///    a. Remove a block from worklist
@@ -299,8 +298,9 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
     /// Initialize all blocks with a custom bottom element factory.
     ///
-    /// This is useful when `L::bottom()` requires additional context that isn't
-    /// available at trait level (e.g., VariableIndex for BitSet-based Liveness).
+    /// **Must be called before `solve()`**. The factory provides the bottom element (⊥)
+    /// for the lattice, which may require runtime context (e.g., `Arc<DefinitionIndex>`
+    /// for `ReachingDefs`, `Arc<VariableIndex>` for `Liveness`).
     ///
     /// ## Example
     ///
@@ -344,18 +344,12 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
     fn solve_forward(mut self) -> Option<DataflowResult<L>> {
         use std::collections::VecDeque;
 
-        // Initialize all blocks to bottom (only if not already initialized by set_bottom_factory or set_initial_state)
+        // All blocks must be initialized via set_bottom_factory() before solve()
         let entry = self.cfg.entry_point();
-        for (block_idx, _vertex) in self.cfg.vertices() {
-            // Use entry().or_insert_with() to avoid overwriting existing initialization
-            self.block_in.entry(block_idx).or_insert_with(L::bottom);
-            self.block_out.entry(block_idx).or_insert_with(L::bottom);
-        }
-
-        // Ensure entry block has an IN state (default to bottom if not set)
-        if let Some(entry_block) = entry {
-            self.block_in.entry(entry_block).or_insert_with(L::bottom);
-        }
+        assert!(
+            self.cfg.vertices().all(|(idx, _)| self.block_in.contains_key(&idx) && self.block_out.contains_key(&idx)),
+            "All blocks must be initialized before solve(). Call set_bottom_factory() first."
+        );
 
         // Worklist: blocks in reverse postorder (optimal for forward analysis)
         // RPO minimizes iterations by visiting nodes in topological order
@@ -462,18 +456,14 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
 
         // PROFILING: track solver calls and timing
 
-        // Initialize all blocks to bottom (only if not already initialized by set_bottom_factory)
+        // All blocks must be initialized via set_bottom_factory() before solve()
         let exit = self.cfg.exit_point();
         let num_blocks = self.cfg.vertices().count();
 
-        for (block_idx, _vertex) in self.cfg.vertices() {
-            // Use entry().or_insert_with() to avoid overwriting existing initialization
-            self.block_in.entry(block_idx).or_insert_with(L::bottom);
-            self.block_out.entry(block_idx).or_insert_with(L::bottom);
-        }
-
-        // Ensure exit block has an OUT state (default to bottom if not set)
-        self.block_out.entry(exit).or_insert_with(L::bottom);
+        assert!(
+            self.cfg.vertices().all(|(idx, _)| self.block_in.contains_key(&idx) && self.block_out.contains_key(&idx)),
+            "All blocks must be initialized before solve(). Call set_bottom_factory() first."
+        );
 
         // Worklist: blocks in postorder from exit (optimal for backward analysis)
         // Postorder minimizes iterations by visiting nodes in dependency order
@@ -746,10 +736,6 @@ mod tests {
     }
 
     impl Lattice for IntSetLattice {
-        fn bottom() -> Self {
-            Self { values: vec![] }
-        }
-
         fn join(&self, other: &Self) -> Self {
             let mut values = self.values.clone();
             for &v in &other.values {
@@ -764,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_lattice_bottom() {
-        let bottom = IntSetLattice::bottom();
+        let bottom = IntSetLattice { values: vec![] };
         assert!(bottom.values.is_empty());
     }
 
@@ -793,7 +779,7 @@ mod tests {
     #[test]
     fn test_lattice_bottom_identity() {
         let a = IntSetLattice { values: vec![1, 2, 3] };
-        let bottom = IntSetLattice::bottom();
+        let bottom = IntSetLattice { values: vec![] };
         assert_eq!(bottom.join(&a), a);
         assert_eq!(a.join(&bottom), a);
     }

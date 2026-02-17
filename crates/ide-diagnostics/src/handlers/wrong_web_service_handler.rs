@@ -7,6 +7,22 @@
 use crate::{Diagnostic, DiagnosticCode};
 use hir_def::{ModuleMetadata, Name};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::WebServiceModule],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious, MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn from_metadata(
     metadata: &ModuleMetadata,
@@ -84,7 +100,6 @@ pub fn from_metadata(
 mod tests {
     use super::*;
     use std::sync::Arc;
-
     fn make_web_service_metadata(web_service: bsl_metadata::WebService) -> ModuleMetadata {
         ModuleMetadata {
             module_type: bsl_metadata::ModuleType::WebServiceModule,

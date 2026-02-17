@@ -13,6 +13,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::CompatibilityMode8_3_3,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn from_hir(
     method_name: &str,
@@ -45,7 +61,6 @@ pub fn from_hir(
 mod tests {
     use super::*;
     use crate::test_utils::*;
-
     #[test]
     fn test_using_synchronous_calls() {
         let code = include_str!("../../test_data/UsingSynchronousCallsDiagnostic.bsl");

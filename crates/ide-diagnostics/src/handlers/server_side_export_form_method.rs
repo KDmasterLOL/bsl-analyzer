@@ -19,6 +19,22 @@ use hir_def::item_tree::AnnotationKind;
 use ide_db::TextRange;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::FormModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error, MetadataTag::Unpredictable, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Check for server-side export methods in managed forms.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -97,7 +113,6 @@ mod tests {
 
     #[cfg(feature = "disabled-form-test-helper")]
     use crate::test_utils::check_diagnostics_in_form;
-
     #[cfg(feature = "disabled-form-test-helper")]
     #[test]
     fn test_export_without_annotation() {

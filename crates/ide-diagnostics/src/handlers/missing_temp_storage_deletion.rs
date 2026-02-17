@@ -66,6 +66,22 @@ use hir_def::hir::{Expr, ExprIdx};
 use hir_def::{Body, BodySourceMap};
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 3,
+    activated_by_default: false,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Performance, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// HIR-based entry point for MissingTempStorageDeletion diagnostic.
 ///

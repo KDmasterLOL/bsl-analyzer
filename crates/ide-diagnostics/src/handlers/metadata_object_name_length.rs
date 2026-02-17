@@ -8,6 +8,23 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use hir_def::ModuleMetadata;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: true,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Consistent,
+};
 
 /// Default maximum metadata object name length.
 const DEFAULT_MAX_LENGTH: usize = 80;
@@ -351,7 +368,6 @@ mod tests {
     #[test]
     fn test_session_module_checks_no_module_objects() {
         use ide_db::RootDatabaseImpl;
-
         let mut bsl_config = bsl_metadata::Configuration::new("TestConfig");
 
         // Add object WITH modules - should NOT be checked

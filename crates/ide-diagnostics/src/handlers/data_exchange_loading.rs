@@ -43,6 +43,26 @@ use cfg_types::IdConversion;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{item_tree::ModItem, Body, Expr, ExprId, Name, Stmt, StmtId};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::RecordSetModule,
+        bsl_metadata::ModuleType::ValueManagerModule,
+    ],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice, MetadataTag::Unpredictable],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const MONITORED_PROCEDURES: &[&str] =
     &["передзаписью", "beforewrite", "призаписи", "onwrite", "передудалением", "beforedelete"];
@@ -272,7 +292,6 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_basic_missing_guard() {
         let code = r#"

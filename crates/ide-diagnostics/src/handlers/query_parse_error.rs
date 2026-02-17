@@ -28,6 +28,23 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
 use tracing::debug;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Sql, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 /// Runs the QueryParseError diagnostic.
 ///
@@ -122,7 +139,6 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_sdbl_diagnostic};
     use crate::{DiagnosticCode, Severity};
-
     #[test]
     fn test_query_parse_error_from_fixture() {
         let code = include_str!("../../test_data/QueryParseErrorDiagnostic.bsl");

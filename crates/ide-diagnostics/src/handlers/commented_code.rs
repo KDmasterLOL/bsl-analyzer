@@ -44,6 +44,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -556,7 +572,6 @@ fn message_en() -> String {
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
-
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
         let code = r#"Функция Тест()

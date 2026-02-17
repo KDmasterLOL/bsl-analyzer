@@ -1,6 +1,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const SIMPLE_TAGS: &[&str] = &["todo", "fixme", "!!", "mrg", "@", "отладка", "debug"];
 
@@ -140,7 +156,6 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
-
     #[test]
     fn test_todo_tag() {
         let code = "// TODO: fix this";

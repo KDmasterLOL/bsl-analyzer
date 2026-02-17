@@ -45,6 +45,23 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::ReturnValueReuse;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Design],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
+};
 
 /// Main entry point for CachedPublic diagnostic.
 ///
@@ -199,7 +216,6 @@ mod tests {
     use test_fixture::Fixture;
     use vfs::file_set::FileSet;
     use vfs::VfsPath;
-
     /// Helper to create DiagnosticsContext for testing
     fn create_test_ctx(code: &str) -> (Rc<dyn RootDatabase>, vfs::FileId, DiagnosticsConfig) {
         let fixture_text = format!("//- /test.bsl\n{}", code);

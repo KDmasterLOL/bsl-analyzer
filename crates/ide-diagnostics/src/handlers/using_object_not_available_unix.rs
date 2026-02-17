@@ -3,6 +3,23 @@ use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::SyntaxKind;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 30,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Lockinos],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
+};
 
 static PATTERN_NEW_EXPRESSION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(COMОбъект|COMObject|Почта|Mail)$").unwrap());
@@ -256,7 +273,6 @@ mod tests {
     #[test]
     fn test_hir_with_platform_guard() {
         use crate::test_utils::check_hir_diagnostic;
-
         let code = r#"
 Процедура Тест()
     Если ТипПлатформы.Windows Тогда

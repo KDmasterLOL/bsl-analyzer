@@ -62,6 +62,22 @@ use hir_def::hir::{Expr, Stmt};
 use hir_def::{ExprId, IdConversion};
 use ide_db::TextRange;
 use std::collections::HashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// HIR-based check for IsInRole() usage without PrivilegedMode() protection.
 ///
@@ -331,7 +347,6 @@ fn create_diagnostic(
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/IsInRoleMethodDiagnostic.bsl");

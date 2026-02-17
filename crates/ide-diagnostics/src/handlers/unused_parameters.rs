@@ -14,6 +14,22 @@ use hir_def::hir::Expr;
 use hir_def::item_tree::ModItem;
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::Os,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Design, MetadataTag::Unused],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 const ONCREATE_HANDLERS: &[&str] = &["присозданииобъекта", "onobjectcreate"];
 
@@ -145,7 +161,6 @@ fn create_diagnostic(
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
-
     #[test]
     fn test_unused_parameter() {
         let code = r#"Процедура ВсеПлохо(А1, Знач Б1 = Ложь)

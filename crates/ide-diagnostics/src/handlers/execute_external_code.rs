@@ -45,6 +45,28 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Vulnerability,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::CommandModule,
+        bsl_metadata::ModuleType::ExternalConnectionModule,
+        bsl_metadata::ModuleType::FormModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::OrdinaryApplicationModule,
+    ],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -70,7 +92,6 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use super::*;
     use crate::test_utils::*;
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/ExecuteExternalCodeDiagnostic.bsl");

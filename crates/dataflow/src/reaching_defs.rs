@@ -529,14 +529,6 @@ impl ReachingDefs {
 }
 
 impl Lattice for ReachingDefs {
-    /// Bottom element: empty bitset (no definitions).
-    ///
-    /// **Note**: Cannot create bottom without DefinitionIndex!
-    /// The solver must use `set_bottom_factory()` to provide the index.
-    fn bottom() -> Self {
-        panic!("ReachingDefs::bottom() requires DefinitionIndex - use new() with def_index instead")
-    }
-
     /// Join: bitwise OR (definition reaches if it reaches from ANY predecessor).
     ///
     /// This is O(n/64) where n is the number of possible definitions.

@@ -48,6 +48,23 @@ use hir_def::hir::{Expr, Stmt};
 use hir_def::{Body, BodySourceMap};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 /// Transaction call type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,7 +375,6 @@ mod tests {
     use super::check;
     use crate::test_utils::check_sdbl_diagnostic;
     use crate::DiagnosticCode;
-
     #[test]
     fn test_valid_pairing_with_commit() {
         let code = r#"

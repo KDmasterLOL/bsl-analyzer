@@ -29,6 +29,23 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 10,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Unpredictable, MetadataTag::Performance],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -58,7 +75,6 @@ pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
-
     #[test]
     fn test_array_add_self() {
         let code =

@@ -44,6 +44,22 @@ use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload, MetadataTag::Suspicious, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Check a HIR body for duplicated insertions.
 ///
@@ -1317,7 +1333,6 @@ mod tests {
     #[test]
     fn test_has_insertion_methods() {
         use super::has_insertion_methods;
-
         // Should find: .Добавить( .Add( .Вставить( .Insert(
         assert!(has_insertion_methods("Массив.Добавить(1)"));
         assert!(has_insertion_methods("Массив.добавить(1)")); // case-insensitive

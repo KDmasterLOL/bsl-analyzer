@@ -57,6 +57,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::hir_def::{Name, PathResolution};
 use syntax::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -159,7 +175,6 @@ mod tests {
         // The diagnostic is created in HIR lowering only when analyze_qualified_call()
         // identifies the call as a CommonModule call (not a local variable).
         use crate::test_utils::check_hir_diagnostic_with_fixtures;
-
         let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Module.bsl
 Процедура ДругойМетод() Экспорт

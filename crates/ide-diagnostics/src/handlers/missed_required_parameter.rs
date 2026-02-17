@@ -56,6 +56,22 @@ use ide_db::hir_def::{symbol_tree::MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 use vfs::{FileId, VfsPath};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Major,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -1447,7 +1463,6 @@ mod tests {
         use std::path::{Path, PathBuf};
         use std::rc::Rc;
         use vfs::{FileSet, VfsPath};
-
         let code = include_str!("../../test_data/MissedRequiredParameterDiagnostic.bsl");
 
         // Set up metadata for Phase 2

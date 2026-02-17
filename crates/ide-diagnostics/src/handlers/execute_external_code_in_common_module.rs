@@ -17,6 +17,22 @@
 
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 15,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Badpractice, MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::ExecuteExternalCodeInCommonModule;
@@ -117,7 +133,6 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use vfs::{FileId, FileSet, VfsPath};
-
     fn check_violations_directly(code: &str) -> Vec<Diagnostic> {
         let mut db = RootDatabaseImpl::new();
 

@@ -323,16 +323,6 @@ impl Liveness {
 }
 
 impl Lattice for Liveness {
-    /// Bottom element: no variables are live.
-    ///
-    /// This represents the state at program exit where nothing will be read anymore.
-    ///
-    /// **Note**: Cannot create bottom without VariableIndex!
-    /// The solver must use initialization with a factory function.
-    fn bottom() -> Self {
-        panic!("Liveness::bottom() requires VariableIndex - use new() with var_index instead")
-    }
-
     /// Join operation: union of live variables (bitwise OR).
     ///
     /// A variable is live if it's live in ANY successor.

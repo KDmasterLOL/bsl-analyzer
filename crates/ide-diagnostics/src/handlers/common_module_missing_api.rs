@@ -7,6 +7,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::ast::{AstNode, FunctionDef, PreRegionDir, ProcedureDef};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::Bsl,
+    modules: &[bsl_metadata::ModuleType::CommonModule],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload, MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CommonModuleMissingAPI;
@@ -71,7 +87,6 @@ fn has_api_regions(root: &syntax::SyntaxNode) -> bool {
 mod tests {
     use super::check;
     use crate::test_utils::check_ast_diagnostic;
-
     #[test]
     fn test_with_export_and_api() {
         let code = r#"

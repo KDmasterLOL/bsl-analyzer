@@ -26,6 +26,27 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use regex::Regex;
 use std::sync::OnceLock;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[
+        bsl_metadata::ModuleType::FormModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::RecordSetModule,
+        bsl_metadata::ModuleType::CommonModule,
+    ],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Deprecated],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Pattern to match AutoTest checks in condition expressions.
 ///
@@ -166,7 +187,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 mod tests {
     use super::check;
     use crate::test_utils::*;
-
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/ExcessiveAutoTestCheckDiagnostic.bsl");

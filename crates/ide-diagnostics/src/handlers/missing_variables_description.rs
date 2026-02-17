@@ -3,6 +3,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::item_tree::ModItem;
 use syntax::{has_variable_description, SyntaxKind, TextRange};
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::MissingVariablesDescription;
@@ -110,7 +126,6 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     use crate::DiagnosticCode;
-
     const FIXTURE: &str = include_str!("test_data/missing_variables_description/fixture.bsl");
 
     #[test]

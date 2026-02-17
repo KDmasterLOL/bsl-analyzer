@@ -44,6 +44,22 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir_def::{MethodId, ModuleId, Name};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 3,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Deprecated, MetadataTag::Design],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -369,7 +385,6 @@ EndProcedure
     #[test]
     fn test_cross_module_deprecated_can_call_deprecated() {
         use crate::test_utils::check_hir_diagnostic_with_fixtures;
-
         let fixture = r#"
 //- /CommonModules/ПервыйОбщийМодуль/Module.bsl
 // Устарела.

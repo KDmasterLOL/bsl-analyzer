@@ -45,6 +45,22 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Minor,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Brainoverload],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
 
 /// Default maximum if condition complexity
 const DEFAULT_MAX_IF_CONDITION_COMPLEXITY: usize = 3;
@@ -97,7 +113,6 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
-
     /// Test simple condition (should pass)
     #[test]
     fn test_simple_condition() {

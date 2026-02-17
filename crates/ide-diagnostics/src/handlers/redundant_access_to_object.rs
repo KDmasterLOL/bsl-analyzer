@@ -19,6 +19,29 @@ use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ModuleType, ReturnValueReuse};
 use hir_def::RedundantAccessKind;
 use ide_db::TextRange;
+use crate::define_metadata;
+use crate::metadata::*;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[
+        bsl_metadata::ModuleType::CommonModule,
+        bsl_metadata::ModuleType::ObjectModule,
+        bsl_metadata::ModuleType::ManagerModule,
+        bsl_metadata::ModuleType::FormModule,
+        bsl_metadata::ModuleType::RecordSetModule,
+    ],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Clumsy],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Adaptable,
+};
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -169,7 +192,6 @@ fn get_check_record_set_module(ctx: &DiagnosticsContext) -> bool {
 mod tests {
     use crate::test_utils::check_hir_diagnostic;
     use crate::DiagnosticCode;
-
     #[test]
     fn test_this_object_field_access() {
         // ThisObject field access - should emit candidate (but no diagnostic without metadata)
