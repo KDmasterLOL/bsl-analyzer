@@ -18,20 +18,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::TernaryOperatorUsage;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Используйте конструкцию Если-Иначе вместо тернарного оператора".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::TernaryOperatorUsage,
+        "Используйте конструкцию Если-Иначе вместо тернарного оператора",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

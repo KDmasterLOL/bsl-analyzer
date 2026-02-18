@@ -63,20 +63,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when IfElseIfEndsWithElse diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::IfElseIfEndsWithElse;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::IfElseIfEndsWithElse,
+        "Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

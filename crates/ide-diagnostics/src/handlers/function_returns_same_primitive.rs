@@ -71,22 +71,13 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when FunctionReturnsSamePrimitive diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::FunctionReturnsSamePrimitive;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Функция всегда возвращает одно и то же примитивное значение. \
-                 Замените функцию на константу или переменную модуля."
-            .to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::FunctionReturnsSamePrimitive,
+        "Функция всегда возвращает одно и то же примитивное значение. \
+         Замените функцию на константу или переменную модуля.",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

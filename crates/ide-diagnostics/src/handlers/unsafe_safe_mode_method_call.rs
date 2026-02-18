@@ -19,18 +19,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::UnsafeSafeModeMethodCall;
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-    Some(Diagnostic {
-        code,
-        message: "Use explicit comparison with boolean when calling SafeMode method".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::UnsafeSafeModeMethodCall,
+        "Use explicit comparison with boolean when calling SafeMode method",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {

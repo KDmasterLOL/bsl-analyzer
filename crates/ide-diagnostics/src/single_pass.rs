@@ -48,10 +48,9 @@ impl DiagnosticState {
     ///
     /// Called after AST traversal completes. Stateful handlers emit
     /// their diagnostics here based on accumulated data.
-    #[allow(unused_variables, clippy::ptr_arg)]
-    pub fn finalize(&self, diagnostics: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+    #[allow(clippy::ptr_arg)]
+    pub fn finalize(&self, _diagnostics: &mut Vec<Diagnostic>, _ctx: &DiagnosticsContext) {
         // Reserved for stateful handlers that emit diagnostics at the end
-        // Note: Using &mut Vec here is intentional as stateful handlers may push diagnostics
     }
 }
 

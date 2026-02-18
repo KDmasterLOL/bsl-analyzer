@@ -48,21 +48,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when ExtraCommas diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::ExtraCommas;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Не используйте запятые для параметров по умолчанию в конце вызова метода"
-            .to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ExtraCommas,
+        "Не используйте запятые для параметры по умолчанию в конце вызова метода",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

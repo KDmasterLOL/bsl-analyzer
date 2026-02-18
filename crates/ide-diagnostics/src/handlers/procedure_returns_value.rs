@@ -46,20 +46,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::ProcedureReturnsValue;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Процедура не должна возвращать значение".to_string(),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ProcedureReturnsValue,
+        "Процедура не должна возвращать значение",
         range,
-        severity: ctx.severity(code),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

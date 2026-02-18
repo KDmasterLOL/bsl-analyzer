@@ -72,20 +72,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::ExecuteExternalCode` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::ExecuteExternalCode;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "It is forbidden to execute external code on the server".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ExecuteExternalCode,
+        "It is forbidden to execute external code on the server",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

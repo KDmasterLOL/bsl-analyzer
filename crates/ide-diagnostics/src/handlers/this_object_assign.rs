@@ -6,7 +6,6 @@
 //! Ported from: ThisObjectAssignDiagnostic.java
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use bsl_metadata::ModuleType;
 use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
@@ -26,27 +25,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::ThisObjectAssign;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    let module_metadata = ctx.module_metadata();
-    let module_type = module_metadata.module_type;
-
-    if !matches!(module_type, ModuleType::CommonModule | ModuleType::FormModule) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Свойство ЭтотОбъект доступно только для чтения".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ThisObjectAssign,
+        "Свойство ЭтотОбъект доступно только для чтения",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

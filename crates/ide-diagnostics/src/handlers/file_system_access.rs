@@ -90,20 +90,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when FileSystemAccess diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::FileSystemAccess;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "File system access detected (security review required)".to_string(),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::FileSystemAccess,
+        "File system access detected (security review required)",
         range,
-        severity: ctx.severity(code),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

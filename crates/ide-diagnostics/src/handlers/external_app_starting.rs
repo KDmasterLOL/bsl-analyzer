@@ -65,20 +65,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when ExternalAppStarting diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::ExternalAppStarting;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "External application launch detected".to_string(),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ExternalAppStarting,
+        "External application launch detected",
         range,
-        severity: ctx.severity(code),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

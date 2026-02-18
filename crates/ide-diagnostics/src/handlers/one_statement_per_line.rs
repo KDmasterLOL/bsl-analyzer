@@ -42,20 +42,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from hir_dispatch.rs when `BodyDiagnostic::OneStatementPerLine` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::OneStatementPerLine;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Several statements in one line".to_string(),
-        severity: ctx.severity(code), // Java: MINOR
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::OneStatementPerLine,
+        "Several statements in one line",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

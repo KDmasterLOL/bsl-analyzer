@@ -35,20 +35,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::WrongUseFunctionProceedWithCall;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::WrongUseFunctionProceedWithCall,
+        "Использовать функцию ПродолжитьВызов() можно только в расширениях и только в методах с аннотацией &Вместо.",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ pub enum RegionPattern {
     Prefix(&'static str, &'static str),
 }
 
-pub fn get_standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
+fn get_standard_patterns(module_type: ModuleType) -> Vec<RegionPattern> {
     use RegionPattern::*;
     let mut patterns = vec![];
 

@@ -51,20 +51,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from hir_dispatch.rs when `BodyDiagnostic::SelfInsertion` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::SelfInsertion;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Удалите вставку коллекции в саму себя".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::SelfInsertion,
+        "Удалите вставку коллекции в саму себя",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {

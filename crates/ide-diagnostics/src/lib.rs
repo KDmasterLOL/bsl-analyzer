@@ -41,6 +41,29 @@ pub fn all_diagnostic_codes() -> impl Iterator<Item = DiagnosticCode> {
     DiagnosticCode::iter()
 }
 
+/// Creates a simple HIR diagnostic with standard disabled check, severity, and tags.
+///
+/// Use this for `from_hir()` handlers that only need a code, message, and range
+/// (no custom fixes or extra logic).
+pub fn simple_hir_diagnostic(
+    code: DiagnosticCode,
+    message: impl Into<String>,
+    range: ide_db::TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+    Some(Diagnostic {
+        code,
+        message: message.into(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    })
+}
+
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{

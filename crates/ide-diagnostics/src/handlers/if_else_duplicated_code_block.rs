@@ -51,19 +51,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::IfElseDuplicatedCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::IfElseDuplicatedCodeBlock;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-    Some(Diagnostic {
-        code,
-        message: "Ветки Если и Иначе содержат идентичный код".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::IfElseDuplicatedCodeBlock,
+        "Ветки Если и Иначе содержат идентичный код",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

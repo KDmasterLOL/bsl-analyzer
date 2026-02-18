@@ -71,21 +71,13 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::CreateQueryInCycle` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::CreateQueryInCycle;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-    Some(Diagnostic {
-        code,
-        message: "Выполнение запроса в цикле приводит к деградации производительности. \
-                  Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла"
-            .to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::CreateQueryInCycle,
+        "Выполнение запроса в цикле приводит к деградации производительности. \
+         Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 /// Legacy check function - now uses HIR diagnostics.

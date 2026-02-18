@@ -51,19 +51,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::EmptyCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::EmptyCodeBlock;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-    Some(Diagnostic {
-        code,
-        message: "Пустой блок кода".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::EmptyCodeBlock,
+        "Пустой блок кода",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

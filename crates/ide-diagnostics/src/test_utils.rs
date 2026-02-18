@@ -541,6 +541,53 @@ where
     check_fn(&metadata_arc, &ctx)
 }
 
+/// Create a `ModuleMetadata` for a CommonModule (without execution context).
+pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir_def::ModuleMetadata {
+    hir_def::ModuleMetadata {
+        module_type: bsl_metadata::ModuleType::CommonModule,
+        execution_context: None,
+        common_module: Some(std::sync::Arc::new(module)),
+        mdo: None,
+        register: None,
+        http_service: None,
+        web_service: None,
+        form: None,
+    }
+}
+
+/// Create a `ModuleMetadata` for a CommonModule with execution context.
+pub fn make_common_module_metadata_with_ctx(
+    module: bsl_metadata::CommonModule,
+    ctx: hir_def::ExecutionContext,
+) -> hir_def::ModuleMetadata {
+    hir_def::ModuleMetadata {
+        module_type: bsl_metadata::ModuleType::CommonModule,
+        execution_context: Some(ctx),
+        common_module: Some(std::sync::Arc::new(module)),
+        mdo: None,
+        register: None,
+        http_service: None,
+        web_service: None,
+        form: None,
+    }
+}
+
+/// Create a `ModuleMetadata` for a non-CommonModule type (for negative tests).
+pub fn make_non_common_module_metadata(
+    module_type: bsl_metadata::ModuleType,
+) -> hir_def::ModuleMetadata {
+    hir_def::ModuleMetadata {
+        module_type,
+        execution_context: None,
+        common_module: None,
+        mdo: None,
+        register: None,
+        http_service: None,
+        web_service: None,
+        form: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

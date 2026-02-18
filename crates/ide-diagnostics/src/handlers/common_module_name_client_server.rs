@@ -4,48 +4,28 @@
 //!
 //! Ported from: CommonModuleNameClientServerDiagnostic.java
 
-use crate::common_module_helpers::{self, check_common_module_name};
-use crate::{Diagnostic, DiagnosticCode};
-use hir::ModuleMetadata;
-use crate::define_metadata;
+use crate::define_common_module_name_check;
 use crate::metadata::*;
 
-pub const METADATA: DiagnosticMetadata = define_metadata! {
+define_common_module_name_check! {
+    code: CommonModuleNameClientServer,
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
-    scope: DiagnosticScope::Bsl,
-    modules: &[bsl_metadata::ModuleType::CommonModule],
-    minutes_to_fix: 5,
-    activated_by_default: true,
-    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
     tags: &[MetadataTag::Standard, MetadataTag::Badpractice, MetadataTag::Unpredictable],
-    can_locate_on_project: false,
-    extra_min_for_complexity: 0.0,
-    lsp_severity_override: "",
     clean_code_attribute: CleanCodeAttribute::Consistent,
-};
-
-pub fn from_metadata(
-    metadata: &ModuleMetadata,
-    ctx: &crate::DiagnosticsContext,
-) -> Vec<Diagnostic> {
-    check_common_module_name(
-        metadata,
-        ctx,
-        DiagnosticCode::CommonModuleNameClientServer,
-        common_module_helpers::is_client_server,
-        &["клиентсервер", "clientserver"],
-        true,
-        "Имя клиент-серверного общего модуля должно содержать 'КлиентСервер' или 'ClientServer'",
-    )
+    predicate: crate::common_module_helpers::is_client_server,
+    keywords: &["клиентсервер", "clientserver"],
+    name_should_contain: true,
+    message: "Имя клиент-серверного общего модуля должно содержать 'КлиентСервер' или 'ClientServer'",
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
+    use crate::test_utils::*;
+
     #[test]
-    fn test_from_metadata_without_keyword() {
+    fn test_without_keyword() {
         let module = bsl_metadata::CommonModule::builder()
             .name("Something")
             .server(true)
@@ -53,25 +33,16 @@ mod tests {
             .client_ordinary_application(true)
             .client_managed_application(true)
             .build();
-
-        let metadata = ide_db::hir_def::ModuleMetadata {
-            module_type: bsl_metadata::ModuleType::CommonModule,
-            execution_context: Some(ide_db::hir_def::ExecutionContext::ClientServer),
-            common_module: Some(std::sync::Arc::new(module)),
-            mdo: None,
-            register: None,
-            http_service: None,
-            web_service: None,
-            form: None,
-        };
-
-        let _config = DiagnosticsConfig::default();
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
+        let metadata = make_common_module_metadata_with_ctx(
+            module,
+            hir_def::ExecutionContext::ClientServer,
+        );
+        let diagnostics = check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
-    fn test_from_metadata_with_keyword() {
+    fn test_with_keyword() {
         let module = bsl_metadata::CommonModule::builder()
             .name("SomethingClientServer")
             .server(true)
@@ -79,20 +50,11 @@ mod tests {
             .client_ordinary_application(true)
             .client_managed_application(true)
             .build();
-
-        let metadata = ide_db::hir_def::ModuleMetadata {
-            module_type: bsl_metadata::ModuleType::CommonModule,
-            execution_context: Some(ide_db::hir_def::ExecutionContext::ClientServer),
-            common_module: Some(std::sync::Arc::new(module)),
-            mdo: None,
-            register: None,
-            http_service: None,
-            web_service: None,
-            form: None,
-        };
-
-        let _config = DiagnosticsConfig::default();
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
+        let metadata = make_common_module_metadata_with_ctx(
+            module,
+            hir_def::ExecutionContext::ClientServer,
+        );
+        let diagnostics = check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 0);
     }
 }

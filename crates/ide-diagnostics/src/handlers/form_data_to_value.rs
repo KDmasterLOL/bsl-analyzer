@@ -45,20 +45,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when FormDataToValue diagnostic is emitted during lowering.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::FormDataToValue;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Use of FormDataToValue method detected".to_string(),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::FormDataToValue,
+        "Use of FormDataToValue method detected",
         range,
-        severity: ctx.severity(code),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

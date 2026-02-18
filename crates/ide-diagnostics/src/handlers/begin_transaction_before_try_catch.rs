@@ -77,24 +77,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 /// Creates diagnostic from HIR BodyDiagnostic (called from lib.rs dispatch).
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::BeginTransactionBeforeTryCatch;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: message_ru(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::BeginTransactionBeforeTryCatch,
+        "Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
-}
-
-fn message_ru() -> String {
-    "Метод 'НачатьТранзакцию' должен быть за пределами блока 'Попытка-Исключение' непосредственно перед оператором 'Попытка'".to_string()
+        ctx,
+    )
 }
 
 #[cfg(test)]

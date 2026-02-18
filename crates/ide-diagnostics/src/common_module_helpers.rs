@@ -131,6 +131,97 @@ pub fn check_common_module_name(
     }]
 }
 
+/// Macro to generate METADATA const + `from_metadata` for CommonModuleName* diagnostics.
+///
+/// Eliminates boilerplate in 7 handler files that all delegate to `check_common_module_name()`.
+/// Common fields (scope, modules, minutes_to_fix, etc.) are hardcoded since they're identical
+/// across all CommonModuleName diagnostics.
+#[macro_export]
+macro_rules! define_common_module_name_check {
+    // Variant with explicit clean_code_attribute
+    (
+        code: $code:ident,
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        tags: $tags:expr,
+        clean_code_attribute: $clean:expr,
+        predicate: $predicate:expr,
+        keywords: $keywords:expr,
+        name_should_contain: $name_should_contain:expr,
+        message: $message:expr $(,)?
+    ) => {
+        pub const METADATA: $crate::DiagnosticMetadata = $crate::define_metadata! {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $crate::DiagnosticScope::Bsl,
+            modules: &[bsl_metadata::ModuleType::CommonModule],
+            minutes_to_fix: 5,
+            activated_by_default: true,
+            compatibility_mode: $crate::DiagnosticCompatibilityMode::Undefined,
+            tags: $tags,
+            can_locate_on_project: false,
+            extra_min_for_complexity: 0.0,
+            lsp_severity_override: "",
+            clean_code_attribute: $clean,
+        };
+
+        pub fn from_metadata(
+            metadata: &hir::ModuleMetadata,
+            ctx: &$crate::DiagnosticsContext,
+        ) -> Vec<$crate::Diagnostic> {
+            $crate::common_module_helpers::check_common_module_name(
+                metadata,
+                ctx,
+                $crate::DiagnosticCode::$code,
+                $predicate,
+                $keywords,
+                $name_should_contain,
+                $message,
+            )
+        }
+    };
+    // Variant without clean_code_attribute (auto-derived)
+    (
+        code: $code:ident,
+        diagnostic_type: $dtype:expr,
+        severity: $severity:expr,
+        tags: $tags:expr,
+        predicate: $predicate:expr,
+        keywords: $keywords:expr,
+        name_should_contain: $name_should_contain:expr,
+        message: $message:expr $(,)?
+    ) => {
+        pub const METADATA: $crate::DiagnosticMetadata = $crate::define_metadata! {
+            diagnostic_type: $dtype,
+            severity: $severity,
+            scope: $crate::DiagnosticScope::Bsl,
+            modules: &[bsl_metadata::ModuleType::CommonModule],
+            minutes_to_fix: 5,
+            activated_by_default: true,
+            compatibility_mode: $crate::DiagnosticCompatibilityMode::Undefined,
+            tags: $tags,
+            can_locate_on_project: false,
+            extra_min_for_complexity: 0.0,
+            lsp_severity_override: "",
+        };
+
+        pub fn from_metadata(
+            metadata: &hir::ModuleMetadata,
+            ctx: &$crate::DiagnosticsContext,
+        ) -> Vec<$crate::Diagnostic> {
+            $crate::common_module_helpers::check_common_module_name(
+                metadata,
+                ctx,
+                $crate::DiagnosticCode::$code,
+                $predicate,
+                $keywords,
+                $name_should_contain,
+                $message,
+            )
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

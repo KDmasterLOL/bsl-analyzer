@@ -41,20 +41,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::OSUsersMethod;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Check for a potentially dangerous OSUsers method call".to_string(),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::OSUsersMethod,
+        "Check for a potentially dangerous OSUsers method call",
         range,
-        severity: ctx.severity(code),
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

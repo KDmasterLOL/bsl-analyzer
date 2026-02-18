@@ -69,20 +69,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from hir_dispatch when `BodyDiagnostic::UsingExternalCodeTools` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::UsingExternalCodeTools;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-
-    Some(Diagnostic {
-        code,
-        message: "Potentially unsafe use of external code tools".to_string(),
-        severity: ctx.severity(code),
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::UsingExternalCodeTools,
+        "Potentially unsafe use of external code tools",
         range,
-        tags: ctx.tags(code),
-        fixes: vec![],
-    })
+        ctx,
+    )
 }
 
 #[cfg(test)]

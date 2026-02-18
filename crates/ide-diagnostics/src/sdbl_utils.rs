@@ -322,29 +322,6 @@ fn byte_offset_to_line_col_fast(text: &str, line_starts: &[usize], offset: u32) 
     (line as u32, col as u32)
 }
 
-/// Convert (line, column) position to byte offset - 0-indexed.
-///
-/// Iterates through the text to find the byte offset at the given line and column.
-pub fn line_col_to_byte_offset(text: &str, target_line: u32, target_col: u32) -> u32 {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (idx, ch) in text.char_indices() {
-        if line == target_line && col == target_col {
-            return idx as u32;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-
-    // If we reach here, we're at EOF - return length
-    text.len() as u32
-}
-
 /// Build line index for O(1) line lookup (public API).
 ///
 /// Returns a Vec where line_starts[i] = byte offset where line i starts.
@@ -390,8 +367,9 @@ fn get_line_text<'a>(text: &'a str, line_starts: &[usize], line: usize) -> &'a s
 
 /// Convert (line, column) to byte offset using line index.
 ///
-/// This is faster than line_col_to_byte_offset() because it uses
-/// the pre-built line index to skip directly to the target line (O(1)),
+/// Convert (line, column) to byte offset using pre-built line index.
+///
+/// Uses the line index to skip directly to the target line (O(1)),
 /// then only iterates through characters on that line (O(col)).
 ///
 /// Overall: O(col) instead of O(total_text)
