@@ -26,34 +26,6 @@ impl<'a> SinglePassContext<'a> {
     }
 }
 
-/// State accumulated during single-pass traversal for stateful handlers.
-///
-/// Some handlers need to track state across multiple nodes (e.g., counting
-/// occurrences, tracking seen regions). This struct holds that state.
-#[derive(Debug, Default)]
-pub struct DiagnosticState {
-    // Reserved for future stateful handlers:
-    // - duplicate_string_literal: HashMap<String, Vec<TextRange>>
-    // - duplicate_region: HashMap<String, Vec<TextRange>>
-    // - consecutive_empty_lines: usize
-}
-
-impl DiagnosticState {
-    /// Create new empty state.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Finalize and emit diagnostics from accumulated state.
-    ///
-    /// Called after AST traversal completes. Stateful handlers emit
-    /// their diagnostics here based on accumulated data.
-    #[allow(clippy::ptr_arg)]
-    pub fn finalize(&self, _diagnostics: &mut Vec<Diagnostic>, _ctx: &DiagnosticsContext) {
-        // Reserved for stateful handlers that emit diagnostics at the end
-    }
-}
-
 /// Collect syntax diagnostics using single-pass AST traversal.
 ///
 /// This function performs ONE traversal of the syntax tree and calls all
@@ -77,7 +49,6 @@ pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
-    let state = DiagnosticState::new();
     let sp_ctx = SinglePassContext::new(ctx);
 
     // Single traversal: visit all nodes and tokens
@@ -92,9 +63,6 @@ pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             }
         }
     }
-
-    // Finalize stateful handlers
-    state.finalize(&mut diagnostics, ctx);
 
     let elapsed = start.elapsed();
     tracing::debug!(

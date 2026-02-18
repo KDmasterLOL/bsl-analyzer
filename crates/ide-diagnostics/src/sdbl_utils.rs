@@ -59,37 +59,11 @@ pub struct SdblPositionMapper<'a> {
 }
 
 impl<'a> SdblPositionMapper<'a> {
-    /// Create a new position mapper from a LITERAL node.
-    pub fn new(
-        bsl_literal_node: &SyntaxNode,
-        bsl_source: &'a str,
-        quote_corrections: Vec<(usize, usize)>,
-    ) -> Self {
-        let bsl_literal_range = bsl_literal_node.text_range();
-        let (bsl_literal_line, bsl_literal_col) =
-            byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
-
-        // Build line index for O(1) line lookups
-        let line_starts = build_line_index(bsl_source);
-
-        Self {
-            bsl_literal_range,
-            bsl_source,
-            bsl_literal_line,
-            bsl_literal_col,
-            line_starts,
-            quote_corrections,
-        }
-    }
-
     /// Create a new position mapper from a cached TextRange.
     ///
-    /// This is used when working with cached SDBL queries where we already
-    /// have the literal range but not the original SyntaxNode.
-    ///
-    /// OPTIMIZATION: Uses `&str` reference instead of copying the entire source.
-    /// OPTIMIZATION: Caches literal position to avoid recalculating for each diagnostic.
-    /// OPTIMIZATION: Builds line index once for O(1) line lookup.
+    /// Builds its own line index internally. For files with many SDBL queries,
+    /// prefer `new_from_range_with_line_index` or `from_query_info` which
+    /// reuse a shared line index.
     pub fn new_from_range(
         bsl_literal_range: TextRange,
         bsl_source: &'a str,
@@ -98,7 +72,6 @@ impl<'a> SdblPositionMapper<'a> {
         let (bsl_literal_line, bsl_literal_col) =
             byte_offset_to_line_col(bsl_source, u32::from(bsl_literal_range.start()));
 
-        // Build line index for O(1) line lookups
         let line_starts = build_line_index(bsl_source);
 
         Self {
@@ -404,108 +377,6 @@ fn line_col_to_byte_offset_fast(
 
     // If we reach here, column is past end of line
     next_line_start as u32
-}
-
-/// Check if a LITERAL node is part of string concatenation.
-///
-/// Detects patterns like: `"text" + variable` or `"text" + "more text"`
-/// These are skipped because extraction would be incomplete.
-pub fn has_string_concatenation(node: &SyntaxNode) -> bool {
-    // Check if there's a PLUS token after this literal
-    if let Some(next) = node.next_sibling_or_token() {
-        if let Some(token) = next.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    // Check if there's a PLUS token before this literal
-    if let Some(prev) = node.prev_sibling_or_token() {
-        if let Some(token) = prev.as_token() {
-            if token.kind() == SyntaxKind::PLUS {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Re-export from syntax crate for backward compatibility.
-pub use syntax::extract_sdbl_with_corrections;
-
-/// Extract SDBL query text from a LITERAL node without unescaping quotes.
-///
-/// This is specifically for SDBL to preserve exact positions for semantic highlighting.
-/// Unlike `extract_string_content()`, this does NOT unescape `""` → `"`.
-///
-/// Handles both simple strings and multiline strings:
-/// - Simple: `"text"` → one STRING token
-/// - Multiline: `"line1\n|line2"` → STRING_START + NEWLINE + STRING_PART + ... + STRING_TAIL
-pub fn extract_sdbl_query_text(node: &SyntaxNode) -> Option<String> {
-    let mut result = String::new();
-    let mut tokens = node.children_with_tokens().filter_map(|it| it.into_token());
-
-    // Check first token to determine string type
-    let first_token = tokens.next()?;
-
-    match first_token.kind() {
-        SyntaxKind::STRING => {
-            // Simple string: "text"
-            let text = first_token.text();
-            if text.len() < 2 {
-                return None;
-            }
-            // Remove outer quotes BUT keep doubled quotes as-is
-            let inner = &text[1..text.len() - 1];
-            result = inner.to_string();
-        }
-        SyntaxKind::STRING_START => {
-            // Multiline string: "line1\n|line2\n|line3"
-            // STRING_START contains: "line1
-            let text = first_token.text();
-            if text.is_empty() {
-                return None;
-            }
-            // Remove opening quote BUT keep doubled quotes as-is
-            result.push_str(&text[1..]);
-
-            // Process remaining tokens
-            for token in tokens {
-                match token.kind() {
-                    SyntaxKind::NEWLINE => {
-                        result.push('\n');
-                    }
-                    SyntaxKind::STRING_PART => {
-                        // STRING_PART contains: |line (with | prefix)
-                        let text = token.text();
-                        // Remove | prefix
-                        if let Some(content) = text.strip_prefix('|') {
-                            result.push_str(content);
-                        }
-                    }
-                    SyntaxKind::STRING_TAIL => {
-                        // STRING_TAIL contains: |line" (with | prefix and closing quote)
-                        let text = token.text();
-                        // Remove | prefix and closing quote
-                        if let Some(content) = text.strip_prefix('|') {
-                            if let Some(content) = content.strip_suffix('"') {
-                                result.push_str(content);
-                            }
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            // DON'T unescape quotes - keep "" as-is for position mapping
-        }
-        _ => return None,
-    }
-
-    Some(result)
 }
 
 /// Extract string content from a LITERAL node containing STRING tokens.

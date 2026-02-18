@@ -45,8 +45,6 @@ pub struct MetadataOverride {
 #[derive(Debug, Clone)]
 pub struct EffectiveMetadata {
     base: &'static crate::metadata::DiagnosticMetadata,
-    severity_override: Option<DiagnosticSeverityLevel>,
-    type_override: Option<DiagnosticType>,
     tags_override: Option<Vec<MetadataTag>>,
     lsp_severity_override: Option<String>,
 }
@@ -65,15 +63,6 @@ impl EffectiveMetadata {
         self.tags_override.clone().unwrap_or_else(|| self.base.tags.to_vec())
     }
 
-    /// Get effective diagnostic type (base or override).
-    pub fn diagnostic_type(&self) -> DiagnosticType {
-        self.type_override.unwrap_or(self.base.diagnostic_type)
-    }
-
-    /// Get effective severity (base or override).
-    pub fn severity(&self) -> DiagnosticSeverityLevel {
-        self.severity_override.unwrap_or(self.base.severity)
-    }
 }
 
 /// Parse severity from string.
@@ -175,8 +164,6 @@ impl DiagnosticsConfig {
 
         Some(EffectiveMetadata {
             base,
-            severity_override: override_data.and_then(|o| o.severity),
-            type_override: override_data.and_then(|o| o.diagnostic_type),
             tags_override: override_data.and_then(|o| o.tags.clone()),
             lsp_severity_override: override_data.and_then(|o| o.lsp_severity.clone()),
         })
@@ -342,11 +329,6 @@ impl DiagnosticsConfig {
             .and_then(|v| v.get(param))
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-    }
-
-    /// Get a float parameter for a diagnostic.
-    pub fn get_float(&self, code: DiagnosticCode, param: &str) -> Option<f64> {
-        self.parameters.get(&code).and_then(|v| v.get(param)).and_then(|v| v.as_f64())
     }
 
     /// Convert from Salsa-hashable DiagnosticsConfigInput.

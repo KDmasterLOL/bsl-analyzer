@@ -569,23 +569,6 @@ pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 // ============================================================================
-// Legacy: collect_semantic_diagnostics (calls new functions)
-// ============================================================================
-
-/// Collect Tier 2 semantic diagnostics.
-///
-/// Now delegates to specialized collectors for better organization.
-pub fn collect_semantic_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    diagnostics.extend(collect_item_tree_diagnostics(ctx));
-    diagnostics.extend(collect_module_bodies_diagnostics(ctx));
-    diagnostics.extend(collect_ast_diagnostics(ctx));
-
-    diagnostics
-}
-
-// ============================================================================
 // Configuration-based diagnostics (require Configuration XML, SessionModule only)
 // ============================================================================
 

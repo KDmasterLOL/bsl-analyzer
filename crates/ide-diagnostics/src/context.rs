@@ -138,11 +138,11 @@ impl<'a> DiagnosticsContext<'a> {
     // These methods use provider when available, falling back to db.
     //
     // Methods by category:
-    //   Text access:            parse, file_text, file_text_input, line_index
+    //   Text access:            parse, file_text, line_index
     //   HIR & semantic:         module_bodies, module_metadata, symbol_tree,
     //                           symbol_tree_for, item_tree, module_data, method_docs
     //   Source structure:        source_root_id, region_tree, module_level_regions
-    //   Cross-module resolution: workspace_symbols, module_index,
+    //   Cross-module resolution: module_index,
     //                           resolve_vfs_path, resolve_qualified_path
     //   SDBL:                   sdbl_hir_in_file, all_sdbl_in_file
     //   Dataflow:               module_cfgs, module_liveness,
@@ -216,16 +216,6 @@ impl<'a> DiagnosticsContext<'a> {
         Arc::new(text)
     }
 
-    /// Get file text input (Salsa input) for current file.
-    ///
-    /// NOTE: This method only works in LSP mode with Salsa database.
-    /// For streaming mode compatibility, use ctx.file_text() instead.
-    ///
-    /// Kept for backward compatibility with handlers that haven't been migrated yet.
-    pub fn file_text_input(&self) -> base_db::FileTextInput {
-        self.db.file_text_input(self.file_id)
-    }
-
     /// Get line index for current file.
     pub fn line_index(&self) -> Arc<line_index::LineIndex> {
         if let Some(provider) = self.provider {
@@ -241,15 +231,6 @@ impl<'a> DiagnosticsContext<'a> {
             return provider.file_source_root_id(self.file_id);
         }
         self.db.file_source_root_input(self.file_id).source_root_id(self.db)
-    }
-
-    /// Get workspace symbols for cross-module resolution.
-    pub fn workspace_symbols(&self) -> Arc<hir_def::WorkspaceSymbols> {
-        let source_root_id = self.source_root_id();
-        if let Some(provider) = self.provider {
-            return provider.workspace_symbols(source_root_id);
-        }
-        self.db.workspace_symbols(source_root_id)
     }
 
     /// Get module index for cross-module resolution.

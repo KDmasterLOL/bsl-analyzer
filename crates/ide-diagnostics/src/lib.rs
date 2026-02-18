@@ -16,7 +16,6 @@ mod types;
 
 pub mod common_module_helpers;
 pub mod handlers;
-pub mod metadata_diagnostic;
 pub mod sdbl_utils;
 pub mod utils;
 
@@ -67,8 +66,9 @@ pub fn simple_hir_diagnostic(
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
-    collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_line_diagnostics,
-    collect_sdbl_hir_diagnostics, collect_semantic_diagnostics, collect_syntax_diagnostics,
+    collect_ast_diagnostics, collect_configuration_diagnostics, collect_dataflow_diagnostics,
+    collect_item_tree_diagnostics, collect_line_diagnostics, collect_module_bodies_diagnostics,
+    collect_sdbl_hir_diagnostics, collect_syntax_diagnostics,
 };
 
 /// Runs all diagnostics on a file.
@@ -95,8 +95,10 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 2. Tier 1: Syntax diagnostics
     result.extend(collect_syntax_diagnostics(ctx));
 
-    // 3. Tier 2: Semantic diagnostics
-    result.extend(collect_semantic_diagnostics(ctx));
+    // 3. Tier 2: Semantic diagnostics (ItemTree + ModuleBodies + AST)
+    result.extend(collect_item_tree_diagnostics(ctx));
+    result.extend(collect_module_bodies_diagnostics(ctx));
+    result.extend(collect_ast_diagnostics(ctx));
 
     // 4. Configuration-based diagnostics (SessionModule only)
     result.extend(collect_configuration_diagnostics(ctx));

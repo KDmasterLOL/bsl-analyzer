@@ -226,14 +226,6 @@ where
     check_fn(&ctx)
 }
 
-/// Run HIR-based diagnostics on test code with a custom check function.
-pub fn check_hir_diagnostic_with_fn<F>(code: &str, check_fn: F) -> Vec<Diagnostic>
-where
-    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
-{
-    check_ast_diagnostic(code, check_fn)
-}
-
 /// Run ALL diagnostics on test code.
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
@@ -315,21 +307,6 @@ where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
     check_ast_diagnostic_with_config(code, config, check_fn)
-}
-
-/// Run diagnostics on test code with custom configuration.
-///
-/// Returns only diagnostics for the specified diagnostic code.
-pub fn check_ast_diagnostic_filtered<F>(
-    code: &str,
-    diagnostic_code: crate::DiagnosticCode,
-    check_fn: F,
-) -> Vec<Diagnostic>
-where
-    F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
-{
-    let diagnostics = check_ast_diagnostic(code, check_fn);
-    diagnostics.into_iter().filter(|d| d.code == diagnostic_code).collect()
 }
 
 /// AnalysisProvider that returns custom metadata for testing metadata-based diagnostics.
