@@ -59,10 +59,6 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
     )
 }
 
-pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};

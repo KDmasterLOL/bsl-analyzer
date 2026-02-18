@@ -65,7 +65,6 @@
 //! - Reusability (same calculation for code lens)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -86,7 +85,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 #[derive(Debug, Clone)]
 struct Config {
     complexity_threshold: u32,
-    check_module_body: bool,
 }
 
 impl Config {
@@ -96,122 +94,8 @@ impl Config {
             .get_int(DiagnosticCode::CyclomaticComplexity, "complexityThreshold")
             .unwrap_or(20) as u32;
 
-        let check_module_body = ctx
-            .config
-            .get_bool(DiagnosticCode::CyclomaticComplexity, "checkModuleBody")
-            .unwrap_or(true);
-
-        Self { complexity_threshold, check_module_body }
+        Self { complexity_threshold }
     }
-}
-
-/// Main entry point for CyclomaticComplexity diagnostic.
-///
-/// Detects functions and procedures with cyclomatic complexity exceeding the threshold.
-/// Default threshold is 20 (configurable via complexityThreshold parameter).
-///
-/// Uses HIR-based complexity calculation for better performance and reusability.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CyclomaticComplexity;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = Config::from_context(ctx);
-
-    // Get ItemTree for method metadata (names, ranges)
-    let item_tree = ctx.item_tree();
-
-    // Get ModuleBodies for HIR-based complexity calculation
-    let module_bodies = ctx.module_bodies();
-
-    let mut diagnostics = Vec::new();
-
-    // Iterate over all methods in the module
-    for (idx, item) in item_tree.top_level_items().iter().enumerate() {
-        let local_id = idx as u32;
-
-        match item {
-            ModItem::Procedure(proc_idx) => {
-                let proc = item_tree.procedure(*proc_idx);
-
-                // Get HIR body and calculate complexity
-                if let Some(body) = module_bodies.body(local_id) {
-                    let complexity = hir_def::cyclomatic_complexity::calculate_complexity(body);
-
-                    if complexity > config.complexity_threshold {
-                        diagnostics.push(Diagnostic {
-                            code,
-                            message: format!(
-                                "Процедура '{}' имеет цикломатическую сложность {} (максимум: {}). \
-                                 Рассмотрите возможность упрощения или разбиения на более мелкие функции",
-                                proc.name, complexity, config.complexity_threshold
-                            ),
-                            severity: ctx.severity(code),
-                            range: proc.name_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-            ModItem::Function(func_idx) => {
-                let func = item_tree.function(*func_idx);
-
-                // Get HIR body and calculate complexity
-                if let Some(body) = module_bodies.body(local_id) {
-                    let complexity = hir_def::cyclomatic_complexity::calculate_complexity(body);
-
-                    if complexity > config.complexity_threshold {
-                        diagnostics.push(Diagnostic {
-                            code,
-                            message: format!(
-                                "Функция '{}' имеет цикломатическую сложность {} (максимум: {}). \
-                                 Рассмотрите возможность упрощения или разбиения на более мелкие функции",
-                                func.name, complexity, config.complexity_threshold
-                            ),
-                            severity: ctx.severity(code),
-                            range: func.name_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-            ModItem::Variable(_) => {}
-        }
-    }
-
-    // Check module body complexity (if enabled)
-    if config.check_module_body {
-        if let Some(module_code) = module_bodies.module_code_result() {
-            let complexity =
-                hir_def::cyclomatic_complexity::calculate_complexity(&module_code.body);
-
-            if complexity > config.complexity_threshold {
-                // Get range of first statement
-                if let Some(first_stmt_id) = module_code.body.body_stmts().next() {
-                    if let Some(range) = module_code.source_map.stmt_range(first_stmt_id) {
-                        diagnostics.push(Diagnostic {
-                            code,
-                            message: format!(
-                                "Тело модуля имеет цикломатическую сложность {} (максимум: {}). \
-                                 Рассмотрите возможность упрощения или переноса логики в функции",
-                                complexity, config.complexity_threshold
-                            ),
-                            severity: ctx.severity(code),
-                            range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
 }
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -266,7 +150,7 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::Severity;
     use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -280,7 +164,11 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
+            .collect();
         assert_eq!(diagnostics.len(), 0, "Complexity 1 should not trigger (threshold 20)");
     }
 
@@ -294,20 +182,28 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
+            .collect();
         assert_eq!(diagnostics.len(), 0, "Complexity 3 should not trigger (threshold 20)");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CyclomaticComplexityDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
+            .collect();
 
         // Java expects 1 diagnostic for function СерверныйМодульМенеджера
         assert_eq!(diagnostics.len(), 1, "Should match Java (1 diagnostic)");
 
         // Java expects diagnostic at line 0, columns 8-32 (function name)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 32);
+        assert_diagnostic_range(code, diagnostics[0], 0, 8, 32);
 
         // Verify diagnostic details
         assert_eq!(diagnostics[0].code, DiagnosticCode::CyclomaticComplexity);
@@ -329,7 +225,6 @@ mod tests {
 
     #[test]
     fn test_calculate_complexity_directly() {
-        // Test direct complexity calculation using HIR
         let code = include_str!("../../test_data/CyclomaticComplexityDiagnostic.bsl");
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
@@ -337,7 +232,6 @@ mod tests {
 
         let mut db = RootDatabaseImpl::new();
 
-        // Set up source root for module_bodies to work
         let mut file_set = FileSet::default();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
@@ -353,12 +247,9 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let module_bodies = db.module_bodies(module_id);
 
-        // Get the first method body (СерверныйМодульМенеджера)
         let body = module_bodies.body(0).expect("Should have first method body");
         let complexity = calculate_complexity(body);
 
-        // The function СерверныйМодульМенеджера has cyclomatic complexity 21
-        // This matches the Java implementation
         assert_eq!(complexity, 21, "СерверныйМодульМенеджера should have complexity 21");
     }
 }

@@ -568,6 +568,7 @@ fn emit_method_scoped_diagnostics(
     ctx: &mut LoweringCtx,
     method_name: &str,
     name_range: TextRange,
+    method_range: TextRange,
     is_function: bool,
 ) {
     use crate::body::BodyDiagnostic;
@@ -600,10 +601,24 @@ fn emit_method_scoped_diagnostics(
         });
     }
 
-    // Emit MethodSize candidate
-    // Calculate method size from body statements count (simplified)
-    // Note: Actual line-based calculation happens in check() for now
-    // HIR-based emit can use statement count as proxy
+    // Emit MethodSize candidate using line-based calculation
+    // Algorithm matches Java: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
+    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match Java's subCodeBlock
+    if let Some(ref line_index) = ctx.line_index {
+        let start_line = line_index.line_col(method_range.start()).line as usize;
+        let end_line = line_index.line_col(method_range.end()).line as usize;
+        let total_span = end_line.saturating_sub(start_line);
+        let method_size = total_span.saturating_sub(4) as u32;
+
+        if method_size > 0 {
+            ctx.emit(BodyDiagnostic::MethodSize {
+                method_name: method_name.to_string(),
+                size: method_size,
+                is_function,
+                range: name_range,
+            });
+        }
+    }
 
     // Emit NumberOfParams and NumberOfOptionalParams candidates
     let params_count = ctx.body.params.len() as u32;
@@ -629,8 +644,6 @@ fn emit_method_scoped_diagnostics(
         });
     }
 
-    // Note: NestedStatements and MethodSize require AST traversal or line counting
-    // which is better done in check() for now. HIR-based alternatives could be added later.
 }
 
 /// Compare two literals for equality (case-insensitive for strings by default).
@@ -906,7 +919,13 @@ pub fn lower_method_with_externals_and_line_index(
 
     // Emit method-scoped diagnostics (Phase 4)
     if let Some(ref token) = name_token {
-        emit_method_scoped_diagnostics(&mut ctx, token.text(), token.text_range(), is_function);
+        emit_method_scoped_diagnostics(
+            &mut ctx,
+            token.text(),
+            token.text_range(),
+            method_node.text_range(),
+            is_function,
+        );
     }
 
     // Collect referenced externals

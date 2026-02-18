@@ -46,12 +46,10 @@
 //!
 //! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
-use crate::utils::literal_context;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::MagicNumberContext;
 use ide_db::TextRange;
 use std::collections::HashSet;
-use syntax::{SyntaxKind, SyntaxToken};
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -187,230 +185,40 @@ impl Config {
     }
 }
 
-/// Check if token is a numeric literal (DECIMAL or FLOAT)
-fn is_numeric_literal(token: &SyntaxToken) -> bool {
-    matches!(token.kind(), SyntaxKind::DECIMAL | SyntaxKind::FLOAT)
-}
-
-/// Extract number text from token
-fn extract_number_text(token: &SyntaxToken) -> String {
-    token.text().to_string()
-}
-
 /// Check if number is in authorized list
 fn is_authorized(number: &str, config: &Config) -> bool {
     config.authorized_numbers.contains(number)
 }
 
-/// Check if number is a simple value (not in a complex expression) that should be excluded
-/// This mimics Java's getExpression() logic which returns empty for certain AST patterns
-fn should_exclude_simple_value(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-    let mut in_binary_expr = false;
-    let mut in_arg_list_or_ternary = false;
-    let mut in_assign_rhs = false;
-
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::BINARY_EXPR {
-            in_binary_expr = true;
-        }
-
-        if matches!(current.kind(), SyntaxKind::ARG_LIST | SyntaxKind::TERNARY_EXPR) {
-            in_arg_list_or_ternary = true;
-        }
-
-        if current.kind() == SyntaxKind::ASSIGN_STMT {
-            in_assign_rhs = true;
-        }
-
-        if matches!(current.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF) {
-            break;
-        }
-
-        node = current.parent();
-    }
-
-    // Exclude if: in ARG_LIST or TERNARY_EXPR, NOT in BINARY_EXPR, and IN an assignment
-    // This matches the pattern for `?(cond, val1, val2)` where val1 and val2 are excluded
-    // but `.Добавить(2)` is NOT excluded (because it's not in an assignment)
-    in_arg_list_or_ternary && !in_binary_expr && in_assign_rhs
-}
-
-/// Check if token should be excluded (in special contexts)
-fn is_excluded_context(token: &SyntaxToken, config: &Config) -> bool {
-    let in_array_index = is_in_array_index_access(token);
-
-    if in_array_index {
-        if config.allow_magic_indexes {
-            return true; // Always exclude if allowed
-        }
-        // If not allowed (allowMagicIndexes = false), always detect array indexes
-        // This includes both standalone and inside function calls:
-        // - Индекс = Массив[20] - should be detected
-        // - Метод(Индексы[21]) - should ALSO be detected
-        // Return false immediately to skip other exclusion checks
-        return false;
-    }
-
-    // Only check other exclusions if NOT in array index
-    // (or if in array index with allowMagicIndexes=true, we already returned above)
-
-    // Exclude simple values in certain contexts (like ternary operator branches)
-    // ?(condition, true_val, false_val) - the true_val and false_val should be excluded
-    // But NOT standalone calls like .Добавить(2)
-    if should_exclude_simple_value(token) {
-        return true;
-    }
-
-    literal_context::is_in_default_value(token)
-        || is_in_structure_or_correspondence_insert(token)
-        || literal_context::is_in_structure_constructor(token, &["соответствие", "map"])
-        || is_in_excluded_constructor(token, config)
-        || literal_context::is_in_property_assignment(token)
-        || literal_context::is_in_simple_assignment(token)
-}
-
-
-/// Check if inside Structure.Insert() or Correspondence.Insert()
-fn is_in_structure_or_correspondence_insert(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-
-    while let Some(current) = node {
-        if matches!(current.kind(), SyntaxKind::CALL_STMT | SyntaxKind::CALL_EXPR) {
-            if let Some(method_name) = literal_context::find_method_name(&current) {
-                let name = method_name.to_lowercase();
-                if name == "вставить" || name == "insert" {
-                    return true;
-                }
-            }
-        }
-        node = current.parent();
-    }
-
-    false
-}
-
-/// Check if inside excluded constructor: Новый КвалификаторыЧисла(10, 2) etc.
-/// Excludes all numeric parameters in constructors from excludedConstructors list.
-fn is_in_excluded_constructor(token: &SyntaxToken, config: &Config) -> bool {
-    if config.excluded_constructors.is_empty() {
-        return false;
-    }
-
-    let mut node = token.parent();
-
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::NEW_EXPR {
-            // Extract type name (IDENT after "Новый"/"New")
-            for element in current.children_with_tokens() {
-                if let Some(t) = element.as_token() {
-                    if t.kind() == SyntaxKind::IDENT {
-                        let type_name = t.text().to_lowercase();
-                        if config.excluded_constructors.contains(&type_name) {
-                            return true;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        node = current.parent();
-    }
-
-    false
-}
-
-/// Check if in array index access: Массив[20], Коллекция.Индексы[20]
-fn is_in_array_index_access(token: &SyntaxToken) -> bool {
-    let mut node = token.parent();
-    while let Some(current) = node {
-        if current.kind() == SyntaxKind::INDEX_EXPR {
-            return true;
-        }
-        node = current.parent();
-    }
-    false
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("MagicNumber::check").entered();
-
-    let code = DiagnosticCode::MagicNumber;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = Config::from_context(ctx);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if !is_numeric_literal(&token) {
-                continue;
-            }
-
-            let number_str = extract_number_text(&token);
-
-            if is_authorized(&number_str, &config) {
-                continue;
-            }
-
-            if is_excluded_context(&token, &config) {
-                continue;
-            }
-
-            diagnostics.push(Diagnostic {
-                code,
-                message: format!(
-                    "Магическое число {}. Замените число на константу с понятным названием.",
-                    number_str
-                ),
-                severity: ctx.severity(code),
-                range: token.text_range(),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
-    }
-
-    tracing::debug!(count = diagnostics.len(), "MagicNumber diagnostics found");
-
-    diagnostics
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
+        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
+
+    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
+        diagnostics.iter().filter(|d| d.code == DiagnosticCode::MagicNumber).collect()
+    }
+
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/MagicNumberDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Java expects 10 diagnostics with default config
-        // Both issues fixed:
-        // - Line 8 ternary `3` is now excluded (using TERNARY_EXPR detection)
-        // - Line 51 `Метод(Индексы[21])` is now excluded (parser fixed to create INDEX_EXPR)
-        assert_eq!(diagnostics.len(), 10, "Must match Java (10 diagnostics)");
+        assert_eq!(diags.len(), 10, "Must match Java (10 diagnostics)");
 
-        // Verify exact positions (0-indexed) - all 10 diagnostics
-        assert_diagnostic_range(code, &diagnostics[0], 3, 18, 20); // 60
-        assert_diagnostic_range(code, &diagnostics[1], 3, 23, 25); // 60
-        assert_diagnostic_range(code, &diagnostics[2], 7, 31, 33); // 11
-        assert_diagnostic_range(code, &diagnostics[3], 11, 20, 21); // 4
-        assert_diagnostic_range(code, &diagnostics[4], 20, 21, 23); // 11
-        assert_diagnostic_range(code, &diagnostics[5], 23, 24, 26); // 14
-        assert_diagnostic_range(code, &diagnostics[6], 27, 34, 35); // 7
-        assert_diagnostic_range(code, &diagnostics[7], 33, 37, 38); // 2
-        assert_diagnostic_range(code, &diagnostics[8], 34, 37, 38); // 3
-        assert_diagnostic_range(code, &diagnostics[9], 44, 12, 14); // 12
+        assert_diagnostic_range(code, diags[0], 3, 18, 20); // 60
+        assert_diagnostic_range(code, diags[1], 3, 23, 25); // 60
+        assert_diagnostic_range(code, diags[2], 7, 31, 33); // 11
+        assert_diagnostic_range(code, diags[3], 11, 20, 21); // 4
+        assert_diagnostic_range(code, diags[4], 20, 21, 23); // 11
+        assert_diagnostic_range(code, diags[5], 23, 24, 26); // 14
+        assert_diagnostic_range(code, diags[6], 27, 34, 35); // 7
+        assert_diagnostic_range(code, diags[7], 33, 37, 38); // 2
+        assert_diagnostic_range(code, diags[8], 34, 37, 38); // 3
+        assert_diagnostic_range(code, diags[9], 44, 12, 14); // 12
     }
 
     #[test]
@@ -423,12 +231,12 @@ mod tests {
     Г = 2;  // Not authorized
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Should only detect 2 (not -1, 0, 1 which are authorized by default)
         assert_eq!(
-            diagnostics.len(),
-            0, // 2 is simple assignment, excluded
+            diags.len(),
+            0,
             "Should detect no numbers (2 is excluded by simple assignment)"
         );
     }
@@ -440,10 +248,10 @@ mod tests {
     Индекс = Массив[20];
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Should NOT detect with default config (allowMagicIndexes = true)
-        assert_eq!(diagnostics.len(), 0, "Array index should be excluded");
+        assert_eq!(diags.len(), 0, "Array index should be excluded");
     }
 
     #[test]
@@ -462,11 +270,11 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diags = filter(&all);
 
-        // Should detect both with allowMagicIndexes = false
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             2,
             "Array index should be detected when allowMagicIndexes = false"
         );
@@ -483,19 +291,17 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diags = filter(&all);
 
-        // Java expects 12 diagnostics with allowMagicIndexes = false
-        // (10 from default + 2 from array indexes on lines 50-51)
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             12,
             "Must match Java (12 diagnostics with allowMagicIndexes=false)"
         );
 
-        // Verify the 2 extra diagnostics are the array indexes
-        assert_diagnostic_range(code, &diagnostics[10], 49, 32, 34); // Line 50: Индекс1 = Коллекция.Индексы[20];
-        assert_diagnostic_range(code, &diagnostics[11], 50, 18, 20); // Line 51: Метод(Индексы[21])
+        assert_diagnostic_range(code, diags[10], 49, 32, 34);
+        assert_diagnostic_range(code, diags[11], 50, 18, 20);
     }
 
     #[test]
@@ -505,9 +311,10 @@ mod tests {
     Возврат 12;
 КонецФункции
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 1, "Return statement should NOT be excluded");
+        assert_eq!(diags.len(), 1, "Return statement should NOT be excluded");
     }
 
     #[test]
@@ -519,9 +326,10 @@ mod tests {
     НоваяСтруктура.Вставить("ДругаяПеременная", 42);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 0, "Structure.Insert() values should be excluded");
+        assert_eq!(diags.len(), 0, "Structure.Insert() values should be excluded");
     }
 
     #[test]
@@ -532,9 +340,10 @@ mod tests {
     Структура2 = Новый ФиксированнаяСтруктура("Значение", 200);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 0, "Structure constructor values should be excluded");
+        assert_eq!(diags.len(), 0, "Structure constructor values should be excluded");
     }
 
     #[test]
@@ -545,9 +354,10 @@ mod tests {
     СтруктураСПолями.МояПеременная = 20;
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 0, "Property assignment values should be excluded");
+        assert_eq!(diags.len(), 0, "Property assignment values should be excluded");
     }
 
     #[test]
@@ -556,9 +366,10 @@ mod tests {
 Процедура А(А = 566)
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 0, "Default parameter values should be excluded");
+        assert_eq!(diags.len(), 0, "Default parameter values should be excluded");
     }
 
     #[test]
@@ -578,16 +389,14 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diags = filter(&all);
 
-        // All numbers are authorized
-        assert_eq!(diagnostics.len(), 0, "All numbers should be authorized with custom config");
+        assert_eq!(diags.len(), 0, "All numbers should be authorized with custom config");
     }
 
     #[test]
     fn test_simple_assignment_with_meaningful_name() {
-        // Пример 1: простое присваивание переменной с понятным именем
-        // Не должно быть магии - название переменной объясняет значение
         let code = r"
 Процедура Тест()
     ДлительностьОперации = 120;
@@ -595,11 +404,11 @@ mod tests {
     ТаймаутСоединения = 30;
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Все числа в простых присваиваниях - исключаются
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "Simple assignments to meaningfully named variables should not be detected"
         );
@@ -607,8 +416,6 @@ mod tests {
 
     #[test]
     fn test_structure_insert_with_meaningful_key() {
-        // Примеры 2 и 3: вставка в структуру с понятным ключом
-        // Не должно быть магии - ключ структуры объясняет значение
         let code = r#"
 Процедура Тест()
     Параметры = Новый Структура;
@@ -620,11 +427,11 @@ mod tests {
     Сессия.Вставить("ПериодПроверки", 15);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Все числа в .Вставить() - исключаются
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "Structure.Insert() with meaningful keys should not be detected"
         );
@@ -632,7 +439,6 @@ mod tests {
 
     #[test]
     fn test_property_assignment_with_meaningful_name() {
-        // Присваивание свойству структуры с понятным именем
         let code = r#"
 Процедура Тест()
     Настройки = Новый Структура("Таймаут, Повторы");
@@ -640,11 +446,11 @@ mod tests {
     Настройки.Повторы = 5;
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Присваивания свойствам - исключаются
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "Property assignments with meaningful names should not be detected"
         );
@@ -652,39 +458,38 @@ mod tests {
 
     #[test]
     fn test_magic_numbers_in_expressions() {
-        // Числа в выражениях ДОЛЖНЫ детектироваться
         let code = r"
 Процедура Тест()
-    СекундВЧасе = 60 * 60; // магия - 60
-    Результат = Значение + 25; // магия - 25
-    Если Счетчик > 100 Тогда // магия - 100
-        Возврат 12; // магия - 12
+    СекундВЧасе = 60 * 60;
+    Результат = Значение + 25;
+    Если Счетчик > 100 Тогда
+        Возврат 12;
     КонецЕсли;
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // Должны быть обнаружены: 60 (дважды), 25, 100, 12 = 5 диагностик
         assert!(
-            diagnostics.len() >= 4,
+            diags.len() >= 4,
             "Magic numbers in expressions should be detected, found {}",
-            diagnostics.len()
+            diags.len()
         );
     }
 
     #[test]
     fn test_excluded_constructors_number_qualifiers() {
-        // КвалификаторыЧисла - параметры самодокументируемы (длина, точность)
         let code = r"
 Процедура Тест()
     Квалификатор = Новый КвалификаторыЧисла(10, 2);
     Квалификатор2 = Новый КвалификаторыЧисла(15, 3, ДопустимыйЗнак.Любой);
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "NumberQualifiers constructor params should be excluded by default"
         );
@@ -692,17 +497,17 @@ mod tests {
 
     #[test]
     fn test_excluded_constructors_string_qualifiers() {
-        // КвалификаторыСтроки - параметры самодокументируемы (длина)
         let code = r"
 Процедура Тест()
     Квалификатор = Новый КвалификаторыСтроки(100);
     Квалификатор2 = Новый КвалификаторыСтроки(255, ДопустимаяДлина.Переменная);
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "StringQualifiers constructor params should be excluded by default"
         );
@@ -710,22 +515,20 @@ mod tests {
 
     #[test]
     fn test_excluded_constructors_english_names() {
-        // English names should also work
         let code = r"
 Процедура Тест()
     Qualifier = New NumberQualifiers(10, 2);
     StrQualifier = New StringQualifiers(100);
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        assert_eq!(diagnostics.len(), 0, "English constructor names should be excluded by default");
+        assert_eq!(diags.len(), 0, "English constructor names should be excluded by default");
     }
 
     #[test]
     fn test_excluded_constructors_custom_list() {
-        // Пользователь может добавить свои конструкторы
-        // Используем вызов метода чтобы избежать simple assignment exclusion
         let code = r"
 Процедура Тест()
     МетодОбработки(Новый Массив(100));
@@ -733,12 +536,11 @@ mod tests {
 КонецПроцедуры
         ";
 
-        // По умолчанию Массив НЕ исключён, но КвалификаторыЧисла исключён
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Array constructor should NOT be excluded by default");
-        assert!(diagnostics[0].message.contains("100"), "Should detect 100 in Array");
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1, "Array constructor should NOT be excluded by default");
+        assert!(diags[0].message.contains("100"), "Should detect 100 in Array");
 
-        // С кастомным списком - Массив тоже исключён
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::MagicNumber,
@@ -747,14 +549,13 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 0, "Array constructor should be excluded with custom config");
+        let all2 = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diags2 = filter(&all2);
+        assert_eq!(diags2.len(), 0, "Array constructor should be excluded with custom config");
     }
 
     #[test]
     fn test_excluded_constructors_empty_disables() {
-        // Пустой список отключает исключение конструкторов
-        // Используем вызов метода чтобы избежать simple assignment exclusion
         let code = r"
 Процедура Тест()
     МетодОбработки(Новый КвалификаторыЧисла(10, 2));
@@ -769,9 +570,10 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diags = filter(&all);
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             2,
             "Empty excludedConstructors should detect all numbers in constructors"
         );
@@ -787,9 +589,10 @@ mod tests {
     ТаблицаДанных.Колонки.Добавить("ОстаткиПоУчету", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(10, 2)));
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
         assert_eq!(
-            diagnostics.len(),
+            diags.len(),
             0,
             "Numbers inside КвалификаторыЧисла in column definitions should be excluded"
         );
@@ -797,8 +600,6 @@ mod tests {
 
     #[test]
     fn test_other_constructors_not_excluded() {
-        // Другие конструкторы НЕ должны исключаться
-        // Используем вызов метода чтобы избежать simple assignment exclusion
         let code = r"
 Процедура Тест()
     МетодОбработки(Новый Массив(100));
@@ -806,9 +607,9 @@ mod tests {
     Список.Добавить(42);
 КонецПроцедуры
         ";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
 
-        // 100 в Массив и 42 в Добавить должны детектироваться
-        assert_eq!(diagnostics.len(), 2, "Non-excluded constructors should be detected");
+        assert_eq!(diags.len(), 2, "Non-excluded constructors should be detected");
     }
 }

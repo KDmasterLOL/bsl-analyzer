@@ -95,13 +95,6 @@ pub fn from_hir(
     })
 }
 
-pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // All diagnostics are now collected during HIR lowering
-    // This function is kept for compatibility with existing diagnostic infrastructure
-    // Real diagnostics are emitted via from_hir() dispatch in lib.rs
-    Vec::new()
-}
-
 fn get_message_and_replacement(name: &str, kind: &DeprecatedKind8312) -> (String, String) {
     let lower = name.to_lowercase();
     let is_russian = lower.chars().any(|c| c as u32 > 127);

@@ -484,23 +484,9 @@ fn check_text(
     }
 }
 
-/// Wrapper function for testing
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    diagnostics
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_ast_diagnostic_with_config;
+    use crate::test_utils::check_hir_diagnostic_with_config;
     use crate::{DiagnosticCode, DiagnosticsConfig};
 
     /// Helper to create config with Typo explicitly enabled (since it's disabled by default).
@@ -515,7 +501,8 @@ mod tests {
         let code = include_str!("../test_data/TypoDiagnostic.bsl");
 
         let config = config_with_typo_enabled();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
 
         assert!(diagnostics.len() >= 3, "Should detect at least 3 typos (Атмена, Варинаты, ыть)");
     }
@@ -532,7 +519,8 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
 
         assert!(
             diagnostics.len() >= 2,
@@ -552,7 +540,8 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
 
         let has_varinaty = diagnostics.iter().any(|d| d.message.contains("Варинаты"));
         assert!(!has_varinaty, "Should NOT detect 'Варинаты' (in user ignore list)");
@@ -571,7 +560,8 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
 
         let has_varinaty = diagnostics.iter().any(|d| d.message.contains("Варинаты"));
         assert!(

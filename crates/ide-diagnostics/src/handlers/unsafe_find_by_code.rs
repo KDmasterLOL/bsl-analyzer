@@ -23,8 +23,6 @@
 
 use bsl_metadata::{CodeSeries, MdoType};
 use ide_db::TextRange;
-use syntax::SyntaxKind;
-
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
@@ -86,134 +84,6 @@ pub fn from_hir(
         tags: ctx.tags(code),
         fixes: vec![],
     })
-}
-
-const FIND_BY_CODE_METHODS: &[&str] = &["найтипокоду", "findbycode"];
-
-const CATALOG_MANAGERS: &[&str] = &["справочники", "catalogs"];
-const CHART_OF_CHARACTERISTIC_TYPES_MANAGERS: &[&str] =
-    &["планывидовхарактеристик", "chartsofcharacteristictypes"];
-const CHART_OF_ACCOUNTS_MANAGERS: &[&str] = &["планысчетов", "chartsofaccounts"];
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::UnsafeFindByCode;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = match ctx.load_configuration() {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-
-    let root = ctx.parse().syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
-
-        // CALL_EXPR structure: <receiver>.Method(args)
-        // First child is the callee expression (FIELD_EXPR for method calls)
-        let Some(callee) = node.first_child() else {
-            continue;
-        };
-
-        if callee.kind() != SyntaxKind::FIELD_EXPR {
-            continue;
-        }
-
-        // FIELD_EXPR structure: receiver . field
-        // Get the method name (last IDENT token)
-        let Some(method_name_token) = callee
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
-            .last()
-        else {
-            continue;
-        };
-
-        let method_name_lower = method_name_token.text().to_lowercase();
-        if !FIND_BY_CODE_METHODS.contains(&method_name_lower.as_str()) {
-            continue;
-        }
-
-        // Get the receiver part (first child of FIELD_EXPR)
-        let Some(receiver) = callee.first_child() else {
-            continue;
-        };
-
-        // Receiver should be another FIELD_EXPR: Manager.Object
-        if receiver.kind() != SyntaxKind::FIELD_EXPR {
-            continue;
-        }
-
-        // Extract object name (last IDENT in receiver FIELD_EXPR)
-        let Some(object_name_token) = receiver
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
-            .last()
-        else {
-            continue;
-        };
-        let object_name = object_name_token.text().to_string();
-
-        // Get manager expression (first child of receiver FIELD_EXPR)
-        let Some(manager_node) = receiver.first_child() else {
-            continue;
-        };
-
-        // Extract manager name (should be an IDENT-like expression)
-        let manager_name = extract_ident_text(&manager_node);
-        let Some(manager_name) = manager_name else {
-            continue;
-        };
-        let manager_lower = manager_name.to_lowercase();
-
-        let mdo_type = if CATALOG_MANAGERS.contains(&manager_lower.as_str()) {
-            MdoType::Catalog
-        } else if CHART_OF_CHARACTERISTIC_TYPES_MANAGERS.contains(&manager_lower.as_str()) {
-            MdoType::ChartOfCharacteristicTypes
-        } else if CHART_OF_ACCOUNTS_MANAGERS.contains(&manager_lower.as_str()) {
-            MdoType::ChartOfAccounts
-        } else {
-            continue;
-        };
-
-        let Some(mdo) = config.find_metadata_object(mdo_type, &object_name) else {
-            continue;
-        };
-
-        if !mdo.is_find_by_code_safe() {
-            let range = method_name_token.text_range();
-            let message = build_message(mdo_type, &object_name, mdo.check_unique, mdo.code_series);
-
-            diagnostics.push(Diagnostic {
-                code,
-                message,
-                range,
-                severity: ctx.severity(code),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
-    }
-
-    diagnostics
-}
-
-fn extract_ident_text(node: &syntax::SyntaxNode) -> Option<String> {
-    // For simple identifiers, the node itself contains the token
-    if let Some(token) = node.first_token() {
-        if token.kind() == SyntaxKind::IDENT {
-            return Some(token.text().to_string());
-        }
-    }
-    None
 }
 
 fn build_message(
@@ -286,7 +156,8 @@ mod tests {
             file_set: None,
         };
 
-        let diagnostics = check(&ctx);
+        let all = crate::diagnostics(&ctx);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
         assert!(diagnostics.is_empty(), "Disabled diagnostic should return empty");
     }
 
@@ -324,7 +195,8 @@ mod tests {
             file_set: None,
         };
 
-        let diagnostics = check(&ctx);
+        let all = crate::diagnostics(&ctx);
+        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
         assert!(diagnostics.is_empty(), "No configuration should return empty diagnostics");
     }
 

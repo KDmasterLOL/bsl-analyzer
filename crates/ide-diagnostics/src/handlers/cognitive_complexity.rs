@@ -84,7 +84,6 @@
 //! - Reusability (same calculation for code lens)
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -116,88 +115,6 @@ impl Config {
 
         Self { complexity_threshold }
     }
-}
-
-/// Main entry point for CognitiveComplexity diagnostic.
-///
-/// Detects functions and procedures with cognitive complexity exceeding the threshold.
-/// Default threshold is 15 (configurable via complexityThreshold parameter).
-///
-/// Uses HIR-based complexity calculation for better performance and reusability.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::CognitiveComplexity;
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = Config::from_context(ctx);
-
-    // Get ItemTree for method metadata (names, ranges)
-    let item_tree = ctx.item_tree();
-
-    // Get ModuleBodies for HIR-based complexity calculation
-    let module_bodies = ctx.module_bodies();
-
-    let mut diagnostics = Vec::new();
-
-    // Iterate over all methods in the module
-    for (idx, item) in item_tree.top_level_items().iter().enumerate() {
-        let local_id = idx as u32;
-
-        match item {
-            ModItem::Procedure(proc_idx) => {
-                let proc = item_tree.procedure(*proc_idx);
-
-                // Get HIR body and calculate complexity
-                if let Some(body) = module_bodies.body(local_id) {
-                    let complexity = hir_def::cognitive_complexity::calculate_complexity(body);
-
-                    if complexity > config.complexity_threshold {
-                        diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::CognitiveComplexity,
-                            message: format!(
-                                "Процедура '{}' имеет когнитивную сложность {} (максимум: {}). \
-                                 Упростите логику или уменьшите вложенность",
-                                proc.name, complexity, config.complexity_threshold
-                            ),
-                            severity: ctx.severity(code),
-                            range: proc.name_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-            ModItem::Function(func_idx) => {
-                let func = item_tree.function(*func_idx);
-
-                // Get HIR body and calculate complexity
-                if let Some(body) = module_bodies.body(local_id) {
-                    let complexity = hir_def::cognitive_complexity::calculate_complexity(body);
-
-                    if complexity > config.complexity_threshold {
-                        diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::CognitiveComplexity,
-                            message: format!(
-                                "Функция '{}' имеет когнитивную сложность {} (максимум: {}). \
-                                 Упростите логику или уменьшите вложенность",
-                                func.name, complexity, config.complexity_threshold
-                            ),
-                            severity: ctx.severity(code),
-                            range: func.name_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-            }
-            ModItem::Variable(_) => {
-                // Variables don't have cognitive complexity
-            }
-        }
-    }
-
-    diagnostics
 }
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -252,7 +169,7 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config};
     use crate::{DiagnosticsConfig, Severity};
     use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -266,7 +183,11 @@ mod tests {
     Возврат Параметр + 1;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
         assert_eq!(diagnostics.len(), 0, "Simple function should have complexity 0");
     }
 
@@ -281,7 +202,11 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
         assert_eq!(diagnostics.len(), 0, "Complexity should be 1 + 2 = 3, below default threshold");
     }
 
@@ -300,7 +225,11 @@ mod tests {
     Возврат 0;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
         assert_eq!(
             diagnostics.len(),
             0,
@@ -322,7 +251,11 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
         assert_eq!(
             diagnostics.len(),
             0,
@@ -340,25 +273,6 @@ mod tests {
     КонецЕсли;
 КонецФункции"#;
 
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-
-        // Set up source root for module_bodies to work
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let mut config = DiagnosticsConfig::default();
         let mut params = serde_json::Map::new();
         params.insert("complexityThreshold".to_string(), serde_json::Value::Number(2.into()));
@@ -366,31 +280,29 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
 
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
-
-        let diagnostics = check(&ctx);
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
         assert_eq!(diagnostics.len(), 1, "Complexity is 3 (1 + 2), should exceed threshold of 2");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CognitiveComplexityDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+            .collect();
 
         // Java expects 1 diagnostic for function СерверныйМодульМенеджера
         assert_eq!(diagnostics.len(), 1, "Should match Java implementation (1 diagnostic)");
 
         // Java expects diagnostic at line 0, columns 8-32 (function name)
-        assert_diagnostic_range(code, &diagnostics[0], 0, 8, 32);
+        assert_diagnostic_range(code, diagnostics[0], 0, 8, 32);
 
         // Verify diagnostic details
         assert_eq!(diagnostics[0].code, DiagnosticCode::CognitiveComplexity);
@@ -412,7 +324,6 @@ mod tests {
 
     #[test]
     fn test_calculate_complexity_directly() {
-        // Test direct complexity calculation using HIR
         let code = include_str!("../../test_data/CognitiveComplexityDiagnostic.bsl");
         let fixture_text = format!("//- /test.bsl\n{}", code);
         let fixture = Fixture::parse(&fixture_text);
@@ -420,7 +331,6 @@ mod tests {
 
         let mut db = RootDatabaseImpl::new();
 
-        // Set up source root for module_bodies to work
         let mut file_set = FileSet::default();
         file_set.insert(file_id, VfsPath::new("/test.bsl"));
         let source_root = SourceRoot::new_local(file_set);
@@ -436,12 +346,9 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let module_bodies = db.module_bodies(module_id);
 
-        // Get the first method body (СерверныйМодульМенеджера)
         let body = module_bodies.body(0).expect("Should have first method body");
         let complexity = calculate_complexity(body);
 
-        // The function СерверныйМодульМенеджера has 82 cognitive complexity
-        // This matches the Java implementation and Rust reference
         assert_eq!(complexity, 82, "СерверныйМодульМенеджера should have complexity 82");
     }
 }

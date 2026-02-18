@@ -80,14 +80,6 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
     )
 }
 
-/// Legacy check function - now uses HIR diagnostics.
-pub fn check(_ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // All diagnostics are now collected during HIR lowering
-    // This function is kept for compatibility with existing diagnostic infrastructure
-    // Real diagnostics are emitted via from_hir() dispatch in lib.rs
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

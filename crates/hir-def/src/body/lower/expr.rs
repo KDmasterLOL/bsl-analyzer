@@ -1761,6 +1761,17 @@ fn check_write_log_event_call(ctx: &mut LoweringCtx, node: &SyntaxNode) {
     let has_detail_error_description =
         args.get(4).and_then(|a| a.as_ref()).map(has_detail_error_description).unwrap_or(false);
 
+    // If direct check failed and we're in except, try resolving variable assignment
+    let has_detail_error_description = if !has_detail_error_description && ctx.in_except_block {
+        if let Some(comment_arg) = args.get(4).and_then(|a| a.as_ref()) {
+            resolve_comment_in_except_block(comment_arg, node).unwrap_or_default()
+        } else {
+            false
+        }
+    } else {
+        has_detail_error_description
+    };
+
     ctx.diagnostics.push(BodyDiagnostic::UsageWriteLogEvent {
         in_except_block: ctx.in_except_block,
         arg_count,
@@ -1807,9 +1818,16 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
 }
 
 /// Check if argument contains Error log level value.
+///
+/// Two-phase heuristic matching Java:
+/// 1. If it's an EventLogLevel enum reference, check for Error variant
+/// 2. For non-literal expressions (variables, function calls) → assume OK (return true)
 fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
     let text = arg.text().to_string().to_lowercase();
-    text.contains("ошибка") || text.contains("error")
+    if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel") {
+        return text.contains("ошибка") || text.contains("error");
+    }
+    true
 }
 
 /// Check if argument contains DetailErrorDescription(ErrorInfo()).
@@ -1817,6 +1835,52 @@ fn has_detail_error_description(arg: &SyntaxNode) -> bool {
     let text = arg.text().to_string().to_lowercase();
     (text.contains("подробноепредставлениеошибки") || text.contains("detailerrordescription"))
         && (text.contains("информацияобошибке") || text.contains("errorinfo"))
+}
+
+/// When the 5th arg is a variable, search the enclosing EXCEPT_CLAUSE for
+/// assignments to that variable. Check if the assignment RHS contains
+/// ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()).
+///
+/// Returns:
+/// - `Some(true)` — found assignment with DetailErrorDescription, or no assignment in except
+/// - `Some(false)` — found assignment WITHOUT DetailErrorDescription
+/// - `None` — not a simple variable or no except context
+fn resolve_comment_in_except_block(arg: &SyntaxNode, call_node: &SyntaxNode) -> Option<bool> {
+    let arg_text = arg.text().to_string();
+    let var_name = arg_text.trim();
+    if var_name.is_empty() || !var_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let var_name = var_name.to_lowercase();
+
+    let except_clause = call_node
+        .ancestors()
+        .find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)?;
+
+    let stmt_list = except_clause
+        .children()
+        .find(|n| n.kind() == SyntaxKind::STMT_LIST)?;
+
+    for child in stmt_list.children() {
+        if child.kind() == SyntaxKind::ASSIGN_STMT {
+            let lhs_node = match child.children().next() {
+                Some(n) => n,
+                None => continue,
+            };
+            let lhs_name = lhs_node.text().to_string().trim().to_lowercase();
+            if lhs_name == var_name {
+                let rhs_text = child.text().to_string().to_lowercase();
+                let has_detail = (rhs_text.contains("подробноепредставлениеошибки")
+                    || rhs_text.contains("detailerrordescription"))
+                    && (rhs_text.contains("информацияобошибке")
+                        || rhs_text.contains("errorinfo"));
+                return Some(has_detail);
+            }
+        }
+    }
+
+    // No assignment in except block → assume OK (matches Java)
+    Some(true)
 }
 
 /// Extract type name from first string argument of Новый("ТипОбъекта", ...).

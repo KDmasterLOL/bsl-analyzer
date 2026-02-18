@@ -39,7 +39,6 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::Name;
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode};
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -83,255 +82,128 @@ pub fn from_hir(
     })
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::UseLessForEach;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let symbol_tree = ctx.symbol_tree();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::FOR_EACH_STMT {
-            continue;
-        }
-
-        if let Some(diag) = check_for_each(&node, &symbol_tree, ctx) {
-            diagnostics.push(diag);
-        }
-    }
-
-    diagnostics
-}
-
-fn check_for_each(
-    node: &SyntaxNode,
-    symbol_tree: &hir_def::SymbolTree,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    let code = DiagnosticCode::UseLessForEach;
-
-    let (iterator_name, iterator_range) = get_iterator_info(node)?;
-
-    if symbol_tree.find_variable(&Name::new(&iterator_name)).is_some() {
-        return None;
-    }
-
-    let stmt_list = find_stmt_list(node)?;
-    let has_valid_usage = check_iterator_usage(&stmt_list, &iterator_name);
-
-    if !has_valid_usage {
-        return Some(Diagnostic {
-            code,
-            message: "Итератор не используется в теле цикла".to_string(),
-            severity: ctx.severity(code),
-            range: iterator_range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
-
-    None
-}
-
-fn get_iterator_info(for_each_node: &SyntaxNode) -> Option<(String, TextRange)> {
-    let mut found_each = false;
-
-    for element in for_each_node.children_with_tokens() {
-        match element.kind() {
-            SyntaxKind::KW_EACH => {
-                found_each = true;
-            }
-            SyntaxKind::IDENT if found_each => {
-                if let Some(token) = element.into_token() {
-                    return Some((token.text().to_string(), token.text_range()));
-                }
-            }
-            SyntaxKind::KW_IN => {
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn find_stmt_list(for_each_node: &SyntaxNode) -> Option<SyntaxNode> {
-    for_each_node.children().find(|child| child.kind() == SyntaxKind::STMT_LIST)
-}
-
-fn check_iterator_usage(stmt_list: &SyntaxNode, iterator_name: &str) -> bool {
-    let iterator_lower = iterator_name.to_lowercase();
-
-    for descendant in stmt_list.descendants_with_tokens() {
-        if let Some(token) = descendant.into_token() {
-            if token.kind() == SyntaxKind::IDENT
-                && token.text().to_lowercase() == iterator_lower
-                && is_valid_usage(&token)
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn is_valid_usage(token: &syntax::SyntaxToken) -> bool {
-    !is_direct_function_call(token)
-}
-
-fn is_direct_function_call(token: &syntax::SyntaxToken) -> bool {
-    let Some(ident_node) = token.parent() else {
-        return false;
-    };
-
-    let Some(parent) = ident_node.parent() else {
-        return false;
-    };
-
-    if parent.kind() == SyntaxKind::CALL_EXPR {
-        return is_direct_callee_node(&ident_node, &parent);
-    }
-
-    if parent.kind() == SyntaxKind::CALL_STMT {
-        for child in parent.children() {
-            if child.kind() == SyntaxKind::CALL_EXPR {
-                return is_direct_callee_node(&ident_node, &child);
-            }
-        }
-    }
-
-    false
-}
-
-fn is_direct_callee_node(ident_node: &SyntaxNode, call_expr: &SyntaxNode) -> bool {
-    if let Some(first_child) = call_expr.first_child() {
-        if first_child.text_range() == ident_node.text_range() {
-            for child in call_expr.children() {
-                if child.kind() == SyntaxKind::FIELD_EXPR {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
 
-    use super::check;
+    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
+        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect()
+    }
 
     #[test]
     fn test_unused_iterator() {
         let code = r#"
-Для Каждого Итератор Из Коллекция Цикл
-    Итератор();
-КонецЦикла;
+Процедура Тест()
+    Для Каждого Итератор Из Коллекция Цикл
+        Итератор();
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, DiagnosticCode::UseLessForEach);
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagnosticCode::UseLessForEach);
     }
 
     #[test]
     fn test_used_in_method_call() {
         let code = r#"
-Для Каждого А Из Б Цикл
-    КакойТОМетод(а);
-КонецЦикла;
+Процедура Тест()
+    Для Каждого А Из Б Цикл
+        КакойТОМетод(а);
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Iterator passed to method should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Iterator passed to method should count as usage");
     }
 
     #[test]
     fn test_used_in_assignment() {
         let code = r#"
-Для Каждого А Из Б Цикл
-    В = А;
-КонецЦикла;
+Процедура Тест()
+    Для Каждого А Из Б Цикл
+        В = А;
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(
-            diagnostics.len(),
-            0,
-            "Iterator in right side of assignment should count as usage"
-        );
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Iterator in right side of assignment should count as usage");
     }
 
     #[test]
     fn test_iterator_assigned() {
         let code = r#"
-Для Каждого А Из Б Цикл
-    А = Истина;
-КонецЦикла;
+Процедура Тест()
+    Для Каждого А Из Б Цикл
+        А = Истина;
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Iterator assigned should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Iterator assigned should count as usage");
     }
 
     #[test]
     fn test_property_access() {
         let code = r#"
-Для Каждого А Из Б Цикл
-    А.Свойство = 1;
-КонецЦикла;
+Процедура Тест()
+    Для Каждого А Из Б Цикл
+        А.Свойство = 1;
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Property access should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Property access should count as usage");
     }
 
     #[test]
     fn test_in_condition() {
         let code = r#"
-Для Каждого А Из Б Цикл
-    Если А Тогда
-    КонецЕсли;
-КонецЦикла;
+Процедура Тест()
+    Для Каждого А Из Б Цикл
+        Если А Тогда
+        КонецЕсли;
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Iterator in condition should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Iterator in condition should count as usage");
     }
 
     #[test]
     fn test_method_call_on_iterator() {
         let code = r#"
-Для Каждого Объект Из Б Цикл
-    Объект.Метод();
-КонецЦикла;
+Процедура Тест()
+    Для Каждого Объект Из Б Цикл
+        Объект.Метод();
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Method call on iterator should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Method call on iterator should count as usage");
     }
 
     #[test]
     fn test_chained_method_call() {
         let code = r#"
-Для Каждого АСтруктура Из Б Цикл
-    АСтруктура.Ключ.Метод();
-КонецЦикла;
+Процедура Тест()
+    Для Каждого АСтруктура Из Б Цикл
+        АСтруктура.Ключ.Метод();
+    КонецЦикла;
+КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Chained method call should count as usage");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "Chained method call should count as usage");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/UseLessForEachDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        let diags: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect();
+        let all = check_hir_diagnostic(code);
+        let mut diags = filter(&all);
+        diags.sort_by_key(|d| d.range.start());
 
         assert_eq!(diags.len(), 2, "Should match Java: 2 diagnostics");
 
@@ -340,25 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hir_unused_iterator() {
-        use crate::test_utils::check_hir_diagnostic;
-
-        let code = r#"
-Процедура Тест()
-    Для Каждого Итератор Из Коллекция Цикл
-        Итератор();
-    КонецЦикла;
-КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let filtered: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect();
-        assert_eq!(filtered.len(), 1, "HIR should detect unused iterator");
-    }
-
-    #[test]
-    fn test_hir_used_iterator() {
-        use crate::test_utils::check_hir_diagnostic;
+    fn test_used_iterator() {
         let code = r#"
 Процедура Тест()
     Для Каждого Элемент Из Коллекция Цикл
@@ -366,9 +220,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let filtered: Vec<_> =
-            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseLessForEach).collect();
-        assert_eq!(filtered.len(), 0, "HIR should not trigger for used iterator");
+        let all = check_hir_diagnostic(code);
+        assert_eq!(filter(&all).len(), 0, "HIR should not trigger for used iterator");
     }
 }

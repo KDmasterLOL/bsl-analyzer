@@ -62,7 +62,6 @@
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode};
 use crate::define_metadata;
 use crate::metadata::*;
 
@@ -96,92 +95,6 @@ impl Config {
 
         Self { max_allowed_level }
     }
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("NestedStatements::check").entered();
-
-    let code = DiagnosticCode::NestedStatements;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = Config::from_context(ctx);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-    traverse_recursive(&root, 0, config.max_allowed_level, code, ctx, &mut diagnostics);
-
-    tracing::debug!(count = diagnostics.len(), "NestedStatements diagnostics found");
-
-    diagnostics
-}
-
-fn is_nesting_statement(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::IF_STMT
-            | SyntaxKind::WHILE_STMT
-            | SyntaxKind::FOR_STMT
-            | SyntaxKind::FOR_EACH_STMT
-            | SyntaxKind::TRY_STMT
-    )
-}
-
-/// Traverse AST recursively, tracking nesting depth.
-///
-/// Returns `true` if this subtree contains nesting statements (IF, WHILE, FOR, TRY).
-/// This flag propagation eliminates the need for `node.descendants()` calls,
-/// reducing complexity from O(n²) to O(n).
-fn traverse_recursive(
-    node: &SyntaxNode,
-    current_depth: usize,
-    max_level: usize,
-    code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> bool {
-    let is_nesting = is_nesting_statement(node.kind());
-    let new_depth = if is_nesting { current_depth + 1 } else { current_depth };
-
-    // Recursively check all children, tracking if any contain nesting statements
-    let mut has_nested_child = false;
-    for child in node.children() {
-        let child_has_nesting =
-            traverse_recursive(&child, new_depth, max_level, code, ctx, diagnostics);
-        has_nested_child = has_nested_child || child_has_nesting;
-    }
-
-    // Report diagnostic if this is a leaf nesting statement exceeding threshold
-    if is_nesting && !has_nested_child && new_depth > max_level {
-        let keyword_range = get_first_keyword_range(node);
-        diagnostics.push(Diagnostic {
-            code,
-            message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),
-            severity: ctx.severity(code),
-            range: keyword_range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
-
-    // Propagate up: this node or its children contain nesting statements
-    is_nesting || has_nested_child
-}
-
-fn get_first_keyword_range(node: &SyntaxNode) -> TextRange {
-    node.children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| {
-            matches!(
-                t.kind(),
-                SyntaxKind::KW_IF | SyntaxKind::KW_WHILE | SyntaxKind::KW_FOR | SyntaxKind::KW_TRY
-            )
-        })
-        .map(|t| t.text_range())
-        .unwrap_or_else(|| node.text_range())
 }
 
 /// Creates diagnostic from HIR BodyDiagnostic.
@@ -218,10 +131,8 @@ pub fn from_hir(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
     use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-        check_hir_diagnostic,
+        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     #[test]
@@ -232,28 +143,35 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_max_nesting_no_violation() {
-        let code = r#"Если а Тогда
+        let code = r#"Процедура Тест()
+Если а Тогда
     Если б Тогда
         Если в Тогда
             Если г Тогда
             КонецЕсли;
         КонецЕсли;
     КонецЕсли;
-КонецЕсли;"#;
+КонецЕсли;
+КонецПроцедуры"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
         assert_eq!(diagnostics.len(), 0, "4 levels is the maximum allowed");
     }
 
     #[test]
     fn test_exceed_max_nesting() {
-        let code = r#"Если а Тогда
+        let code = r#"Процедура Тест()
+Если а Тогда
     Если б Тогда
         Если в Тогда
             Если г Тогда
@@ -262,21 +180,26 @@ mod tests {
             КонецЕсли;
         КонецЕсли;
     КонецЕсли;
-КонецЕсли;"#;
+КонецЕсли;
+КонецПроцедуры"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
         assert_eq!(diagnostics.len(), 1, "5 levels exceeds limit of 4");
     }
 
     #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/NestedStatementsDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_hir_diagnostic(code);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
 
         assert_eq!(diagnostics.len(), 2, "Should match Java implementation (2 diagnostics)");
 
-        assert_diagnostic_range(code, &diagnostics[0], 35, 8, 12);
-        assert_diagnostic_range(code, &diagnostics[1], 50, 6, 10);
+        assert_diagnostic_range(code, diagnostics[0], 35, 8, 12);
+        assert_diagnostic_range(code, diagnostics[1], 50, 6, 10);
     }
 
     #[test]
@@ -287,15 +210,17 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::NestedStatements, serde_json::json!({ "maxAllowedLevel": 6 }));
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics =
+            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
 
         assert_eq!(diagnostics.len(), 1, "With maxAllowedLevel=6, only 7-level nesting triggers");
-        assert_diagnostic_range(code, &diagnostics[0], 50, 6, 10);
+        assert_diagnostic_range(code, diagnostics[0], 50, 6, 10);
     }
 
     #[test]
     fn test_hir_detection() {
-        // Test that HIR-based detection works
         let code = r#"
 Процедура Тест()
     Если а Тогда
