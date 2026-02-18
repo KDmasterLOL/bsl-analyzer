@@ -39,12 +39,12 @@
 //!
 //! Now uses SDBL HIR with diagnostics collected during lowering.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use sdbl_hir;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -195,8 +195,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        test_utils::assert_diagnostic_range,
-        Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity,
+        test_utils::assert_diagnostic_range, Diagnostic, DiagnosticCode, DiagnosticsConfig,
+        Severity,
     };
     use parser::parse_sdbl;
 

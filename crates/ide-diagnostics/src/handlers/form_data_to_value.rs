@@ -22,10 +22,10 @@
 //! - FormDataToValueDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - form_data_to_value.rs (bsl-language-server-rust) - Reference implementation
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

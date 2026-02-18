@@ -1,7 +1,7 @@
 //! Diagnostics configuration.
 
-use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::handlers;
+use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::{DiagnosticCode, Severity};
 use base_db::DiagnosticsConfigInput;
 use std::collections::HashMap;
@@ -62,7 +62,6 @@ impl EffectiveMetadata {
     pub fn tags(&self) -> Vec<MetadataTag> {
         self.tags_override.clone().unwrap_or_else(|| self.base.tags.to_vec())
     }
-
 }
 
 /// Parse severity from string.

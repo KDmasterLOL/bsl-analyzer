@@ -11,10 +11,10 @@
 //! AST node has no SEMICOLON token (excluding EMPTY_STMT, LABEL_STMT, and
 //! statements with parse errors).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

@@ -643,7 +643,6 @@ fn emit_method_scoped_diagnostics(
             range: name_range,
         });
     }
-
 }
 
 /// Compare two literals for equality (case-insensitive for strings by default).

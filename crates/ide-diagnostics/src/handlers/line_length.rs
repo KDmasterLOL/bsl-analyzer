@@ -23,13 +23,13 @@
 //! - `checkMethodDescription` (Boolean, default: true) - Include method description comments in check
 //! - `excludeTrailingComments` (Boolean, default: false) - Exclude comments on same line as code
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::{LineIndex, TextSize};
 use std::collections::HashSet;
 use syntax::{ast::AstNode, SyntaxKind, SyntaxNode};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

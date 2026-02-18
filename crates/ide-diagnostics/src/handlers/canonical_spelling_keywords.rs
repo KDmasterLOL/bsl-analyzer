@@ -30,10 +30,10 @@
 //! - No parameters
 //! - Can be disabled via config
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
-use syntax::{SyntaxKind, SyntaxToken};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

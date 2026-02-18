@@ -49,11 +49,11 @@
 //! AST-based diagnostic that walks PRE_SYMBOL nodes and validates them against
 //! the known symbols list. Single pass for optimal performance.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::utils::preprocessor_symbols;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

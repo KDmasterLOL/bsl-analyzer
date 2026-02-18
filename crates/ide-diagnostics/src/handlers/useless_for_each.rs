@@ -36,11 +36,11 @@
 //! - **Tags:** CLUMSY
 //! - **Minutes to fix:** 2
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::Name;
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -129,7 +129,11 @@ mod tests {
 КонецПроцедуры
 "#;
         let all = check_hir_diagnostic(code);
-        assert_eq!(filter(&all).len(), 0, "Iterator in right side of assignment should count as usage");
+        assert_eq!(
+            filter(&all).len(),
+            0,
+            "Iterator in right side of assignment should count as usage"
+        );
     }
 
     #[test]

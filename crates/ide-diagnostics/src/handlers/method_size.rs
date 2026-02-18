@@ -39,9 +39,9 @@
 //! Uses LineIndex for O(1) line number lookups instead of scanning the entire
 //! file text for each method. LineIndex is built once O(n) at the start.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -151,8 +151,7 @@ mod tests {
         params.insert("maxMethodSize".to_string(), serde_json::Value::Number(20.into()));
         config.parameters.insert(DiagnosticCode::MethodSize, serde_json::Value::Object(params));
 
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
         assert_eq!(diagnostics.len(), 4, "Should match Java: 4 diagnostics with threshold 20");

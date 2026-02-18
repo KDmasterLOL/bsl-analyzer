@@ -36,14 +36,14 @@
 //! This diagnostic uses HIR-based post-analysis for structural expression comparison.
 //! Instead of regex-based text normalization, it compares HIR expression trees directly.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, Name, Stmt, StmtId};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

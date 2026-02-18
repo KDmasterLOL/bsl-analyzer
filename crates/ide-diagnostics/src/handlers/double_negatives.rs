@@ -20,11 +20,11 @@
 //! 3. No CFG/dataflow needed - pure structural pattern matching on expression trees
 //! 4. Single-pass AST traversal is optimal for this syntactic check
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

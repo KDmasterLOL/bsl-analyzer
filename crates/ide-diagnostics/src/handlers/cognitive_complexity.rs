@@ -83,9 +83,9 @@
 //! - Cleaner code (structured HIR vs raw AST)
 //! - Reusability (same calculation for code lens)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -169,7 +169,9 @@ pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config};
+    use crate::test_utils::{
+        assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
+    };
     use crate::{DiagnosticsConfig, Severity};
     use hir_def::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
@@ -184,10 +186,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
         assert_eq!(diagnostics.len(), 0, "Simple function should have complexity 0");
     }
 
@@ -203,10 +203,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
         assert_eq!(diagnostics.len(), 0, "Complexity should be 1 + 2 = 3, below default threshold");
     }
 
@@ -226,10 +224,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
         assert_eq!(
             diagnostics.len(),
             0,
@@ -252,10 +248,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
         assert_eq!(
             diagnostics.len(),
             0,
@@ -280,12 +274,9 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
 
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
         assert_eq!(diagnostics.len(), 1, "Complexity is 3 (1 + 2), should exceed threshold of 2");
     }
 
@@ -293,10 +284,8 @@ mod tests {
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CognitiveComplexityDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
 
         // Java expects 1 diagnostic for function СерверныйМодульМенеджера
         assert_eq!(diagnostics.len(), 1, "Should match Java implementation (1 diagnostic)");

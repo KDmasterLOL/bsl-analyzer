@@ -21,11 +21,11 @@
 //! - **Tags:** DESIGN, SUSPICIOUS
 //! - **Minutes to fix:** 5
 
-use bsl_metadata::{CodeSeries, MdoType};
-use ide_db::TextRange;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_metadata::{CodeSeries, MdoType};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -157,7 +157,8 @@ mod tests {
         };
 
         let all = crate::diagnostics(&ctx);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
+        let diagnostics: Vec<_> =
+            all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
         assert!(diagnostics.is_empty(), "Disabled diagnostic should return empty");
     }
 
@@ -196,7 +197,8 @@ mod tests {
         };
 
         let all = crate::diagnostics(&ctx);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
+        let diagnostics: Vec<_> =
+            all.iter().filter(|d| d.code == DiagnosticCode::UnsafeFindByCode).collect();
         assert!(diagnostics.is_empty(), "No configuration should return empty diagnostics");
     }
 

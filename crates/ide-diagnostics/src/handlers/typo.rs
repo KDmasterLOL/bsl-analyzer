@@ -28,6 +28,8 @@
 //! - `userWordsToIgnore`: Comma-separated list of words to ignore (default: "")
 //! - `caseInsensitive`: Case-insensitive matching for user dictionary (default: false)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use once_cell::sync::Lazy;
@@ -35,8 +37,6 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

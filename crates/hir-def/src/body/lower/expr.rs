@@ -1824,7 +1824,8 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
 /// 2. For non-literal expressions (variables, function calls) → assume OK (return true)
 fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
     let text = arg.text().to_string().to_lowercase();
-    if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel") {
+    if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel")
+    {
         return text.contains("ошибка") || text.contains("error");
     }
     true
@@ -1853,13 +1854,9 @@ fn resolve_comment_in_except_block(arg: &SyntaxNode, call_node: &SyntaxNode) -> 
     }
     let var_name = var_name.to_lowercase();
 
-    let except_clause = call_node
-        .ancestors()
-        .find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)?;
+    let except_clause = call_node.ancestors().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)?;
 
-    let stmt_list = except_clause
-        .children()
-        .find(|n| n.kind() == SyntaxKind::STMT_LIST)?;
+    let stmt_list = except_clause.children().find(|n| n.kind() == SyntaxKind::STMT_LIST)?;
 
     for child in stmt_list.children() {
         if child.kind() == SyntaxKind::ASSIGN_STMT {
@@ -1872,8 +1869,7 @@ fn resolve_comment_in_except_block(arg: &SyntaxNode, call_node: &SyntaxNode) -> 
                 let rhs_text = child.text().to_string().to_lowercase();
                 let has_detail = (rhs_text.contains("подробноепредставлениеошибки")
                     || rhs_text.contains("detailerrordescription"))
-                    && (rhs_text.contains("информацияобошибке")
-                        || rhs_text.contains("errorinfo"));
+                    && (rhs_text.contains("информацияобошибке") || rhs_text.contains("errorinfo"));
                 return Some(has_detail);
             }
         }

@@ -50,13 +50,13 @@
 //! 2. SymbolTree lookups are Salsa-cached
 //! 3. Method resolution happens once during lowering
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::{MdObject, Module};
 use hir::{MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
 use vfs::{FileId, VfsPath};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -450,10 +450,7 @@ mod tests {
     use crate::DiagnosticCode;
 
     fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::MissedRequiredParameter)
-            .collect()
+        diagnostics.iter().filter(|d| d.code == DiagnosticCode::MissedRequiredParameter).collect()
     }
 
     #[test]

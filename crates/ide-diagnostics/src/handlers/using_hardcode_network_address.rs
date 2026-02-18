@@ -1,10 +1,10 @@
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, Literal};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,

@@ -19,10 +19,10 @@
 //! КонецПроцедуры
 //! ```
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::ModItem;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

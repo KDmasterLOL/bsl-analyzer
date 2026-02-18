@@ -30,12 +30,12 @@
 //! - `badWords`: Regular expression pattern for forbidden words (default: "")
 //! - `findInComments`: Check comments as well (default: true)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use regex::RegexBuilder;
 use syntax::SyntaxNode;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

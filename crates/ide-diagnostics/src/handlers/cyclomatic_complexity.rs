@@ -64,9 +64,9 @@
 //! - Cleaner code (structured HIR vs raw AST)
 //! - Reusability (same calculation for code lens)
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -165,10 +165,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
         assert_eq!(diagnostics.len(), 0, "Complexity 1 should not trigger (threshold 20)");
     }
 
@@ -183,10 +181,8 @@ mod tests {
 КонецФункции"#;
 
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
         assert_eq!(diagnostics.len(), 0, "Complexity 3 should not trigger (threshold 20)");
     }
 
@@ -194,10 +190,8 @@ mod tests {
     fn test_comprehensive() {
         let code = include_str!("../../test_data/CyclomaticComplexityDiagnostic.bsl");
         let diagnostics = check_hir_diagnostic(code);
-        let diagnostics: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::CyclomaticComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::CyclomaticComplexity).collect();
 
         // Java expects 1 diagnostic for function СерверныйМодульМенеджера
         assert_eq!(diagnostics.len(), 1, "Should match Java (1 diagnostic)");

@@ -53,10 +53,10 @@
 //! Source: bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/GetFormMethodDiagnostic.java
 //! Uses AbstractFindMethodDiagnostic pattern - checks both global and object method calls.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

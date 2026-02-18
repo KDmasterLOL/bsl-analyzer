@@ -39,11 +39,11 @@
 
 use cfg_types::{BindingId, IdConversion};
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::ModuleId;
 use ide_db::{RootDatabase, TextRange};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

@@ -1067,10 +1067,8 @@ mod tests {
 
         // Codes intentionally in multiple collectors (detected via both paths,
         // deduplicated at runtime by deduplicate_diagnostics in lib.rs)
-        let known_dual_registration: &[DiagnosticCode] = &[
-            DiagnosticCode::IncorrectUseOfStrTemplate,
-            DiagnosticCode::UnusedLocalVariable,
-        ];
+        let known_dual_registration: &[DiagnosticCode] =
+            &[DiagnosticCode::IncorrectUseOfStrTemplate, DiagnosticCode::UnusedLocalVariable];
 
         // Check for unexpected duplicates
         let mut duplicates = Vec::new();

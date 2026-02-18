@@ -46,12 +46,12 @@
 //!
 //! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::MagicNumberContext;
 use ide_db::TextRange;
 use std::collections::HashSet;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -234,11 +234,7 @@ mod tests {
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
 
-        assert_eq!(
-            diags.len(),
-            0,
-            "Should detect no numbers (2 is excluded by simple assignment)"
-        );
+        assert_eq!(diags.len(), 0, "Should detect no numbers (2 is excluded by simple assignment)");
     }
 
     #[test]
@@ -273,11 +269,7 @@ mod tests {
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diags = filter(&all);
 
-        assert_eq!(
-            diags.len(),
-            2,
-            "Array index should be detected when allowMagicIndexes = false"
-        );
+        assert_eq!(diags.len(), 2, "Array index should be detected when allowMagicIndexes = false");
     }
 
     #[test]

@@ -9,12 +9,12 @@
 //! - Empty methods (no code in body)
 //! - `ПриСозданииОбъекта` / `OnObjectCreate` handlers (lifecycle pattern)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ModItem};
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

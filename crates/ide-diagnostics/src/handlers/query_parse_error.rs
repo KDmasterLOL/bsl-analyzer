@@ -25,11 +25,11 @@
 //! - Parse errors are already available in `SdblQueryInfo.query_ast`
 //! - Method `SdblQueryInfo.is_valid()` returns `false` when parse errors exist
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
 use tracing::debug;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

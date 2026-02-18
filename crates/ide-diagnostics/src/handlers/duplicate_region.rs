@@ -62,12 +62,12 @@
 //!
 //! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::base_db::RegionInfo;
 use ide_db::TextRange;
 use std::collections::HashMap;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

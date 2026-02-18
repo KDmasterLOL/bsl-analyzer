@@ -48,11 +48,11 @@
 //! - Simpler code - direct check on except array
 //! - Better error recovery - HIR handles parse errors gracefully
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{IdConversion, Stmt, StmtId};
 use syntax::SyntaxKind;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

@@ -41,11 +41,11 @@
 //!
 //! Migrated to text-based API using Rowan tokens instead of text processing.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

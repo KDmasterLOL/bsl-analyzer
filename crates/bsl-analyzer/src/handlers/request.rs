@@ -457,7 +457,8 @@ pub fn handle_code_action(
     let line_index = LineIndex::new(&text);
     let range = crate::lsp::text_range(&line_index, &text, params.range)?;
 
-    let diagnostics = snap.analysis.file_diagnostics_cached(file_id, snap.diagnostics_config.clone());
+    let diagnostics =
+        snap.analysis.file_diagnostics_cached(file_id, snap.diagnostics_config.clone());
 
     let mut actions = Vec::new();
     for diag in diagnostics.iter() {

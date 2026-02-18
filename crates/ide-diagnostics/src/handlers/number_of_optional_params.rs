@@ -29,9 +29,9 @@
 //! ## Implementation
 //! Uses ItemTree for efficiency (cached by Salsa).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -131,8 +131,7 @@ mod tests {
             DiagnosticCode::NumberOfOptionalParams,
             serde_json::json!({ "maxOptionalParamsCount": 1 }),
         );
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diagnostics: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::NumberOfOptionalParams)

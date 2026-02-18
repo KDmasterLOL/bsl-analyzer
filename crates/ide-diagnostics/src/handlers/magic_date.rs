@@ -34,12 +34,12 @@
 //! Comma-separated list of authorized dates (without quotes).
 //! Default: `"00010101,00010101000000,000101010000"`
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::utils::literal_context;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

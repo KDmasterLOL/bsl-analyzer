@@ -57,12 +57,12 @@
 //! - Cleaner code - no token-level parsing
 //! - Better error recovery - HIR handles parse errors gracefully
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ExprId, IdConversion, Stmt};
 use ide_db::TextRange;
 use std::collections::HashSet;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

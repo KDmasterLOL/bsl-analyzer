@@ -60,11 +60,11 @@
 //! This HIR-based implementation replaces the AST-based version to leverage
 //! Salsa caching and the rust-analyzer architecture pattern.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::MethodId;
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

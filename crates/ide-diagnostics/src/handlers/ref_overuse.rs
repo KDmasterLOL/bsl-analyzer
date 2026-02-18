@@ -20,12 +20,12 @@
 //!
 //! Uses SDBL HIR with diagnostics collected during lowering.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

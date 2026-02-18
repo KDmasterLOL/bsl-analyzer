@@ -69,10 +69,10 @@
 use cfg_types::{IdConversion, StmtId};
 use hir::{Body, BodySourceMap, Expr, ExprIdx, Stmt};
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use regex::Regex;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use regex::Regex;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

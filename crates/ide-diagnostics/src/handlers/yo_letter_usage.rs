@@ -5,10 +5,10 @@
 //! In module code it is prohibited to use the letter "ё".
 //! Exception is interface texts displayed to user in messages, forms and help.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::{SyntaxKind, SyntaxToken};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

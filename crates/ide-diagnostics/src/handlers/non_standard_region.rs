@@ -33,11 +33,11 @@
 //! - NonStandardRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - Regions.java (bsl-language-server) - standard regions mapping
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::utils::standard_regions;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::ModuleType;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

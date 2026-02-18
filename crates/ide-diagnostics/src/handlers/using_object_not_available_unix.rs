@@ -1,7 +1,7 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -47,7 +47,10 @@ mod tests {
     use crate::DiagnosticCode;
 
     fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
-        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingObjectNotAvailableUnix).collect()
+        diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingObjectNotAvailableUnix)
+            .collect()
     }
 
     #[test]

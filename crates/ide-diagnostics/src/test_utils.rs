@@ -350,10 +350,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.item_tree(file_id)
     }
 
-    fn symbol_tree(
-        &self,
-        module_id: hir_def::ModuleId,
-    ) -> std::sync::Arc<hir_def::SymbolTree> {
+    fn symbol_tree(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::SymbolTree> {
         use hir_def::DefDatabase;
         self.db.symbol_tree(module_id)
     }
@@ -363,10 +360,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.region_tree(file_id)
     }
 
-    fn module_bodies(
-        &self,
-        module_id: hir_def::ModuleId,
-    ) -> std::sync::Arc<hir_def::ModuleBodies> {
+    fn module_bodies(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::ModuleBodies> {
         use hir_def::DefDatabase;
         self.db.module_bodies(module_id)
     }
@@ -444,10 +438,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.all_sdbl_in_file(file_id)
     }
 
-    fn module_data(
-        &self,
-        module_id: hir_def::ModuleId,
-    ) -> std::sync::Arc<hir_def::ModuleData> {
+    fn module_data(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::ModuleData> {
         use hir_def::DefDatabase;
         self.db.module_data(module_id)
     }

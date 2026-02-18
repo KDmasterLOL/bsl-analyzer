@@ -7,11 +7,11 @@
 //! - **Enabled by default:** Yes (but does nothing without configuration)
 //! - **Severity:** MAJOR → Warning
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::ModItem;
 use rustc_hash::FxHashSet;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

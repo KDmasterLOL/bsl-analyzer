@@ -43,10 +43,10 @@
 //! Tier 3 diagnostic: Requires metadata (CommonModule, ReturnValueReuse).
 //! Uses HIR RegionTree and ItemTree for clean, cached access to regions and methods.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use bsl_metadata::ReturnValueReuse;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_metadata::ReturnValueReuse;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

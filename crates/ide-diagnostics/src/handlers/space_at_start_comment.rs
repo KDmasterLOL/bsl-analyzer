@@ -13,13 +13,13 @@
 //! COMMENT tokens. This avoids false positives on // inside strings (lexer distinguishes them).
 //! Cannot use per-node check_node() API because comments are tokens, not nodes.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use line_index::TextSize;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use syntax::{NodeOrToken, SyntaxKind};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

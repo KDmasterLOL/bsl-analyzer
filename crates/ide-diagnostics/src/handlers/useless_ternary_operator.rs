@@ -1,7 +1,7 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::{SyntaxKind, SyntaxNode};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

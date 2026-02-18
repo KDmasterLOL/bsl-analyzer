@@ -27,11 +27,11 @@
 //! Tier 3 diagnostic: Requires metadata (Form with elements).
 //! Applies to FormModule (checks current form's elements).
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
 use hir::ModuleMetadata;
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

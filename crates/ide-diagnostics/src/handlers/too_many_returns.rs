@@ -20,10 +20,10 @@
 //! **This is a HIR-based diagnostic** - return statements are collected during AST→HIR lowering.
 //! The handler applies configuration filtering (maxReturnsCount).
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

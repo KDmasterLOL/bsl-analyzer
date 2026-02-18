@@ -57,14 +57,14 @@
 //! Ported from:
 //! - MissingEventSubscriptionHandlerDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use hir::{ModuleId, Name};
 use ide_db::TextRange;
 use vfs::FileId;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: crate::metadata::DiagnosticType::Error,

@@ -15,13 +15,13 @@ pub use hir_def::{
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 // Re-export types used by diagnostic handlers (H9: facade over hir_def internals)
-pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
-pub use hir_def::{RedundantAccessKind, SdblExprId};
 pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext};
 pub use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, UnaryOp};
 pub use hir_def::item_tree::{Annotation, AnnotationKind, ModItem};
 pub use hir_def::region_tree::RegionTree;
 pub use hir_def::symbol_tree::MethodSymbol;
+pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
+pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;

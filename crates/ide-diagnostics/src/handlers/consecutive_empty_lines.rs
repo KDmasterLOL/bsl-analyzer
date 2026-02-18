@@ -8,11 +8,11 @@
 //! ## Configuration
 //! - `allowedEmptyLinesCount` (Integer, default: 1) - Maximum allowed consecutive empty lines
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use line_index::LineIndex;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

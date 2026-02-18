@@ -40,12 +40,12 @@
 //! Allow consecutive commas without spaces between them.
 //! Default: `false`
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxToken};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

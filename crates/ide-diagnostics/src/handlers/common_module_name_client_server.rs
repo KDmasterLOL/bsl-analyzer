@@ -33,10 +33,8 @@ mod tests {
             .client_ordinary_application(true)
             .client_managed_application(true)
             .build();
-        let metadata = make_common_module_metadata_with_ctx(
-            module,
-            hir_def::ExecutionContext::ClientServer,
-        );
+        let metadata =
+            make_common_module_metadata_with_ctx(module, hir_def::ExecutionContext::ClientServer);
         let diagnostics = check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 1);
     }
@@ -50,10 +48,8 @@ mod tests {
             .client_ordinary_application(true)
             .client_managed_application(true)
             .build();
-        let metadata = make_common_module_metadata_with_ctx(
-            module,
-            hir_def::ExecutionContext::ClientServer,
-        );
+        let metadata =
+            make_common_module_metadata_with_ctx(module, hir_def::ExecutionContext::ClientServer);
         let diagnostics = check_metadata_diagnostic(metadata, "", from_metadata);
         assert_eq!(diagnostics.len(), 0);
     }

@@ -4,12 +4,12 @@
 //!
 //! Ported from: MetadataObjectNameLengthDiagnostic.java
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use hir::ModuleMetadata;
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

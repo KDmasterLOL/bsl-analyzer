@@ -28,10 +28,10 @@
 //! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedCodeBlockDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_code_block.rs
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

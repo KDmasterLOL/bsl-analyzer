@@ -28,10 +28,10 @@
 //! The diagnostic is emitted in `hir-def/body/lower/stmt.rs` during statement lowering
 //! for if/elsif/else/while/for/foreach/try/except blocks.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -51,12 +51,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Called from lib.rs dispatch when `BodyDiagnostic::EmptyCodeBlock` is encountered.
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    crate::simple_hir_diagnostic(
-        DiagnosticCode::EmptyCodeBlock,
-        "Пустой блок кода",
-        range,
-        ctx,
-    )
+    crate::simple_hir_diagnostic(DiagnosticCode::EmptyCodeBlock, "Пустой блок кода", range, ctx)
 }
 
 #[cfg(test)]

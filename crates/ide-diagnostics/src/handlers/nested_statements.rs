@@ -60,10 +60,10 @@
 //! This diagnostic uses AST (not HIR) because it checks structural properties only.
 //! AST tree traversal is simpler and more efficient for this use case.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -210,8 +210,7 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::NestedStatements, serde_json::json!({ "maxAllowedLevel": 6 }));
 
-        let diagnostics =
-            check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
 

@@ -18,9 +18,9 @@ use bsl_metadata::{FormType, ModuleType};
 use hir::AnnotationKind;
 use ide_db::TextRange;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

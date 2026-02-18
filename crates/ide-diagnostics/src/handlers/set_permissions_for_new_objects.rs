@@ -35,11 +35,11 @@
 //! Ported from:
 //! - SetPermissionsForNewObjectsDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
 use rustc_hash::FxHashSet;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,

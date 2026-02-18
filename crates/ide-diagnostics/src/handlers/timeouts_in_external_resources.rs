@@ -45,12 +45,12 @@
 
 use cfg_types::{ExprId, IdConversion};
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, Literal, Name, Stmt};
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

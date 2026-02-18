@@ -26,11 +26,11 @@ pub mod test_utils;
 pub use code::DiagnosticCode;
 pub use config::{DiagnosticsConfig, EffectiveMetadata, MetadataOverride};
 pub use context::DiagnosticsContext;
+pub use handlers::get_metadata;
 pub use metadata::{
     CleanCodeAttribute, DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope,
     DiagnosticSeverityLevel, DiagnosticType, Impact, ImpactSeverity, MetadataTag, SoftwareQuality,
 };
-pub use handlers::get_metadata;
 pub use query::file_diagnostics_query;
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
 

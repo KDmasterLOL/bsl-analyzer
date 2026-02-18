@@ -70,11 +70,11 @@
 //! (like &MyAnnotation) are filtered out in `item_tree::lower::lower_annotations()`.
 //! This allows `has_builtin_annotations()` to work by checking if annotations array is non-empty.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Annotation, Name, RegionTree};
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

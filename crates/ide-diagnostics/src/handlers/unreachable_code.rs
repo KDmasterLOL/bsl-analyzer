@@ -40,11 +40,11 @@
 //! Ported from:
 //! - UnreachableCodeDiagnostic.java (bsl-language-server)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg::CfgVertex;
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

@@ -762,7 +762,6 @@ impl CfgBuilder {
             self.current_block = Some(merge_block);
         }
     }
-
 }
 
 impl Default for CfgBuilder {

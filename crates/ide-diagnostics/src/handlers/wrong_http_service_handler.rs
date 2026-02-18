@@ -5,11 +5,11 @@
 //! - Handler not found in module
 //! - Incorrect handler (wrong number of parameters)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
 use hir::{ModItem, ModuleMetadata, Name};
 use ide_db::TextRange;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

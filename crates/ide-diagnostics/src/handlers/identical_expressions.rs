@@ -57,13 +57,13 @@
 //!   - No way to distinguish intentional split from separate statements
 //! - See `check_preprocessor_split_expressions()` for detailed explanation
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg_types::IdConversion;
 use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, Literal, UnaryOp};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

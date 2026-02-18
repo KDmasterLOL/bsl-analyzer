@@ -26,11 +26,11 @@
 //! Migrated to HIR-based approach for consistency with other SDBL diagnostics.
 //! Diagnostics are collected during HIR lowering when processing string literals.
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use tracing::debug;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

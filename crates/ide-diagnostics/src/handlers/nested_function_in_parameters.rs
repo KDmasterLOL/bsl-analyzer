@@ -41,12 +41,12 @@
 //! - Automatic Salsa caching via module_bodies()
 //! - Module-level code coverage (not just methods)
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Name};
 use line_index::LineIndex;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

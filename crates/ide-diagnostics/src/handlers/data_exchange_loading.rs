@@ -41,10 +41,10 @@
 
 use cfg_types::IdConversion;
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Body, Expr, ExprId, ModItem, Name, Stmt, StmtId};
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::{Body, Expr, ExprId, ModItem, Name, Stmt, StmtId};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

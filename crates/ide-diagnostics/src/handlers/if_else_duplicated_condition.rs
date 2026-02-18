@@ -35,10 +35,10 @@
 //! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedConditionDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_condition.rs
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

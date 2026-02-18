@@ -25,12 +25,12 @@
 //! ## Configuration
 //! - `declaredLanguages` (String, default: `"ru"`) - comma-separated list of required languages
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::utils::nstr::extract_language_keys;
 use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

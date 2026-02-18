@@ -15,10 +15,10 @@
 //! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
 //! - Java: ExecuteExternalCodeInCommonModuleDiagnostic.java
 
-use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::SyntaxKind;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,

@@ -3,10 +3,10 @@
 //! Detects usage of deprecated `ЭтаФорма` / `ThisForm` property.
 //! Starting from 1C:Enterprise 8.3.3, should use `ЭтотОбъект` / `ThisObject` instead.
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

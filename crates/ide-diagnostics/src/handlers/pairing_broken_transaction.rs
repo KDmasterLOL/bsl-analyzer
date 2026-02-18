@@ -41,14 +41,14 @@
 //! - PairingBrokenTransactionDiagnostic.java (bsl-language-server) - logic reference
 //! - Enhanced with CFG-based path analysis for higher precision
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use cfg::{CfgVertex, ControlFlowGraph, NodeIndex};
 use cfg_types::{ExprId, IdConversion, StmtId};
 use hir::{Body, BodySourceMap, Expr, Stmt};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,

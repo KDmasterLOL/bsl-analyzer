@@ -347,7 +347,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         // All blocks must be initialized via set_bottom_factory() before solve()
         let entry = self.cfg.entry_point();
         assert!(
-            self.cfg.vertices().all(|(idx, _)| self.block_in.contains_key(&idx) && self.block_out.contains_key(&idx)),
+            self.cfg
+                .vertices()
+                .all(|(idx, _)| self.block_in.contains_key(&idx)
+                    && self.block_out.contains_key(&idx)),
             "All blocks must be initialized before solve(). Call set_bottom_factory() first."
         );
 
@@ -461,7 +464,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         let num_blocks = self.cfg.vertices().count();
 
         assert!(
-            self.cfg.vertices().all(|(idx, _)| self.block_in.contains_key(&idx) && self.block_out.contains_key(&idx)),
+            self.cfg
+                .vertices()
+                .all(|(idx, _)| self.block_in.contains_key(&idx)
+                    && self.block_out.contains_key(&idx)),
             "All blocks must be initialized before solve(). Call set_bottom_factory() first."
         );
 

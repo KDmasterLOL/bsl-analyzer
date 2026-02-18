@@ -43,10 +43,10 @@
 //! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
 //! - Java implementation: bsl-language-server/diagnostics/ExecuteExternalCodeDiagnostic.java
 
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,

@@ -199,12 +199,16 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::CodeAfterAsyncCall => Some(&code_after_async_call::METADATA),
         DiagnosticCode::DenyIncompleteValues => Some(&deny_incomplete_values::METADATA),
         DiagnosticCode::ForbiddenMetadataName => Some(&forbidden_metadata_name::METADATA),
-        DiagnosticCode::FieldsFromJoinsWithoutIsNull => Some(&fields_from_joins_without_is_null::METADATA),
+        DiagnosticCode::FieldsFromJoinsWithoutIsNull => {
+            Some(&fields_from_joins_without_is_null::METADATA)
+        }
         DiagnosticCode::FileSystemAccess => Some(&file_system_access::METADATA),
         DiagnosticCode::FunctionNameStartsWithGet => Some(&function_name_starts_with_get::METADATA),
         DiagnosticCode::FunctionOutParameter => Some(&function_out_parameter::METADATA),
         DiagnosticCode::InternetAccess => Some(&internet_access::METADATA),
-        DiagnosticCode::MissingTempStorageDeletion => Some(&missing_temp_storage_deletion::METADATA),
+        DiagnosticCode::MissingTempStorageDeletion => {
+            Some(&missing_temp_storage_deletion::METADATA)
+        }
         DiagnosticCode::TernaryOperatorUsage => Some(&ternary_operator_usage::METADATA),
         DiagnosticCode::TooManyReturns => Some(&too_many_returns::METADATA),
 
@@ -230,11 +234,15 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::MagicNumber => Some(&magic_number::METADATA),
         DiagnosticCode::MagicDate => Some(&magic_date::METADATA),
         DiagnosticCode::YoLetterUsage => Some(&yo_letter_usage::METADATA),
-        DiagnosticCode::LatinAndCyrillicSymbolInWord => Some(&latin_and_cyrillic_symbol_in_word::METADATA),
+        DiagnosticCode::LatinAndCyrillicSymbolInWord => {
+            Some(&latin_and_cyrillic_symbol_in_word::METADATA)
+        }
         DiagnosticCode::InvalidCharacterInFile => Some(&invalid_character_in_file::METADATA),
         DiagnosticCode::DoubleNegatives => Some(&double_negatives::METADATA),
         DiagnosticCode::NestedTernaryOperator => Some(&nested_ternary_operator::METADATA),
-        DiagnosticCode::NonExportMethodsInApiRegion => Some(&non_export_methods_in_api_region::METADATA),
+        DiagnosticCode::NonExportMethodsInApiRegion => {
+            Some(&non_export_methods_in_api_region::METADATA)
+        }
         DiagnosticCode::UnaryPlusInConcatenation => Some(&unary_plus_in_concatenation::METADATA),
         DiagnosticCode::UselessTernaryOperator => Some(&useless_ternary_operator::METADATA),
         DiagnosticCode::DuplicateStringLiteral => Some(&duplicate_string_literal::METADATA),
@@ -257,13 +265,19 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::NestedConstructorsInStructureDeclaration => {
             Some(&nested_constructors_in_structure_declaration::METADATA)
         }
-        DiagnosticCode::NestedFunctionInParameters => Some(&nested_function_in_parameters::METADATA),
+        DiagnosticCode::NestedFunctionInParameters => {
+            Some(&nested_function_in_parameters::METADATA)
+        }
 
         // Tier 2 diagnostics (semantic analysis) - 52 total
-        DiagnosticCode::AllFunctionPathMustHaveReturn => Some(&all_function_path_must_have_return::METADATA),
+        DiagnosticCode::AllFunctionPathMustHaveReturn => {
+            Some(&all_function_path_must_have_return::METADATA)
+        }
         DiagnosticCode::FunctionShouldHaveReturn => Some(&function_should_have_return::METADATA),
         DiagnosticCode::ProcedureReturnsValue => Some(&procedure_returns_value::METADATA),
-        DiagnosticCode::FunctionReturnsSamePrimitive => Some(&function_returns_same_primitive::METADATA),
+        DiagnosticCode::FunctionReturnsSamePrimitive => {
+            Some(&function_returns_same_primitive::METADATA)
+        }
         DiagnosticCode::NumberOfParams => Some(&number_of_params::METADATA),
         DiagnosticCode::NumberOfOptionalParams => Some(&number_of_optional_params::METADATA),
         DiagnosticCode::NumberOfValuesInStructureConstructor => {
@@ -272,7 +286,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::OrderOfParams => Some(&order_of_params::METADATA),
         DiagnosticCode::MissedRequiredParameter => Some(&missed_required_parameter::METADATA),
         DiagnosticCode::UnusedParameters => Some(&unused_parameters::METADATA),
-        DiagnosticCode::MissingParameterDescription => Some(&missing_parameter_description::METADATA),
+        DiagnosticCode::MissingParameterDescription => {
+            Some(&missing_parameter_description::METADATA)
+        }
         DiagnosticCode::MissingReturnedValueDescription => {
             Some(&missing_returned_value_description::METADATA)
         }
@@ -280,7 +296,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::RewriteMethodParameter => Some(&rewrite_method_parameter::METADATA),
         DiagnosticCode::UnusedLocalMethod => Some(&unused_local_method::METADATA),
         DiagnosticCode::ExportVariables => Some(&export_variables::METADATA),
-        DiagnosticCode::MissingVariablesDescription => Some(&missing_variables_description::METADATA),
+        DiagnosticCode::MissingVariablesDescription => {
+            Some(&missing_variables_description::METADATA)
+        }
         DiagnosticCode::SelfAssign => Some(&self_assign::METADATA),
         DiagnosticCode::ThisObjectAssign => Some(&this_object_assign::METADATA),
         DiagnosticCode::CyclomaticComplexity => Some(&cyclomatic_complexity::METADATA),
@@ -289,15 +307,21 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::MethodSize => Some(&method_size::METADATA),
         DiagnosticCode::IfConditionComplexity => Some(&if_condition_complexity::METADATA),
         DiagnosticCode::MissingCodeTryCatchEx => Some(&missing_code_try_catch_ex::METADATA),
-        DiagnosticCode::MissingTemporaryFileDeletion => Some(&missing_temporary_file_deletion::METADATA),
+        DiagnosticCode::MissingTemporaryFileDeletion => {
+            Some(&missing_temporary_file_deletion::METADATA)
+        }
         DiagnosticCode::UseLessForEach => Some(&useless_for_each::METADATA),
         DiagnosticCode::UsingGoto => Some(&using_goto::METADATA),
-        DiagnosticCode::BeginTransactionBeforeTryCatch => Some(&begin_transaction_before_try_catch::METADATA),
+        DiagnosticCode::BeginTransactionBeforeTryCatch => {
+            Some(&begin_transaction_before_try_catch::METADATA)
+        }
         DiagnosticCode::CommitTransactionOutsideTryCatch => {
             Some(&commit_transaction_outside_try_catch::METADATA)
         }
         DiagnosticCode::CompilationDirectiveLost => Some(&compilation_directive_lost::METADATA),
-        DiagnosticCode::CompilationDirectiveNeedLess => Some(&compilation_directive_need_less::METADATA),
+        DiagnosticCode::CompilationDirectiveNeedLess => {
+            Some(&compilation_directive_need_less::METADATA)
+        }
         DiagnosticCode::CreateQueryInCycle => Some(&create_query_in_cycle::METADATA),
         DiagnosticCode::DeletingCollectionItem => Some(&deleting_collection_item::METADATA),
         DiagnosticCode::SelfInsertion => Some(&self_insertion::METADATA),
@@ -329,23 +353,35 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         // Tier 3 + SDBL diagnostics (35 total)
         DiagnosticCode::AssignAliasFieldsInQuery => Some(&assign_alias_fields_in_query::METADATA),
         DiagnosticCode::CachedPublic => Some(&cached_public::METADATA),
-        DiagnosticCode::CommandModuleExportMethods => Some(&command_module_export_methods::METADATA),
+        DiagnosticCode::CommandModuleExportMethods => {
+            Some(&command_module_export_methods::METADATA)
+        }
         DiagnosticCode::CommonModuleAssign => Some(&common_module_assign::METADATA),
         DiagnosticCode::CommonModuleInvalidType => Some(&common_module_invalid_type::METADATA),
         DiagnosticCode::CommonModuleMissingAPI => Some(&common_module_missing_api::METADATA),
         DiagnosticCode::CommonModuleNameCached => Some(&common_module_name_cached::METADATA),
         DiagnosticCode::CommonModuleNameClient => Some(&common_module_name_client::METADATA),
-        DiagnosticCode::CommonModuleNameClientServer => Some(&common_module_name_client_server::METADATA),
-        DiagnosticCode::CommonModuleNameFullAccess => Some(&common_module_name_full_access::METADATA),
+        DiagnosticCode::CommonModuleNameClientServer => {
+            Some(&common_module_name_client_server::METADATA)
+        }
+        DiagnosticCode::CommonModuleNameFullAccess => {
+            Some(&common_module_name_full_access::METADATA)
+        }
         DiagnosticCode::CommonModuleNameGlobal => Some(&common_module_name_global::METADATA),
-        DiagnosticCode::CommonModuleNameGlobalClient => Some(&common_module_name_global_client::METADATA),
-        DiagnosticCode::CommonModuleNameServerCall => Some(&common_module_name_server_call::METADATA),
+        DiagnosticCode::CommonModuleNameGlobalClient => {
+            Some(&common_module_name_global_client::METADATA)
+        }
+        DiagnosticCode::CommonModuleNameServerCall => {
+            Some(&common_module_name_server_call::METADATA)
+        }
         DiagnosticCode::CommonModuleNameWords => Some(&common_module_name_words::METADATA),
         DiagnosticCode::FullOuterJoinQuery => Some(&full_outer_join_query::METADATA),
         DiagnosticCode::IncorrectUseLikeInQuery => Some(&incorrect_use_like_in_query::METADATA),
         DiagnosticCode::JoinWithSubQuery => Some(&join_with_sub_query::METADATA),
         DiagnosticCode::JoinWithVirtualTable => Some(&join_with_virtual_table::METADATA),
-        DiagnosticCode::LogicalOrInJoinQuerySection => Some(&logical_or_in_join_query_section::METADATA),
+        DiagnosticCode::LogicalOrInJoinQuerySection => {
+            Some(&logical_or_in_join_query_section::METADATA)
+        }
         DiagnosticCode::LogicalOrInTheWhereSectionOfQuery => {
             Some(&logical_or_in_the_where_section_of_query::METADATA)
         }
@@ -356,7 +392,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         }
         DiagnosticCode::MultilineStringInQuery => Some(&multiline_string_in_query::METADATA),
         DiagnosticCode::OrdinaryAppSupport => Some(&ordinary_app_support::METADATA),
-        DiagnosticCode::PrivilegedModuleMethodCall => Some(&privileged_module_method_call::METADATA),
+        DiagnosticCode::PrivilegedModuleMethodCall => {
+            Some(&privileged_module_method_call::METADATA)
+        }
         DiagnosticCode::ProtectedModule => Some(&protected_module::METADATA),
         DiagnosticCode::PublicMethodsDescription => Some(&public_methods_description::METADATA),
         DiagnosticCode::QueryNestedFieldsByDot => Some(&query_nested_fields_by_dot::METADATA),
@@ -371,8 +409,12 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         }
         DiagnosticCode::ScheduledJobHandler => Some(&scheduled_job_handler::METADATA),
         DiagnosticCode::ServerCallsInFormEvents => Some(&server_calls_in_form_events::METADATA),
-        DiagnosticCode::ServerSideExportFormMethod => Some(&server_side_export_form_method::METADATA),
-        DiagnosticCode::SetPermissionsForNewObjects => Some(&set_permissions_for_new_objects::METADATA),
+        DiagnosticCode::ServerSideExportFormMethod => {
+            Some(&server_side_export_form_method::METADATA)
+        }
+        DiagnosticCode::SetPermissionsForNewObjects => {
+            Some(&set_permissions_for_new_objects::METADATA)
+        }
         DiagnosticCode::SetPrivilegedMode => Some(&set_privileged_mode::METADATA),
         DiagnosticCode::TransferringParametersBetweenClientAndServer => {
             Some(&transferring_parameters_between_client_and_server::METADATA)
@@ -390,7 +432,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&same_metadata_object_and_child_names::METADATA)
         }
         DiagnosticCode::UnusedLocalVariable => Some(&unused_local_variable::METADATA),
-        DiagnosticCode::TimeoutsInExternalResources => Some(&timeouts_in_external_resources::METADATA),
+        DiagnosticCode::TimeoutsInExternalResources => {
+            Some(&timeouts_in_external_resources::METADATA)
+        }
         DiagnosticCode::TryNumber => Some(&try_number::METADATA),
         DiagnosticCode::Typo => Some(&typo::METADATA),
         DiagnosticCode::UnknownPreprocessorSymbol => Some(&unknown_preprocessor_symbol::METADATA),
@@ -400,15 +444,23 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UsingCancelParameter => Some(&using_cancel_parameter::METADATA),
         DiagnosticCode::UsingExternalCodeTools => Some(&using_external_code_tools::METADATA),
         DiagnosticCode::UsingFindElementByString => Some(&using_find_element_by_string::METADATA),
-        DiagnosticCode::UsingHardcodeNetworkAddress => Some(&using_hardcode_network_address::METADATA),
+        DiagnosticCode::UsingHardcodeNetworkAddress => {
+            Some(&using_hardcode_network_address::METADATA)
+        }
         DiagnosticCode::UsingHardcodePath => Some(&using_hardcode_path::METADATA),
-        DiagnosticCode::UsingHardcodeSecretInformation => Some(&using_hardcode_secret_information::METADATA),
+        DiagnosticCode::UsingHardcodeSecretInformation => {
+            Some(&using_hardcode_secret_information::METADATA)
+        }
         DiagnosticCode::UsingModalWindows => Some(&using_modal_windows::METADATA),
-        DiagnosticCode::UsingObjectNotAvailableUnix => Some(&using_object_not_available_unix::METADATA),
+        DiagnosticCode::UsingObjectNotAvailableUnix => {
+            Some(&using_object_not_available_unix::METADATA)
+        }
         DiagnosticCode::UsingSynchronousCalls => Some(&using_synchronous_calls::METADATA),
         DiagnosticCode::UsingServiceTag => Some(&using_service_tag::METADATA),
         DiagnosticCode::UsingThisForm => Some(&using_this_form::METADATA),
-        DiagnosticCode::WrongDataPathForFormElements => Some(&wrong_data_path_for_form_elements::METADATA),
+        DiagnosticCode::WrongDataPathForFormElements => {
+            Some(&wrong_data_path_for_form_elements::METADATA)
+        }
         DiagnosticCode::WrongHttpServiceHandler => Some(&wrong_http_service_handler::METADATA),
         DiagnosticCode::WrongWebServiceHandler => Some(&wrong_web_service_handler::METADATA),
         DiagnosticCode::WrongUseFunctionProceedWithCall => {

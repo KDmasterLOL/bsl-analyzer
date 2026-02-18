@@ -24,12 +24,12 @@
 //! 2. ColumnRef with 2+ parts inside virtual table parameters (implicit join)
 //! 3. FunctionCall (CAST) with 2+ member_access fields
 
+use crate::define_metadata;
+use crate::metadata::*;
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 use tracing::debug;
-use crate::define_metadata;
-use crate::metadata::*;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
