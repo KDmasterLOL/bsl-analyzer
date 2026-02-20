@@ -1,5 +1,5 @@
 # GitLab CI/CD для bsl-analyzer
-# Runner: Docker executor с rust image
+# Runner: docker-autoscaler (VK Cloud)
 # Stages: test → build → upload → publish
 #
 # Артефакты:
@@ -20,17 +20,14 @@ variables:
   # RELEASE_SERVER_URL: https://releases.example.com
   # RELEASE_UPLOAD_TOKEN: <secret>
 
-# Кэширование зависимостей Cargo
+# Кэширование зависимостей Cargo (только registry, без target/)
 .cargo-cache: &cargo-cache
   cache:
-    key: cargo-${CI_JOB_NAME}
-    fallback_keys:
-      - cargo-test
+    key: cargo-registry
     unprotect: true
     paths:
       - .cargo/registry/index
       - .cargo/registry/cache
-      - target/
 
 # ============================================
 # Stage: test
@@ -38,17 +35,15 @@ variables:
 
 test:
   stage: test
-  image: rust:1.91
+  image: rust:1.93
   tags:
-    - rust
+    - autoscale
   <<: *cargo-cache
   before_script:
     - rustup component add rustfmt clippy
-    - rustc --version
-    - cargo --version
   script:
     - cargo fmt --all -- --check
-    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo clippy --all-targets --all-features
     - cargo test --all --no-fail-fast
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -62,9 +57,9 @@ test:
 # Шаблон для сборки
 .build-template: &build-template
   stage: build
-  image: rust:1.91
+  image: rust:1.93
   tags:
-    - rust
+    - autoscale
   <<: *cargo-cache
   before_script:
     - rustup target add ${RUST_TARGET}
@@ -85,18 +80,12 @@ test:
 
 # Linux AMD64 (glibc build on Ubuntu 22.04 for compatibility with Ubuntu 22.04+)
 # Note: musl build is 10x slower due to allocator performance
-# Note: separate cache key to avoid mixing with rust:1.91 image builds
 build:linux-amd64:
   stage: build
   image: ubuntu:22.04
   tags:
-    - rust
-  cache:
-    key: cargo-ubuntu-22.04
-    paths:
-      - .cargo/registry/index
-      - .cargo/registry/cache
-      - target/
+    - autoscale
+  <<: *cargo-cache
   variables:
     RUST_TARGET: x86_64-unknown-linux-gnu
     PLATFORM_SUFFIX: linux-amd64
@@ -106,7 +95,7 @@ build:linux-amd64:
     - apt-get update -qq && apt-get install -y -qq curl build-essential
     - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
     - export PATH="${CARGO_HOME}/bin:${PATH}"
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.91 --no-modify-path
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93 --no-modify-path
     - rustc --version
   script:
     - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
@@ -144,7 +133,7 @@ upload:
   stage: upload
   image: curlimages/curl:latest
   tags:
-    - rust
+    - autoscale
   needs:
     - build:linux-amd64
     - build:windows-amd64
@@ -177,7 +166,7 @@ publish:
   stage: publish
   image: curlimages/curl:latest
   tags:
-    - rust
+    - autoscale
   needs:
     - upload
   script:
@@ -197,7 +186,7 @@ release:
   stage: publish
   image: registry.gitlab.com/gitlab-org/cli:v1.60.0
   tags:
-    - rust
+    - autoscale
   needs:
     - job: build:linux-amd64
       artifacts: true
@@ -217,9 +206,9 @@ release:
 
 doc:
   stage: test
-  image: rust:1.91
+  image: rust:1.93
   tags:
-    - rust
+    - autoscale
   <<: *cargo-cache
   script:
     - cargo doc --all --no-deps

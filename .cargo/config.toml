@@ -1,0 +1,5 @@
+[source.crates-io]
+replace-with = "crates-proxy"
+
+[source.crates-proxy]
+registry = "sparse+https://dev.runsystems.ru/index/"
