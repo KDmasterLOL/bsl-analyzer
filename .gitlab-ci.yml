@@ -1,11 +1,3 @@
-# GitLab CI/CD для bsl-analyzer
-# Runner: docker-autoscaler (VK Cloud)
-# Stages: test → build → upload → publish
-#
-# Артефакты:
-#   - bsl-analyzer (launcher) - распространяется в репозиториях/IDE
-#   - bsl-analyzer-app (LSP сервер) - скачивается с release-server
-
 stages:
   - test
   - build
@@ -16,12 +8,9 @@ variables:
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   RUSTFLAGS: "-D warnings"
   GIT_DEPTH: 1
-  # CI/CD Variables:
-  # RELEASE_SERVER_URL: https://releases.example.com
-  # RELEASE_UPLOAD_TOKEN: <secret>
+  CI_IMAGE: gitlab.runsystems.ru:5050/proit/rtools/ci:rust-1.93
 
-# Кэширование зависимостей Cargo (только registry, без target/)
-.cargo-cache: &cargo-cache
+.cargo-cache:
   cache:
     key: cargo-registry
     unprotect: true
@@ -35,12 +24,10 @@ variables:
 
 test:
   stage: test
-  image: rust:1.93
+  image: ${CI_IMAGE}
   tags:
     - autoscale
-  <<: *cargo-cache
-  before_script:
-    - rustup component add rustfmt clippy
+  extends: .cargo-cache
   script:
     - cargo fmt --all -- --check
     - cargo clippy --all-targets --all-features
@@ -54,23 +41,12 @@ test:
 # Stage: build
 # ============================================
 
-# Шаблон для сборки
-.build-template: &build-template
+.build-base:
   stage: build
-  image: rust:1.93
+  image: ${CI_IMAGE}
   tags:
     - autoscale
-  <<: *cargo-cache
-  before_script:
-    - rustup target add ${RUST_TARGET}
-  script:
-    - cargo build --release --target ${RUST_TARGET}
-    - mkdir -p artifacts
-    # Launcher (распространяется в репозиториях)
-    - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-launcher-${PLATFORM_SUFFIX}${BINARY_EXT}
-    # App (скачивается с release-server)
-    - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
-    - ls -la artifacts/
+  extends: .cargo-cache
   artifacts:
     paths:
       - artifacts/
@@ -78,50 +54,41 @@ test:
   rules:
     - if: $CI_COMMIT_TAG
 
-# Linux AMD64 (glibc build on Ubuntu 22.04 for compatibility with Ubuntu 22.04+)
-# Note: musl build is 10x slower due to allocator performance
-build:linux-amd64:
-  stage: build
-  image: ubuntu:22.04
-  tags:
-    - autoscale
-  <<: *cargo-cache
+.platform-linux:
   variables:
     RUST_TARGET: x86_64-unknown-linux-gnu
     PLATFORM_SUFFIX: linux-amd64
     BINARY_EXT: ""
-    DEBIAN_FRONTEND: noninteractive
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq curl build-essential
-    - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
-    - export PATH="${CARGO_HOME}/bin:${PATH}"
-    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93 --no-modify-path
-    - rustc --version
+
+.platform-windows-gnu:
+  variables:
+    RUST_TARGET: x86_64-pc-windows-gnu
+    PLATFORM_SUFFIX: windows-amd64
+    BINARY_EXT: ".exe"
+
+# Linux AMD64 (glibc 2.35, compatible with Ubuntu 22.04+)
+build:linux-amd64:
+  extends:
+    - .build-base
+    - .platform-linux
   script:
-    - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
-    - export PATH="${CARGO_HOME}/bin:${PATH}"
     - cargo build --release --target ${RUST_TARGET}
     - mkdir -p artifacts
     - cp target/${RUST_TARGET}/release/bsl-analyzer artifacts/bsl-launcher-${PLATFORM_SUFFIX}
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}
     - ls -la artifacts/
-  artifacts:
-    paths:
-      - artifacts/
-    expire_in: 1 day
-  rules:
-    - if: $CI_COMMIT_TAG
 
 # Windows AMD64 (cross-compilation via mingw)
 build:windows-amd64:
-  <<: *build-template
-  variables:
-    RUST_TARGET: x86_64-pc-windows-gnu
-    PLATFORM_SUFFIX: windows-amd64
-    BINARY_EXT: .exe
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq mingw-w64
-    - rustup target add ${RUST_TARGET}
+  extends:
+    - .build-base
+    - .platform-windows-gnu
+  script:
+    - cargo build --release --target ${RUST_TARGET}
+    - mkdir -p artifacts
+    - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-launcher-${PLATFORM_SUFFIX}${BINARY_EXT}
+    - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
+    - ls -la artifacts/
 
 # macOS builds require local MacBook - see scripts/build-macos.sh
 
@@ -206,10 +173,10 @@ release:
 
 doc:
   stage: test
-  image: rust:1.93
+  image: ${CI_IMAGE}
   tags:
     - autoscale
-  <<: *cargo-cache
+  extends: .cargo-cache
   script:
     - cargo doc --all --no-deps
   allow_failure: true
