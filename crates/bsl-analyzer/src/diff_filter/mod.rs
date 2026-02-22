@@ -3,14 +3,10 @@
 //! This module provides filtering of analysis to only include diagnostics
 //! within changed lines (hunks) as reported by a diff tool.
 
-mod xml_deps;
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-
-pub use xml_deps::resolve_xml_to_bsl;
 
 /// Input JSON format from rtools diff-report.
 #[derive(Debug, Deserialize)]
@@ -175,41 +171,6 @@ impl DiffFilter {
         }
 
         None
-    }
-
-    /// Expand XML dependencies to their corresponding BSL modules.
-    ///
-    /// For example, if `Forms/Foo/Ext/Form.xml` is changed, this will also
-    /// include `Forms/Foo/Ext/Form/Module.bsl` in the filter with all lines
-    /// marked as relevant (since XML change may affect any part of the module).
-    pub fn expand_xml_deps(&mut self, workspace: &Path) {
-        let xml_paths: Vec<PathBuf> = self
-            .files
-            .keys()
-            .filter(|p| p.extension().map(|e| e == "xml").unwrap_or(false))
-            .cloned()
-            .collect();
-
-        for xml_path in xml_paths {
-            if let Some(bsl_path) = resolve_xml_to_bsl(&xml_path) {
-                // Check if BSL file exists
-                let full_bsl_path = workspace.join(&bsl_path);
-                if full_bsl_path.exists() {
-                    // Add BSL module with all lines relevant (None = new file behavior)
-                    let normalized_bsl = normalize_path(&bsl_path.to_string_lossy());
-                    if self.files.entry(normalized_bsl.clone()).or_insert(None).is_none() {
-                        // Also update filename index
-                        if let Some(filename) = normalized_bsl.file_name().and_then(|n| n.to_str())
-                        {
-                            self.filename_index
-                                .entry(filename.to_string())
-                                .or_default()
-                                .push(normalized_bsl);
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

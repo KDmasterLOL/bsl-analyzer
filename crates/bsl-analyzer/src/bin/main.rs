@@ -711,12 +711,6 @@ fn analyze_salsa(
     let _metadata = proj_config.load_metadata(&source_dir);
     let configuration_path = proj_config.configuration_path(&source_dir);
 
-    // Expand XML dependencies in diff filter
-    let mut diff_filter = diff_filter;
-    if let Some(ref mut filter) = diff_filter {
-        filter.expand_xml_deps(&source_dir);
-    }
-
     // Create database
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
@@ -1040,12 +1034,6 @@ fn analyze_streaming(
         params = diag_config.parameters.len(),
         "Loaded DiagnosticsConfig (streaming mode)"
     );
-
-    // Expand XML dependencies in diff filter
-    let mut diff_filter = diff_filter;
-    if let Some(ref mut filter) = diff_filter {
-        filter.expand_xml_deps(&source_dir);
-    }
 
     // Find all BSL files
     tracing::info!("Finding BSL files in {:?}", source_dir);
