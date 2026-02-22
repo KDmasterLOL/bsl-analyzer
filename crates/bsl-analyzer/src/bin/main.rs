@@ -1096,11 +1096,69 @@ fn analyze_streaming(
 
     // Route to format-specific output
     match format {
+        OutputFormat::Jsonl if diff_filter.is_some() => {
+            // JSONL with diff filtering: collect results, filter, then output JSONL
+            use std::time::Instant;
+
+            use ide::streaming::{DoneEvent, FileEvent, StartEvent};
+
+            let start = Instant::now();
+            let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
+            let total_files = file_id_vec.len();
+
+            // Print start event
+            let start_event = StartEvent::new(total_files);
+            println!("{}", serde_json::to_string(&start_event).unwrap());
+
+            let streaming_results =
+                orchestrator.analyze_with_progress(file_id_vec, file_set, |_, _| {})?;
+
+            let filter = diff_filter.as_ref().unwrap();
+            let mut total_diagnostics = 0;
+
+            for file_result in &streaming_results.file_results {
+                if let Some((_, path)) = file_ids.iter().find(|(id, _)| *id == file_result.file_id)
+                {
+                    let rel_path = path.strip_prefix(&source_dir).unwrap_or(path);
+                    let filtered: Vec<_> = file_result
+                        .diagnostics
+                        .iter()
+                        .filter(|d| {
+                            filter.diagnostic_in_diff(
+                                rel_path,
+                                d.start_line as u32,
+                                d.end_line as u32,
+                            )
+                        })
+                        .cloned()
+                        .collect();
+
+                    total_diagnostics += filtered.len();
+                    let file_event = FileEvent::new(
+                        path.display().to_string(),
+                        filtered,
+                        file_result.metrics.clone(),
+                        file_result.error.as_ref().map(|e| e.to_string()),
+                    );
+                    println!("{}", serde_json::to_string(&file_event).unwrap());
+                }
+            }
+
+            // Print done event
+            let done_event = DoneEvent::new(
+                start.elapsed().as_secs_f64(),
+                streaming_results.file_results.len(),
+                total_diagnostics,
+                streaming_results.file_results.iter().filter(|r| r.error.is_some()).count(),
+            );
+            println!("{}", serde_json::to_string(&done_event).unwrap());
+
+            tracing::info!("JSONL streaming analysis complete (with diff filter)");
+        }
         OutputFormat::Jsonl => {
-            // JSONL streaming mode - output directly to stdout
+            // JSONL streaming mode - output directly to stdout (no diff filter)
             let file_id_vec: Vec<FileId> = file_ids.iter().map(|(id, _)| *id).collect();
             let _summary = orchestrator.analyze_jsonl(file_id_vec, file_set)?;
-            // All output already printed to stdout
             tracing::info!("JSONL streaming analysis complete");
         }
         OutputFormat::Console => {
