@@ -2166,3 +2166,18 @@ fn test_error_node_analysis() {
         }
     }
 }
+
+#[test]
+fn test_drop_table_russian() {
+    check_no_errors("УНИЧТОЖИТЬ ВременнаяТаблица");
+}
+
+#[test]
+fn test_drop_table_english() {
+    check_no_errors("DROP TempTable");
+}
+
+#[test]
+fn test_batch_with_drop() {
+    check_no_errors("ВЫБРАТЬ Поле ИЗ Таблица ПОМЕСТИТЬ ВТ; УНИЧТОЖИТЬ ВТ");
+}

@@ -128,6 +128,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblMultiString => SK::SDBL_MULTI_STRING,
         NodeKind::SdblParameter => SK::SDBL_PARAMETER,
         NodeKind::SdblType => SK::SDBL_TYPE,
+        NodeKind::SdblDropQuery => SK::SDBL_DROP_QUERY,
         NodeKind::SdblMissingArg => SK::SDBL_MISSING_ARG,
         NodeKind::SdblError => SK::SDBL_ERROR,
 

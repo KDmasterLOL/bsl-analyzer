@@ -277,6 +277,9 @@ pub enum SyntaxKind {
     SDBL_AUTOORDER,     // AUTOORDER clause
     SDBL_TOTALS_BY,     // TOTALS BY clause
 
+    // DROP TABLE query
+    SDBL_DROP_QUERY, // DROP/УНИЧТОЖИТЬ temp table query
+
     // Missing argument placeholder
     SDBL_MISSING_ARG, // Intentionally empty VT parameter slot
 

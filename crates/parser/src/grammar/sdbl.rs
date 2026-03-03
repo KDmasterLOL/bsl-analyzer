@@ -94,18 +94,25 @@ pub fn query_package(p: &mut Parser) {
 /// Parse a single query (either SELECT or DROP TABLE)
 ///
 /// Grammar: `queries: selectQuery | dropTableQuery`
-///
-/// Currently only SELECT queries are supported (Phase 1 MVP).
-/// DROP TABLE support will be added in Phase 4.
 fn queries(p: &mut Parser) {
-    // Phase 1: Only SELECT queries
-    // Phase 4: Add DROP TABLE support
-    //
-    // if p.at(TokenKind::KwDrop) {
-    //     drop_table_query(p);
-    // } else {
-    //     select::select_query(p);
-    // }
+    if select::at_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ") {
+        drop_table_query(p);
+    } else {
+        select::select_query(p);
+    }
+}
 
-    select::select_query(p);
+/// Parse DROP TABLE query
+///
+/// Grammar: `dropTableQuery: DROP temporaryTableName=identifier`
+fn drop_table_query(p: &mut Parser) {
+    let m = p.start();
+    select::eat_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ");
+    p.skip_trivia();
+    if p.at(TokenKind::Ident) {
+        p.bump();
+    } else {
+        p.error();
+    }
+    m.complete(p, NodeKind::SdblDropQuery);
 }

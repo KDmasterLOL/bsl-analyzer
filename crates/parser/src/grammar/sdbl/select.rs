@@ -14,12 +14,12 @@ use lexer::TokenKind;
 use super::expressions;
 
 /// Helper to check for bilingual SDBL keywords (English or Russian).
-fn at_sdbl_keyword(p: &Parser, en: &str, ru: &str) -> bool {
+pub(super) fn at_sdbl_keyword(p: &Parser, en: &str, ru: &str) -> bool {
     p.at_keyword(en) || p.at_keyword(ru)
 }
 
 /// Helper to consume bilingual SDBL keywords (English or Russian).
-fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
+pub(super) fn eat_sdbl_keyword(p: &mut Parser, en: &str, ru: &str) -> bool {
     p.eat_keyword(en) || p.eat_keyword(ru)
 }
 
