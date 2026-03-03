@@ -7,10 +7,11 @@
 //! ## Exclusions
 //!
 //! - Empty methods (no code in body)
-//! - `ПриСозданииОбъекта` / `OnObjectCreate` handlers (lifecycle pattern)
+//! - Platform event handlers (fixed signature defined by 1C platform)
 
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::utils::platform_event_handlers::is_platform_event_handler;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ModItem};
 use ide_db::TextRange;
@@ -29,8 +30,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     extra_min_for_complexity: 0.0,
     lsp_severity_override: "",
 };
-
-const ONCREATE_HANDLERS: &[&str] = &["присозданииобъекта", "onobjectcreate"];
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::UnusedParameters;
@@ -88,7 +87,7 @@ fn check_method(
         return diagnostics;
     }
 
-    if is_oncreate_handler(method_name) {
+    if method_name.is_some_and(is_platform_event_handler) {
         return diagnostics;
     }
 
@@ -128,16 +127,6 @@ fn collect_used_identifiers(body: &hir_def::Body) -> FxHashSet<String> {
 
 fn is_empty_body(body: &hir_def::Body) -> bool {
     body.body_stmts().next().is_none()
-}
-
-fn is_oncreate_handler(name: Option<&str>) -> bool {
-    match name {
-        Some(n) => {
-            let lowercase = n.to_lowercase();
-            ONCREATE_HANDLERS.contains(&lowercase.as_str())
-        }
-        None => false,
-    }
 }
 
 fn create_diagnostic(
@@ -218,6 +207,20 @@ mod tests {
     #[test]
     fn test_oncreate_handler_no_diagnostic() {
         let code = r#"Процедура ПриСозданииОбъекта(Отказ)
+    Если ЧтоТо Тогда
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_platform_event_handler_no_diagnostic() {
+        let code = r#"Процедура ПриЗаписи(Отказ)
     Если ЧтоТо Тогда
     КонецЕсли;
 КонецПроцедуры"#;

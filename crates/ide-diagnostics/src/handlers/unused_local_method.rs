@@ -12,7 +12,7 @@
 //! - Exported methods (Экспорт)
 //! - Extension methods (@Перед/@До, @После, @Вместо, @ИзменениеИКонтроль)
 //! - Attachable methods (configurable prefix, default: подключаемый_, attachable_)
-//! - Object creation handlers (ПриСозданииОбъекта/OnObjectCreate)
+//! - Platform event handlers (fixed signature defined by 1C platform)
 //!
 //! ## Configuration
 //! - **attachableMethodPrefixes** (string, default: "подключаемый_,attachable_") - comma-separated prefixes
@@ -208,7 +208,7 @@ fn is_attachable_method(name_lower: &str, prefixes: &[String]) -> bool {
 }
 
 fn is_handler_method(name_lower: &str) -> bool {
-    name_lower == "присозданииобъекта" || name_lower == "onobjectcreate"
+    crate::utils::platform_event_handlers::is_platform_event_handler(name_lower)
 }
 
 #[cfg(test)]
@@ -355,6 +355,29 @@ mod tests {
 КонецПроцедуры
 
 Процедура OnObjectCreate(Parameter)
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+
+        assert_eq!(unused_diags.len(), 0);
+    }
+
+    #[test]
+    fn test_platform_event_handlers_not_flagged() {
+        let code = r#"
+Процедура ПередЗаписью(Отказ)
+КонецПроцедуры
+
+Процедура ПриЗаписи(Отказ)
+КонецПроцедуры
+
+Процедура ПередУдалением(Отказ)
+КонецПроцедуры
+
+Процедура ОбработкаЗаполнения(ДанныеЗаполнения)
 КонецПроцедуры
 "#;
 
