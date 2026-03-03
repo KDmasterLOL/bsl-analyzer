@@ -815,4 +815,153 @@ mod tests {
 
         assert!(catalog.find_attribute("Владелец").is_none());
     }
+
+    #[test]
+    fn test_document_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Document uuid="...">
+        <Properties>
+            <Name>ПриходнаяНакладная</Name>
+            <NumberLength>11</NumberLength>
+        </Properties>
+    </Document>
+</MetaDataObject>"#;
+
+        let document = parse_document_xml(xml).unwrap();
+
+        assert!(document.find_attribute("Ссылка").is_some());
+        assert!(document.find_attribute("ПометкаУдаления").is_some());
+        assert!(document.find_attribute("Номер").is_some());
+        assert!(document.find_attribute("Дата").is_some());
+        assert!(document.find_attribute("Проведен").is_some());
+
+        // Document should NOT have Catalog-specific attributes
+        assert!(document.find_attribute("Код").is_none());
+        assert!(document.find_attribute("Наименование").is_none());
+
+        // Check English names
+        let number = document.find_attribute("Номер").unwrap();
+        assert_eq!(number.name_en, Some("Number".to_string()));
+        let date = document.find_attribute("Дата").unwrap();
+        assert_eq!(date.name_en, Some("Date".to_string()));
+    }
+
+    #[test]
+    fn test_business_process_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <BusinessProcess uuid="...">
+        <Properties>
+            <Name>Исполнение</Name>
+            <NumberLength>9</NumberLength>
+        </Properties>
+    </BusinessProcess>
+</MetaDataObject>"#;
+
+        let bp = parse_business_process_xml(xml).unwrap();
+
+        assert!(bp.find_attribute("Ссылка").is_some());
+        assert!(bp.find_attribute("ПометкаУдаления").is_some());
+        assert!(bp.find_attribute("Номер").is_some());
+        assert!(bp.find_attribute("Дата").is_some());
+        assert!(bp.find_attribute("Стартован").is_some());
+        assert!(bp.find_attribute("Завершен").is_some());
+        assert!(bp.find_attribute("ГлавнаяЗадача").is_some());
+
+        // BusinessProcess should NOT have Document-specific or Catalog-specific
+        assert!(bp.find_attribute("Проведен").is_none());
+        assert!(bp.find_attribute("Код").is_none());
+    }
+
+    #[test]
+    fn test_task_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <Task uuid="...">
+        <Properties>
+            <Name>ЗадачаИсполнителя</Name>
+            <NumberLength>9</NumberLength>
+        </Properties>
+    </Task>
+</MetaDataObject>"#;
+
+        let task = parse_task_xml(xml).unwrap();
+
+        assert!(task.find_attribute("Ссылка").is_some());
+        assert!(task.find_attribute("ПометкаУдаления").is_some());
+        assert!(task.find_attribute("Номер").is_some());
+        assert!(task.find_attribute("Дата").is_some());
+        assert!(task.find_attribute("Выполнена").is_some());
+        assert!(task.find_attribute("БизнесПроцесс").is_some());
+        assert!(task.find_attribute("ТочкаМаршрута").is_some());
+
+        // Task should NOT have BP-specific
+        assert!(task.find_attribute("Стартован").is_none());
+    }
+
+    #[test]
+    fn test_exchange_plan_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <ExchangePlan uuid="...">
+        <Properties>
+            <Name>ОбменДанными</Name>
+            <CodeLength>9</CodeLength>
+            <DescriptionLength>150</DescriptionLength>
+        </Properties>
+    </ExchangePlan>
+</MetaDataObject>"#;
+
+        let ep = parse_exchange_plan_xml(xml).unwrap();
+
+        // Has Catalog standard attributes
+        assert!(ep.find_attribute("Ссылка").is_some());
+        assert!(ep.find_attribute("Код").is_some());
+        assert!(ep.find_attribute("Наименование").is_some());
+        // Plus ExchangePlan-specific
+        assert!(ep.find_attribute("ЭтотУзел").is_some());
+    }
+
+    #[test]
+    fn test_chart_of_characteristic_types_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <ChartOfCharacteristicTypes uuid="...">
+        <Properties>
+            <Name>ДополнительныеРеквизитыИСведения</Name>
+            <CodeLength>11</CodeLength>
+            <DescriptionLength>100</DescriptionLength>
+        </Properties>
+    </ChartOfCharacteristicTypes>
+</MetaDataObject>"#;
+
+        let cct = parse_chart_of_characteristic_types_xml(xml).unwrap();
+
+        assert!(cct.find_attribute("Ссылка").is_some());
+        assert!(cct.find_attribute("Код").is_some());
+        assert!(cct.find_attribute("Наименование").is_some());
+        assert!(cct.find_attribute("ТипЗначения").is_some());
+    }
+
+    #[test]
+    fn test_chart_of_accounts_standard_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <ChartOfAccounts uuid="...">
+        <Properties>
+            <Name>Хозрасчетный</Name>
+            <CodeLength>4</CodeLength>
+            <DescriptionLength>100</DescriptionLength>
+        </Properties>
+    </ChartOfAccounts>
+</MetaDataObject>"#;
+
+        let coa = parse_chart_of_accounts_xml(xml).unwrap();
+
+        assert!(coa.find_attribute("Ссылка").is_some());
+        assert!(coa.find_attribute("Код").is_some());
+        assert!(coa.find_attribute("Наименование").is_some());
+        assert!(coa.find_attribute("Порядок").is_some());
+    }
 }

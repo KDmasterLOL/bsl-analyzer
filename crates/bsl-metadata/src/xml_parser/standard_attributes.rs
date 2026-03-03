@@ -167,6 +167,207 @@ pub(crate) fn add_catalog_standard_attributes(
     ));
 }
 
+/// Add standard attributes for Document objects
+///
+/// Documents have: Ref, DeletionMark, Number (if NumberLength > 0), Date, Posted
+pub(crate) fn add_document_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    let object_name = &properties.name;
+
+    // Ref - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
+
+    // DeletionMark - always present
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::DeletionMark,
+        mdo_type,
+        object_name,
+    ));
+
+    // Number - only if NumberLength > 0
+    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
+    {
+        let kind = StandardAttributeKind::Number { length };
+        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
+    }
+
+    // Date - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
+
+    // Posted - always present for Document
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::Posted,
+        mdo_type,
+        object_name,
+    ));
+}
+
+/// Add standard attributes for BusinessProcess objects
+///
+/// BusinessProcesses have: Ref, DeletionMark, Number (if NumberLength > 0), Date,
+/// Started, Completed, HeadTask
+pub(crate) fn add_business_process_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    let object_name = &properties.name;
+
+    // Ref - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
+
+    // DeletionMark - always present
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::DeletionMark,
+        mdo_type,
+        object_name,
+    ));
+
+    // Number - only if NumberLength > 0
+    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
+    {
+        let kind = StandardAttributeKind::Number { length };
+        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
+    }
+
+    // Date - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
+
+    // Started - always present for BusinessProcess
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::Started,
+        mdo_type,
+        object_name,
+    ));
+
+    // Completed - always present for BusinessProcess
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::Completed,
+        mdo_type,
+        object_name,
+    ));
+
+    // HeadTask - always present for BusinessProcess
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::HeadTask,
+        mdo_type,
+        object_name,
+    ));
+}
+
+/// Add standard attributes for Task objects
+///
+/// Tasks have: Ref, DeletionMark, Number (if NumberLength > 0), Date,
+/// Executed, TaskBusinessProcess, RoutePoint
+pub(crate) fn add_task_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    let object_name = &properties.name;
+
+    // Ref - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Ref, mdo_type, object_name));
+
+    // DeletionMark - always present
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::DeletionMark,
+        mdo_type,
+        object_name,
+    ));
+
+    // Number - only if NumberLength > 0
+    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
+    {
+        let kind = StandardAttributeKind::Number { length };
+        attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
+    }
+
+    // Date - always present
+    attributes.push(create_standard_attribute(&StandardAttributeKind::Date, mdo_type, object_name));
+
+    // Executed - always present for Task
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::Executed,
+        mdo_type,
+        object_name,
+    ));
+
+    // TaskBusinessProcess - always present for Task
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::TaskBusinessProcess,
+        mdo_type,
+        object_name,
+    ));
+
+    // RoutePoint - always present for Task
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::RoutePoint,
+        mdo_type,
+        object_name,
+    ));
+}
+
+/// Add standard attributes for ExchangePlan objects
+///
+/// ExchangePlans have: same as Catalog + ThisNode
+pub(crate) fn add_exchange_plan_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    add_catalog_standard_attributes(attributes, properties, mdo_type);
+
+    let object_name = &properties.name;
+    // ThisNode - always present for ExchangePlan
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::ThisNode,
+        mdo_type,
+        object_name,
+    ));
+}
+
+/// Add standard attributes for ChartOfCharacteristicTypes objects
+///
+/// ChartOfCharacteristicTypes have: same as Catalog + ValueType
+pub(crate) fn add_chart_of_characteristic_types_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    add_catalog_standard_attributes(attributes, properties, mdo_type);
+
+    let object_name = &properties.name;
+    // ValueType - always present for ChartOfCharacteristicTypes
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::ValueType,
+        mdo_type,
+        object_name,
+    ));
+}
+
+/// Add standard attributes for ChartOfAccounts objects
+///
+/// ChartOfAccounts have: same as Catalog + Order
+pub(crate) fn add_chart_of_accounts_standard_attributes(
+    attributes: &mut Vec<Attribute>,
+    properties: &MetadataObjectProperties,
+    mdo_type: MdoType,
+) {
+    add_catalog_standard_attributes(attributes, properties, mdo_type);
+
+    let object_name = &properties.name;
+    // Order - always present for ChartOfAccounts
+    attributes.push(create_standard_attribute(
+        &StandardAttributeKind::Order,
+        mdo_type,
+        object_name,
+    ));
+}
+
 /// Add standard attributes for InformationRegister (Attribute variant)
 pub(crate) fn add_information_register_standard_attributes_as_attrs(
     attributes: &mut Vec<Attribute>,

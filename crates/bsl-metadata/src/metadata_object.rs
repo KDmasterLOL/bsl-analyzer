@@ -404,6 +404,41 @@ pub enum StandardAttributeKind {
     /// Predefined data name attribute (ИмяПредопределенныхДанных) - always present
     PredefinedDataName,
 
+    // Document/BusinessProcess/Task standard attributes
+    /// Number attribute (Номер) - present if NumberLength > 0
+    Number {
+        /// Maximum length of number
+        length: u32,
+    },
+    /// Date attribute (Дата) - always present on Document/BusinessProcess/Task
+    Date,
+    /// Posted attribute (Проведен) - Document only
+    Posted,
+    /// Started attribute (Стартован) - BusinessProcess only
+    Started,
+    /// Completed attribute (Завершен) - BusinessProcess only
+    Completed,
+    /// HeadTask attribute (ГлавнаяЗадача) - BusinessProcess only
+    HeadTask,
+    /// Executed attribute (Выполнена) - Task only
+    Executed,
+    /// BusinessProcess attribute (БизнесПроцесс) - Task only
+    TaskBusinessProcess,
+    /// RoutePoint attribute (ТочкаМаршрута) - Task only
+    RoutePoint,
+
+    // ExchangePlan standard attributes
+    /// ThisNode attribute (ЭтотУзел) - ExchangePlan only
+    ThisNode,
+
+    // ChartOfCharacteristicTypes standard attributes
+    /// ValueType attribute (ТипЗначения) - ChartOfCharacteristicTypes only
+    ValueType,
+
+    // ChartOfAccounts standard attributes
+    /// Order attribute (Порядок) - ChartOfAccounts only
+    Order,
+
     // Information Register standard attributes
     /// Active attribute (Активность) - always present
     Active,
@@ -437,6 +472,18 @@ impl StandardAttributeKind {
             Self::Parent => AttributeType::Ref { mdo_type, name: object_name.to_string() },
             Self::Predefined => AttributeType::Boolean,
             Self::PredefinedDataName => AttributeType::String { length: None },
+            Self::Number { length } => AttributeType::String { length: Some(*length) },
+            Self::Date => AttributeType::DateTime,
+            Self::Posted => AttributeType::Boolean,
+            Self::Started => AttributeType::Boolean,
+            Self::Completed => AttributeType::Boolean,
+            Self::HeadTask => AttributeType::Unknown,
+            Self::Executed => AttributeType::Boolean,
+            Self::TaskBusinessProcess => AttributeType::Unknown,
+            Self::RoutePoint => AttributeType::Unknown,
+            Self::ThisNode => AttributeType::Boolean,
+            Self::ValueType => AttributeType::Unknown,
+            Self::Order => AttributeType::String { length: None },
             Self::Active => AttributeType::Boolean,
             Self::LineNumber => AttributeType::Number { precision: 10, scale: 0 },
             Self::Recorder => AttributeType::AnyObjectRef { mdo_type: MdoType::Document },
@@ -456,6 +503,18 @@ impl StandardAttributeKind {
             Self::Parent => "Родитель",
             Self::Predefined => "Предопределенный",
             Self::PredefinedDataName => "ИмяПредопределенныхДанных",
+            Self::Number { .. } => "Номер",
+            Self::Date => "Дата",
+            Self::Posted => "Проведен",
+            Self::Started => "Стартован",
+            Self::Completed => "Завершен",
+            Self::HeadTask => "ГлавнаяЗадача",
+            Self::Executed => "Выполнена",
+            Self::TaskBusinessProcess => "БизнесПроцесс",
+            Self::RoutePoint => "ТочкаМаршрута",
+            Self::ThisNode => "ЭтотУзел",
+            Self::ValueType => "ТипЗначения",
+            Self::Order => "Порядок",
             Self::Active => "Активность",
             Self::LineNumber => "НомерСтроки",
             Self::Recorder => "Регистратор",
@@ -475,6 +534,18 @@ impl StandardAttributeKind {
             Self::Parent => "Parent",
             Self::Predefined => "Predefined",
             Self::PredefinedDataName => "PredefinedDataName",
+            Self::Number { .. } => "Number",
+            Self::Date => "Date",
+            Self::Posted => "Posted",
+            Self::Started => "Started",
+            Self::Completed => "Completed",
+            Self::HeadTask => "HeadTask",
+            Self::Executed => "Executed",
+            Self::TaskBusinessProcess => "BusinessProcess",
+            Self::RoutePoint => "RoutePoint",
+            Self::ThisNode => "ThisNode",
+            Self::ValueType => "ValueType",
+            Self::Order => "Order",
             Self::Active => "Active",
             Self::LineNumber => "LineNumber",
             Self::Recorder => "Recorder",

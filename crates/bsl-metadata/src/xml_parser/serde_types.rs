@@ -465,6 +465,9 @@ pub(crate) struct MetadataObjectProperties {
     #[serde(rename = "CodeLength", default)]
     pub code_length: Option<IntValue>,
 
+    #[serde(rename = "NumberLength", default)]
+    pub number_length: Option<IntValue>,
+
     #[serde(rename = "DescriptionLength", default)]
     pub description_length: Option<IntValue>,
 

@@ -38,6 +38,7 @@
 //! ```
 
 use cfg_types::{BindingId, IdConversion};
+use rustc_hash::FxHashSet;
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -66,6 +67,42 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Build a set of lowercase object attribute and tabular section names from metadata.
+///
+/// In ObjectModule, assignments to names like `Дата`, `Номер`, `Автор` set object
+/// attributes, not local variables. This function collects all such names so the
+/// diagnostic can skip them.
+fn build_object_attribute_names(ctx: &DiagnosticsContext) -> FxHashSet<String> {
+    let metadata = ctx.module_metadata();
+
+    if metadata.module_type != bsl_metadata::ModuleType::ObjectModule {
+        return FxHashSet::default();
+    }
+
+    let mdo = match &metadata.mdo {
+        Some(mdo) => mdo,
+        None => return FxHashSet::default(),
+    };
+
+    let mut names = FxHashSet::default();
+
+    for attr in &mdo.attributes {
+        names.insert(attr.name.to_lowercase());
+        if let Some(ref en) = attr.name_en {
+            names.insert(en.to_lowercase());
+        }
+    }
+
+    for ts in &mdo.tabular_sections {
+        names.insert(ts.name().to_lowercase());
+        if let Some(en) = ts.name_en() {
+            names.insert(en.to_lowercase());
+        }
+    }
+
+    names
+}
+
 /// Collect UnusedLocalVariable diagnostics using liveness analysis.
 ///
 /// This function performs dataflow-based detection of unused local variables:
@@ -87,6 +124,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
+    // Build object attribute names set once for the entire module
+    let object_attr_names = build_object_attribute_names(ctx);
+
     // Load module_bodies ONCE for the entire file
     let module_bodies = ctx.module_bodies();
 
@@ -105,6 +145,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &module_cfgs,
             code,
             ctx,
+            &object_attr_names,
         ));
     }
 
@@ -112,7 +153,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
     if ctx.provider.is_none() {
         let module_id = hir_def::ModuleId::new(ctx.file_id);
-        diagnostics.extend(check_module_level_code(ctx.db, module_id, code, ctx));
+        diagnostics.extend(check_module_level_code(
+            ctx.db,
+            module_id,
+            code,
+            ctx,
+            &object_attr_names,
+        ));
     }
 
     diagnostics
@@ -122,6 +169,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// This function uses pre-loaded module-level liveness and CFG results (batch processed
 /// via Salsa), avoiding direct construction and leveraging Salsa caching.
+#[allow(clippy::too_many_arguments)] // object_attr_names needed to filter ObjectModule attributes
 fn check_method_with_module_liveness(
     local_id: u32,
     body: &hir_def::Body,
@@ -130,6 +178,7 @@ fn check_method_with_module_liveness(
     module_cfgs: &cfg::ModuleCfgs,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
+    object_attr_names: &FxHashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -277,8 +326,10 @@ fn check_method_with_module_liveness(
             if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
-                // Skip if already declared or is a parameter
-                if !declared_vars.contains(&lowercase_name) {
+                // Skip if already declared, is a parameter, or is an object attribute
+                if !declared_vars.contains(&lowercase_name)
+                    && !object_attr_names.contains(&lowercase_name)
+                {
                     // This is an implicit variable - save it with its first assignment location
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         implicit_vars.entry(lowercase_name)
@@ -331,6 +382,7 @@ fn check_module_level_code(
     module_id: ModuleId,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
+    object_attr_names: &FxHashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -366,6 +418,11 @@ fn check_module_level_code(
             let target_opaque = cfg_types::ExprId::from_idx(*target);
             if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
+
+                // Skip object attributes (in ObjectModule, these set object fields)
+                if object_attr_names.contains(&lowercase_name) {
+                    continue;
+                }
 
                 // Save first assignment location for each variable
                 if let std::collections::hash_map::Entry::Vacant(e) =
@@ -897,5 +954,131 @@ mod tests {
 
         // All other implicit variables (Отбор, ФоновоеЗадание) are also used
         assert_eq!(unused_diags.len(), 0, "No variables should be flagged as unused in this code");
+    }
+
+    /// Helper to create ObjectModule metadata with given MDO.
+    fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir_def::ModuleMetadata {
+        hir_def::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::ObjectModule,
+            execution_context: None,
+            common_module: None,
+            mdo: Some(std::sync::Arc::new(mdo)),
+            register: None,
+            http_service: None,
+            web_service: None,
+            form: None,
+        }
+    }
+
+    #[test]
+    fn test_object_attribute_not_flagged_in_object_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let mut mdo =
+            bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::BusinessProcess, "Исполнение");
+        mdo.add_attribute(bsl_metadata::Attribute {
+            name: "Дата".to_string(),
+            name_en: Some("Date".to_string()),
+            attr_type: bsl_metadata::AttributeType::DateTime,
+        });
+        mdo.add_attribute(bsl_metadata::Attribute {
+            name: "Автор".to_string(),
+            name_en: None,
+            attr_type: bsl_metadata::AttributeType::Unknown,
+        });
+
+        let metadata = make_object_module_metadata(mdo);
+
+        let code = r#"Процедура ПриЗаписи(Отказ)
+    Дата = ТекущаяДатаСеанса();
+    Автор = ПользователиИнформационнойБазы.ТекущийПользователь();
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Object attributes should not be flagged as unused in ObjectModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_tabular_section_not_flagged_in_object_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let mut mdo = bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Document,
+            "ПриходнаяНакладная",
+        );
+        let ts = bsl_metadata::TabularSection::new(uuid::Uuid::nil(), "Товары");
+        mdo.add_tabular_section(ts);
+
+        let metadata = make_object_module_metadata(mdo);
+
+        let code = r#"Процедура ПриЗаписи(Отказ)
+    Товары = ЭтотОбъект.Товары.Выгрузить();
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Tabular section name should not be flagged in ObjectModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_true_unused_still_flagged_in_object_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let mdo =
+            bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::BusinessProcess, "Исполнение");
+
+        let metadata = make_object_module_metadata(mdo);
+
+        let code = r#"Процедура ПриЗаписи(Отказ)
+    НеАтрибутОбъекта = 42;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "True unused variable should still be flagged in ObjectModule"
+        );
+        assert!(unused_diags[0].message.contains("НеАтрибутОбъекта"));
+    }
+
+    #[test]
+    fn test_attribute_name_still_flagged_in_common_module() {
+        use crate::test_utils::{check_metadata_diagnostic, make_non_common_module_metadata};
+
+        let metadata = make_non_common_module_metadata(bsl_metadata::ModuleType::CommonModule);
+
+        let code = r#"Процедура Тест()
+    Дата = ТекущаяДатаСеанса();
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "Same name should be flagged in CommonModule (not an object attribute)"
+        );
+        assert!(unused_diags[0].message.contains("Дата"));
     }
 }

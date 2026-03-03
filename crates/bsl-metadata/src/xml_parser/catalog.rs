@@ -12,7 +12,11 @@ use super::serde_types::{
     TabularSectionXml, TaskRoot,
 };
 use super::standard_attributes::{
-    add_catalog_standard_attributes, add_information_register_standard_attributes_as_attrs,
+    add_business_process_standard_attributes, add_catalog_standard_attributes,
+    add_chart_of_accounts_standard_attributes,
+    add_chart_of_characteristic_types_standard_attributes, add_document_standard_attributes,
+    add_exchange_plan_standard_attributes, add_information_register_standard_attributes_as_attrs,
+    add_task_standard_attributes,
 };
 use super::type_parser::parse_type_xml;
 
@@ -96,8 +100,38 @@ fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Resul
 
     // Add standard attributes FIRST based on object type
     match mdo_type {
-        MdoType::Catalog | MdoType::Document => {
+        MdoType::Catalog => {
             add_catalog_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::Document => {
+            add_document_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::BusinessProcess => {
+            add_business_process_standard_attributes(
+                &mut attributes,
+                &obj_xml.properties,
+                mdo_type,
+            );
+        }
+        MdoType::Task => {
+            add_task_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::ExchangePlan => {
+            add_exchange_plan_standard_attributes(&mut attributes, &obj_xml.properties, mdo_type);
+        }
+        MdoType::ChartOfCharacteristicTypes => {
+            add_chart_of_characteristic_types_standard_attributes(
+                &mut attributes,
+                &obj_xml.properties,
+                mdo_type,
+            );
+        }
+        MdoType::ChartOfAccounts => {
+            add_chart_of_accounts_standard_attributes(
+                &mut attributes,
+                &obj_xml.properties,
+                mdo_type,
+            );
         }
         MdoType::InformationRegister => {
             add_information_register_standard_attributes_as_attrs(
@@ -106,9 +140,7 @@ fn parse_metadata_object(obj_xml: MetadataObjectXml, mdo_type: MdoType) -> Resul
                 mdo_type,
             );
         }
-        _ => {
-            // Other types don't have standard attributes yet
-        }
+        _ => {}
     }
 
     // Parse child objects if present
