@@ -427,4 +427,15 @@ mod tests {
             "Complex query with IN (VALUE(), VALUE()) should not trigger diagnostic"
         );
     }
+
+    #[test]
+    fn test_count_distinct_no_diagnostic() {
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ КОЛИЧЕСТВО(РАЗЛИЧНЫЕ Т.Поле) КАК Кол ИЗ Таблица КАК Т";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "COUNT(DISTINCT expr) is valid SDBL");
+    }
 }

@@ -892,6 +892,12 @@ fn column_or_function(p: &mut Parser) {
         // Parse arguments (comma-separated expressions)
         // Support empty parameters like in BSL: Method(, , value)
         if !p.at(TokenKind::RParen) {
+            // DISTINCT/РАЗЛИЧНЫЕ inside aggregate functions: COUNT(DISTINCT expr)
+            if p.at_keyword("DISTINCT") || p.at_keyword("РАЗЛИЧНЫЕ") {
+                p.bump();
+                p.skip_trivia();
+            }
+
             // First argument (might be empty)
             if is_expression_start(p) && !p.at(TokenKind::Comma) {
                 expression(p);
