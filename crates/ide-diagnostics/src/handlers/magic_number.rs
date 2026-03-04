@@ -42,7 +42,7 @@
 //! ### `excludedConstructors` (String)
 //! Comma-separated list of constructor names where numbers are excluded.
 //! Useful for type qualifiers where parameters are self-documenting.
-//! Default: `"КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers"`
+//! Default: `"КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers,Цвет,Color"`
 //!
 //! Example: `Новый КвалификаторыЧисла(10, 2)` - 10 and 2 are excluded
 
@@ -135,7 +135,7 @@ pub fn from_hir(
 const DEFAULT_AUTHORIZED_NUMBERS: &str = "-1,0,1";
 const DEFAULT_ALLOW_MAGIC_INDEXES: bool = true;
 const DEFAULT_EXCLUDED_CONSTRUCTORS: &str =
-    "КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers";
+    "КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers,Цвет,Color";
 
 /// Configuration for the diagnostic
 #[derive(Debug, Clone)]
@@ -517,6 +517,20 @@ mod tests {
         let diags = filter(&all);
 
         assert_eq!(diags.len(), 0, "English constructor names should be excluded by default");
+    }
+
+    #[test]
+    fn test_excluded_constructors_color() {
+        let code = r"
+Процедура Тест()
+    ЦветФона = Новый Цвет(1, 150, 150);
+    BorderColor = New Color(255, 128, 0);
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+
+        assert_eq!(diags.len(), 0, "Color constructor params should be excluded by default");
     }
 
     #[test]
