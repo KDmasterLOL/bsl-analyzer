@@ -129,6 +129,7 @@ pub enum NodeKind {
     SdblTupleExpr,
     SdblSubqueryExpr,
     SdblColumnRef,
+    SdblInlineTableFields,
     SdblFunctionCall,
     SdblCaseExpr,
     SdblWhenClause,

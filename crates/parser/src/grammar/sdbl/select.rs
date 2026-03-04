@@ -429,7 +429,7 @@ fn query(p: &mut Parser) {
 /// - Invalid tokens between commas
 ///
 /// Recovery stops at clause keywords (FROM, WHERE, etc.) to allow rest of query to parse.
-fn selected_fields(p: &mut Parser) {
+pub(super) fn selected_fields(p: &mut Parser) {
     let m = p.start();
 
     // Parse fields (comma-separated) with error recovery

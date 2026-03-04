@@ -121,6 +121,7 @@ pub fn node_kind_to_syntax(kind: NodeKind) -> syntax::SyntaxKind {
         NodeKind::SdblTupleExpr => SK::SDBL_TUPLE_EXPR,
         NodeKind::SdblSubqueryExpr => SK::SDBL_SUBQUERY_EXPR,
         NodeKind::SdblColumnRef => SK::SDBL_COLUMN_REF,
+        NodeKind::SdblInlineTableFields => SK::SDBL_INLINE_TABLE_FIELDS,
         NodeKind::SdblFunctionCall => SK::SDBL_FUNCTION_CALL,
         NodeKind::SdblCaseExpr => SK::SDBL_CASE_EXPR,
         NodeKind::SdblWhenClause => SK::SDBL_WHEN_CLAUSE,

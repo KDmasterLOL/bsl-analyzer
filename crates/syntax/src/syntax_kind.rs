@@ -258,14 +258,15 @@ pub enum SyntaxKind {
     SDBL_SUBQUERY_EXPR, // Subquery in expression context
 
     // Primary Expressions
-    SDBL_COLUMN_REF,    // Column reference
-    SDBL_FUNCTION_CALL, // Function call
-    SDBL_CASE_EXPR,     // CASE expression (CASE [expr] WHEN ... THEN ... [ELSE ...] END)
-    SDBL_WHEN_CLAUSE,   // WHEN clause in CASE expression
-    SDBL_LITERAL,       // Literal value (number, string, boolean, null)
-    SDBL_MULTI_STRING,  // Multiple string tokens or string with newlines (multiString: STR+)
-    SDBL_PARAMETER,     // Parameter reference (&Parameter)
-    SDBL_TYPE,          // Type specification in CAST (СТРОКА, ЧИСЛО, etc.)
+    SDBL_COLUMN_REF,          // Column reference
+    SDBL_INLINE_TABLE_FIELDS, // Tabular part field list: Table.TabPart.(Field1, Field2)
+    SDBL_FUNCTION_CALL,       // Function call
+    SDBL_CASE_EXPR,           // CASE expression (CASE [expr] WHEN ... THEN ... [ELSE ...] END)
+    SDBL_WHEN_CLAUSE,         // WHEN clause in CASE expression
+    SDBL_LITERAL,             // Literal value (number, string, boolean, null)
+    SDBL_MULTI_STRING,        // Multiple string tokens or string with newlines (multiString: STR+)
+    SDBL_PARAMETER,           // Parameter reference (&Parameter)
+    SDBL_TYPE,                // Type specification in CAST (СТРОКА, ЧИСЛО, etc.)
 
     // Future (Phase 2+)
     SDBL_JOIN_CLAUSE,   // JOIN clause

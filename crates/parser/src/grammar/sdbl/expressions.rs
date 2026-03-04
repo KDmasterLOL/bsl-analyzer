@@ -861,6 +861,13 @@ fn column_or_function(p: &mut Parser) {
         while p.eat(TokenKind::Dot) {
             p.skip_trivia();
 
+            // Tabular part field list: Table.TabPart.(Field1, Field2, ...)
+            // Grammar: inlineTableField: column DOT LPAREN selectedFields RPAREN
+            if p.at(TokenKind::LParen) {
+                inline_table_fields(p);
+                break;
+            }
+
             // ERROR RECOVERY: After DOT, only Ident is valid for column/field name
             // Whitelist approach: if NOT Ident, mark incomplete and stop
             if !p.at(TokenKind::Ident) {
@@ -989,6 +996,26 @@ fn column_or_function(p: &mut Parser) {
         // Simple column reference (no DOT, no LPAREN)
         m.complete(p, NodeKind::SdblColumnRef);
     }
+}
+
+/// Parse inline table field list: `.(Field1, Field2, ...)`
+///
+/// Grammar: `inlineTableField: column DOT LPAREN selectedFields RPAREN`
+///
+/// Used for selecting multiple fields from a tabular part:
+/// `Table.TabularPart.(Field1, Field2, Ref)`
+fn inline_table_fields(p: &mut Parser) {
+    let m = p.start();
+
+    p.bump(); // LParen
+    p.skip_trivia();
+
+    super::select::selected_fields(p);
+
+    p.skip_trivia();
+    p.expect(TokenKind::RParen);
+
+    m.complete(p, NodeKind::SdblInlineTableFields);
 }
 
 /// Parse CASE expression
