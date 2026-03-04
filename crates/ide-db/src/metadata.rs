@@ -234,12 +234,36 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         return None;
     }
 
-    let type_plural = parts[0];
-    let name = parts[1].to_string();
+    // Find the type folder by scanning parts (handles paths with prefix like ./src/cf/)
+    let type_idx =
+        parts.iter().position(|&p| mdo_type_from_plural(p).is_some() || p == "CommonModules")?;
 
-    // Determine MDO type from plural form
-    let mdo_type = match type_plural {
-        // Metadata objects
+    // Need at least type + name + Ext + module file
+    if parts.len() < type_idx + 4 {
+        return None;
+    }
+
+    let type_plural = parts[type_idx];
+    let name = parts[type_idx + 1].to_string();
+
+    let mdo_type = mdo_type_from_plural(type_plural);
+
+    // Determine module type from file name
+    let module_file = parts[parts.len() - 1];
+    let module_type = match module_file {
+        "ObjectModule.bsl" => bsl_metadata::ModuleType::ObjectModule,
+        "ManagerModule.bsl" => bsl_metadata::ModuleType::ManagerModule,
+        "RecordSetModule.bsl" => bsl_metadata::ModuleType::RecordSetModule,
+        "Module.bsl" if type_plural == "CommonModules" => bsl_metadata::ModuleType::CommonModule,
+        _ => bsl_metadata::ModuleType::Unknown,
+    };
+
+    Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
+}
+
+/// Map plural type folder name to MdoType.
+fn mdo_type_from_plural(type_plural: &str) -> Option<bsl_metadata::MdoType> {
+    match type_plural {
         "Catalogs" | "Справочники" => Some(bsl_metadata::MdoType::Catalog),
         "Documents" | "Документы" => Some(bsl_metadata::MdoType::Document),
         "BusinessProcesses" | "БизнесПроцессы" => {
@@ -256,7 +280,6 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         "ChartsOfCharacteristicTypes" | "ПланыВидовХарактеристик" => {
             Some(bsl_metadata::MdoType::ChartOfCharacteristicTypes)
         }
-        // Registers
         "InformationRegisters" | "РегистрыСведений" => {
             Some(bsl_metadata::MdoType::InformationRegister)
         }
@@ -269,22 +292,10 @@ pub fn parse_module_path(file_uri: &str) -> Option<ModulePathInfo> {
         "CalculationRegisters" | "РегистрыРасчета" => {
             Some(bsl_metadata::MdoType::CalculationRegister)
         }
-        // Common modules don't have MDO type in the same sense
-        "CommonModules" => None,
+        "DataProcessors" | "Обработки" => Some(bsl_metadata::MdoType::DataProcessor),
+        "Reports" | "Отчеты" => Some(bsl_metadata::MdoType::Report),
         _ => None,
-    };
-
-    // Determine module type from file name
-    let module_file = parts[parts.len() - 1];
-    let module_type = match module_file {
-        "ObjectModule.bsl" => bsl_metadata::ModuleType::ObjectModule,
-        "ManagerModule.bsl" => bsl_metadata::ModuleType::ManagerModule,
-        "RecordSetModule.bsl" => bsl_metadata::ModuleType::RecordSetModule,
-        "Module.bsl" if type_plural == "CommonModules" => bsl_metadata::ModuleType::CommonModule,
-        _ => bsl_metadata::ModuleType::Unknown,
-    };
-
-    Some(ModulePathInfo { mdo_type, name: Some(name), module_type })
+    }
 }
 
 /// Find a metadata object by type and name.
@@ -984,5 +995,49 @@ mod tests {
             get_module_type_from_uri(uri),
             Some(bsl_metadata::ModuleType::ManagedApplicationModule)
         );
+    }
+
+    #[test]
+    fn test_parse_module_path_simple() {
+        let info = parse_module_path("Catalogs/Справочник1/Ext/ObjectModule.bsl").unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
+        assert_eq!(info.name.as_deref(), Some("Справочник1"));
+        assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    #[test]
+    fn test_parse_module_path_with_prefix() {
+        // Streaming mode passes paths like ./src/cf/Catalogs/...
+        let info = parse_module_path("./src/cf/Catalogs/ДействияСогласования/Ext/ObjectModule.bsl")
+            .unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Catalog));
+        assert_eq!(info.name.as_deref(), Some("ДействияСогласования"));
+        assert_eq!(info.module_type, bsl_metadata::ModuleType::ObjectModule);
+    }
+
+    #[test]
+    fn test_parse_module_path_document() {
+        let info =
+            parse_module_path("src/cf/Documents/ПриходнаяНакладная/Ext/ObjectModule.bsl").unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::Document));
+        assert_eq!(info.name.as_deref(), Some("ПриходнаяНакладная"));
+    }
+
+    #[test]
+    fn test_parse_module_path_register() {
+        let info = parse_module_path(
+            "src/cf/InformationRegisters/НастройкиОбмена/Ext/RecordSetModule.bsl",
+        )
+        .unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::InformationRegister));
+        assert_eq!(info.name.as_deref(), Some("НастройкиОбмена"));
+        assert_eq!(info.module_type, bsl_metadata::ModuleType::RecordSetModule);
+    }
+
+    #[test]
+    fn test_parse_module_path_data_processor() {
+        let info = parse_module_path("DataProcessors/ЗагрузкаДанных/Ext/ObjectModule.bsl").unwrap();
+        assert_eq!(info.mdo_type, Some(bsl_metadata::MdoType::DataProcessor));
+        assert_eq!(info.name.as_deref(), Some("ЗагрузкаДанных"));
     }
 }
