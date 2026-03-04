@@ -316,7 +316,14 @@ fn dfs_check_paths(
             }
         }
     } else {
-        let successors: Vec<_> = ctx.cfg.outgoing_edges(node).map(|(idx, _)| idx).collect();
+        // Skip AdjacentCode edges: they represent dead code after Continue/Return/Raise
+        // and carry stale transaction levels that cause false positives.
+        let successors: Vec<_> = ctx
+            .cfg
+            .outgoing_edges(node)
+            .filter(|(_, edge_type)| !matches!(edge_type, CfgEdgeType::AdjacentCode))
+            .map(|(idx, _)| idx)
+            .collect();
         for succ in successors {
             dfs_check_paths(succ, state.clone(), visited_states, issues, ctx);
         }
@@ -942,6 +949,44 @@ mod tests {
             pairing_diags.len(),
             0,
             "Begin inside try with nested raise should have NO diagnostics, got: {:?}",
+            pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Multiple Commit+Continue inside loop with try-except.
+    /// Each branch has its own Commit followed by Continue to next iteration.
+    #[test]
+    fn test_multiple_commit_continue_in_loop() {
+        let code = r#"
+Процедура Тест()
+    Пока Истина Цикл
+        НачатьТранзакцию();
+        Попытка
+            Если Условие1 Тогда
+                ЗафиксироватьТранзакцию();
+                Продолжить;
+            КонецЕсли;
+            Если Условие2 Тогда
+                ЗафиксироватьТранзакцию();
+                Продолжить;
+            КонецЕсли;
+            ЗафиксироватьТранзакцию();
+        Исключение
+            ОтменитьТранзакцию();
+        КонецПопытки;
+    КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Multiple Commit+Continue in loop should have NO diagnostics, got: {:?}",
             pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
