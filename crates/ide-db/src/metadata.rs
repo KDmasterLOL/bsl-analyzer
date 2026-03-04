@@ -168,8 +168,15 @@ pub fn get_module_type_from_uri(file_uri: &str) -> Option<bsl_metadata::ModuleTy
         }
     }
 
-    // <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl
-    // Check for Commands in path and CommandModule.bsl at end
+    // CommonCommands/<Name>/Ext/CommandModule.bsl (top-level common commands)
+    if let Some(idx) = parts.iter().position(|&p| p == "CommonCommands" || p == "ОбщиеКоманды")
+    {
+        if parts.len() >= idx + 4 && parts[parts.len() - 1] == "CommandModule.bsl" {
+            return Some(bsl_metadata::ModuleType::CommandModule);
+        }
+    }
+
+    // <TypePlural>/<Name>/Commands/<Cmd>/Ext/CommandModule.bsl (subordinate commands)
     if let Some(cmd_idx) = parts.iter().position(|&p| p == "Commands") {
         if parts.len() >= cmd_idx + 4 && parts[parts.len() - 1].ends_with("CommandModule.bsl") {
             return Some(bsl_metadata::ModuleType::CommandModule);
@@ -569,8 +576,7 @@ pub fn build_module_metadata(
     let path_info = parse_module_path(&uri);
 
     // Determine module type from file URI
-    let module_type =
-        get_module_type_from_uri(&uri).unwrap_or(bsl_metadata::ModuleType::CommonModule);
+    let module_type = get_module_type_from_uri(&uri).unwrap_or(bsl_metadata::ModuleType::Unknown);
 
     tracing::debug!(uri = %uri, module_type = ?module_type, "build_module_metadata");
 
@@ -944,6 +950,18 @@ mod tests {
     #[test]
     fn test_get_module_type_command_module() {
         let uri = "Catalogs/Справочник1/Commands/Команда1/Ext/CommandModule.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommandModule));
+    }
+
+    #[test]
+    fn test_get_module_type_common_command_module() {
+        let uri = "CommonCommands/АвтономнаяРабота/Ext/CommandModule.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommandModule));
+
+        let uri = "src/cf/CommonCommands/АвтономнаяРабота/Ext/CommandModule.bsl";
+        assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommandModule));
+
+        let uri = "ОбщиеКоманды/ВыполнитьДействие/Ext/CommandModule.bsl";
         assert_eq!(get_module_type_from_uri(uri), Some(bsl_metadata::ModuleType::CommandModule));
     }
 
