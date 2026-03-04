@@ -73,7 +73,7 @@ fn check_ternary(node: &SyntaxNode, ctx: &DiagnosticsContext) -> Option<Diagnost
     let true_bool = get_boolean_literal(true_branch);
     let false_bool = get_boolean_literal(false_branch);
 
-    let is_useless = condition_bool.is_some() || true_bool.is_some() || false_bool.is_some();
+    let is_useless = condition_bool.is_some() || (true_bool.is_some() && false_bool.is_some());
 
     if is_useless {
         return Some(Diagnostic {
@@ -159,6 +159,29 @@ mod tests {
     }
 
     #[test]
+    fn test_single_boolean_branch_is_not_useless() {
+        // null-guard: ?(obj = Неопределено, Ложь, obj.Свойство)
+        let code = r#"А = ?(СтрокаПредмета.Предмет = Неопределено, Ложь, СтрокаПредмета.Предмет.ПометкаУдаления);"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Single boolean branch (null-guard) should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_mixed_boolean_nonboolean_not_useless() {
+        let code = "А = ?(Б = 1, True, 1);";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Single boolean branch with non-boolean should not trigger diagnostic"
+        );
+    }
+
+    #[test]
     fn test_comprehensive() {
         let code = include_str!("../../test_data/UselessTernaryOperatorDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
@@ -168,15 +191,13 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::UselessTernaryOperator)
             .collect();
 
-        assert_eq!(diags.len(), 8, "Should match Java: 8 diagnostics");
+        assert_eq!(diags.len(), 6);
 
         assert_diagnostic_range(code, diags[0], 1, 4, 26);
         assert_diagnostic_range(code, diags[1], 2, 4, 25);
         assert_diagnostic_range(code, diags[2], 3, 4, 26);
         assert_diagnostic_range(code, diags[3], 4, 4, 25);
-        assert_diagnostic_range(code, diags[4], 5, 4, 21);
-        assert_diagnostic_range(code, diags[5], 6, 4, 22);
-        assert_diagnostic_range(code, diags[6], 7, 4, 19);
-        assert_diagnostic_range(code, diags[7], 8, 4, 18);
+        assert_diagnostic_range(code, diags[4], 5, 4, 19);
+        assert_diagnostic_range(code, diags[5], 6, 4, 18);
     }
 }

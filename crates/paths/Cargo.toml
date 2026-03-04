@@ -1,6 +1,6 @@
 [package]
 name = "paths"
-version = "0.0.0"
+version = "0.1.27"
 repository.workspace = true
 description = "Path wrappers for absolute and relative paths rust-analyzer."
 
