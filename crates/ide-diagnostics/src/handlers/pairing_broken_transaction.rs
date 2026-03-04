@@ -44,7 +44,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg::{CfgVertex, ControlFlowGraph, NodeIndex};
+use cfg::{CfgEdgeType, CfgVertex, ControlFlowGraph, NodeIndex};
 use cfg_types::{ExprId, IdConversion, StmtId};
 use hir::{Body, BodySourceMap, Expr, Stmt};
 use ide_db::TextRange;
@@ -284,9 +284,42 @@ fn dfs_check_paths(
     }
 
     // Continue DFS to successors
-    let successors: Vec<_> = ctx.cfg.outgoing_edges(node).map(|(idx, _)| idx).collect();
-    for succ in successors {
-        dfs_check_paths(succ, state.clone(), visited_states, issues, ctx);
+    if matches!(ctx.cfg.vertex(node), Some(CfgVertex::TryExcept(_))) {
+        // TryExceptVertex has TrueBranch → try body and FalseBranch → except handler.
+        // The FalseBranch carries transaction level from BEFORE the try body, which causes
+        // false positives when НачатьТранзакцию() is inside the Попытка block.
+        // If the except handler is also reachable via Raise from the try body (with correct
+        // post-Begin level), skip the FalseBranch to avoid false orphaned Rollback reports.
+        let mut try_node = None;
+        let mut except_node = None;
+
+        for (idx, edge_type) in ctx.cfg.outgoing_edges(node) {
+            match edge_type {
+                CfgEdgeType::TrueBranch => try_node = Some(idx),
+                CfgEdgeType::FalseBranch => except_node = Some(idx),
+                _ => {}
+            }
+        }
+
+        if let Some(try_n) = try_node {
+            dfs_check_paths(try_n, state.clone(), visited_states, issues, ctx);
+        }
+
+        if let Some(except_n) = except_node {
+            let has_raise_edges = ctx
+                .cfg
+                .incoming_edges(except_n)
+                .any(|(_, edge_type)| !matches!(edge_type, CfgEdgeType::FalseBranch));
+
+            if !has_raise_edges {
+                dfs_check_paths(except_n, state.clone(), visited_states, issues, ctx);
+            }
+        }
+    } else {
+        let successors: Vec<_> = ctx.cfg.outgoing_edges(node).map(|(idx, _)| idx).collect();
+        for succ in successors {
+            dfs_check_paths(succ, state.clone(), visited_states, issues, ctx);
+        }
     }
 }
 
@@ -876,6 +909,41 @@ mod tests {
 
         // Path with Raise: Begin -> Raise -> exit (no Commit/Rollback)
         assert_eq!(pairing_diags.len(), 1, "Raise outside try leaves transaction open");
+    }
+
+    /// Begin inside try with nested try-raise: inner except re-raises to outer except
+    /// where Rollback is called. FalseBranch of outer TryExceptVertex should be skipped
+    /// because except is reachable via Raise with correct transaction level.
+    #[test]
+    fn test_begin_inside_try_with_nested_raise() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        НачатьТранзакцию();
+        Попытка
+            Действие();
+        Исключение
+            ВызватьИсключение;
+        КонецПопытки;
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        let pairing_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
+            .collect();
+
+        assert_eq!(
+            pairing_diags.len(),
+            0,
+            "Begin inside try with nested raise should have NO diagnostics, got: {:?}",
+            pairing_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
