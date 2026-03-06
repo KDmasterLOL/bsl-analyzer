@@ -367,7 +367,7 @@ mod tests {
         let external_ref = ExternalRef::QualifiedCall {
             receiver: Name::new("ОбщегоНазначения"),
             method: Name::new("СообщитьПользователю"),
-            range: text_size::TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         };
 
         assert_eq!(index.resolve(&external_ref), Some(file_id));

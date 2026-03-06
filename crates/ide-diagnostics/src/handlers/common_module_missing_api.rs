@@ -6,7 +6,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
 use syntax::ast::{AstNode, FunctionDef, PreRegionDir, ProcedureDef};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -46,7 +45,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             code,
             message: "Общий модуль должен содержать экспортные методы и области API".to_string(),
             severity: ctx.severity(code),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             tags: ctx.tags(code),
             fixes: vec![],
         }]

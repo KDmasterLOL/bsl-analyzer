@@ -8,7 +8,6 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use hir::ModuleMetadata;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -56,7 +55,7 @@ pub fn from_metadata(
                 message: "Имя общего модуля не должно содержать общих слов типа 'Процедуры', 'Функции', 'Модуль'"
                     .to_string(),
                 severity: ctx.severity(code),
-                range: TextRange::empty(0.into()),
+                range: syntax::MODULE_RANGE,
                 tags: ctx.tags(code),
                 fixes: vec![],
             }];

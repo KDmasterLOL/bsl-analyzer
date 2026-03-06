@@ -32,10 +32,7 @@
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use sdbl_hir;
-use tracing::debug;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -55,62 +52,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use std::time::Instant;
-    let start = Instant::now();
-
-    let code = DiagnosticCode::JoinWithSubQuery;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    // Get SDBL HIR with collected diagnostics
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-
-    let bsl_source = ctx.file_text();
-
-    // Get cached SDBL queries for position mapping
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    // Build shared line index
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    // Iterate SDBL HIRs and corresponding query infos in parallel
-    // Both are sorted by position in file, so we can zip them
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
-    {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        // Emit diagnostics from HIR
-        for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::JoinWithSubQuery { range } = hir_diag {
-                let bsl_range = mapper.map_range(*range, &query_info.query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: "Don't use a join with sub queries. \
-                              Joins with subqueries cause severe performance issues."
-                        .to_string(),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
-        }
-    }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "JoinWithSubQuery completed"
-    );
-
-    diagnostics
+    crate::sdbl_utils::collect_sdbl_simple(
+        ctx,
+        DiagnosticCode::JoinWithSubQuery,
+        "Don't use a join with sub queries. Joins with subqueries cause severe performance issues.",
+        |diag| match diag {
+            sdbl_hir::SdblDiagnostic::JoinWithSubQuery { range } => Some(*range),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(test)]

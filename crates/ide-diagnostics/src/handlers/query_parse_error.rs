@@ -29,7 +29,6 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::SyntaxKind;
-use tracing::debug;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -53,9 +52,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// 1. Looking for ERROR nodes in the SDBL AST (parser is error-tolerant)
 /// 2. Checking for trailing dots in REFS expressions (e.g., `ССЫЛКА Документ.`)
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use std::time::Instant;
-    let start = Instant::now();
-
     let code = DiagnosticCode::QueryParseError;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -100,12 +96,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             });
         }
     }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "QueryParseError completed"
-    );
 
     diagnostics
 }

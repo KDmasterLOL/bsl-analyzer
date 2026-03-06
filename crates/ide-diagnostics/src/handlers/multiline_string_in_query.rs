@@ -30,7 +30,6 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use tracing::debug;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -50,9 +49,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 ///
 /// Uses SDBL HIR with diagnostics collected during lowering.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use std::time::Instant;
-    let start = Instant::now();
-
     let code = DiagnosticCode::MultilineStringInQuery;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -122,12 +118,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             );
         }
     }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "MultilineStringInQuery completed (HIR-based)"
-    );
 
     diagnostics
 }

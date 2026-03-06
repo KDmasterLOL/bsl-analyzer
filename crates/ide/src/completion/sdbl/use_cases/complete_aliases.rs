@@ -79,7 +79,6 @@ mod tests {
     use bsl_metadata::MdoType;
     use sdbl_hir::{ResolvedTable, TableRef};
     use smol_str::SmolStr;
-    use syntax::TextRange;
 
     fn make_test_scope_with_aliases() -> Scope {
         let mut scope = Scope::new();
@@ -96,7 +95,7 @@ mod tests {
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             subquery: Vec::new(),
         };
 
@@ -112,7 +111,7 @@ mod tests {
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             subquery: Vec::new(),
         };
 
@@ -128,7 +127,7 @@ mod tests {
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             subquery: Vec::new(),
         };
 

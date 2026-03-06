@@ -8,7 +8,6 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use bsl_metadata::traits::MdObject;
 use hir::ModuleMetadata;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -98,7 +97,7 @@ pub fn check_session_module(
                         mdo.name, max_length
                     ),
                     severity: ctx.severity(code),
-                    range: TextRange::empty(0.into()),
+                    range: syntax::MODULE_RANGE,
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -140,7 +139,7 @@ fn check_common_module(
                 max_length
             ),
             severity: ctx.severity(code),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -163,7 +162,7 @@ fn check_metadata_object(
                 mdo.name, max_length
             ),
             severity: ctx.severity(code),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -187,7 +186,7 @@ fn check_register(
                 max_length
             ),
             severity: ctx.severity(code),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             tags: ctx.tags(code),
             fixes: vec![],
         });

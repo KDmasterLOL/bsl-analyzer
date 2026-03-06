@@ -5,7 +5,58 @@
 //!
 //! This module is shared by all SDBL diagnostics to avoid code duplication.
 
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
+
+/// Collect SDBL diagnostics matching a single variant with only a `range` field.
+///
+/// This helper extracts the common boilerplate shared by most SDBL diagnostic handlers:
+/// disabled check → sdbl_hir_in_file → build_line_index → zip iteration → match → map_range → push.
+///
+/// `matcher` should return `Some(range)` for the target `SdblDiagnostic` variant, `None` otherwise.
+pub fn collect_sdbl_simple<F>(
+    ctx: &DiagnosticsContext,
+    code: DiagnosticCode,
+    message: &str,
+    matcher: F,
+) -> Vec<Diagnostic>
+where
+    F: Fn(&sdbl_hir::SdblDiagnostic) -> Option<TextRange>,
+{
+    if ctx.is_disabled_with_metadata(code) {
+        return Vec::new();
+    }
+
+    let sdbl_hirs = ctx.sdbl_hir_in_file();
+    let bsl_source = ctx.file_text();
+    let sdbl_queries = ctx.all_sdbl_in_file();
+    let line_starts = build_line_index_shared(&bsl_source);
+
+    let mut diagnostics = Vec::new();
+
+    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
+        sdbl_hirs.iter().zip(sdbl_queries.iter())
+    {
+        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
+
+        for hir_diag in sdbl_package.all_diagnostics() {
+            if let Some(range) = matcher(hir_diag) {
+                let bsl_range = mapper.map_range(range, &query_info.query_text);
+
+                diagnostics.push(Diagnostic {
+                    code,
+                    message: message.to_string(),
+                    severity: ctx.severity(code),
+                    range: bsl_range,
+                    tags: ctx.tags(code),
+                    fixes: vec![],
+                });
+            }
+        }
+    }
+
+    diagnostics
+}
 
 /// Maps SDBL positions back to BSL source positions.
 ///

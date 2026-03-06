@@ -162,7 +162,6 @@ mod tests {
     use sdbl_hir::{FieldDef, ResolvedTable, TableRef};
     use smol_str::SmolStr;
     use std::sync::Arc;
-    use syntax::TextRange;
 
     struct TestMetadataProvider(Option<Arc<Configuration>>);
 
@@ -228,7 +227,7 @@ mod tests {
             }),
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
             subquery: Vec::new(),
         };
 

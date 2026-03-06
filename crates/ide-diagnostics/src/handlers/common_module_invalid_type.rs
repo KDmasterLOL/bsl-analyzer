@@ -7,7 +7,6 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode};
 use hir::ModuleMetadata;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -62,7 +61,7 @@ pub fn from_metadata(
             "Общий модуль должен быть одного из типов: Server, ServerCall, Client, ClientServer"
                 .to_string(),
         severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
+        range: syntax::MODULE_RANGE,
         tags: ctx.tags(code),
         fixes: vec![],
     }]

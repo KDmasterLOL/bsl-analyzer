@@ -478,14 +478,14 @@ mod tests {
     fn test_diagnostic_codes() {
         let diag = SdblDiagnostic::QueryToMissingMetadata {
             table_name: "Test".to_string(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         };
         assert_eq!(diag.code(), Some(122));
 
         let diag = SdblDiagnostic::JoinWithVirtualTable {
             table_name: "Test".to_string(),
             virtual_table_type: "СрезПоследних".to_string(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         };
         assert_eq!(diag.code(), Some(79));
     }
@@ -495,7 +495,7 @@ mod tests {
         let diag = SdblDiagnostic::UnknownField {
             table_name: "Справочник.Валюты".to_string(),
             field_name: "НесуществующееПоле".to_string(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         };
         assert!(diag.message().contains("НесуществующееПоле"));
         assert!(diag.message().contains("Справочник.Валюты"));

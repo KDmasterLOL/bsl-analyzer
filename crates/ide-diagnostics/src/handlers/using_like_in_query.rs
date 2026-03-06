@@ -1,9 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use sdbl_hir;
-use tracing::debug;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,52 +18,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use std::time::Instant;
-    let start = Instant::now();
-
-    let code = DiagnosticCode::UsingLikeInQuery;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-    let bsl_source = ctx.file_text();
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
-    {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } = hir_diag {
-                let bsl_range = mapper.map_range(*range, &query_info.query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: "Измените выражение, чтобы не использовать 'ПОДОБНО'".to_string(),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
-        }
-    }
-
-    debug!(
-        time_ms = start.elapsed().as_millis(),
-        diagnostics_found = diagnostics.len(),
-        "UsingLikeInQuery completed"
-    );
-
-    diagnostics
+    crate::sdbl_utils::collect_sdbl_simple(
+        ctx,
+        DiagnosticCode::UsingLikeInQuery,
+        "Измените выражение, чтобы не использовать 'ПОДОБНО'",
+        |diag| match diag {
+            sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } => Some(*range),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(test)]

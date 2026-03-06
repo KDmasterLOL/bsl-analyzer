@@ -155,36 +155,25 @@ impl Definition {
     pub fn name(&self, db: &dyn DefDatabase) -> Option<Name> {
         match self {
             Definition::Method(id) => {
-                // Get method name from ItemTree
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        match item {
-                            hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                                let proc = tree.procedure(*proc_idx);
-                                return Some(proc.name.clone());
-                            }
-                            hir_def::item_tree::ModItem::Function(func_idx) => {
-                                let func = tree.function(*func_idx);
-                                return Some(func.name.clone());
-                            }
-                            _ => {}
-                        }
+                match tree.top_level_items().get(id.local_id as usize)? {
+                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        Some(tree.procedure(*proc_idx).name.clone())
                     }
+                    hir_def::item_tree::ModItem::Function(func_idx) => {
+                        Some(tree.function(*func_idx).name.clone())
+                    }
+                    _ => None,
                 }
-                None
             }
             Definition::Variable(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                            let var = tree.variable(*var_idx);
-                            return Some(var.name.clone());
-                        }
+                match tree.top_level_items().get(id.local_id as usize)? {
+                    hir_def::item_tree::ModItem::Variable(var_idx) => {
+                        Some(tree.variable(*var_idx).name.clone())
                     }
+                    _ => None,
                 }
-                None
             }
             Definition::Parameter { param_name, .. } => Some(param_name.clone()),
             Definition::Local { var_name, .. } => Some(var_name.clone()),
@@ -210,34 +199,24 @@ impl Definition {
         match self {
             Definition::Method(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        match item {
-                            hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                                let proc = tree.procedure(*proc_idx);
-                                return proc.is_export;
-                            }
-                            hir_def::item_tree::ModItem::Function(func_idx) => {
-                                let func = tree.function(*func_idx);
-                                return func.is_export;
-                            }
-                            _ => {}
-                        }
+                match tree.top_level_items().get(id.local_id as usize) {
+                    Some(hir_def::item_tree::ModItem::Procedure(proc_idx)) => {
+                        tree.procedure(*proc_idx).is_export
                     }
+                    Some(hir_def::item_tree::ModItem::Function(func_idx)) => {
+                        tree.function(*func_idx).is_export
+                    }
+                    _ => false,
                 }
-                false
             }
             Definition::Variable(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                            let var = tree.variable(*var_idx);
-                            return var.is_export;
-                        }
+                match tree.top_level_items().get(id.local_id as usize) {
+                    Some(hir_def::item_tree::ModItem::Variable(var_idx)) => {
+                        tree.variable(*var_idx).is_export
                     }
+                    _ => false,
                 }
-                false
             }
             // Other definitions cannot be exported
             _ => false,
@@ -251,34 +230,24 @@ impl Definition {
         match self {
             Definition::Method(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        match item {
-                            hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                                let proc = tree.procedure(*proc_idx);
-                                return Some(proc.source_range);
-                            }
-                            hir_def::item_tree::ModItem::Function(func_idx) => {
-                                let func = tree.function(*func_idx);
-                                return Some(func.source_range);
-                            }
-                            _ => {}
-                        }
+                match tree.top_level_items().get(id.local_id as usize)? {
+                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        Some(tree.procedure(*proc_idx).source_range)
                     }
+                    hir_def::item_tree::ModItem::Function(func_idx) => {
+                        Some(tree.function(*func_idx).source_range)
+                    }
+                    _ => None,
                 }
-                None
             }
             Definition::Variable(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
-                            let var = tree.variable(*var_idx);
-                            return Some(var.source_range);
-                        }
+                match tree.top_level_items().get(id.local_id as usize)? {
+                    hir_def::item_tree::ModItem::Variable(var_idx) => {
+                        Some(tree.variable(*var_idx).source_range)
                     }
+                    _ => None,
                 }
-                None
             }
             // TODO: Implement for parameters and local variables
             // This requires storing their source ranges in Body/ExprScopes
@@ -297,22 +266,15 @@ impl Definition {
         match self {
             Definition::Method(id) => {
                 let tree = db.item_tree(id.module.file_id);
-                for (idx, item) in tree.top_level_items().iter().enumerate() {
-                    if idx == id.local_id as usize {
-                        match item {
-                            hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                                let proc = tree.procedure(*proc_idx);
-                                return Some(proc.name_range);
-                            }
-                            hir_def::item_tree::ModItem::Function(func_idx) => {
-                                let func = tree.function(*func_idx);
-                                return Some(func.name_range);
-                            }
-                            _ => {}
-                        }
+                match tree.top_level_items().get(id.local_id as usize)? {
+                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        Some(tree.procedure(*proc_idx).name_range)
                     }
+                    hir_def::item_tree::ModItem::Function(func_idx) => {
+                        Some(tree.function(*func_idx).name_range)
+                    }
+                    _ => None,
                 }
-                None
             }
             Definition::Variable(_id) => {
                 // Variables don't have separate name_range in ItemTree

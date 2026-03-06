@@ -26,10 +26,12 @@
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::utils::nstr::extract_language_keys;
+use crate::utils::nstr::{
+    extract_language_keys, get_assigned_variable_name, has_template_in_parents, is_nstr_call,
+    is_variable_used_in_template, NstrConfig,
+};
 use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use std::collections::HashSet;
-use syntax::{SyntaxKind, SyntaxNode};
+use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -45,165 +47,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-const DEFAULT_DECLARED_LANGUAGES: &str = "ru";
-
-#[derive(Debug, Clone)]
-struct Config {
-    declared_languages: HashSet<String>,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let declared_str = ctx
-            .config
-            .get_string(DiagnosticCode::MultilingualStringUsingWithTemplate, "declaredLanguages")
-            .unwrap_or(DEFAULT_DECLARED_LANGUAGES);
-
-        let declared_languages: HashSet<String> = declared_str
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        Self { declared_languages }
-    }
-}
-
-/// Check if the given name is an NStr call (case-insensitive)
-fn is_nstr_call(name: &str) -> bool {
-    name.eq_ignore_ascii_case("НСтр") || name.eq_ignore_ascii_case("NStr")
-}
-
-/// Check if the given name is a StrTemplate call (case-insensitive)
-fn is_template_call(name: &str) -> bool {
-    name.eq_ignore_ascii_case("СтрШаблон") || name.eq_ignore_ascii_case("StrTemplate")
-}
-
-/// Check if a node has a StrTemplate call in its ancestors
-fn has_template_in_parents(node: &SyntaxNode) -> bool {
-    // New AST: CALL_EXPR > IDENT(node) > IDENT(token:СтрШаблон) or
-    // CALL_EXPR > FIELD_EXPR > IDENT(node) > IDENT(token:СтрШаблон)
-    for ancestor in node.ancestors() {
-        if ancestor.kind() == SyntaxKind::CALL_EXPR {
-            // Check if this CALL_EXPR is a StrTemplate call
-            // Look for IDENT tokens directly in descendants
-            for token in ancestor.descendants_with_tokens() {
-                if let syntax::NodeOrToken::Token(t) = token {
-                    if t.kind() == SyntaxKind::IDENT && is_template_call(t.text()) {
-                        // Make sure this IDENT is the call target, not an argument
-                        // The StrTemplate IDENT should be before ARG_LIST
-                        let arg_list_start = ancestor
-                            .descendants()
-                            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
-                            .map(|n| n.text_range().start());
-                        if let Some(al_start) = arg_list_start {
-                            if t.text_range().start() < al_start {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Get the variable name from an ASSIGN_STMT if this is an assignment
-fn get_assigned_variable_name(nstr_node: &SyntaxNode) -> Option<String> {
-    let mut current = nstr_node.parent();
-    while let Some(parent) = current {
-        if parent.kind() == SyntaxKind::ASSIGN_STMT {
-            // Structure: ASSIGN_STMT > IDENT(node) > IDENT(token), then EQ, then EXPR
-            // Find the first IDENT node before EQ
-            let eq_pos = parent
-                .children_with_tokens()
-                .filter_map(|c| c.into_token())
-                .find(|t| t.kind() == SyntaxKind::EQ)
-                .map(|t| t.text_range().start());
-
-            if let Some(eq_pos) = eq_pos {
-                // Find the first IDENT node before EQ
-                for child in parent.children() {
-                    if child.kind() == SyntaxKind::IDENT && child.text_range().end() <= eq_pos {
-                        // Get the IDENT token from inside the IDENT node
-                        for inner in child.children_with_tokens() {
-                            if let syntax::NodeOrToken::Token(token) = inner {
-                                if token.kind() == SyntaxKind::IDENT {
-                                    return Some(token.text().to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return None;
-        }
-        if matches!(parent.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF) {
-            break;
-        }
-        current = parent.parent();
-    }
-    None
-}
-
-/// Check if a variable is used later in a StrTemplate call within the same code block
-fn is_variable_used_in_template(var_name: &str, nstr_node: &SyntaxNode) -> bool {
-    // Find the containing statement list
-    let stmt_list = nstr_node.ancestors().find(|n| n.kind() == SyntaxKind::STMT_LIST);
-    let stmt_list = match stmt_list {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let nstr_offset = nstr_node.text_range().start();
-
-    // Look for StrTemplate CALL_EXPR nodes after this NStr
-    for node in stmt_list.descendants() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
-
-        // Only check nodes that come after the NStr
-        if node.text_range().start() <= nstr_offset {
-            continue;
-        }
-
-        // Check if this is a StrTemplate call
-        // New AST: CALL_EXPR > IDENT(node) > IDENT(token:СтрШаблон) > ARG_LIST
-        let arg_list_start = node
-            .descendants()
-            .find(|n| n.kind() == SyntaxKind::ARG_LIST)
-            .map(|n| n.text_range().start());
-
-        let mut is_str_template = false;
-        let mut has_var_in_args = false;
-
-        for token in node.descendants_with_tokens() {
-            if let syntax::NodeOrToken::Token(t) = token {
-                if t.kind() == SyntaxKind::IDENT {
-                    // Check if this is the StrTemplate identifier (before ARG_LIST)
-                    if let Some(al_start) = arg_list_start {
-                        if t.text_range().start() < al_start && is_template_call(t.text()) {
-                            is_str_template = true;
-                        } else if t.text_range().start() >= al_start
-                            && t.text().eq_ignore_ascii_case(var_name)
-                        {
-                            has_var_in_args = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if is_str_template && has_var_in_args {
-            return true;
-        }
-    }
-
-    false
-}
-
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("MultilingualStringUsingWithTemplate::check").entered();
 
@@ -213,7 +56,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let config = Config::from_context(ctx);
+    let config = NstrConfig::from_context(ctx, code);
     let parse = ctx.parse();
     let root = parse.syntax_node();
 

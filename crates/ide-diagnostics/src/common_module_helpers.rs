@@ -3,7 +3,6 @@
 use bsl_metadata::traits::{MdObject, Module};
 use bsl_metadata::CommonModule;
 use hir::ModuleMetadata;
-use ide_db::TextRange;
 
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
@@ -122,7 +121,7 @@ pub fn check_common_module_name(
         code,
         message: message.to_string(),
         severity: ctx.severity(code),
-        range: TextRange::empty(0.into()),
+        range: syntax::MODULE_RANGE,
         tags: ctx.tags(code),
         fixes: vec![],
     }]

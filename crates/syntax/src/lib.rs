@@ -33,6 +33,9 @@ pub use crate::{
 };
 pub use rowan::{Direction, NodeCache, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 
+/// Empty range at position 0 — used for module-level diagnostics without a specific source location.
+pub const MODULE_RANGE: TextRange = TextRange::empty(TextSize::new(0));
+
 /// Result of parsing BSL source code.
 ///
 /// Contains a syntax tree (green node) and a list of errors.

@@ -352,15 +352,15 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 ### Средний приоритет (архитектура, влияет на доработку)
 
 6. **M2** — две type inference → разобраться, какая актуальна.
-7. **NEW-M4** — SDBL boilerplate → extract helper (~350 lines saved).
+7. ~~**NEW-M4** — SDBL boilerplate → extract helper (~350 lines saved).~~ ✅ Исправлено
 8. **NEW-M6** — `String` → `Name` в `MethodData`/`ParameterData`.
-9. **NEW-M7** — ItemTree lookup helper (7-way duplication).
+9. ~~**NEW-M7** — ItemTree lookup helper (7-way duplication).~~ ✅ Исправлено
 
 ### Быстрые wins (< 1 часа)
 
 10. **L1** — удалить `cfg-types-research`.
 11. **M10 + L9** — удалить `petgraph` из hir-def + закомментированный `cfg_builder`.
-12. **NEW-L2** — const `MODULE_RANGE`.
+12. ~~**NEW-L2** — const `MODULE_RANGE`.~~ ✅ Исправлено
 13. **NEW-L5** — удалить dead-комментарии в `collect_ast_diagnostics`.
 
 ---
@@ -373,5 +373,14 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 |---|---|---|---|---|---|
 | **CRITICAL** | 4 | 3 | 0 | 0 | 1 |
 | **HIGH** | 11 | 7 | 2 | 1 | 5 (NEW) |
-| **MEDIUM** | 18 | 0 | 0 | 0 | 18 |
-| **LOW** | 10 | 0 | 0 | 0 | 10 |
+| **MEDIUM** | 18 | 4 | 0 | 0 | 14 |
+| **LOW** | 10 | 2 | 0 | 0 | 8 |
+
+### Исправлено в этом аудите
+
+- **NEW-L2** — `TextRange::empty(0.into())` заменён на `syntax::MODULE_RANGE` (14 файлов)
+- **NEW-L3** — Удалён мёртвый timing-код из 15 SDBL handlers
+- **NEW-M2** — Regex удалён из `hir-def` (было исправлено ранее)
+- **NEW-M4** — SDBL boilerplate → `collect_sdbl_simple()` helper (10 handlers, ~200 строк сэкономлено)
+- **NEW-M5** — Дублирование NStr-утилит → общий `utils/nstr.rs` (7 функций, ~160 строк сэкономлено)
+- **NEW-M7** — ItemTree traversal: 7 линейных сканов → `.get()` в `definition.rs`

@@ -647,7 +647,6 @@ mod tests {
     use super::*;
     use crate::hir::ResolvedTable;
     use bsl_metadata::MdoType;
-    use text_size::TextRange;
 
     fn make_table(name: &str, alias: Option<&str>, fields: Vec<FieldDef>) -> TableRef {
         TableRef {
@@ -662,7 +661,7 @@ mod tests {
             is_virtual_table: false,
             virtual_table_params: Vec::new(),
             subquery: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         }
     }
 

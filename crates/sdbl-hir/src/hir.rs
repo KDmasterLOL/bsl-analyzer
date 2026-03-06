@@ -66,7 +66,7 @@ impl SdblHir {
             order_by: None,
             unions: Vec::new(),
             diagnostics: Vec::new(),
-            range: TextRange::empty(0.into()),
+            range: syntax::MODULE_RANGE,
         }
     }
 
