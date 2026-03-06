@@ -162,6 +162,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         ));
     }
 
+    // Check explicit module-level variable declarations (Перем X;)
+    // that are not referenced by any method body or module-level code
+    diagnostics.extend(check_module_var_declarations(&module_bodies, code, ctx));
+
     diagnostics
 }
 
@@ -446,6 +450,44 @@ fn check_module_level_code(
 
         if !is_live_anywhere {
             diagnostics.push(create_diagnostic(&original_name, range, code, ctx));
+        }
+    }
+
+    diagnostics
+}
+
+/// Check explicit module-level variable declarations (Перем X;).
+///
+/// Detects `Перем` declarations that are not referenced by any method body
+/// or module-level code. Exported variables are skipped.
+fn check_module_var_declarations(
+    module_bodies: &hir_def::ModuleBodies,
+    code: DiagnosticCode,
+    ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
+    let module_vars = module_bodies.module_vars();
+    if module_vars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all_referenced_externals: rustc_hash::FxHashSet<String> =
+        rustc_hash::FxHashSet::default();
+
+    for (_local_id, lower_result) in module_bodies.iter_lower_results() {
+        all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
+    }
+    if let Some(module_code_result) = module_bodies.module_code_result() {
+        all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
+    }
+
+    let mut diagnostics = Vec::new();
+    for var in module_vars {
+        if var.is_export {
+            continue;
+        }
+        let key = var.name.to_lowercase();
+        if !all_referenced_externals.contains(&key) {
+            diagnostics.push(create_diagnostic(&var.name, var.range, code, ctx));
         }
     }
 

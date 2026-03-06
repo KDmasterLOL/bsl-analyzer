@@ -1,8 +1,9 @@
 # Clean Architecture Audit — BSL Analyzer
 
-> Дата: 2026-02-17
+> Дата: 2026-03-07 (обновление)
+> Предыдущий аудит: 2026-02-17
 > Методология: Robert C. Martin (Clean Architecture, SOLID) + анализ дублирования кода
-> Объём: 31 crate, ~100k+ строк Rust
+> Объём: 31 crate, ~170k строк Rust
 
 ## Иерархия слоёв (текущая)
 
@@ -26,282 +27,351 @@ Layer  0: paths, stdx, intern, line-index, cfg-types, profile, test-utils
 
 ## CRITICAL
 
-### C1. Нарушение LSP: `Lattice::bottom()` паникует в 2 из 3 реализаций
+### C1. [ИСПРАВЛЕНО] Нарушение LSP: `Lattice::bottom()` паникует в 2 из 3 реализаций
+
+**Статус:** [x] Исправлено (коммит ce7a244)
+
+### C2. [ИСПРАВЛЕНО] Нарушение OCP: `metadata_registry.rs` — 4352 строки, match на 220 веток
+
+**Статус:** [x] Исправлено (коммит ce7a244)
+
+### C3. [ИСПРАВЛЕНО] Shotgun Surgery: добавление диагностики требует правок в 5–6 местах
+
+**Статус:** [x] Исправлено (коммит ce7a244)
+
+### C4. [НОВАЯ] `UnusedLocalVariable` эмитится из двух путей, дедупликация отсутствует
 
 | Файл | Строка |
 |---|---|
-| `crates/dataflow/src/reaching_defs.rs` | 536 |
-| `crates/dataflow/src/liveness.rs` | 332 |
+| `crates/ide-diagnostics/src/lib.rs` | 133 |
+| `crates/ide-diagnostics/src/runner.rs` | 1087 |
+| `crates/ide-diagnostics/src/hir_dispatch.rs` | 74, 144-146 |
 
-Трейт `Lattice` требует `fn bottom() -> Self`, но `ReachingDefs` и `Liveness` паникуют при вызове. `DataflowSolver` вызывает `L::bottom()` в `or_insert_with` (строка 351) — латентный баг при определённых путях выполнения. Обходной путь через `set_bottom_factory()` не гарантирует безопасность.
+`UnusedLocalVariable` зарегистрирована в **двух** коллекторах: `HIR_DIAGNOSTICS` (через `BodyDiagnostic::UnusedVariable` → `from_hir()`) и `DATAFLOW_DIAGNOSTICS` (через liveness analysis → `check()`). Обе могут обнаружить одну и ту же неиспользуемую переменную.
 
-**Решение:** Изменить трейт на `fn bottom(ctx: &BottomContext) -> Self` или убрать `bottom()` из трейта и использовать фабрику.
+Функция `deduplicate_diagnostics` обрабатывает **только** `UnreachableCode`:
+```rust
+let dedupe_codes = [DiagnosticCode::UnreachableCode];
+```
 
-**Статус:** [x] Исправлено (коммит ce7a244) — `bottom()` удалён из трейта, `set_bottom_factory()` обязателен
+Комментарий в тесте (`runner.rs:1085-1086`) утверждает, что обе дуально-зарегистрированные диагностики "deduplicated at runtime by `deduplicate_diagnostics` in lib.rs" — это **ложь** для `UnusedLocalVariable`. В результате пользователь получает **дубликаты диагностик**.
 
-### C2. Нарушение OCP: `metadata_registry.rs` — 4352 строки, match на 220 веток
+`IncorrectUseOfStrTemplate` безопасна — HIR-путь обрабатывает литералы, dataflow-путь обрабатывает переменные (непересекающиеся множества). Но безопасность зависит от implementation detail, а не от архитектурной гарантии.
 
-| Файл | Строка |
-|---|---|
-| `crates/ide-diagnostics/src/metadata_registry.rs` | 94–316 |
-
-Каждая новая диагностика = ещё одна ветка match в `get_metadata()` + const определение. Файл уже 4352 строки. Нарушение Open/Closed Principle — модификация вместо расширения.
-
-**Решение:** Inventory/linkme или `#[diagnostic_metadata]` proc-macro для автоматической регистрации.
-
-**Статус:** [x] Исправлено (коммит ce7a244) — `define_metadata!` macro, const METADATA в каждом handler, metadata_registry.rs сокращён до ~560 строк
-
-### C3. Shotgun Surgery: добавление диагностики требует правок в 5–6 местах
-
-Для каждой новой диагностики нужно изменить:
-1. `code.rs` — новый вариант enum
-2. `metadata_registry.rs` — match arm + const metadata (4352 строки)
-3. `runner.rs` — добавить в нужный const-массив + dispatch-функцию
-4. `handlers/` — новый файл
-5. `handlers.rs` — `pub mod`
-6. `hir_dispatch.rs` — если HIR-диагностика (+70 match arms)
-
-При 180 диагностиках — это 1000+ мест ручной синхронизации.
-
-**Решение:** Единая точка регистрации с автогенерацией dispatch-кода.
-
-**Статус:** [x] Исправлено (коммит ce7a244) — metadata co-located в handler файлах, metadata_registry только dispatch
+**Решение:** Отключить HIR-путь для `UnusedLocalVariable` (аналогично `UnreachableCode` — return `None` в `hir_dispatch.rs`), т.к. dataflow-анализ строго точнее. Удалить `BodyDiagnostic::UnusedVariable` из lowering.
 
 ---
 
 ## HIGH
 
-### H1. Нарушение SRP: `sdbl-hir/src/lib.rs` — 3206 строк, 6 ответственностей
+### H3. [ОТЛОЖЕНО] Нарушение ISP: `RootDatabase` → дублирование `AnalysisProvider`
 
-Смешаны: типы, строковые утилиты, определение позиции, completion-контекст, парсинг-хелперы, тесты. Должно быть минимум 4 модуля.
+**Файлы:** `crates/ide-db/src/lib.rs`, `crates/ide-diagnostics/src/context.rs`
 
-**Статус:** [x] Исправлено — lib.rs 3207→223 строк, извлечены `literal.rs`, `position_detector.rs`, `context_detector.rs`
+`DiagnosticsContext` содержит 20+ helper-методов с идентичным шаблоном:
+```rust
+if let Some(provider) = self.provider { return provider.X(); }
+self.db.X()
+```
 
-### H2. Нарушение SRP: `ide-db/src/lib.rs` — 1755 строк
+При добавлении Salsa-запроса — правка в 3 местах: `RootDatabase`, `AnalysisProvider`, `DiagnosticsContext`.
 
-Database struct + 6 trait impl'ов + бизнес-логика (`build_module_metadata`, `find_common_module_by_uri`) + re-exports + filesystem-хелперы.
+**Статус:** [ ] Отложено — рефакторинг Salsa-трейта слишком рискован
 
-**Статус:** [x] Исправлено — lib.rs 1755→690 строк, бизнес-логика в `metadata.rs`, VFS-хелперы в `vfs_helpers.rs`, тесты в `database_impl_tests.rs`
+### H4-H6, H8-H9. [ИСПРАВЛЕНО] Дублирование common_module, forbidden_names, test setup, hir facade
 
-### H3. Нарушение ISP: `RootDatabase` — 16 методов + `as_any()` escape hatch
+**Статус:** [x] Исправлено
 
-`crates/ide-db/src/lib.rs:69-303`. Трейт невозможно реализовать без Salsa — `StreamingProvider` создал параллельный `AnalysisProvider` (15+ методов) вместо реализации `RootDatabase`. `as_any()` — прямой индикатор нарушения ISP.
+### H7, H10. [ЗАКРЫТО] By design
 
-**Статус:** [ ] Отложено — `as_any()` используется в 4 VFS-хелперах, рефакторинг Salsa-трейта слишком рискован
+### NEW-H1. `resolve_local_to_definition` возвращает неправильный MethodId
 
-### H4. Дублирование: 8 файлов `common_module_name_*.rs` (~1121 строк)
-
-8 почти идентичных обработчиков отличаются только списком ключевых слов и кодом диагностики. Дублируются: guard-блок, `is_disabled_with_metadata`, конструкция `Diagnostic`, конструкция `ModuleMetadata` в тестах (28+ раз).
-
-**Статус:** [x] Исправлено — generic `check_common_module_name()` в `common_module_helpers.rs`, 7 handler'ов упрощены до ~15-20 строк
-
-### H5. Дублирование: `FORBIDDEN_NAMES` — два списка
-
-| Файл | Структура данных |
+| Файл | Строка |
 |---|---|
-| `rules/forbidden_metadata_name.rs:48-120` | `const &[&str]` (original case) |
-| `handlers/forbidden_metadata_name.rs:14-87` | `Lazy<FxHashSet<&str>>` (lowercase) |
+| `crates/hir/src/lib.rs` | 431-445, 458-472 |
 
-**Статус:** [x] Исправлено — модуль `rules/` удалён (dead code), единственный список в `handlers/`
+Метод ищет `ProcedureDef`/`FunctionDef` в синтаксическом дереве, затем перебирает ItemTree. Внутренний цикл возвращает **первый** найденный procedure/function, а не тот, который соответствует объемлющему синтаксическому узлу. Если в файле несколько процедур — для всех, кроме первой, будет возвращён неправильный `MethodId`.
 
-### H6. Дублирование: `MetadataObjectNameLength` — две реализации
+```rust
+for (idx, item) in tree.top_level_items().iter().enumerate() {
+    if let hir_def::item_tree::ModItem::Procedure(_) = item {
+        let method_id = MethodId { module: module_id, local_id: idx as u32 };
+        return Some(...);  // ← всегда первая процедура!
+    }
+}
+```
 
-| Файл | Паттерн |
+**Влияние:** Баг в goto definition для локальных символов (параметров, переменных).
+
+**Решение:** Сравнивать range синтаксического узла найденного ItemTree элемента с range объемлющего `ProcedureDef`/`FunctionDef`, или матчить по имени метода.
+
+### NEW-H2. `param_index: 0` — TODO в production-коде
+
+| Файл | Строка |
 |---|---|
-| `rules/metadata_object_name_length.rs` | `MetadataDiagnostic` trait |
-| `handlers/metadata_object_name_length.rs` | `from_metadata()` функция |
+| `crates/hir/src/lib.rs` | 438, 465 |
 
-**Статус:** [x] Исправлено — модуль `rules/` удалён (dead code), единственная реализация в `handlers/`
+```rust
+param_index: 0, // TODO: get actual index
+```
 
-### H7. Нарушение OCP: `hir_dispatch.rs` — 70 match arms
+Все параметры резолвятся с `param_index: 0`. Любой consumer, зависящий от `param_index` (signature help, rename), будет работать неправильно для параметров после первого.
 
-`crates/ide-diagnostics/src/hir_dispatch.rs:128-390`. Каждый новый `BodyDiagnostic` вариант = правка в двух crate'ах.
+**Решение:** Получить реальный индекс из `ExprScopes`.
 
-**Статус:** [x] Закрыто (by design) — inherent complexity, каждый variant имеет уникальные поля
+### NEW-H3. `unwrap()` на URI из LSP-клиента → panic на non-file URIs
 
-### H8. Дублирование: тестовый setup DB — 100+ копий
+| Файл | Строка |
+|---|---|
+| `crates/bsl-analyzer/src/handlers/notification.rs` | 90, 171 |
 
-Идентичный 8-строчный блок копипастится в 15+ файлов, 100+ тест-функций. `test-fixture` crate существует, но не используется.
+```rust
+let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
+```
 
-**Статус:** [x] Исправлено — `create_test_db()` хелпер, `MetadataTestProvider` единое определение, делегирование между helper-функциями
+`to_file_path()` возвращает `Err` для non-`file://` URIs (`untitled:`, `vscode-notebook-cell:`). Сервер упадёт при получении такого URI от клиента.
 
-### H9. Leaky Abstraction: `ide-diagnostics` handlers обходят `hir` facade
+**Решение:** `uri.to_file_path().ok()` + early return.
 
-15+ обработчиков напрямую импортируют `hir_def::hir::*`, `hir_def::item_tree::*`, `hir_def::body::*`.
+### NEW-H4. Dead code: `BodyDiagnostic::UnreachableCode` эмитится из 5 мест, но dispatch возвращает `None`
 
-**Статус:** [x] Исправлено — re-exports в `hir/src/lib.rs`, ~42 handler файла обновлены на `use hir::`
+| Файл | Строки эмиссии |
+|---|---|
+| `crates/hir-def/src/body/lower/stmt.rs` | 572 |
+| `crates/hir-def/src/body/lower/mod.rs` | 1027, 1139 |
+| `crates/hir-def/src/body/lower/preproc.rs` | 170, 279 |
+| `crates/ide-diagnostics/src/hir_dispatch.rs` | 147-149 |
 
-### H10. Feature Envy: диагностическая логика в HIR lowering
+`UnreachableCode` диагностики вычисляются при lowering, хранятся в `LowerResult.diagnostics`, итерируются в `collect_hir_diagnostics`, и **тихо отбрасываются** (return `None`). CFG-based детекция в `unreachable_code::check()` — единственный рабочий путь.
 
-`crates/hir-def/src/body/lower/expr.rs:1623-1940` — 9 функций проверки (`is_os_users_method`, `is_external_app_method` и др.) в HIR-lowering вместо `ide-diagnostics`.
+**Влияние:** Впустую тратятся CPU-циклы на вычисление, хранение и итерацию бесполезных диагностик.
 
-**Статус:** [x] Закрыто (by design) — ~230 строк утилит, перенос в diagnostics потребует re-traversal AST (performance loss)
+**Решение:** Удалить `BodyDiagnostic::UnreachableCode` вариант и все 5 мест эмиссии.
+
+### NEW-H5. Двойная регистрация диагностик — вводящий в заблуждение комментарий
+
+| Файл | Строка |
+|---|---|
+| `crates/ide-diagnostics/src/runner.rs` | 1085-1088 |
+
+Комментарий в тесте:
+```rust
+// Codes intentionally in multiple collectors (detected via both paths,
+// deduplicated at runtime by deduplicate_diagnostics in lib.rs)
+let known_dual_registration: &[DiagnosticCode] =
+    &[DiagnosticCode::IncorrectUseOfStrTemplate, DiagnosticCode::UnusedLocalVariable];
+```
+
+Утверждение о runtime-дедупликации **ложно** — `deduplicate_diagnostics` обрабатывает только `UnreachableCode`. Если разработчик добавит новую dual-registered диагностику, полагаясь на этот комментарий, получит дубликаты.
+
+**Решение:** Исправить комментарий + убрать dual-registration (см. C4).
 
 ---
 
 ## MEDIUM
 
-### M1. `base-db` зависит от `parser` — нарушение слоёв
+### M1. [ОТКРЫТО] `base-db` зависит от `parser` — нарушение слоёв
 
-`crates/base-db/Cargo.toml:11`. Функция `parse_query` вызывает `parser::parse_bsl()`.
+`crates/base-db/Cargo.toml:11`. `base-db` (Layer 4) зависит от `parser` (Layer 3) для Salsa-запроса `parse_query`.
 
-**Статус:** [ ] Не исправлено
+### M2. [ОТКРЫТО] Две параллельные системы type inference
 
-### M2. Две параллельных системы type inference
+- `crates/hir-def/src/ty/infer.rs` — старая AST-based
+- `crates/hir-ty/src/infer.rs` — новая HIR-based
 
-| Файл | Система |
+Обе содержат "Phase 1" в документации. Обе существуют параллельно. Разработчик не знает, куда добавлять новую логику.
+
+### M3. [ОТКРЫТО] Дублирование `parse_module_path` — две реализации
+
+- `hir-def/src/module_index.rs:223` — `(ModulePathType, String)`, case-insensitive
+- `ide-db/src/metadata.rs:237` — `ModulePathInfo`, case-sensitive
+
+### M4. [ОТКРЫТО] `BodyDiagnostic` — 80+ variants, все содержат `range`
+
+`crates/hir-def/src/body.rs`. `fn range()` — 80 однообразных match-рук.
+
+### M5. [ОТКРЫТО] `runner.rs` — 1116 строк, registry + dispatcher + orchestrator
+
+9 const-массивов + 8 коллекторных функций.
+
+### M9. [ОТКРЫТО] `ide` использует утилиты из `ide-diagnostics`
+
+`crates/ide/src/syntax_highlighting/sdbl.rs:76-182` — `SdblPositionMapper`, `extract_string_content`, `build_line_index_shared`. Принадлежат `sdbl-hir` или `ide-db`.
+
+### M10. [ОТКРЫТО] `petgraph` — неиспользуемая зависимость в `hir-def`
+
+`crates/hir-def/Cargo.toml:35` — `petgraph = "0.8.3"`. Ни один `.rs` файл не использует.
+
+### NEW-M1. `catch_unwind` маскирует баги в diagnostic dispatch
+
+| Файл | Строка |
 |---|---|
-| `hir-def/src/ty/infer.rs` | Старая AST-based (TODO: "Remove in Phase 2") |
-| `hir-ty/src/infer.rs` | Новая HIR-based |
+| `crates/ide-diagnostics/src/hir_dispatch.rs` | 103-106 |
+| `crates/ide-diagnostics/src/metadata_dispatch.rs` | 42-45 |
 
-**Статус:** [ ] Не исправлено
+`catch_unwind(AssertUnwindSafe(...))` вокруг `ctx.module_bodies()` тихо проглатывает панику, возвращая пустой `Vec`. В LSP-сервере (`notification.rs`, `main.rs`) `catch_unwind` имеет смысл (Salsa cancellation). Но внутри diagnostic dispatch — это маскировка багов.
 
-### M3. Дублирование: `parse_module_path` — две реализации
+**Решение:** Проверять preconditions (наличие source_root) вместо catch_unwind.
 
-| Файл | Особенности |
+### NEW-M2. `regex` в `hir-def` — дублирование + нарушение правил
+
+| Файл | Строка |
 |---|---|
-| `hir-def/src/module_index.rs:223` | case-insensitive |
-| `ide-db/src/metadata.rs:229` | case-sensitive |
+| `crates/hir-def/src/body/lower/expr.rs` | 2082-2134 |
 
-**Статус:** [ ] Не исправлено
+3 функции (`is_wrong_str_template`, `compare_template_and_params`, `various_params`) используют regex. В `ide-diagnostics/src/handlers/incorrect_use_of_str_template.rs:320-331` есть regex-free реализация. Нарушение правила CLAUDE.md: "Использовать regexp нельзя".
 
-### M4. `BodyDiagnostic::range()` — 80 однообразных match arms
+### NEW-M3. Дублирование `SymbolInfo`/`SymbolKind`
 
-`crates/hir-def/src/body.rs:1024-1107`. Все 80 вариантов содержат `range`.
+- `hir-def/src/workspace_index.rs:29-36` — `SymbolKind::Method, Variable`
+- `ide-db/src/lib.rs:52-65` — `SymbolKind::Procedure, Function, Variable, Region`
 
-**Статус:** [ ] Не исправлено
+### NEW-M4. SDBL — 16 handler'ов с идентичным ~30-строчным boilerplate
 
-### M5. `runner.rs` — 1187 строк, registry + dispatcher + orchestrator
+| Файлы |
+|---|
+| `using_like_in_query.rs`, `union_all.rs`, `full_outer_join_query.rs`, `join_with_sub_query.rs`, `virtual_table_call_without_parameters.rs`, `join_with_virtual_table.rs`, + 10 ещё |
 
-9 const-массивов + 8 collection-функций с захардкоженными списками.
+Паттерн: disabled-check → `sdbl_hir_in_file()` → `all_sdbl_in_file()` → `build_line_index_shared` → zip-итерация → match на конкретный `SdblDiagnostic` вариант → `mapper.map_range` → push `Diagnostic`.
 
-**Статус:** [ ] Не исправлено
+~350 строк чистого дублирования. `common_module_helpers.rs` уже показал, что команда умеет абстрагировать такие паттерны.
 
-### M6. Панники в Salsa queries и XML-парсере
+**Решение:** Helper `collect_sdbl_single_variant(ctx, code, |diag| ...)` в `sdbl_utils.rs`.
 
-| Файл | Строки |
+### NEW-M5. Дублирование `is_nstr_call` / `has_template_in_parents` / `Config` между двумя multilingual handlers
+
+| Файлы |
+|---|
+| `multilingual_string_has_all_declared_languages.rs:75-85` |
+| `multilingual_string_using_with_template.rs:73-83` |
+
+3 функции + struct `Config` + const `DEFAULT_DECLARED_LANGUAGES` идентично скопированы.
+
+**Решение:** Вынести в `utils/nstr.rs`.
+
+### NEW-M6. `MethodData`/`ParameterData`/`VariableData` используют `String` вместо `Name`
+
+| Файл | Строка |
 |---|---|
-| `ide-db/src/metadata.rs` | 592, 617, 662 |
-| `bsl-metadata/src/xml_parser/mod.rs` | 634, 755, 798 |
+| `crates/hir-def/src/lib.rs` | 502-535 |
 
-**Статус:** [ ] Не исправлено
+Проект определяет тип `Name` (SmolStr, case-insensitive compare), но 4 публичных struct используют raw `String`. Каждое сравнение требует ручного `.to_lowercase()`. Риск case-sensitivity багов.
 
-### M7. Inline `DiagnosticsContext` конструкция — 50+ копий
+### NEW-M7. ItemTree traversal дублируется 7+ раз в `hir/src/definition.rs`
 
-20+ файлов обработчиков, 50+ повторений конструкции с 8 полями.
-
-**Статус:** [ ] Не исправлено
-
-### M8. Дублирование `SymbolInfo`/`SymbolKind` между crate'ами
-
-| Файл | Варианты |
+| Файл | Строка |
 |---|---|
-| `hir-def/src/workspace_index.rs:29` | `Method, Variable` |
-| `ide-db/src/lib.rs:49` | `Procedure, Function, Variable, Region` |
+| `crates/hir/src/definition.rs` | 160-324 |
 
-**Статус:** [ ] Не исправлено
+Паттерн `for (idx, item) in tree.top_level_items().iter().enumerate()` с match на `ModItem` повторяется в `name()`, `is_export()`, `source_range()`, `name_range()`, `label()`. При этом `Method::method_info()` в том же crate уже использует эффективный `.get()`.
 
-### M9. `ide` использует утилиты из `ide-diagnostics::sdbl_utils`
+**Решение:** Общий helper `resolve_item(tree, local_id) -> Option<&ModItem>`.
 
-`syntax_highlighting.rs` и `sdbl.rs` импортируют `SdblPositionMapper`, `build_line_index_shared` из `ide-diagnostics`. Принадлежат `sdbl-hir` или `ide-db`.
+### NEW-M8. `bsl-analyzer` — skip-layer access (16 внутренних зависимостей)
 
-**Статус:** [ ] Не исправлено
+| Файл | Строка |
+|---|---|
+| `crates/bsl-analyzer/Cargo.toml` | 15-31 |
 
-### M10. `petgraph` — неиспользуемая зависимость в `hir-def`
-
-`hir-def/Cargo.toml` объявляет `petgraph = "0.8.3"`, ни один файл не импортирует.
-
-**Статус:** [ ] Не исправлено
+LSP-сервер (Layer 12) напрямую зависит от `base-db` (Layer 4), `parser` (Layer 3), `cfg` (Layer 6), `dataflow` (Layer 6), `bsl-metadata` (Layer 1) — пропускает 5-8 слоёв. Должен зависеть только от `ide` + инфраструктура (`vfs`, `paths`).
 
 ---
 
 ## LOW
 
-### L1. `cfg-types-research` — забытый scaffold crate
+### L1. [ОТКРЫТО] `cfg-types-research` — забытый scaffold crate
 
 Содержит только `pub fn add()`. Никем не используется.
 
-**Статус:** [ ] Не исправлено
+### L8. [ОТКРЫТО] `cfg` re-exports `petgraph::graph::NodeIndex`
 
-### L2. Дублирование `eq_ignore_case`
+### L9. [ОТКРЫТО] Закомментированный `// pub mod cfg_builder;` в `hir-def/src/lib.rs:28`
 
-`hir-def/src/name.rs:30` (метод) и `ide-diagnostics/src/utils/standard_regions.rs:121` (свободная функция).
-
-**Статус:** [ ] Не исправлено
-
-### L3. `TextRange::empty(0.into())` — 27 копий
-
-Должна быть `const MODULE_RANGE` или хелпер `Diagnostic::at_module_start()`.
-
-**Статус:** [ ] Не исправлено
-
-### L4. `#[allow(dead_code)]` на 6 функциях `message_en()`
-
-Мёртвые английские сообщения в 6 обработчиках.
-
-**Статус:** [ ] Не исправлено
-
-### L5. `println!`/`eprintln!` в тестах
-
-`hir-def/src/hir.rs:358-360`, `parser/src/sink.rs:165-256`.
-
-**Статус:** [ ] Не исправлено
-
-### L6. `regex` в `hir-def` при наличии решения без regex
-
-`hir-def/src/body/lower/expr.rs:2025-2075` vs regex-free `ide-diagnostics/src/handlers/incorrect_use_of_str_template.rs:320-331`.
-
-**Статус:** [ ] Не исправлено
-
-### L7. Три разных конвенции сигнатур diagnostic handlers
-
-`check()`, `from_hir()`, `check_node()`, `check_token()`, `from_metadata()`. Некоторые экспортируют оба.
-
-**Статус:** [ ] Не исправлено
-
-### L8. `cfg` re-exports `petgraph::graph::NodeIndex`
-
-`crates/cfg/src/lib.rs:54` — утечка implementation detail.
-
-**Статус:** [ ] Не исправлено
-
-### L9. Commented-out code в `hir-def/src/lib.rs:28`
-
-`// pub mod cfg_builder;`
-
-**Статус:** [ ] Не исправлено
-
-### L10. Dev-dependencies нарушают layering
+### L10. [ОТКРЫТО] Dev-dependencies нарушают layering
 
 `hir-def`, `hir`, `dataflow` используют `ide-db` в `[dev-dependencies]`.
 
-**Статус:** [ ] Не исправлено
+### NEW-L1. 37 TODO/FIXME в production-коде
+
+Наиболее значимые:
+- `hir/src/lib.rs:438,465` — `param_index: 0` (→ поглощён NEW-H2)
+- `ide-assists/src/lib.rs:40` — `// TODO: Implement assists`
+- `ide/src/lib.rs:128` — `// TODO: Implement`
+- `hir-ty/src/infer.rs:213,410,522` — Phase 2+ placeholders
+
+### NEW-L2. `TextRange::empty(0.into())` — 21+ копия
+
+Паттерн для module-level диагностик. Нужна const `MODULE_RANGE` или хелпер.
+
+### NEW-L3. Dead legacy `check()` в 8 single-pass handlers
+
+| Файлы |
+|---|
+| `useless_ternary_operator.rs`, `double_negatives.rs`, `unknown_preprocessor_symbol.rs`, `bad_words.rs`, `nested_ternary_operator.rs`, `yo_letter_usage.rs`, `magic_date.rs`, `typo.rs` |
+
+Каждый сохраняет legacy `check()` (full AST traversal) рядом с `check_node()`/`check_token()` (single-pass). Legacy используется только в invariant-тестах. Двойная стоимость поддержки — при изменении логики нужно менять оба.
+
+### NEW-L4. Ручной timing в 15 SDBL handlers, дублирующий `run_diagnostic`
+
+15 SDBL handlers используют `Instant::now()` + `debug!(time_ms=...)`. При этом `run_diagnostic()` в `runner.rs` уже оборачивает каждый вызов handler'а с timing (порог >80ms). Два перекрывающихся механизма.
+
+### NEW-L5. 12 dead-комментариев в `collect_ast_diagnostics`
+
+`runner.rs:534-568` — функция из 14 строк, из которых 12 — комментарии о мигрированных диагностиках. Археологический мусор.
+
+### NEW-L6. `using_hardcode_path` — последний legacy AST-диагностик
+
+Единственная диагностика в `collect_ast_diagnostics()`. Все остальные мигрированы. Использует regex (нарушение правил). Целый коллектор существует ради одного handler'а.
 
 ---
 
 ## Сводка
 
-| Severity | Кол-во | Основная тема |
-|---|---|---|
-| **CRITICAL** | 3 | Паникующий трейт, 4352-строчный match, shotgun surgery |
-| **HIGH** | 10 | God-файлы, ISP, массовое дублирование |
-| **MEDIUM** | 10 | Нарушения слоёв, две inference, дублирование |
-| **LOW** | 10 | Dead code, regex, стилистика |
+| Severity | Всего | Новые | Из прошлого | Исправлено/Закрыто |
+|---|---|---|---|---|
+| **CRITICAL** | 4 | 1 (C4) | 3 → все исправлены | 3 |
+| **HIGH** | 11 | 5 (NEW-H1..H5) | 10 → 9 исправлены, 1 отложен | 9 |
+| **MEDIUM** | 18 | 8 (NEW-M1..M8) | 10 → 0 исправлены | 0 |
+| **LOW** | 10 | 6 (NEW-L1..L6) | 10 → 6 открыто | 0 |
 
-**Главный системный паттерн:** параллельные инфраструктуры (`rules/` vs `handlers/`, старый vs новый inference, `MetadataDiagnostic` vs `from_metadata()`). Консолидация — самый эффективный рефакторинг.
+---
+
+## Рекомендуемые приоритеты
+
+### Наивысший приоритет (баги)
+
+1. **C4** — `UnusedLocalVariable` дубликаты в production. Fix: return `None` для `BodyDiagnostic::UnusedVariable` в hir_dispatch.
+2. **NEW-H1** — `resolve_local_to_definition` возвращает wrong MethodId. Fix: match по range/name.
+3. **NEW-H3** — `unwrap()` на non-file URI → server crash. Fix: `.ok()` + early return.
+
+### Высокий приоритет (dead code / misleading)
+
+4. **NEW-H4** — удалить `BodyDiagnostic::UnreachableCode` + 5 emission sites (dead code).
+5. **NEW-H5** — исправить ложный комментарий о дедупликации.
+
+### Средний приоритет (архитектура, влияет на доработку)
+
+6. **M2** — две type inference → разобраться, какая актуальна.
+7. **NEW-M4** — SDBL boilerplate → extract helper (~350 lines saved).
+8. **NEW-M6** — `String` → `Name` в `MethodData`/`ParameterData`.
+9. **NEW-M7** — ItemTree lookup helper (7-way duplication).
+
+### Быстрые wins (< 1 часа)
+
+10. **L1** — удалить `cfg-types-research`.
+11. **M10 + L9** — удалить `petgraph` из hir-def + закомментированный `cfg_builder`.
+12. **NEW-L2** — const `MODULE_RANGE`.
+13. **NEW-L5** — удалить dead-комментарии в `collect_ast_diagnostics`.
 
 ---
 
 ## Прогресс
 
-> Обновлено: 2026-02-17
+> Обновлено: 2026-03-07
 
 | Severity | Всего | Исправлено | Закрыто (by design) | Отложено | Открыто |
 |---|---|---|---|---|---|
-| **CRITICAL** | 3 | 3 | 0 | 0 | 0 |
-| **HIGH** | 10 | 7 | 2 | 1 | 0 |
-| **MEDIUM** | 10 | 0 | 0 | 0 | 10 |
+| **CRITICAL** | 4 | 3 | 0 | 0 | 1 |
+| **HIGH** | 11 | 7 | 2 | 1 | 5 (NEW) |
+| **MEDIUM** | 18 | 0 | 0 | 0 | 18 |
 | **LOW** | 10 | 0 | 0 | 0 | 10 |
-
-**CRITICAL (3/3):** C1 (Lattice::bottom), C2 (metadata_registry 4352→~560), C3 (shotgun surgery → co-located metadata)
-**HIGH (9/10):** H1-H2 (god-файлы split), H4-H6 (дублирование удалено), H8 (test_utils), H9 (hir facade), H7+H10 (by design), H3 (отложено)

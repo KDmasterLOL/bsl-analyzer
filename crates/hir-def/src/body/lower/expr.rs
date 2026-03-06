@@ -2081,87 +2081,123 @@ fn is_str_template_method(name: &str) -> bool {
 /// - No invalid placeholders (%0, %11+)
 /// - All required parameters present
 fn is_wrong_str_template(template_string: &str, used_params_count: usize) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    static TWO_PERCENT_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("%%").unwrap());
-
     let is_wrong_call = compare_template_and_params(template_string, used_params_count);
     if !is_wrong_call {
         return false;
     }
 
     // Remove %% escapes and check again
-    let str = TWO_PERCENT_PATTERN.replace_all(template_string, "");
-    compare_template_and_params(&str, used_params_count)
+    let cleaned = remove_double_percent(template_string);
+    compare_template_and_params(&cleaned, used_params_count)
+}
+
+/// Remove %% escape sequences from template string.
+fn remove_double_percent(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'%' && bytes[i + 1] == b'%' {
+            i += 2;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Parse a placeholder at position, returns (number, length) or None.
+/// Handles both %N and %(N) formats where N is a number.
+fn parse_placeholder(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if pos >= bytes.len() || bytes[pos] != b'%' {
+        return None;
+    }
+
+    let start = pos + 1;
+    if start >= bytes.len() {
+        return None;
+    }
+
+    // Check for %(N) format
+    if bytes[start] == b'(' {
+        let num_start = start + 1;
+        let mut num_end = num_start;
+        while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+            num_end += 1;
+        }
+        if num_end > num_start && num_end < bytes.len() && bytes[num_end] == b')' {
+            let num_str = std::str::from_utf8(&bytes[num_start..num_end]).ok()?;
+            let num: usize = num_str.parse().ok()?;
+            return Some((num, num_end - pos + 1));
+        }
+        return None;
+    }
+
+    // Check for %N format (one or more digits)
+    let mut num_end = start;
+    while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+        num_end += 1;
+    }
+    if num_end > start {
+        let num_str = std::str::from_utf8(&bytes[start..num_end]).ok()?;
+        let num: usize = num_str.parse().ok()?;
+        return Some((num, num_end - pos));
+    }
+
+    None
 }
 
 /// Compare template string and parameter count.
 #[allow(clippy::nonminimal_bool)]
 fn compare_template_and_params(template_string: &str, used_params_count: usize) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-
-    // These patterns are used across multiple functions, so we define them at the module level
-    // to avoid recompilation on every call.
-    static PARAMS_PATTERN_INNER: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
-
-    static WRONG_NUMBERS_PATTERN_INNER: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"%(?:(1[1-9]\d*|[2-9]\d+|0|10\d+)|\((1[1-9]\d*|[2-9]\d+|0|10\d+)\))").unwrap()
-    });
-
-    let have_params = used_params_count > 0;
-    let matches = PARAMS_PATTERN_INNER.is_match(template_string);
-
-    // Check conditions:
-    // 1. Template has parameters but no arguments provided
-    // 2. Template has no parameters but arguments provided
-    // 3. Template has parameters and various/mismatched params
-    // 4. Wrong parameter numbers (0, 11+)
-    (matches && !have_params)
-        || (!matches && have_params)
-        || (matches && various_params(used_params_count, template_string))
-        || WRONG_NUMBERS_PATTERN_INNER.is_match(template_string)
-}
-
-/// Check if template has mismatched parameter indices.
-fn various_params(used_params_count: usize, template_string: &str) -> bool {
-    use once_cell::sync::Lazy;
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    static PARAMS_PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"%(?:(10|[1-9])|\((10|[1-9])\))").unwrap());
-
-    let mut template_params = HashSet::new();
     let bytes = template_string.as_bytes();
+    let have_params = used_params_count > 0;
 
-    for cap in PARAMS_PATTERN.captures_iter(template_string) {
-        let match_obj = cap.get(0).unwrap();
-        let pos = match_obj.start();
+    let mut has_valid_placeholder = false;
+    let mut has_wrong_number = false;
+    let mut used_placeholders = [false; 11]; // Index 1-10
 
-        // Skip if this is part of %% escape sequence
-        if pos > 0 && bytes.get(pos - 1) == Some(&b'%') {
-            continue;
-        }
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                i += 2;
+                continue;
+            }
 
-        // Group 1: %N format, Group 2: %(N) format
-        let group = cap.get(1).or_else(|| cap.get(2));
-        if let Some(g) = group {
-            if let Ok(index) = g.as_str().parse::<usize>() {
-                if index > used_params_count {
-                    return true;
+            if let Some((num, len)) = parse_placeholder(bytes, i) {
+                if (1..=10).contains(&num) {
+                    has_valid_placeholder = true;
+                    used_placeholders[num] = true;
+                    if num > used_params_count {
+                        return true;
+                    }
+                } else {
+                    has_wrong_number = true;
                 }
-                template_params.insert(index);
+                i += len;
+                continue;
             }
         }
+        i += 1;
     }
 
-    // Check if all parameters from 1..used_params_count are present
-    for i in 1..=used_params_count {
-        if !template_params.contains(&i) {
-            return true;
+    if has_wrong_number {
+        return true;
+    }
+    if has_valid_placeholder && !have_params {
+        return true;
+    }
+    if !has_valid_placeholder && have_params {
+        return true;
+    }
+
+    if has_valid_placeholder {
+        for &used in used_placeholders.iter().take(used_params_count + 1).skip(1) {
+            if !used {
+                return true;
+            }
         }
     }
 

@@ -946,36 +946,21 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
     let mut ctx = LoweringCtx::new(false);
 
     let mut stmts = Vec::new();
-    let mut unreachable_start: Option<TextRange> = None;
-    let mut unreachable_end: Option<TextRange> = None;
 
     for node in root.children() {
         // Handle preprocessor directives at module level
         if node.kind() == SyntaxKind::PRE_IF_DIR {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(node.text_range());
-            }
             // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
             if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
                 let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
                 stmts.push(stmt_id);
             }
-            // Check if all branches terminate
-            if unreachable_start.is_none() && preproc::preproc_if_all_branches_terminate(&node) {
-                unreachable_start = Some(node.text_range());
-            }
             continue;
         }
         if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(node.text_range());
-            }
             // Lower statements from region (adds them to body)
-            let (region_stmts, region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
+            let (region_stmts, _region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
             stmts.extend(region_stmts);
-            if unreachable_start.is_none() && region_terminates {
-                unreachable_start = Some(node.text_range());
-            }
             continue;
         }
 
@@ -991,15 +976,6 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
             continue;
         }
 
-        // If we're in unreachable mode, extend the range
-        if unreachable_start.is_some() {
-            unreachable_end = Some(node.text_range());
-            if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
-                stmts.push(stmt_id);
-            }
-            continue;
-        }
-
         // Lower the statement
         if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
             stmts.push(stmt_id);
@@ -1009,22 +985,6 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
                 let range = stmt::get_last_meaningful_token_range(&node);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
-
-            // Check if this statement is a control flow that makes subsequent code unreachable
-            if control_flow::is_control_flow_terminator(&node)
-                || (node.kind() == SyntaxKind::IF_STMT
-                    && control_flow::if_all_branches_terminate(&node))
-            {
-                unreachable_start = Some(node.text_range());
-            }
-        }
-    }
-
-    // Emit unreachable code diagnostic for module-level code
-    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
-        if let Some(first_unreachable) = control_flow::find_first_unreachable_at_root(root, start) {
-            let range = TextRange::new(first_unreachable.start(), end.end());
-            ctx.emit(BodyDiagnostic::UnreachableCode { range });
         }
     }
 
@@ -1055,36 +1015,21 @@ pub fn lower_module_code_with_line_index(
     ctx.set_line_index(line_index);
 
     let mut stmts = Vec::new();
-    let mut unreachable_start: Option<TextRange> = None;
-    let mut unreachable_end: Option<TextRange> = None;
 
     for node in root.children() {
         // Handle preprocessor directives at module level
         if node.kind() == SyntaxKind::PRE_IF_DIR {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(node.text_range());
-            }
             // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
             if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
                 let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
                 stmts.push(stmt_id);
             }
-            // Check if all branches terminate
-            if unreachable_start.is_none() && preproc::preproc_if_all_branches_terminate(&node) {
-                unreachable_start = Some(node.text_range());
-            }
             continue;
         }
         if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            if unreachable_start.is_some() {
-                unreachable_end = Some(node.text_range());
-            }
             // Lower statements from region (adds them to body)
-            let (region_stmts, region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
+            let (region_stmts, _region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
             stmts.extend(region_stmts);
-            if unreachable_start.is_none() && region_terminates {
-                unreachable_start = Some(node.text_range());
-            }
             continue;
         }
 
@@ -1095,15 +1040,6 @@ pub fn lower_module_code_with_line_index(
 
         // Skip VAR_DEF - module-level Перем declarations are tracked separately
         if node.kind() == SyntaxKind::VAR_DEF {
-            continue;
-        }
-
-        // If we're in unreachable mode, extend the range
-        if unreachable_start.is_some() {
-            unreachable_end = Some(node.text_range());
-            if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
-                stmts.push(stmt_id);
-            }
             continue;
         }
 
@@ -1121,22 +1057,6 @@ pub fn lower_module_code_with_line_index(
                 let range = stmt::get_last_meaningful_token_range(&node);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
-
-            // Check if this statement is a control flow that makes subsequent code unreachable
-            if control_flow::is_control_flow_terminator(&node)
-                || (node.kind() == SyntaxKind::IF_STMT
-                    && control_flow::if_all_branches_terminate(&node))
-            {
-                unreachable_start = Some(node.text_range());
-            }
-        }
-    }
-
-    // Emit unreachable code diagnostic for module-level code
-    if let (Some(start), Some(end)) = (unreachable_start, unreachable_end) {
-        if let Some(first_unreachable) = control_flow::find_first_unreachable_at_root(root, start) {
-            let range = TextRange::new(first_unreachable.start(), end.end());
-            ctx.emit(BodyDiagnostic::UnreachableCode { range });
         }
     }
 

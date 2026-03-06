@@ -79,7 +79,7 @@ pub fn module_data_query<'db>(
 ///
 /// This is the main query for body lowering. It:
 /// 1. Lowers all procedure and function bodies to HIR
-/// 2. Collects diagnostics during lowering (MissingReturn, UnreachableCode, etc.)
+/// 2. Collects diagnostics during lowering (MissingReturn, MagicNumber, etc.)
 /// 3. Attaches module metadata for context-sensitive checks
 ///
 /// ## Salsa caching

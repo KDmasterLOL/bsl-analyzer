@@ -326,10 +326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cfg-types-research"
-version = "0.1.32"
-
-[[package]]
 name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,11 +990,8 @@ dependencies = [
  "la-arena",
  "lexer",
  "line-index",
- "once_cell",
  "ordered-float",
  "parser",
- "petgraph",
- "regex",
  "rustc-hash 2.1.1",
  "salsa",
  "smallvec",

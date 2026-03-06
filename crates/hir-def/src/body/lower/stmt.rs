@@ -10,10 +10,7 @@ use crate::hir::{Binding, BindingIdx, Expr, Stmt, StmtIdx};
 use crate::{Name, StmtId};
 use cfg_types::IdConversion;
 
-use super::control_flow::{
-    find_first_unreachable_stmt, if_all_branches_terminate, is_control_flow_terminator,
-    is_statement_node,
-};
+use super::control_flow::is_statement_node;
 use super::diagnostics::{
     check_commit_transaction_in_try, check_duplicated_code_blocks,
     check_rollback_transaction_in_try, extend_range_with_semicolon,
@@ -21,7 +18,7 @@ use super::diagnostics::{
     is_global_rollback_transaction_call, is_inside_try_body,
 };
 use super::expr::{exprs_are_equal, lower_expr_node};
-use super::preproc::{lower_preproc_if, lower_region_stmts, preproc_if_all_branches_terminate};
+use super::preproc::{lower_preproc_if, lower_region_stmts};
 use super::LoweringCtx;
 
 // ============================================================================
@@ -410,8 +407,6 @@ pub(super) fn lower_stmt_list_with_unreachable(
     emit_diagnostics: bool,
 ) -> Vec<StmtIdx> {
     let mut stmts = Vec::new();
-    let mut unreachable_start: Option<TextRange> = None;
-    let mut unreachable_end: Option<TextRange> = None;
 
     // Track pending BeginTransaction node for BeginTransactionBeforeTryCatch diagnostic
     let mut pending_begin_transaction: Option<SyntaxNode> = None;
@@ -423,35 +418,17 @@ pub(super) fn lower_stmt_list_with_unreachable(
     for child in stmt_list.children() {
         // Handle preprocessor directives - lower to Stmt::PreprocIf for CFG
         if child.kind() == SyntaxKind::PRE_IF_DIR {
-            // Check if this directive is unreachable
-            if unreachable_start.is_some() {
-                unreachable_end = Some(child.text_range());
-            }
-
             // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
             if let Some(stmt) = lower_preproc_if(ctx, &child) {
                 let stmt_id = ctx.alloc_stmt(stmt, child.text_range());
                 stmts.push(stmt_id);
             }
-
-            // Check if all branches terminate - subsequent code is unreachable
-            if unreachable_start.is_none() && preproc_if_all_branches_terminate(&child) {
-                unreachable_start = Some(child.text_range());
-            }
             continue;
         }
         if child.kind() == SyntaxKind::PRE_REGION_DIR {
-            // Check if this region is unreachable
-            if unreachable_start.is_some() {
-                unreachable_end = Some(child.text_range());
-            }
             // Lower statements from region (adds them to body)
-            let (region_stmts, region_terminates) = lower_region_stmts(ctx, &child);
+            let (region_stmts, _region_terminates) = lower_region_stmts(ctx, &child);
             stmts.extend(region_stmts);
-            // Check if region terminates - propagate unreachable state
-            if unreachable_start.is_none() && region_terminates {
-                unreachable_start = Some(child.text_range());
-            }
             continue;
         }
 
@@ -463,16 +440,6 @@ pub(super) fn lower_stmt_list_with_unreachable(
         // BeginTransactionBeforeTryCatch: Check for Try statement (consumes pending BeginTransaction)
         if emit_diagnostics && child.kind() == SyntaxKind::TRY_STMT {
             pending_begin_transaction = None;
-        }
-
-        // If we're in unreachable mode, extend the range
-        if unreachable_start.is_some() {
-            unreachable_end = Some(child.text_range());
-            // Still lower the statement (for completeness), but we've marked it unreachable
-            if let Some(stmt_id) = lower_stmt(ctx, &child) {
-                stmts.push(stmt_id);
-            }
-            continue;
         }
 
         // BeginTransactionBeforeTryCatch: Check for BeginTransaction call
@@ -548,31 +515,11 @@ pub(super) fn lower_stmt_list_with_unreachable(
                 let range = get_last_meaningful_token_range(&child);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
-
-            // Check if this statement is a control flow that makes subsequent code unreachable
-            if is_control_flow_terminator(&child) {
-                // Mark that subsequent statements are unreachable
-                // The range will start from the next statement
-                unreachable_start = Some(child.text_range());
-            }
-            // Check if if-statement has all branches terminating
-            else if child.kind() == SyntaxKind::IF_STMT && if_all_branches_terminate(&child) {
-                unreachable_start = Some(child.text_range());
-            }
         }
     }
 
     // Emit unreachable code diagnostic if we found any
     if emit_diagnostics {
-        if let (Some(_start), Some(end)) = (unreachable_start, unreachable_end) {
-            // Find the first unreachable statement's range
-            // We need to get the range from after the control flow statement to the end
-            if let Some(first_unreachable) = find_first_unreachable_stmt(stmt_list, _start) {
-                let range = TextRange::new(first_unreachable.start(), end.end());
-                ctx.emit(BodyDiagnostic::UnreachableCode { range });
-            }
-        }
-
         // BeginTransactionBeforeTryCatch: If there's still pending at end of list → ERROR
         if let Some(pending_node) = pending_begin_transaction {
             let extended_range =

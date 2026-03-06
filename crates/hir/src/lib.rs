@@ -426,17 +426,30 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
                 // Resolve name in scopes
                 if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
-                    // Find method index in module
+                    // Find matching method in ItemTree by source_range
                     let tree = self.db.item_tree(file_id);
+                    let proc_range = proc_def.syntax().text_range();
                     for (idx, item) in tree.top_level_items().iter().enumerate() {
-                        if let hir_def::item_tree::ModItem::Procedure(_) = item {
+                        if let hir_def::item_tree::ModItem::Procedure(proc_idx) = item {
+                            let proc = tree.procedure(*proc_idx);
+                            if proc.source_range != proc_range {
+                                continue;
+                            }
                             let method_id = MethodId { module: module_id, local_id: idx as u32 };
                             return Some(match scope_def {
-                                ScopeDef::Parameter => Definition::Parameter {
-                                    method_id,
-                                    param_name: name.clone(),
-                                    param_index: 0, // TODO: get actual index
-                                },
+                                ScopeDef::Parameter => {
+                                    let param_index = proc
+                                        .params
+                                        .iter()
+                                        .position(|p| p.name.eq_ignore_case(&name))
+                                        .unwrap_or(0)
+                                        as u32;
+                                    Definition::Parameter {
+                                        method_id,
+                                        param_name: name.clone(),
+                                        param_index,
+                                    }
+                                }
                                 ScopeDef::LocalVariable => {
                                     Definition::Local { method_id, var_name: name.clone() }
                                 }
@@ -453,17 +466,30 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
                 // Resolve name in scopes
                 if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
-                    // Find method index in module
+                    // Find matching method in ItemTree by source_range
                     let tree = self.db.item_tree(file_id);
+                    let func_range = func_def.syntax().text_range();
                     for (idx, item) in tree.top_level_items().iter().enumerate() {
-                        if let hir_def::item_tree::ModItem::Function(_) = item {
+                        if let hir_def::item_tree::ModItem::Function(func_idx) = item {
+                            let func = tree.function(*func_idx);
+                            if func.source_range != func_range {
+                                continue;
+                            }
                             let method_id = MethodId { module: module_id, local_id: idx as u32 };
                             return Some(match scope_def {
-                                ScopeDef::Parameter => Definition::Parameter {
-                                    method_id,
-                                    param_name: name.clone(),
-                                    param_index: 0, // TODO: get actual index
-                                },
+                                ScopeDef::Parameter => {
+                                    let param_index = func
+                                        .params
+                                        .iter()
+                                        .position(|p| p.name.eq_ignore_case(&name))
+                                        .unwrap_or(0)
+                                        as u32;
+                                    Definition::Parameter {
+                                        method_id,
+                                        param_name: name.clone(),
+                                        param_index,
+                                    }
+                                }
                                 ScopeDef::LocalVariable => {
                                     Definition::Local { method_id, var_name: name.clone() }
                                 }

@@ -87,7 +87,9 @@ pub fn handle_did_open(state: &mut GlobalState, params: DidOpenTextDocumentParam
 
     // Update VFS with file content
     {
-        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
+        let vfs_path = vfs::VfsPath::new(
+            uri.to_file_path().map_err(|()| anyhow::anyhow!("Not a file URI: {}", uri))?,
+        );
         let mut vfs = state.vfs.write();
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }
@@ -168,7 +170,9 @@ pub fn handle_did_change(
 
     // Update VFS
     {
-        let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
+        let vfs_path = vfs::VfsPath::new(
+            uri.to_file_path().map_err(|()| anyhow::anyhow!("Not a file URI: {}", uri))?,
+        );
         let mut vfs = state.vfs.write();
         vfs.set_file_contents(vfs_path, Some(Arc::from(text.as_str())));
     }

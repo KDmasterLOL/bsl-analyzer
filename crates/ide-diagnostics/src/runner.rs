@@ -532,37 +532,17 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 /// These diagnostics use `ctx.parse().syntax_node().descendants()`.
 /// They should be migrated to HIR or single-pass when possible.
 pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(AST_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
 
-    // MethodSize moved to HIR (BodyDiagnostic::MethodSize)
-    // NestedStatements moved to HIR (BodyDiagnostic::NestedStatements)
-
-    // Try-catch patterns
-    // TryNumber moved to HIR (BodyDiagnostic::TryNumber)
-    // MissingCodeTryCatchEx moved to collect_module_bodies_diagnostics (already uses module_bodies())
-
-    // MissingTempStorageDeletion moved to collect_dataflow_diagnostics (uses module_bodies)
-    // MissingTemporaryFileDeletion moved to collect_dataflow_diagnostics (uses module_bodies + module_cfgs)
-
-    // UsingHardcodeNetworkAddress moved to collect_module_bodies_diagnostics (uses module_bodies)
-
-    // Hardcoded values
     diagnostics.extend(run_diagnostic(
         "UsingHardcodePath",
         ctx,
         handlers::using_hardcode_path::check,
     ));
-
-    // UnsafeSafeModeMethodCall moved to HIR (BodyDiagnostic::UnsafeSafeModeMethodCall)
-    // UsageWriteLogEvent moved to HIR (BodyDiagnostic::UsageWriteLogEvent)
-    // UseLessForEach moved to HIR (BodyDiagnostic::UselessForEach)
-    // UsingObjectNotAvailableUnix moved to HIR (BodyDiagnostic::UsingObjectNotAvailableUnix)
-    // UnsafeFindByCode moved to HIR (BodyDiagnostic::UnsafeFindByCode)
 
     diagnostics
 }
@@ -1082,10 +1062,10 @@ mod tests {
             }
         }
 
-        // Codes intentionally in multiple collectors (detected via both paths,
-        // deduplicated at runtime by deduplicate_diagnostics in lib.rs)
+        // Codes intentionally in multiple collectors (non-overlapping detection paths:
+        // HIR handles literals, dataflow handles variables)
         let known_dual_registration: &[DiagnosticCode] =
-            &[DiagnosticCode::IncorrectUseOfStrTemplate, DiagnosticCode::UnusedLocalVariable];
+            &[DiagnosticCode::IncorrectUseOfStrTemplate];
 
         // Check for unexpected duplicates
         let mut duplicates = Vec::new();

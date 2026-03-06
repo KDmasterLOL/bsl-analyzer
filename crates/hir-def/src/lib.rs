@@ -25,7 +25,6 @@
 //! - **BodySourceMap**: Bidirectional mapping between HIR and AST
 
 pub mod body;
-// pub mod cfg_builder; // TODO: Reimplement with updated cfg crate API
 pub mod cognitive_complexity;
 pub mod conditional_tree;
 pub mod cyclomatic_complexity;
@@ -222,7 +221,7 @@ pub trait DefDatabase: base_db::RootQueryDb {
     ///
     /// Returns lowered HIR bodies for all procedures and functions in the module.
     /// Diagnostics are collected during lowering as a byproduct of semantic analysis
-    /// (MissingReturn, UnreachableCode, etc.).
+    /// (MissingReturn, MagicNumber, etc.).
     ///
     /// # Performance
     /// - **LRU cache:** 128 (heavy lowering operation)
@@ -669,7 +668,6 @@ impl ModuleBodies {
 
         let root = parse.syntax_node();
         let mut result = ModuleBodies::new();
-        let mut all_referenced_externals: FxHashSet<String> = FxHashSet::default();
         let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
 
         // Single pass to collect module variables and method nodes
@@ -717,7 +715,6 @@ impl ModuleBodies {
                 result.all_diagnostics.push((method_id_val, diag.clone()));
             }
 
-            all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
             result.bodies.insert(method_idx, lower_result);
         }
 
@@ -727,22 +724,7 @@ impl ModuleBodies {
         for diag in &module_code_result.diagnostics {
             result.all_diagnostics.push((module_method_id, diag.clone()));
         }
-        all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
         result.module_code = Some(module_code_result);
-
-        // Check for unused module variables
-        for var in &result.module_vars {
-            if var.is_export {
-                continue;
-            }
-            let key = var.name.to_lowercase();
-            if !all_referenced_externals.contains(&key) {
-                result.all_diagnostics.push((
-                    module_method_id,
-                    BodyDiagnostic::UnusedVariable { name: var.name.clone(), range: var.range },
-                ));
-            }
-        }
 
         result
     }
@@ -875,7 +857,6 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
     let root = parse.syntax_node();
 
     let mut result = ModuleBodies::new();
-    let mut all_referenced_externals: FxHashSet<String> = FxHashSet::default();
 
     // Optimization: Single pass to collect both module variables and method nodes
     // This avoids two separate root.descendants() traversals
@@ -937,9 +918,6 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
             result.all_diagnostics.push((method_id, diag.clone()));
         }
 
-        // Collect referenced externals
-        all_referenced_externals.extend(lower_result.referenced_externals.iter().cloned());
-
         result.bodies.insert(method_idx, lower_result);
     }
 
@@ -953,27 +931,7 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
         result.all_diagnostics.push((module_method_id, diag.clone()));
     }
 
-    // Collect referenced externals from module code
-    all_referenced_externals.extend(module_code_result.referenced_externals.iter().cloned());
-
     result.module_code = Some(module_code_result);
-
-    // Fourth pass: check for unused module variables
-    for var in &result.module_vars {
-        // Skip exported variables (externally visible)
-        if var.is_export {
-            continue;
-        }
-
-        let key = var.name.to_lowercase();
-        if !all_referenced_externals.contains(&key) {
-            // Variable is not used anywhere
-            result.all_diagnostics.push((
-                module_method_id,
-                BodyDiagnostic::UnusedVariable { name: var.name.clone(), range: var.range },
-            ));
-        }
-    }
 
     result
 }

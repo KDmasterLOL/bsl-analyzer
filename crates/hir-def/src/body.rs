@@ -335,9 +335,6 @@ pub enum BodyDiagnostic {
     /// Missing return statement in function.
     MissingReturn { range: TextRange },
 
-    /// Unreachable code after return/raise/break/continue.
-    UnreachableCode { range: TextRange },
-
     /// Empty code block (if/while/for/try with empty body).
     EmptyCodeBlock { range: TextRange },
 
@@ -1026,7 +1023,6 @@ impl BodyDiagnostic {
     pub fn range(&self) -> TextRange {
         match self {
             BodyDiagnostic::MissingReturn { range } => *range,
-            BodyDiagnostic::UnreachableCode { range } => *range,
             BodyDiagnostic::EmptyCodeBlock { range } => *range,
             BodyDiagnostic::DeprecatedMethod { range, .. } => *range,
             BodyDiagnostic::DeprecatedCurrentDate { range, .. } => *range,
@@ -1234,7 +1230,6 @@ mod tests {
 
         let diagnostics = vec![
             BodyDiagnostic::MissingReturn { range },
-            BodyDiagnostic::UnreachableCode { range },
             BodyDiagnostic::EmptyCodeBlock { range },
             BodyDiagnostic::DeprecatedMethod { name: "Test".to_string(), range },
             BodyDiagnostic::MagicNumber {

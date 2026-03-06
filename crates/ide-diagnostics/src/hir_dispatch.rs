@@ -71,7 +71,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnaryPlusInConcatenation,
     DiagnosticCode::UnsafeFindByCode,
     DiagnosticCode::UnsafeSafeModeMethodCall,
-    DiagnosticCode::UnusedLocalVariable,
     DiagnosticCode::UsageWriteLogEvent,
     DiagnosticCode::UseLessForEach,
     DiagnosticCode::UseSystemInformation,
@@ -141,11 +140,8 @@ pub fn dispatch_hir_diagnostic(
             handlers::magic_number::from_hir(value, *range, context, ctx)
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
-        BodyDiagnostic::UnusedVariable { name, range } => {
-            handlers::unused_local_variable::from_hir(name, *range, ctx)
-        }
-        BodyDiagnostic::UnreachableCode { range: _ } => {
-            // Skip HIR-based detection - using CFG-based detection in unreachable_code::check()
+        BodyDiagnostic::UnusedVariable { name: _, range: _ } => {
+            // Skip HIR-based detection - using dataflow-based detection in unused_local_variable::check()
             None
         }
         BodyDiagnostic::MissingReturn { range } => {

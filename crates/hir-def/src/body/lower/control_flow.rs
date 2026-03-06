@@ -4,7 +4,6 @@
 //! including return path analysis and detection of unreachable code.
 
 use syntax::{SyntaxKind, SyntaxNode};
-use text_size::TextRange;
 
 /// Result of combined control flow analysis.
 pub(crate) struct ControlFlowAnalysis {
@@ -75,50 +74,6 @@ pub(crate) fn is_control_flow_terminator(node: &SyntaxNode) -> bool {
             | SyntaxKind::CONTINUE_STMT
             | SyntaxKind::GOTO_STMT
     )
-}
-
-/// Find the first statement after a control flow terminator.
-pub(crate) fn find_first_unreachable_stmt(
-    stmt_list: &SyntaxNode,
-    after_range: TextRange,
-) -> Option<TextRange> {
-    for child in stmt_list.children() {
-        // Skip empty statements - they shouldn't be reported as unreachable
-        if child.kind() == SyntaxKind::EMPTY_STMT {
-            continue;
-        }
-        if is_statement_node(&child) && child.text_range().start() > after_range.end() {
-            return Some(child.text_range());
-        }
-        // Also check for preprocessor directives as unreachable
-        if matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR)
-            && child.text_range().start() > after_range.end()
-        {
-            return Some(child.text_range());
-        }
-    }
-    None
-}
-
-/// Find the first unreachable node at module root level.
-pub(crate) fn find_first_unreachable_at_root(
-    root: &SyntaxNode,
-    after_range: TextRange,
-) -> Option<TextRange> {
-    for child in root.children() {
-        // Skip empty statements - they shouldn't be reported as unreachable
-        if child.kind() == SyntaxKind::EMPTY_STMT {
-            continue;
-        }
-        let child_start = child.text_range().start();
-        if child_start > after_range.end()
-            && (is_statement_node(&child)
-                || matches!(child.kind(), SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_REGION_DIR))
-        {
-            return Some(child.text_range());
-        }
-    }
-    None
 }
 
 /// Check if an if-statement has all branches terminating (with return/raise).
