@@ -1,17 +1,10 @@
 //! SDBL (Structured Data Base Language) lexer for 1C:Enterprise query language.
 //!
-//! Based on SDBLLexer.g4 from bsl-parser project.
 //! Supports both Russian and English keywords (case-insensitive).
 //!
 //! SDBL is the SQL-like query language embedded within BSL code as string literals.
 //! It's used to query the 1C platform's metadata-based database structure.
 //!
-//! ## References
-//!
-//! - bsl-parser/src/main/antlr/SDBLLexer.g4 (ANTLR grammar)
-//! - bsl-parser/src/main/antlr/SDBLParser.g4 (SDBL grammar)
-//! - bsl-language-server-rust/crates/bsl-parser/src/sdbl_tokenizer.rs (Rust example)
-
 use logos::Logos;
 use smol_str::SmolStr;
 

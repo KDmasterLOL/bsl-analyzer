@@ -122,7 +122,7 @@ mod tests {
         let mut sorted_diagnostics = diagnostics.clone();
         sorted_diagnostics.sort_by_key(|d| d.range.start());
 
-        // Verify diagnostic positions (lines must match bsl-language-server, columns may differ by +-1)
+        // Verify diagnostic positions
         assert_diagnostic_range(code, &sorted_diagnostics[0], 6, 8, 44);
         assert_diagnostic_range(code, &sorted_diagnostics[1], 7, 8, 48);
         assert_diagnostic_range(code, &sorted_diagnostics[2], 8, 8, 39);

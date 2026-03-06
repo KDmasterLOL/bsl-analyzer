@@ -352,8 +352,6 @@ fn test_sequential_assignments() {
 
 ### Implementation References
 
-- **rust-analyzer**: `crates/hir-ty/src/mir/eval.rs` - MIR dataflow for const eval
-- **rust-analyzer**: `crates/hir-ty/src/infer.rs` - Type inference lattice
 - **Dataflow Analysis Book**: *Principles of Program Analysis* (Nielson et al.)
 
 ## See Also

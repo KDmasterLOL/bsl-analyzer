@@ -76,7 +76,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Extends range to include trailing semicolon if present (for bsl-language-server compatibility)
+/// Extends range to include trailing semicolon if present.
 fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
     use syntax::{SyntaxToken, TextSize};
 
@@ -119,7 +119,6 @@ fn check_node(
         {
             let (element_type, range) = match child.kind() {
                 SyntaxKind::FUNCTION_DEF => {
-                    // Use method name range for bsl-language-server compatibility
                     let range = ast::FunctionDef::cast(child.clone())
                         .and_then(|f| f.name())
                         .map(|name| name.text_range())
@@ -127,19 +126,15 @@ fn check_node(
                     ("Функция", range)
                 }
                 SyntaxKind::PROCEDURE_DEF => {
-                    // Use method name range for bsl-language-server compatibility
                     let range = ast::ProcedureDef::cast(child.clone())
                         .and_then(|p| p.name())
                         .map(|name| name.text_range())
                         .unwrap_or_else(|| child.text_range());
                     ("Процедура", range)
                 }
-                SyntaxKind::VAR_DEF => {
-                    // bsl-language-server uses whole variable declaration, not just the name
-                    ("Переменная", child.text_range())
-                }
+                SyntaxKind::VAR_DEF => ("Переменная", child.text_range()),
                 _ => {
-                    // For statements, include semicolon for bsl-language-server compatibility
+                    // For statements, include trailing semicolon
                     ("Элемент кода", range_with_semicolon(&child))
                 }
             };
@@ -390,8 +385,7 @@ mod tests {
 Б = Аа() + А;";
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // NOTE: bsl-language-server returns 1 diagnostic with relatedInformation when no regions exist
-        // Rust returns individual diagnostics for each element (acceptable difference)
+        // Returns individual diagnostics for each element when no regions exist
         assert_eq!(diagnostics.len(), 6);
 
         // Diagnostic 0: Перем А; (line 5)

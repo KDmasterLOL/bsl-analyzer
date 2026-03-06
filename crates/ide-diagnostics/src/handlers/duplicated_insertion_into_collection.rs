@@ -642,7 +642,7 @@ impl<'a> InsertionTracker<'a> {
 
                 for group in grouped.values() {
                     if group.len() > 1 {
-                        // Report only SECOND insertion (bsl-language-server compatibility)
+                        // Report only SECOND insertion
                         if let Some(second_insertion) = group.get(1) {
                             // Generate display strings only when actually reporting
                             let collection_display =
@@ -1203,8 +1203,8 @@ mod tests {
     fn test_preprocessor_duplicate() {
         // NOTE: HIR currently does not lower statements inside preprocessor directives.
         // This is a known limitation. Code inside #Если/#Иначе is not included in body.body_stmts.
-        // The bsl-language-server does detect duplicates across preprocessor branches,
-        // but our HIR-based implementation cannot until HIR is extended to support this.
+        // Duplicates across preprocessor branches are not yet detected;
+        // this requires HIR to be extended to support preprocessor directives.
         let code = r#"
 Процедура Тест()
     #Если ТолстыйКлиентОбычноеПриложение Тогда

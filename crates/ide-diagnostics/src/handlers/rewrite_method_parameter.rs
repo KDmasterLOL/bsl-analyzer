@@ -52,7 +52,7 @@
 //!
 //! ### Why CFG is required
 //!
-//! bsl-language-server uses textual order (sorts references by line/column), which produces
+//! Textual-order analysis (sorts references by line/column) produces
 //! **false negatives** on conditional branches:
 //!
 //! ```bsl
@@ -60,12 +60,12 @@
 //!     Если Условие Тогда
 //!         Результат = Парам;  // USE (line 3)
 //!     Иначе
-//!         Парам = 0;  // OVERWRITE (line 5) - bsl-language-server misses this!
+//!         Парам = 0;  // OVERWRITE (line 5) - missed by textual-order analysis
 //!     КонецЕсли;
 //! КонецПроцедуры
 //! ```
 //!
-//! bsl-language-server sees USE before OVERWRITE textually → no diagnostic.
+//! Textual order sees USE before OVERWRITE → no diagnostic.
 //! But on else branch: parameter overwritten WITHOUT use!
 //!
 //! Our CFG-based approach correctly analyzes each execution path.
@@ -113,7 +113,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// ## Parameters
 ///
 /// - `stmt_range`: Full statement range for BodySourceMap lookup
-/// - `ident_range`: Identifier range for diagnostic display (bsl-language-server compatibility)
+/// - `ident_range`: Identifier range for diagnostic display
 pub fn from_hir(
     param_id: BindingId,
     _stmt_id: StmtId, // Placeholder from lowering - we'll find real one via range
@@ -186,7 +186,7 @@ pub fn from_hir(
                     code,
                     message: format!("Переприсваивание параметра метода '{}'", param_name),
                     severity: ctx.severity(code),
-                    range: ident_range, // Use identifier range for bsl-language-server compatibility
+                    range: ident_range,
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -580,8 +580,8 @@ mod tests {
             "Expected 5 RewriteMethodParameter diagnostics from test fixture"
         );
 
-        // bsl-language-server positions are 0-based line, character columns (not byte offsets)
-        // Range now covers only identifier, not full statement (bsl-language-server compatibility)
+        // Uses 0-based line, character columns (not byte offsets)
+        // Range covers only identifier, not full statement
 
         // Line 2 (Тест1): Парам1 = 10; - "Парам1" is 6 chars at col 4-10
         assert_diagnostic_range(code, rewrite_diags[0], 1, 4, 10);

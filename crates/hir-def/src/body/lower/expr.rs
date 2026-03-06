@@ -1819,7 +1819,7 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
 
 /// Check if argument contains Error log level value.
 ///
-/// Two-phase heuristic matching bsl-language-server:
+/// Two-phase heuristic:
 /// 1. If it's an EventLogLevel enum reference, check for Error variant
 /// 2. For non-literal expressions (variables, function calls) → assume OK (return true)
 fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
@@ -2114,7 +2114,7 @@ fn compare_template_and_params(template_string: &str, used_params_count: usize) 
     let have_params = used_params_count > 0;
     let matches = PARAMS_PATTERN_INNER.is_match(template_string);
 
-    // Check conditions (keep logic as-is for clarity, matches bsl-language-server implementation):
+    // Check conditions:
     // 1. Template has parameters but no arguments provided
     // 2. Template has no parameters but arguments provided
     // 3. Template has parameters and various/mismatched params

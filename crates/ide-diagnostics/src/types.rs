@@ -110,7 +110,6 @@ impl Diagnostic {
 }
 
 /// Diagnostic severity.
-/// Matches bsl-language-server severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Blocker,     // Highest severity

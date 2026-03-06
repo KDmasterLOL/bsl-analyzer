@@ -203,7 +203,7 @@ The durability problem only manifests in **incremental scenarios:**
 
 ### Expected Impact (Theoretical Analysis)
 
-Based on rust-analyzer experience and Salsa behavior:
+Based on Salsa behavior:
 
 **Incremental Edit (1 file changed):**
 - **Without durability fix:**

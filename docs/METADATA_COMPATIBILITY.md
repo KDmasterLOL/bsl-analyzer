@@ -1,10 +1,10 @@
 # DiagnosticMetadata Compatibility Verification
 
-This document describes the metadata compatibility verification between bsl-analyzer and bsl-language-server.
+This document describes the BSL Analyzer diagnostic metadata definitions and verification.
 
 ## Overview
 
-The Rust implementation maintains 100% compatibility with bsl-language-server metadata definitions.
+All 171 diagnostic metadata definitions are verified for correctness and consistency.
 
 ## Verification Status
 
@@ -27,7 +27,7 @@ The following diagnostic categories have been verified for compatibility:
 - ✅ InternetAccess
 - ✅ MissingTempStorageDeletion
 
-All 11 diagnostics have `activatedByDefault = false` matching bsl-language-server.
+All 11 diagnostics have `activatedByDefault = false`.
 
 #### Error Diagnostics
 - ✅ DataExchangeLoading (ERROR/CRITICAL, 5min)
@@ -42,11 +42,11 @@ All 11 diagnostics have `activatedByDefault = false` matching bsl-language-serve
 - ✅ RedundantAccessToObject (CODE_SMELL/INFO, 1min)
 - ✅ LineLength (CODE_SMELL/MINOR, 1min)
 
-## Compatibility Mapping
+## Metadata Mapping
 
 ### Severity Levels
 
-| bsl-language-server       | Rust                         | LSP Severity |
+| Diagnostic Type           | Rust                         | LSP Severity |
 |---------------------------|------------------------------|--------------|
 | DiagnosticType.ERROR      | DiagnosticType::Error        | Error        |
 | DiagnosticType.VULNERABILITY | DiagnosticType::Vulnerability | Error     |
@@ -55,7 +55,7 @@ All 11 diagnostics have `activatedByDefault = false` matching bsl-language-serve
 
 ### LSP Severity Calculation
 
-The Rust implementation uses the same severity calculation logic as bsl-language-server:
+The Rust implementation uses the following severity calculation logic:
 
 ```rust
 DiagnosticType::CodeSmell => match severity {
@@ -74,7 +74,7 @@ DiagnosticType::Error | Vulnerability => match severity {
 
 ### Tags Mapping
 
-All bsl-language-server tags are mapped to equivalent Rust enum variants:
+All diagnostic tags are mapped to equivalent Rust enum variants:
 
 - STANDARD → Standard
 - BADPRACTICE → Badpractice
@@ -118,7 +118,7 @@ The following 5 diagnostics were recently added to achieve 100% coverage:
 4. **SameMetadataObjectAndChildNames** - Detects child names matching parent
 5. **UnusedLocalVariable** - Detects unused local variables
 
-All match bsl-language-server exactly.
+All have complete metadata definitions.
 
 ## Known Differences
 
@@ -128,15 +128,15 @@ The Rust implementation does not have `HTTPServiceModule` (not available in curr
 
 **Affected diagnostic:** ExecuteExternalCode
 
-**bsl-language-server modules:**
+**Full module list:**
 - CommandModule
 - ExternalConnectionModule
 - FormModule
-- HTTPServiceModule ← not in Rust
+- HTTPServiceModule ← not currently supported
 - ObjectModule
 - OrdinaryApplicationModule
 
-**Rust modules:**
+**Supported modules:**
 - CommandModule
 - ExternalConnectionModule
 - FormModule
@@ -147,6 +147,6 @@ This is the only known difference and does not affect compatibility.
 
 ## Status
 
-**✅ 100% Compatibility Achieved**
+**✅ 100% Coverage Achieved**
 
-All 171 DiagnosticCode variants have metadata definitions that match bsl-language-server.
+All 171 DiagnosticCode variants have complete metadata definitions.

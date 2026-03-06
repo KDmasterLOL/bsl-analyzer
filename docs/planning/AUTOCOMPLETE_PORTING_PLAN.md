@@ -672,9 +672,8 @@ fn sort_completions_by_relevance(items: &mut [CompletionItem], stats: &HashMap<S
 
 Если экспорт из RDT1C не сработает:
 
-### Опция A: bsl-language-server
-- Данные в JSON
-- Расположение: `src/main/resources/`
+### Опция A: JSON данные
+- Данные в JSON формате
 - Неполная информация о типах
 
 ### Опция B: 1C Syntax Helper напрямую

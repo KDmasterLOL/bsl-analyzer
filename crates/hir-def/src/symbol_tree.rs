@@ -18,9 +18,6 @@
 //! - **BSL-specific**: Handles both Cyrillic and Latin identifiers
 //! - **Documentation**: Method docs are parsed once during SymbolTree construction
 //!
-//! ## Reference
-//!
-//! Inspired by bsl-language-server's SymbolTree, but adapted to Rust patterns.
 
 use crate::docs::MethodDocs;
 use crate::item_tree::{Annotation, ItemTree, ModItem, Param};
@@ -392,8 +389,7 @@ impl<'a> SymbolTreeBuilder<'a> {
     fn add_variable(&mut self, local_id: u32, var: &crate::item_tree::Variable) {
         let key: SmolStr = var.name.as_str().to_lowercase().into();
 
-        // Skip duplicate module variable declarations (matching bsl-language-server behavior)
-        // bsl-language-server: VariableSymbolComputer.visitModuleVarDeclaration checks moduleVariables.containsKey
+        // Skip duplicate module variable declarations
         if self.variables_by_name.contains_key(&key) {
             return;
         }

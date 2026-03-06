@@ -282,7 +282,7 @@ pub trait RootDatabase:
     /// - Line-based analysis (line length, empty lines, etc.)
     ///
     /// ## Architecture
-    /// Follows rust-analyzer pattern - LineIndex is cached through Salsa.
+    /// LineIndex is cached through Salsa.
     ///
     /// ## Performance
     /// - LRU: 256 files (most recently accessed)

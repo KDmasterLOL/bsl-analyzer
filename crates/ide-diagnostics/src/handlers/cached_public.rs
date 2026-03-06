@@ -149,8 +149,8 @@ fn is_public_region(region_name: &str) -> bool {
 
 /// Check code with specific ReturnValueReuse (test-only helper).
 ///
-/// This function mimics bsl-language-server's spy pattern - it skips HIR metadata loading
-/// and uses provided reuse value directly, allowing tests to verify caching behavior.
+/// Skips HIR metadata loading and uses provided reuse value directly,
+/// allowing tests to verify caching behavior.
 #[cfg(test)]
 fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Diagnostic> {
     // Check if module would be cached with this reuse setting

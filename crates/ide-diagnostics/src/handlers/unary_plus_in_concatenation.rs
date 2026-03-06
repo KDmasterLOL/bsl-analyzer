@@ -19,8 +19,6 @@
 //! Хорошо = "Строка1" + "Строка2";
 //! ```
 //!
-//! ## Source
-//! bsl-language-server/bsl-language-server
 
 use crate::define_metadata;
 use crate::metadata::*;

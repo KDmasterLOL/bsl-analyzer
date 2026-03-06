@@ -1,7 +1,6 @@
 //! Global state for the LSP server.
 //!
-//! This module defines the main state structures for the bsl-analyzer LSP server,
-//! following the rust-analyzer architecture pattern.
+//! This module defines the main state structures for the bsl-analyzer LSP server.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -69,7 +68,7 @@ pub struct GlobalState {
     /// Workspace root directory (from LSP initialize).
     pub workspace_root: Option<PathBuf>,
 
-    /// Project configuration (loaded from .bsl-analyzer.json or .bsl-language-server.json).
+    /// Project configuration (loaded from .bsl-analyzer.json or .bsl-language-server.json config files).
     pub project: Option<Project>,
 
     /// Whether shutdown has been requested.

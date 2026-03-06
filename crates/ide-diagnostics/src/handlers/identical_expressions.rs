@@ -32,9 +32,6 @@
 //! Результат = a - b;
 //! ```
 //!
-//! ## Source
-//! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/identical_expressions.rs
-//!
 //! ## Implementation
 //!
 //! **Hybrid approach: HIR + AST fallback**
@@ -845,7 +842,7 @@ fn extract_assign_rhs(assign_stmt: &SyntaxNode) -> Option<String> {
 /// 3. Normalize text (remove whitespace, parentheses)
 /// 4. Deduplicate while preserving order
 ///
-/// NOTE: This is MORE comprehensive than bsl-language-server - we also find complex expressions!
+/// Also finds complex expressions beyond simple literals and identifiers.
 fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
     let mut operands = Vec::new();
 

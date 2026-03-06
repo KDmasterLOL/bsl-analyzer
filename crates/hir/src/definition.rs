@@ -6,7 +6,6 @@
 //!
 //! ## Architecture Pattern
 //!
-//! This follows the rust-analyzer pattern:
 //! - Single Definition enum covering ALL symbol types
 //! - Unified resolution API in Semantics
 //! - Each IDE feature converts Definition to its own representation

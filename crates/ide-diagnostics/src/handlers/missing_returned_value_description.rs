@@ -512,9 +512,8 @@ mod tests {
         //     * Field1 - Type1 - description
         //     * Field2 - Type2 - description
         //
-        // This matches bsl-language-server behavior: sub-parameters (fields with *)
-        // are added to the last type. If there's no type, they're ignored and the
-        // return value block is considered empty.
+        // Sub-parameters (fields with *) are added to the last type.
+        // If there's no type, they're ignored and the return value block is considered empty.
         let code = r#"// Пакет ответа результата вызова метода HTTP.
 //
 // Возвращаемое значение:

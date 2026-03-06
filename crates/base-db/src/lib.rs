@@ -173,7 +173,7 @@ pub trait RootQueryDb: SourceDatabase {
 /// Helper structure for managing file state with concurrent access.
 ///
 /// Uses DashMap for lock-free concurrent access to Salsa input structs.
-/// Note: Like rust-analyzer, we keep Files as a DashMap-based helper outside Salsa.
+/// Note: Files is a DashMap-based helper kept outside Salsa.
 #[derive(Debug, Default, Clone)]
 pub struct Files {
     file_texts: Arc<DashMap<FileId, FileTextInput, BuildHasherDefault<FxHasher>>>,

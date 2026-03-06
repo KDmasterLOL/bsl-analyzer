@@ -24,8 +24,6 @@
 //! Возврат;
 //! ```
 //!
-//! ## Source
-//! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_code_block.rs
 
 use crate::define_metadata;
 use crate::metadata::*;

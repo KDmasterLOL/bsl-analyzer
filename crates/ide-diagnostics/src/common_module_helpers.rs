@@ -1,7 +1,4 @@
-//! Helper functions for CommonModule diagnostics
-//!
-//! Ported from bsl-language-server AbstractCommonModuleNameDiagnostic helper methods
-//! Source: bsl-language-server/.../diagnostics/bsl-language-server
+//! Helper functions for CommonModule diagnostics.
 
 use bsl_metadata::traits::{MdObject, Module};
 use bsl_metadata::CommonModule;

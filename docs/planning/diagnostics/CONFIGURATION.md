@@ -2,7 +2,7 @@
 
 ## Overview
 
-bsl-analyzer maintains **100% compatibility** with bsl-language-server configuration format.
+bsl-analyzer uses the `.bsl-language-server.json` configuration format.
 
 Configuration file: `.bsl-language-server.json` (placed in project root)
 
@@ -681,11 +681,9 @@ bsl-analyzer searches for `.bsl-language-server.json` in this order:
 
 ---
 
-## Migration from bsl-language-server
+## Using existing configuration
 
-✅ **No changes required!** bsl-analyzer uses the same configuration format.
-
-Existing `.bsl-language-server.json` files work without modification.
+✅ **No changes required!** Existing `.bsl-language-server.json` files work without modification.
 
 ---
 

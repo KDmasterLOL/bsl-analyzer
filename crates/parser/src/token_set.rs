@@ -1,6 +1,5 @@
 //! TokenSet for efficient token matching in parser.
 //!
-//! Inspired by rust-analyzer's TokenSet pattern.
 //! Uses bitwise operations for O(1) membership checks.
 //!
 //! # Example

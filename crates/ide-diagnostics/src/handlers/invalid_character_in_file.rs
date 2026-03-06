@@ -99,7 +99,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Scan STRING, COMMENT, and ERROR tokens for illegal characters
-    // Matches bsl-language-server: HIDDEN channel (comments) + string tokens
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.as_token() {
             let should_check = matches!(

@@ -192,8 +192,8 @@ fn create_diagnostics(
 
 /// Merge adjacent or overlapping ranges into larger ranges.
 ///
-/// This combines multiple unreachable blocks into single diagnostics,
-/// matching bsl-language-server behavior where a whole unreachable block gets one diagnostic.
+/// This combines multiple unreachable blocks into single diagnostics
+/// so that a whole unreachable block gets one diagnostic.
 ///
 /// Ranges are considered adjacent if they are on the same line or adjacent lines
 /// (no blank line between them). This is more reliable than byte-based gaps
@@ -344,7 +344,7 @@ fn get_vertex_range(vertex: &CfgVertex, source_map: &hir_def::BodySourceMap) -> 
             Some(TextRange::new(first_range.start(), last_range.end()))
         }
         // Don't include Conditional vertex range - when whole If is unreachable due to
-        // external control flow, bsl-language-server doesn't show the If header as unreachable.
+        // external control flow, the If header is not shown as unreachable.
         // Unreachable BasicBlocks inside the If will be reported separately.
         CfgVertex::Conditional(_) => None,
         CfgVertex::WhileLoop(loop_vertex) => source_map.expr_range(loop_vertex.condition),
@@ -756,11 +756,7 @@ mod tests {
         let unreachable_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnreachableCode).collect();
 
-        assert_eq!(
-            unreachable_diags.len(),
-            17,
-            "Expected 17 unreachable code diagnostics to match bsl-language-server"
-        );
+        assert_eq!(unreachable_diags.len(), 17, "Expected 17 unreachable code diagnostics");
 
         use crate::test_utils::{assert_diagnostic_range, assert_diagnostic_range_multiline};
         assert_diagnostic_range(code, unreachable_diags[0], 12, 12, 19);
@@ -779,10 +775,9 @@ mod tests {
         assert_diagnostic_range(code, unreachable_diags[13], 163, 4, 22);
         assert_diagnostic_range(code, unreachable_diags[14], 171, 4, 12);
         // Note: We include ВызватьИсключение as unreachable because the whole If is unreachable
-        // after preproc returns. bsl-language-server doesn't include it. This is a minor difference.
+        // after preproc returns (minor difference from simple linear analysis).
         assert_diagnostic_range_multiline(code, unreachable_diags[15], 175, 4, 178, 12);
         // We include module-level Возврат as unreachable (cascading from preproc returns).
-        // bsl-language-server shows only Метод2() after it.
         assert_diagnostic_range_multiline(code, unreachable_diags[16], 181, 0, 182, 8);
     }
 

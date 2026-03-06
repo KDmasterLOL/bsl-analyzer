@@ -73,7 +73,6 @@ impl Config {
 /// Check a single syntax node for bad words (node-based API).
 ///
 /// This is called from collect_syntax_single_pass() for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::BadWords;
     // Check if disabled
@@ -386,11 +385,7 @@ mod tests {
 
         // Expected 4 diagnostics with badWords="лотус|шмотус", findInComments=false
         // (excludes first two from comment line)
-        assert_eq!(
-            diagnostics.len(),
-            4,
-            "Should match bsl-language-server implementation (4 diagnostics without comments)"
-        );
+        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics without comments");
 
         // Verify exact positions (same as above, but without first two)
         // Line 4, cols 4-9: Лотус (SDBL query)

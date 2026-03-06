@@ -9,7 +9,6 @@
 //! descriptive alternatives that don't use the "Получить" prefix.
 //!
 //! **Note:** This diagnostic only checks Russian "Получить" prefix, not English "Get".
-//! This matches the behavior of bsl-language-server (bsl-language-server).
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - detects function names during HIR lowering.

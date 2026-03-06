@@ -1,7 +1,6 @@
 //! Request and notification dispatching.
 //!
-//! This module provides the dispatcher pattern for LSP requests and notifications,
-//! following the rust-analyzer architecture.
+//! This module provides the dispatcher pattern for LSP requests and notifications.
 
 use std::fmt;
 

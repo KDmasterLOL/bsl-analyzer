@@ -8,7 +8,7 @@
 
 ## Исполнительное резюме
 
-Успешно реализован полнофункциональный LSP (Language Server Protocol) сервер для BSL (1C:Enterprise) на базе архитектуры rust-analyzer. MVP включает все критически важные функции для продуктивной работы в редакторе кода:
+Успешно реализован полнофункциональный LSP (Language Server Protocol) сервер для BSL (1C:Enterprise). MVP включает все критически важные функции для продуктивной работы в редакторе кода:
 
 - ✅ **Диагностики** - 118 правил анализа кода
 - ✅ **Навигация** - Go to Definition, Find References
@@ -18,7 +18,6 @@
 **Метрики качества:**
 - 860+ тестов пройдено успешно
 - 0 предупреждений компилятора
-- Полная совместимость с rust-analyzer patterns
 - Thread-safe архитектура
 
 ---
@@ -82,7 +81,7 @@
 
 **Диагностические правила:**
 - 118 правил из ide-diagnostics
-- Совместимость с bsl-language-server кодами
+- Стандартные коды диагностик
 - Configurable severity через .bsl-analyzer.json
 
 **Тесты:** 10 passed
@@ -309,13 +308,10 @@ RequestDispatcher { req: Some(req), global_state: state }
 
 ## Compatibility
 
-### С bsl-language-server:
-✅ Diagnostic codes (100% совместимость)
+✅ Diagnostic codes (100% покрытие)
 ✅ Severity levels
 ✅ Configuration format (.bsl-analyzer.json)
 ✅ Diagnostic parameters
-
-### С rust-analyzer:
 ✅ GlobalState pattern
 ✅ Snapshot pattern
 ✅ Request/Notification dispatchers
@@ -421,7 +417,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ### Inline documentation:
 - Все публичные API имеют doc comments
 - Сложные алгоритмы прокомментированы
-- Ссылки на rust-analyzer patterns
+- Ссылки на архитектурные паттерны
 
 ---
 
@@ -441,8 +437,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Благодарности
 
-Проект основан на:
-- **rust-analyzer** - архитектурные паттерны
+Проект использует:
 - **Salsa** - инкрементальные вычисления
 - **Rowan** - lossless syntax trees
 - **lsp-types** / **lsp-server** - LSP реализация

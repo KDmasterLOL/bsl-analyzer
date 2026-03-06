@@ -50,7 +50,7 @@ pub fn parse_query(db: &dyn salsa::Database, input: FileTextInput) -> Parse<Synt
 ///
 /// # Root Region Lookup
 /// For nested regions, always returns the TOP-LEVEL (root) region name,
-/// not the immediate parent. This matches bsl-language-server behavior.
+/// not the immediate parent.
 ///
 /// Example:
 /// ```bsl

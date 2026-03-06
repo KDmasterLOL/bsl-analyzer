@@ -562,9 +562,8 @@ Large file set (200)    4.14 μs     LRU eviction
 ## Resources
 
 ### Documentation
-- Official Salsa Book: `~/src/lsp/salsa/book/`
-- Salsa Examples: `~/src/lsp/salsa/tests/`
-- Rust-Analyzer Reference: `~/src/lsp/rust-analyzer/crates/base-db/`
+- Official Salsa Book: https://salsa-rs.github.io/salsa/
+- Salsa crate documentation: https://docs.rs/salsa/latest/salsa/
 
 ### BSL-Analyzer Files
 - Base-DB: `crates/base-db/src/lib.rs` (parse_query implementation)
@@ -585,6 +584,6 @@ If you encounter issues:
 1. Check this guide's [Common Pitfalls](#common-pitfalls) section
 2. Review existing tests in `crates/base-db/` and `crates/ide-db/`
 3. Run benchmarks to verify performance
-4. Consult Salsa examples in `~/src/lsp/salsa/tests/`
+4. Consult Salsa documentation and examples
 
 **Remember:** Salsa is production-ready in bsl-analyzer with excellent performance (100-25,000x better than targets). Focus on correctness first, profile before optimizing!

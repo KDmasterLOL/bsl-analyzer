@@ -165,7 +165,7 @@ EndFunction"#;
         assert_eq!(return_diags.len(), 1, "English function without return should trigger");
     }
 
-    /// Tests cases from the bsl-language-server reference fixture.
+    /// Tests fixture cases.
     /// reference test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
     #[test]
     fn test_fixture_only_function_without_return_triggers() {

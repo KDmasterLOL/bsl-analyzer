@@ -255,7 +255,6 @@ mod tests {
         // 13 internet access detections (matching reference test: hasSize(13))
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
 
-        // All diagnostics match bsl-language-server test expectations
         // assert_diagnostic_range uses 0-indexed lines
 
         assert_diagnostic_range(code, &diagnostics[0], 1, 20, 75);

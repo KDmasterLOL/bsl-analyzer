@@ -16,8 +16,6 @@
 //! СтруктураДанных.Поле = НовоеЗначение;
 //! ```
 //!
-//! ## Source
-//! bsl-language-server/bsl-language-server
 
 use crate::define_metadata;
 use crate::metadata::*;

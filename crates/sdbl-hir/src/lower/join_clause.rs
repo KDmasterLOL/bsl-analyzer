@@ -110,7 +110,6 @@ impl LoweringContext {
         // Lower joined table
         let table = if let Some(ds) = join.data_source() {
             // Check if JOIN's data source is a subquery
-            // This matches bsl-language-server: visitJoinPart() checks dataSource().subquery() != null
             if ds.subquery().is_some() {
                 self.diagnostics
                     .push(SdblDiagnostic::JoinWithSubQuery { range: ds.syntax().text_range() });
@@ -161,7 +160,6 @@ impl LoweringContext {
 
     /// Check JOIN ON condition for OR with multiple distinct fields.
     ///
-    /// Matches bsl-language-server: isMultipleFieldsExpression() logic.
     /// Only reports if OR involves different fields (same field like "Status = 1 OR Status = 2" is OK).
     fn check_join_or_with_multiple_fields(&mut self, expr_node: &syntax::SyntaxNode) {
         use syntax::SyntaxToken;

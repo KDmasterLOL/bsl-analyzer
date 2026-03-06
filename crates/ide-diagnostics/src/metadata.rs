@@ -1,4 +1,4 @@
-//! Diagnostic metadata matching bsl-language-server @DiagnosticMetadata.
+//! Diagnostic metadata.
 //!
 //! Provides compile-time const metadata definitions with zero-cost abstraction.
 //! Runtime config can override metadata through JSON configuration.
@@ -144,7 +144,7 @@ pub const fn derive_primary_impact(
     Impact::new(software_quality, impact_severity)
 }
 
-/// Diagnostic type (matches bsl-language-server DiagnosticType).
+/// Diagnostic type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticType {
     /// Ошибка в коде
@@ -157,7 +157,7 @@ pub enum DiagnosticType {
     SecurityHotspot,
 }
 
-/// Diagnostic severity level (matches bsl-language-server DiagnosticSeverity).
+/// Diagnostic severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticSeverityLevel {
     /// Информация
@@ -172,7 +172,7 @@ pub enum DiagnosticSeverityLevel {
     Blocker,
 }
 
-/// Diagnostic tag (matches bsl-language-server DiagnosticTag).
+/// Diagnostic tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetadataTag {
     /// Нарушение стандартов 1С
@@ -205,7 +205,7 @@ pub enum MetadataTag {
     Localize,
 }
 
-/// Diagnostic scope (matches bsl-language-server DiagnosticScope).
+/// Diagnostic scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticScope {
     /// BSL и OneScript
@@ -216,7 +216,7 @@ pub enum DiagnosticScope {
     Bsl,
 }
 
-/// Diagnostic compatibility mode (matches bsl-language-server DiagnosticCompatibilityMode).
+/// Diagnostic compatibility mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCompatibilityMode {
     Undefined,
@@ -232,7 +232,7 @@ pub enum DiagnosticCompatibilityMode {
 
 /// Compile-time diagnostic metadata (zero-cost).
 ///
-/// This struct mirrors bsl-language-server's @DiagnosticMetadata annotation.
+/// Compile-time diagnostic metadata definition.
 /// All fields are const-friendly for compile-time definitions.
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticMetadata {
@@ -256,9 +256,9 @@ pub struct DiagnosticMetadata {
 }
 
 impl DiagnosticMetadata {
-    /// Calculate severity (matches bsl-language-server logic).
+    /// Calculate LSP severity from diagnostic type and severity level.
     ///
-    /// bsl-language-server DiagnosticSeverityMapper::getDiagnosticSeverity logic:
+    /// Mapping logic:
     /// - CODE_SMELL + INFO → Hint
     /// - CODE_SMELL + MINOR → Information
     /// - CODE_SMELL + MAJOR/CRITICAL/BLOCKER → Warning

@@ -30,9 +30,7 @@
 //!
 //! ## Implementation
 //!
-//! Migrated to HIR-based collection (rust-analyzer pattern).
-//!
-//! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_condition.rs
+//! Migrated to HIR-based collection.
 
 use crate::define_metadata;
 use crate::metadata::*;

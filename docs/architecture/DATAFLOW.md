@@ -15,7 +15,7 @@ bsl-analyzer needs flow-sensitive diagnostics that track how information (variab
 
 **Problem**: Ad-hoc implementations (like `VariableGenerations` in `DuplicatedInsertionIntoCollection`) are not reusable, lack theoretical foundation, and miss control flow nuances (branches, loops).
 
-**Goal**: Production-quality dataflow framework to support 11+ diagnostics with better accuracy than bsl-language-server.
+**Goal**: Production-quality dataflow framework to support 11+ diagnostics with high accuracy.
 
 ## Decision
 
@@ -646,7 +646,7 @@ impl RootDatabase for RootDatabaseImpl {
 - ❌ Complex variable extraction (string parsing)
 - ❌ Harder to test (requires full AST setup)
 
-**Decision**: Use HIR-based approach like rust-analyzer.
+**Decision**: Use HIR-based approach.
 
 ### 2. Ad-hoc Per-Diagnostic Analysis (rejected)
 
@@ -665,9 +665,9 @@ impl RootDatabase for RootDatabaseImpl {
 
 ### 3. MIR-based Dataflow (rejected)
 
-**Question**: Should we lower HIR → MIR (like rust-analyzer)?
+**Question**: Should we lower HIR → MIR?
 
-**Analysis**: rust-analyzer uses MIR ONLY for:
+**Analysis**: MIR is needed ONLY for:
 - Borrow checking (mutability tracking)
 - Const evaluation
 - Specific type system needs
@@ -892,7 +892,7 @@ impl RootDatabase for RootDatabaseImpl {
 
 ### 1. HIR is the Right Level
 
-**Insight**: rust-analyzer uses HIR for most analyses, not MIR.
+**Insight**: HIR is the right level for most analyses, not MIR.
 
 **Lesson**: Don't over-engineer. HIR + CFG is sufficient for IDE features.
 
@@ -929,8 +929,6 @@ let in_state = if is_entry && !has_predecessors {
 
 ### Implementation
 
-- [rust-analyzer HIR](https://github.com/rust-lang/rust-analyzer/tree/master/crates/hir)
-- [rust-analyzer MIR](https://github.com/rust-lang/rust-analyzer/blob/master/crates/hir-ty/src/mir/eval.rs)
 - [Salsa Documentation](https://salsa-rs.github.io/salsa/)
 
 ### Related ADRs

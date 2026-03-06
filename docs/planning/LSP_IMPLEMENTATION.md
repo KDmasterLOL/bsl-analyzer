@@ -2,7 +2,7 @@
 
 ## Обзор
 
-Реализация Language Server Protocol для полной совместимости с bsl-language-server.
+Реализация Language Server Protocol для BSL (1C:Enterprise).
 
 ## Поддерживаемые возможности (по приоритету)
 
@@ -128,7 +128,7 @@ pub fn handle_goto_definition(
 
 ```json
 {
-    "$schema": "https://raw.githubusercontent.com/1c-syntax/bsl-language-server/master/docs/configuration/schema.json",
+    "$schema": "https://raw.githubusercontent.com/1c-syntax/bsl-analyzer/master/docs/configuration/schema.json",
     "diagnostics": {
         "parameters": {
             "CyclomaticComplexity": {
@@ -271,12 +271,11 @@ pub enum Commands {
 
 ---
 
-## Совместимость с bsl-language-server
+## Коды диагностик
 
 ### Идентичные коды диагностик
 
 ```rust
-// Используем те же коды что и bsl-language-server
 pub enum DiagnosticCode {
     CanonicalSpellingKeywords,      // Те же названия
     ConsecutiveEmptyLines,

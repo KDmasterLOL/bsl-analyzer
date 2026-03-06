@@ -18,7 +18,6 @@
 //! - Dataflow transfer functions can access Body arenas
 //! - Same Body used in CFG and diagnostics (single source of truth)
 //! - Structured access via pattern matching (no tree traversal)
-//! - Follows rust-analyzer patterns
 
 use cfg_types::{BindingId, ExprId, StmtId};
 use hir_def::Name;

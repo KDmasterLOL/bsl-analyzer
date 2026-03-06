@@ -1,6 +1,5 @@
 //! Lexer for BSL (1C:Enterprise) language.
 //!
-//! Based on BSLLexer.g4 from bsl-parser project.
 //! Supports both Russian and English keywords (case-insensitive).
 //!
 //! ## Token Structure
@@ -19,12 +18,6 @@
 //! The `sdbl` module provides a separate lexer for SDBL (query language) tokens.
 //! SDBL queries are embedded in BSL string literals.
 //!
-//! ## References
-//!
-//! - bsl-parser/src/main/antlr/BSLLexer.g4 (ANTLR grammar)
-//! - bsl-parser/src/main/antlr/SDBLLexer.g4 (SDBL grammar)
-//! - tree-sitter-bsl/grammar.js (tree-sitter grammar)
-
 pub mod sdbl;
 
 use logos::Logos;

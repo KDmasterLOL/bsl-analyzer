@@ -165,8 +165,7 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
 /// Create diagnostic for code blocks before subroutines.
 ///
 /// Combines ranges from first block to last block (inclusive).
-/// For preprocessor regions, adjusts the range to start from the first executable code inside,
-/// matching bsl-language-server's behavior.
+/// For preprocessor regions, adjusts the range to start from the first executable code inside.
 fn create_diagnostic(
     code_blocks: &[SyntaxNode],
     code: DiagnosticCode,

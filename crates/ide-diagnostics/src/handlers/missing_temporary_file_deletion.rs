@@ -458,7 +458,7 @@ mod tests {
         // Expect 7 diagnostics with default configuration
         assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics with default config");
 
-        // Verify exact positions match bsl-language-server implementation
+        // Verify exact positions
         // Line 6: ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла("xml")
         assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
 
@@ -574,9 +574,9 @@ mod tests {
 
     #[test]
     fn test_inline_usage() {
-        // bsl-language-server creates diagnostic for inline GetTempFileName usage (without assignment)
+        // Inline GetTempFileName usage (without assignment) is always flagged
         // Example: Func(GetTempFileName("xml"))
-        // This is ALWAYS an error because deletion cannot be tracked
+        // This is always an error because deletion cannot be tracked
 
         // Test 1: Pure inline usage without any assignment
         let code = r#"
@@ -587,11 +587,7 @@ mod tests {
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(
-            diagnostics.len(),
-            2,
-            "Should create diagnostic for inline usage (matches bsl-language-server behavior)"
-        );
+        assert_eq!(diagnostics.len(), 2, "Should create diagnostic for inline usage");
 
         // Both should have generic message (no variable name)
         for d in &diagnostics {
@@ -613,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_comprehensive_java_compatibility() {
-        // Comprehensive test to ensure 100% compatibility with bsl-language-server implementation
+        // Comprehensive test covering all cases
         let code = r#"
             Процедура ТестВсехКейсов()
                 // Case 1: Normal assignment with deletion - OK

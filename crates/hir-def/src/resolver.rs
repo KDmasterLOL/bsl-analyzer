@@ -138,7 +138,7 @@ impl Resolver {
 
     /// Resolve a qualified path (e.g., Module.Method or Documents.PKO.Create).
     ///
-    /// Performs segment-by-segment resolution following rust-analyzer patterns.
+    /// Performs segment-by-segment resolution.
     ///
     /// # Resolution Strategy
     ///

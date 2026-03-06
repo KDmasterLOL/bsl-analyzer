@@ -2,8 +2,7 @@
 //!
 //! Implements parsing for 1C:Enterprise query language embedded in BSL code.
 //!
-//! Grammar reference: SDBLParser.g4 from bsl-parser
-//! Architecture: Event-based parser (like rust-analyzer)
+//! Architecture: Event-based parser
 //!
 //! ## Token Handling
 //!

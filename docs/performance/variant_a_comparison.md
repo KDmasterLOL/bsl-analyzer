@@ -160,7 +160,7 @@ For single-run analysis (like doc3):
 1. Solves the durability problem with minimal code change
 2. No performance regression on current workload
 3. Sets foundation for future incremental optimizations
-4. No need for Variant B (full rust-analyzer MEDIUM level) unless profiling shows bottleneck
+4. No need for Variant B (full three-level MEDIUM durability) unless profiling shows bottleneck
 
 ### Next Steps
 

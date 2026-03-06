@@ -66,13 +66,13 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TernaryOperatorUsage).collect();
 
         assert_eq!(diags.len(), 4);
-        // bsl-language-server positions: hasRange(1, 11, 10, 13) - 0-based line numbers
+        // Expected range: (1, 11, 10, 13) - 0-based line numbers
         assert_diagnostic_range_multiline(code, diags[0], 1, 11, 10, 13);
-        // bsl-language-server positions: hasRange(3, 13, 9, 14)
+        // Expected range: (3, 13, 9, 14)
         assert_diagnostic_range_multiline(code, diags[1], 3, 13, 9, 14);
-        // bsl-language-server positions: hasRange(12, 9, 12, 85)
+        // Expected range: (12, 9, 12, 85)
         assert_diagnostic_range(code, diags[2], 12, 9, 85);
-        // bsl-language-server positions: hasRange(14, 5, 14, 60)
+        // Expected range: (14, 5, 14, 60)
         assert_diagnostic_range(code, diags[3], 14, 5, 60);
     }
 

@@ -200,7 +200,6 @@ where
 /// These diagnostics work on lines/text level, not AST nodes.
 /// Examples: line_length, consecutive_empty_lines, parse_error, etc.
 ///
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/lib.rs:336-352
 pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(LINE_DIAGNOSTICS) {

@@ -295,8 +295,7 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
             "Should find exactly 8 diagnostics (matching reference implementation)"
         );
 
-        // Verify exact positions matching bsl-language-server implementation
-        // bsl-language-server uses 0-indexed lines
+        // Verify exact positions (uses 0-indexed lines)
         assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 14, 16, 23, 62);
         assert_diagnostic_range_multiline(code, &diagnostics[2], 25, 16, 27, 96);

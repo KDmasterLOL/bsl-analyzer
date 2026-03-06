@@ -92,7 +92,6 @@ pub fn from_metadata(
             );
 
             // Use range [0, min(9, file_len)) to avoid exceeding file bounds
-            // bsl-language-server uses (0, 0, 0, 9) but we need to be safe for small files
             let file_len = file_text.len();
             let end_offset = std::cmp::min(9, file_len);
             let range = TextRange::new(0.into(), (end_offset as u32).into());

@@ -3,9 +3,6 @@
 //! These symbols are used in `#Если` / `#If` directives to control conditional compilation.
 //! Unknown symbols should trigger the UnknownPreprocessorSymbol diagnostic.
 //!
-//! # References
-//! Ported from:
-//! - BSLLexer.g4 (bsl-parser) - PREPROC_*_SYMBOL tokens
 
 const KNOWN_SYMBOLS: &[&str] = &[
     "КЛИЕНТ",

@@ -260,7 +260,7 @@ mod tests {
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
 
-        assert_eq!(diags.len(), 10, "Must match bsl-language-server (10 diagnostics)");
+        assert_eq!(diags.len(), 10, "Expected 10 diagnostics");
 
         assert_diagnostic_range(code, diags[0], 3, 18, 20); // 60
         assert_diagnostic_range(code, diags[1], 3, 23, 25); // 60

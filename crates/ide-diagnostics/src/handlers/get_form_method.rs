@@ -205,7 +205,6 @@ EndProcedure
 
     #[test]
     fn test_from_java_fixture() {
-        // Source: bsl-language-server/src/test/resources/diagnostics/GetFormMethodDiagnostic.bsl
         let code = r#"Процедура Тест()
     Док=Документы.ЗаявкаНаОперацию.СоздатьДокумент();
     Форма=Док.ПолучитьФорму("ФормаДокумента"); // Срабатывание здесь
@@ -229,11 +228,7 @@ EndProcedure
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
 
         // Expected 4 diagnostics
-        assert_eq!(
-            get_form_diags.len(),
-            4,
-            "Should match bsl-language-server implementation: 4 diagnostics"
-        );
+        assert_eq!(get_form_diags.len(), 4, "Expected 4 diagnostics");
 
         // reference test expectations (0-based lines):
 

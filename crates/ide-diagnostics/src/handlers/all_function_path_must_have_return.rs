@@ -57,7 +57,7 @@
 //! Ported from:
 //!
 //! This HIR-based implementation replaces the AST-based version to leverage
-//! Salsa caching and the rust-analyzer architecture pattern.
+//! Salsa caching.
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -88,8 +88,7 @@ pub fn from_hir(
     method_id: &MethodId,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
-    // Note: AllFunctionPathMustHaveReturn is the diagnostic code used in bsl-language-server
-    // MissingReturn is the internal HIR diagnostic name
+    // AllFunctionPathMustHaveReturn is the diagnostic code; MissingReturn is the internal HIR name
     let code = DiagnosticCode::AllFunctionPathMustHaveReturn;
 
     if ctx.is_disabled_with_metadata(code) {

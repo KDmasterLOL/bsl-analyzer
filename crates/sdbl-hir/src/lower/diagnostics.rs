@@ -68,7 +68,7 @@ impl LoweringContext {
 
     /// Find tables that are protected by WHERE IS NOT NULL checks.
     ///
-    /// bsl-language-server semantics: if WHERE has IS NOT NULL check for ANY field from a table,
+    /// If WHERE has IS NOT NULL check for ANY field from a table,
     /// the ENTIRE table is considered protected.
     fn find_tables_protected_by_where(&self, hir: &SdblHir) -> std::collections::HashSet<String> {
         let mut protected = std::collections::HashSet::new();

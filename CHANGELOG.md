@@ -48,7 +48,7 @@ Releases will follow the `YYYY.MM.DD` format as defined in [VERSIONING.md](docs/
 - **Alpha (0.x)** - Current phase: Foundation and basic functionality
 - **Beta** - 100+ diagnostics, basic LSP support
 - **RC** - 181 diagnostics, full LSP compatibility
-- **Stable** - Production ready, drop-in replacement for bsl-language-server
+- **Stable** - Production ready
 
 ---
 

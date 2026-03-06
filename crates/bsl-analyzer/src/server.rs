@@ -1,7 +1,6 @@
 //! LSP server main loop.
 //!
-//! This module implements the core event loop for the LSP server,
-//! following the rust-analyzer architecture.
+//! This module implements the core event loop for the LSP server.
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{select, Receiver};

@@ -18,8 +18,6 @@
 //! The 1C standard 772 requiring "АвтоТест" checks has been revoked.
 //! This pattern should be removed from code.
 //!
-//! ## Sources
-//! - **Rust:** bsl-language-server-rust/rules/excessive_auto_test_check.rs
 
 use crate::define_metadata;
 use crate::metadata::*;

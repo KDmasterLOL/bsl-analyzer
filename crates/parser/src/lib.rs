@@ -1,7 +1,7 @@
 //! Parser for BSL (1C:Enterprise) language.
 //!
 //! This crate parses BSL tokens into a syntax tree.
-//! The parser uses an event-based approach similar to rust-analyzer.
+//! The parser uses an event-based approach.
 //!
 //! ## SDBL Support
 //!

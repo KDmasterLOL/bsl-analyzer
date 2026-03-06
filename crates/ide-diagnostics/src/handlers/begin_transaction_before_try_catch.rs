@@ -340,7 +340,7 @@ EndProcedure"#;
         // but we don't check module-level code. Not worth complicating lower_module_code for this.
         assert_eq!(diags.len(), 6, "Should detect 6 diagnostics (excluding module-level code)");
 
-        // Verify exact positions match bsl-language-server test expectations
+        // Verify exact positions
         assert_diagnostic_range(code, diags[0], 29, 4, 23); // Пример2: код перед попыткой
         assert_diagnostic_range(code, diags[1], 42, 8, 27); // Пример3: в попытке
         assert_diagnostic_range(code, diags[2], 55, 4, 23); // Пример4: код после начала

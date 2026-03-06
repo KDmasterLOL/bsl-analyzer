@@ -26,7 +26,7 @@
 //!
 //! ## Implementation
 //!
-//! Migrated to HIR-based collection (rust-analyzer pattern).
+//! Migrated to HIR-based collection.
 //!
 //! Ported from:
 //!

@@ -197,8 +197,8 @@ fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
 }
 
 /// Recursively check if HIR expression contains DataExchange.Load pattern.
-/// NOTE: bsl-language-server checks for any mention of DataExchange.Load in condition,
-/// even if negated. The guard is valid as long as there's a Return in then_branch.
+/// Checks for any mention of DataExchange.Load in condition, even if negated.
+/// The guard is valid as long as there's a Return in then_branch.
 fn condition_has_data_exchange_load(body: &Body, expr_id: ExprId) -> bool {
     let expr = body.expr(expr_id);
 
@@ -247,14 +247,9 @@ fn is_data_exchange_load_field(body: &Body, base_id: ExprId, field: &Name) -> bo
 }
 
 /// Check if branch contains Return statement.
-/// For DataExchangeLoading guard pattern, match bsl-language-server behavior:
-/// The guard pattern should be simple: just a Return statement, possibly with other
-/// simple statements but Return should be present.
-/// However, bsl-language-server seems to accept any Return in the branch.
+/// The guard pattern accepts any Return anywhere in the branch statements.
 fn has_return_in_branch(body: &Body, stmts: &[StmtId]) -> bool {
-    // bsl-language-server uses descendants().any(Return), which finds Return anywhere
-    // But based on test failures, it seems bsl-language-server may have stricter requirements
-    // Let's check if Return exists anywhere in the statements
+    // Check if Return exists anywhere in the statements
     for &stmt_id in stmts {
         if has_return_anywhere(body, stmt_id) {
             return true;

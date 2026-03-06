@@ -154,14 +154,6 @@ println!(); dbg!(); eprintln!();
 
 Перед использованием crate → Context7 (`resolve-library-id` + `query-docs`)
 
-### 6. Источники
-
-| Приоритет | Проект | Что брать |
-|-----------|--------|-----------|
-| 1 | rust-analyzer | Архитектура, Rowan, Salsa |
-| 2 | bsl-language-server | Совместимость, коды диагностик |
-| 3 | bsl-parser | Грамматика BSL/SDBL |
-
 ---
 
 ## DiagnosticsContext API

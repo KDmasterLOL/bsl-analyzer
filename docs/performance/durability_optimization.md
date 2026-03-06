@@ -36,7 +36,7 @@ pub fn apply(self, db: &mut dyn RootQueryDb) {
 
 ### Research Findings
 
-**Source:** rust-analyzer (reference implementation)
+**Research findings:**
 
 - Uses **3 durability levels**: HIGH (library files), MEDIUM (metadata), LOW (user code)
 - Separate functions: `file_text_durability()` and `source_root_durability()`
@@ -160,7 +160,7 @@ cargo test --all
 
 ## Alternative Approaches Considered
 
-### Variant B: Full rust-analyzer Implementation
+### Variant B: Full Three-Level Durability Implementation
 
 **Would include:**
 - Separate `file_text_durability()` and `source_root_durability()` functions
@@ -181,7 +181,7 @@ cargo test --all
 
 **Rejected because:**
 - Problem obvious from code inspection
-- rust-analyzer experience provides strong evidence
+- Salsa documentation and code inspection provide strong evidence
 - Incremental mode not needed for current CLI use case
 
 ## Recommendations
@@ -240,8 +240,7 @@ cargo test --all
 - **Plan:** `/home/itrous/.claude/plans/floofy-hugging-cat.md`
 - **Baseline metrics:** `docs/performance/baseline_durability.md`
 - **Variant A comparison:** `docs/performance/variant_a_comparison.md`
-- **rust-analyzer source:** `~/src/lsp/rust-analyzer/crates/base-db/src/change.rs`
-- **Salsa repository:** `~/src/lsp/salsa/`
+- **Salsa documentation:** https://salsa-rs.github.io/salsa/
 
 ---
 

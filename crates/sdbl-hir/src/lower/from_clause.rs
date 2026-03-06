@@ -44,7 +44,6 @@ impl LoweringContext {
         }
 
         // Check if this FROM data source is a virtual table with JOINs
-        // bsl-language-server: visitDataSources() checks dataSource has joinPart AND virtualTable
         if let Some(table_ref) = ds.table_ref() {
             if ds.join_clauses().next().is_some() {
                 let parts: Vec<String> = table_ref

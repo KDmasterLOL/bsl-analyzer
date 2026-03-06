@@ -13,7 +13,7 @@
 //! statements start on the same line (excluding preprocessor directives,
 //! empty statements, and statements with parse errors).
 //!
-//! ## Exclusions (matching bsl-language-server behavior):
+//! ## Exclusions:
 //! - Empty statements (standalone `;`)
 //! - Statements containing preprocessor directives
 //! - Statements with parse errors

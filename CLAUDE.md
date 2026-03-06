@@ -4,9 +4,9 @@ Guidance for Claude Code when working with bsl-analyzer codebase.
 
 ## Project Overview
 
-**BSL Analyzer** - High-performance LSP for BSL (1C:Enterprise) in Rust. Target: drop-in replacement for bsl-language-server with 5x speed, 2.7x less memory.
+**BSL Analyzer** - High-performance production ready LSP for BSL (1C:Enterprise) in Rust.
 
-**Performance (doc3: 121 MB, 6,540 files):** 11.2s vs 58.9s bsl-language-server (5.3x faster), 1.4 GB vs 3.8 GB memory (2.7x less)
+**Performance (doc3: 121 MB, 6,540 files):** 11.2s analysis time, 1.4 GB memory usage
 
 See `docs/planning/PERFORMANCE_REAL_DATA.md` for benchmarks.
 
@@ -52,7 +52,7 @@ bsl-analyzer (LSP Server)
 - Compile-time const metadata + runtime JSON overrides
 - `ctx.severity(code)`, `ctx.tags(code)` instead of hardcoded values
 - Automatic LSP severity mapping from type+severity
-- 100% compatible with bsl-language-server `@DiagnosticMetadata`
+- Metadata annotations compatible with BSL diagnostic tooling
 
 **HIR Diagnostics** - Collected during HIR lowering, cached by Salsa, see `docs/architecture/ARCHITECTURE.md`
 
@@ -81,19 +81,7 @@ Before using external crates: `resolve-library-id` → `query-docs` (Context7 MC
 **Use:** hover (types), goToDefinition, findReferences, documentSymbol, workspaceSymbol, call hierarchy
 **Don't use:** when you know exact path (use Read), text search (Grep), patterns (Glob)
 
-### 3. Reference Sources
-**Primary reference:**
-- `~/src/lsp/rust-analyzer/` - Architecture patterns, diagnostics infrastructure, call hierarchy, search/usages
-
-**BSL specifics:**
-- `~/src/lsp/bsl-parser/` - BSL/SDBL grammar (ANTLR4)
-- `~/src/lsp/bsl-language-server/` - Diagnostic compatibility (codes, messages, config format only)
-
-**Priority:** rust-analyzer > bsl-parser > bsl-language-server
-
-See `docs/architecture/SOURCES.md` for details
-
-### 4. Logging: tracing only
+### 3. Logging: tracing only
 ```rust
 use tracing::{debug, info, warn, error};
 let _span = tracing::info_span!("parse_file", len = input.len()).entered();
@@ -144,25 +132,19 @@ All test files in repo. Never use absolute paths: `include_str!("fixtures/Module
 
 **Key Files:**
 - `docs/architecture/ARCHITECTURE.md` - Architecture details
-- `docs/architecture/SOURCES.md` - Source projects
 - `docs/contributing/DEVELOPMENT_RULES.md` - Guidelines
 - `docs/METADATA_COMPATIBILITY.md` - Metadata compatibility
 
-## Compatibility & Architecture
+## Architecture Highlights
 
-**User-facing compatibility** with bsl-language-server:
-- 100% compatible diagnostic codes, messages, severity levels
-- Same config format (`.bsl-analyzer.json` or `.bsl-language-server.json`)
-- Same diagnostic parameters and metadata
+**Configuration format:** `.bsl-analyzer.json` or `.bsl-language-server.json`
 
-**Architecture advantages** over bsl-language-server:
-- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON (vs annotations only)
-- ✅ **HIR-based diagnostics:** Collected during lowering, Salsa-cached (vs separate AST passes)
-- ✅ **Text-based single pass:** One traversal for all text diagnostics (vs N separate passes)
+**Diagnostic metadata system:**
+- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON overrides
+- ✅ **HIR-based diagnostics:** Collected during lowering, Salsa-cached
+- ✅ **Text-based single pass:** One traversal for all text diagnostics
 - ✅ **Dataflow analysis:** CFG + liveness for intra-procedural checks
-- 🚧 **CallGraph (planned):** Inter-procedural analysis infrastructure inspired by rust-analyzer
-
-**Reference architecture:** rust-analyzer for all new infrastructure
+- 🚧 **CallGraph (planned):** Inter-procedural analysis infrastructure
 
 ## Общие правила
 

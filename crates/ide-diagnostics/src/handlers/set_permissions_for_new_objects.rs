@@ -125,8 +125,7 @@ fn get_allowed_roles(ctx: &DiagnosticsContext) -> FxHashSet<String> {
 
 /// Create diagnostic with Russian error message
 ///
-/// All diagnostics are reported at the ManagedApplicationModule start (line 1, columns 1-9)
-/// to match bsl-language-server behavior.
+/// All diagnostics are reported at the ManagedApplicationModule start (line 1, columns 1-9).
 fn create_diagnostic(
     ctx: &DiagnosticsContext,
     role_name: &str,
@@ -141,7 +140,7 @@ fn create_diagnostic(
     let file_text = ctx.file_text();
     let file_len = file_text.len();
 
-    // Use range [0, min(9, file_len)) to match bsl-language-server behavior
+    // Use range [0, min(9, file_len))
     let end_offset = std::cmp::min(9, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 

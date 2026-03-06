@@ -85,8 +85,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // bsl-language-server processes in this order: all line-end checks first, then all line-start checks
-    // This order is required for test compatibility
+    // Process in this order: all line-end checks first, then all line-start checks
 
     // First pass: check line END (operators/keywords at the end)
     for (line_idx, tokens) in line_tokens.iter().enumerate() {

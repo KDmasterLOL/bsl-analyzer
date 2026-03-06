@@ -1,8 +1,8 @@
-//! Diagnostic codes matching bsl-language-server.
+//! Diagnostic codes.
 
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
-/// Diagnostic code - matches bsl-language-server codes.
+/// Diagnostic code.
 ///
 /// Uses strum for automatic as_str/from_str generation and iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display, IntoStaticStr, EnumIter)]

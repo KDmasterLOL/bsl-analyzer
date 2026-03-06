@@ -35,9 +35,7 @@
 //!
 //! ## Implementation
 //!
-//! Migrated to HIR-based collection (rust-analyzer pattern).
-//!
-//! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_if_ends_with_else.rs
+//! Migrated to HIR-based collection.
 
 use crate::define_metadata;
 use crate::metadata::*;

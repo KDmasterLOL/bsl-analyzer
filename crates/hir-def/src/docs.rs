@@ -12,8 +12,7 @@
 //! Parse → ItemTree → method_docs() query → MethodDocs (cached) → Use everywhere
 //! ```
 //!
-//! This follows the rust-analyzer pattern where documentation is a first-class
-//! HIR concept, and matches bsl-language-server's MethodDescription approach.
+//! Documentation is a first-class HIR concept.
 
 use crate::item_tree::ModItem;
 use crate::{DefDatabase, MethodId};
@@ -22,7 +21,6 @@ use syntax::{extract_leading_comments_at_offset, SyntaxNode};
 
 /// Parsed documentation for a BSL method (procedure or function).
 ///
-/// This is analogous to `MethodDescription` in bsl-language-server (bsl-language-server).
 /// All fields are optional because documentation sections may be missing.
 ///
 /// ## Example
@@ -917,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_parse_deprecated_with_dot() {
-        // Format used in bsl-language-server: "Устарела." with dot
+        // Format: "Устарела." with dot
         let comments = vec!["Устарела.".to_string()];
 
         let docs = parse_method_docs(&comments).unwrap();

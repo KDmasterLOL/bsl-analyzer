@@ -43,8 +43,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// Check a single syntax node for double negatives (node-based API).
 ///
 /// This is called from `collect_syntax_single_pass()` for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
-///
 /// Note: This handler has complex logic that requires looking at descendants.
 /// The check_node approach works but may revisit some patterns. For full
 /// optimization, consider stateful tracking in DiagnosticState.

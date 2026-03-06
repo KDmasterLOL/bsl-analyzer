@@ -406,7 +406,6 @@ fn is_client_only_method(method_node: &SyntaxNode) -> bool {
 ///
 /// Platform 8.3.12 added bitwise operation methods to global context.
 /// User-defined methods with these names will conflict.
-/// List matches bsl-language-server.
 fn is_global_context_collision_8312(name: &str) -> bool {
     const COLLISION_METHODS: &[&str] = &[
         // Russian variants
@@ -603,7 +602,7 @@ fn emit_method_scoped_diagnostics(
 
     // Emit MethodSize candidate using line-based calculation
     // Algorithm: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
-    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match bsl-language-server's subCodeBlock
+    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match the subCodeBlock span
     if let Some(ref line_index) = ctx.line_index {
         let start_line = line_index.line_col(method_range.start()).line as usize;
         let end_line = line_index.line_col(method_range.end()).line as usize;

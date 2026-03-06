@@ -32,7 +32,7 @@
 //!
 //! ## Implementation
 //!
-//! Algorithm: Calculates line difference (stop_line - start_line) matching bsl-language-server's ANTLR behavior.
+//! Algorithm: Calculates line difference (stop_line - start_line).
 //!
 //! ## Performance
 //! Uses LineIndex for O(1) line number lookups instead of scanning the entire
@@ -128,7 +128,7 @@ mod tests {
         // Sizes are computed as stop_line - start_line (ANTLR behavior).
         // Процедура201Строка: lines 6-212 → size 206? No — we need size=201.
         // Original has 201 А=0 statements, making the method span 203 lines (start + 201 body + end).
-        // bsl-language-server size = stop_line - start_line = 202 lines diff but reports 201.
+        // Size = stop_line - start_line = 202 lines diff but reports 201.
         // We replicate the exact file structure: same line counts as original .bsl.
 
         let mut s = String::new();

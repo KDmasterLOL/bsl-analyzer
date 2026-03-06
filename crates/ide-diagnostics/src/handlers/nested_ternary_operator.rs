@@ -47,7 +47,7 @@
 //!
 //! ## Implementation
 //!
-//! Uses node-based API pattern from rust-analyzer. Checks three cases:
+//! Checks three cases:
 //! 1. `IF_STMT` - finds ternary operators in IF conditions
 //! 2. `ELSIF_CLAUSE` - finds ternary operators in ELSIF conditions
 //! 3. `TERNARY_EXPR` - finds nested ternary operators within another ternary
@@ -78,8 +78,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// Check a single syntax node for nested ternary operators (node-based API).
 ///
 /// This is called from collect_syntax_single_pass() for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
-///
 /// ## Cases checked
 /// 1. **IF_STMT** - Reports ternary operators in IF conditions
 /// 2. **ELSIF_CLAUSE** - Reports ternary operators in ELSIF conditions

@@ -2,7 +2,7 @@
 
 ## Обзор
 
-BSL Analyzer построен по образцу rust-analyzer с адаптацией под BSL/1C.
+BSL Analyzer использует инкрементальную архитектуру на базе Salsa с адаптацией под BSL/1C.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -138,7 +138,7 @@ Metadata-driven система для всех 144 диагностик (100% co
 - **Центральный registry**: все severity/tags/minutesToFix в `metadata_registry.rs`
 - **Runtime overrides**: JSON config может переопределить severity/type/tags
 - **Автоматический LSP mapping**: DiagnosticType + SeverityLevel → LSP Severity
-- **Совместимость с bsl-language-server**: 1:1 соответствие с @DiagnosticMetadata annotations
+- **Метаданные диагностик**: 1:1 соответствие с форматом аннотаций диагностик
 
 Вместо hardcoded значений handlers используют `ctx.severity(code)` и `ctx.tags(code)`.
 
@@ -207,6 +207,6 @@ BSL_LOG_FILE=/tmp/bsl.log        # write to file
 
 ## Совместимость
 
-100% совместимость с bsl-language-server:
+Поддерживаемые форматы конфигурации:
 - Те же коды диагностик и severity
 - Поддержка `.bsl-analyzer.json` и `.bsl-language-server.json`

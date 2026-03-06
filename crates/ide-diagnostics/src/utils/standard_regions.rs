@@ -4,10 +4,6 @@
 //! of allowed standard region names. This module provides utilities to check if a region
 //! name matches the standards for a given module type.
 //!
-//! # References
-//! Ported from:
-//! - Regions (bsl-language-server) - standard regions mapping
-//! - Keywords (bsl-language-server) - bilingual region names
 
 use bsl_metadata::ModuleType;
 

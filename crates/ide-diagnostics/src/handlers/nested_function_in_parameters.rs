@@ -116,7 +116,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Get module bodies from HIR (cached by Salsa)
     let module_bodies = ctx.module_bodies();
 
-    // Get line index (cached by Salsa, following rust-analyzer pattern)
+    // Get line index (cached by Salsa)
     let line_index = ctx.line_index();
 
     // Get parse tree for name token extraction
@@ -405,7 +405,7 @@ fn check_call_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
+    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -471,7 +471,7 @@ fn check_method_call_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
+    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -529,7 +529,7 @@ fn check_new_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
+    // ALWAYS skip single-line calls
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -683,8 +683,7 @@ mod tests {
 
     #[test]
     fn test_diagnostic_with_allow_oneliner_false() {
-        // Single-line calls are ALWAYS skipped (matching bsl-language-server behavior)
-        // bsl-language-server: "однострочники пропускаем сразу" - line 116-118
+        // Single-line calls are ALWAYS skipped
         // allowOneliner only affects whether multiline params are required
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
         let mut config = DiagnosticsConfig::default();
@@ -848,10 +847,9 @@ mod tests {
         let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
         // Expected 12 diagnostics with allowOneliner=false
-        // Now fully matching bsl-language-server behavior (100%)
         assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics with allowOneliner=false ");
 
-        // Verify positions match bsl-language-server implementation (100% match)
+        // Verify positions
         assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30); // Вставить
         assert_diagnostic_range(FIXTURE, &diagnostics[1], 3, 11, 19); // Картинка
         assert_diagnostic_range(FIXTURE, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
@@ -879,7 +877,6 @@ mod tests {
         let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
         // Expected 13 diagnostics with custom allowed methods + allowOneliner=false
-        // Now fully matching bsl-language-server behavior (100%)
         assert_eq!(
             diagnostics.len(),
             13,

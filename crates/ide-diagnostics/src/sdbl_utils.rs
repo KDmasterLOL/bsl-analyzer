@@ -18,7 +18,7 @@ use syntax::{SyntaxKind, SyntaxNode, TextRange};
 ///
 /// ## Algorithm
 ///
-/// Based on reference implementation from bsl-language-server-rust:
+/// Algorithm:
 /// - Line mapping: `bsl_line = bsl_literal_line + sdbl_line`
 /// - Column mapping:
 ///   - First line: `bsl_col = bsl_literal_col + sdbl_col + 1` (+1 for opening quote)

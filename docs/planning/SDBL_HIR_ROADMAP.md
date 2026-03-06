@@ -1194,12 +1194,6 @@ fn test_query_to_missing_metadata_diagnostic() {
 - `docs/planning/HIR_DIAGNOSTICS_ROADMAP.md` - BSL HIR diagnostics
 - `docs/planning/DIAGNOSTICS_MIGRATION.md` - Diagnostic migration plan
 
-### Source Projects
-
-- `~/src/lsp/rust-analyzer/` - HIR architecture reference
-- `~/src/lsp/bsl-language-server/` - SDBL diagnostics compatibility
-- `~/src/lsp/salsa/` - Incremental computation framework
-
 ### Key Files
 
 - `crates/hir-def/src/body.rs` - BSL HIR Body structure

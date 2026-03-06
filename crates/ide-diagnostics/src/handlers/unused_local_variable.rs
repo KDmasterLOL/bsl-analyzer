@@ -853,9 +853,9 @@ mod tests {
     /// - hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
     /// - hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
     ///
-    /// Note: bsl-language-server uses 0-indexed lines. Our implementation may differ because:
+    /// Note: Uses 0-indexed lines. Implementation may differ because:
     /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
-    /// - We may detect additional unused variables that bsl-language-server doesn't flag
+    /// - We may detect additional unused variables
     #[test]
     fn test_java_fixture_full() {
         let code = r#"&НаКлиенте
@@ -994,8 +994,7 @@ mod tests {
         // - Line 2: &НаКлиенте Перем ПеременнаяМодуляНеИспользуемая; // Error (first declaration)
         // - Line 5: &НаСервере Перем ПеременнаяМодуляНеИспользуемая; // Ignored (duplicate name)
         //
-        // bsl-language-server ignores duplicate module variable declarations (VariableSymbolComputer.visitModuleVarDeclaration:88-89).
-        // We now match this behavior by skipping duplicates in SymbolTreeBuilder.add_variable.
+        // Duplicate module variable declarations are skipped (handled in SymbolTreeBuilder.add_variable).
         assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables ");
 
         // Verify exact positions (matching reference test)

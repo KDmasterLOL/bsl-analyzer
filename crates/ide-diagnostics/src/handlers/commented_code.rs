@@ -147,8 +147,7 @@ fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
 /// Comments are considered consecutive if they are on immediately adjacent lines
 /// with no non-comment lines between them (including blank lines or code lines).
 ///
-/// This mimics the bsl-language-server which processes line-by-line and breaks
-/// groups when a non-comment line is encountered.
+/// Groups are broken when a non-comment line is encountered.
 fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<CommentGroup> {
     if tokens.is_empty() {
         return Vec::new();

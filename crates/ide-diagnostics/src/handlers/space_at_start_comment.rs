@@ -34,17 +34,17 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-// Default comment annotations (same as bsl-language-server)
+// Default comment annotations
 const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
 
-// Good comment patterns (from bsl-language-server)
-// bsl-language-server GOOD_COMMENT_PATTERN_STRICT: "(?:(?:\\/\\/[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
+// Good comment patterns
+// GOOD_COMMENT_PATTERN_STRICT: "(?:(?:\\/\\/[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
 // - First alternative: exactly // followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators like ////////)
 static GOOD_COMMENT_PATTERN_STRICT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^//[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
 
-// bsl-language-server GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
+// GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
 // - First alternative: 2+ slashes followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators)
 static GOOD_COMMENT_PATTERN: Lazy<Regex> =
@@ -83,9 +83,7 @@ fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String])
         return true;
     }
 
-    // Check if it's commented code (bsl-language-server uses CodeRecognizer with 0.9 threshold)
-    // For now, skip this check - we'll implement it later if needed
-    // TODO: Port CodeRecognizer from bsl-language-server
+    // TODO: Implement CodeRecognizer to skip commented code (0.9 threshold)
 
     false
 }
@@ -189,7 +187,7 @@ mod tests {
 ////Текст с ошибкой"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // TODO: Port CodeRecognizer from bsl-language-server to skip commented code (lines 31-33)
+        // TODO: Implement CodeRecognizer to skip commented code (lines 31-33)
         // Expected 7 diagnostics, we get 10 because we don't skip commented code yet.
         // Expected diagnostics:
         // 1. Line 6: //Плохой комментарий
@@ -197,7 +195,7 @@ mod tests {
         // 3. Line 9: //Так тоже плохо
         // 4. Line 20: //(с) Похоже... (cyrillic 'с', not in default annotations)
         // 5. Line 22: //// Плохой... (4 slashes without space in strict mode)
-        // 6. Line 30: //&НаКлиенте (commented code, skipped in bsl-language-server)
+        // 6. Line 30: //&НаКлиенте (commented code, skipped by CodeRecognizer)
         // 7. Line 34: /// Текст... (3 slashes with text, error in strict mode)
         // 8. Line 35: ////Текст... (4 slashes with text)
 

@@ -611,7 +611,7 @@ pub fn module_level_liveness_analysis_query<'db>(
 /// - Line-based analysis (line length, empty lines, etc.)
 ///
 /// # Architecture
-/// Follows rust-analyzer pattern of caching LineIndex through Salsa.
+/// LineIndex is cached through Salsa.
 ///
 /// # Performance
 /// - LRU: 256 files (most recently accessed)

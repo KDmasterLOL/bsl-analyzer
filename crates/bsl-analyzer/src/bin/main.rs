@@ -544,7 +544,7 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // CLI compatibility with bsl-language-server
+#[allow(clippy::too_many_arguments)]
 fn analyze(
     source_dir: PathBuf,
     workspace_dir: Option<PathBuf>,
@@ -692,9 +692,9 @@ fn analyze_salsa(
     let start = Instant::now();
 
     // Determine workspace and output directories
-    // workspace_dir defaults to source_dir (bsl-language-server behavior)
+    // workspace_dir defaults to source_dir
     let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
-    // output_dir defaults to current directory "." (bsl-language-server behavior)
+    // output_dir defaults to current directory "."
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
     // Load project configuration

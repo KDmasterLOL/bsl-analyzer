@@ -609,7 +609,6 @@ fn unary_expr(p: &mut Parser) {
 ///
 /// TODO: Add support for type cast syntax: `ВЫРАЗИТЬ(expr КАК type(size))`
 /// Currently КАК inside expressions creates ERROR node which breaks parsing.
-/// See: https://github.com/1c-syntax/bsl-parser SDBL grammar for CAST syntax
 fn primary_expr(p: &mut Parser) {
     // Check for CASE keyword first (using at_keyword since CASE might be IDENT token)
     if p.at_keyword("CASE") || p.at_keyword("ВЫБОР") {

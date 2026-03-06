@@ -459,7 +459,7 @@ pub enum BodyDiagnostic {
         param_id: BindingId,    // Parameter being overwritten
         stmt_id: StmtId,        // Assignment statement for CFG analysis
         stmt_range: TextRange,  // Full statement range for BodySourceMap lookup
-        ident_range: TextRange, // Identifier range for diagnostic display (bsl-language-server compatibility)
+        ident_range: TextRange, // Identifier range for diagnostic display
     },
 
     /// Query/QueryBuilder/ReportBuilder Execute() call inside a loop.

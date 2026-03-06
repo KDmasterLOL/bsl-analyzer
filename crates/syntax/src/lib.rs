@@ -8,10 +8,6 @@
 //! - [`BslLanguage`] - language definition for Rowan
 //! - [`SyntaxNode`], [`SyntaxToken`], [`SyntaxElement`] - untyped tree types
 //! - [`ast`] - typed AST wrappers over untyped syntax tree
-//!
-//! ## References
-//!
-//! Based on rust-analyzer's syntax crate architecture.
 
 pub mod ast;
 pub mod ast_utils;

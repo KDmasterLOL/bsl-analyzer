@@ -73,7 +73,7 @@
 //! ## Configuration
 //! - **complexityThreshold** (default: 15) - Maximum allowed cognitive complexity
 //! - **Enabled by default:** Yes
-//! - **Severity:** Warning (CRITICAL in bsl-language-server for compatibility)
+//! - **Severity:** Warning
 //! - **Tags:** BRAINOVERLOAD
 //! - **Minutes to fix:** 15
 //!

@@ -932,7 +932,7 @@ pub(crate) fn is_followed_by_loop_exit(expr_node: &SyntaxNode) -> bool {
 ///
 /// BSL parser (ANTLR).StatementContext includes the SEMICOLON in the statement range.
 /// Our CALL_STMT does not include SEMICOLON (it's a separate token).
-/// To match bsl-language-server ranges, we extend the range to include the semicolon.
+/// We extend the range to include the semicolon.
 pub(crate) fn extend_range_with_semicolon(
     node: &SyntaxNode,
     original_range: TextRange,

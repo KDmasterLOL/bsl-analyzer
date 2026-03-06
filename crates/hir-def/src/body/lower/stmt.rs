@@ -153,7 +153,7 @@ fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
 /// Get condition range, trimming trailing whitespace.
 ///
 /// ANTLR parser doesn't include trailing whitespace in expression nodes,
-/// but Rowan CST includes all tokens. This trims trailing whitespace to match bsl-language-server.
+/// but Rowan CST includes all tokens. This trims trailing whitespace.
 fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
     let text = expr_node.text().to_string();
     let trimmed = text.trim_end();
@@ -174,7 +174,7 @@ fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
 /// Default max complexity is 3 (hardcoded here as we don't have config during lowering).
 /// The actual config check happens in from_hir().
 fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode) {
-    // Default max complexity (matches bsl-language-server default)
+    // Default max complexity
     const DEFAULT_MAX_COMPLEXITY: usize = 3;
 
     let bool_op_count = count_bool_operations(condition_node);
@@ -253,7 +253,7 @@ fn check_duplicated_conditions(ctx: &mut LoweringCtx, condition_nodes: &[SyntaxN
     for (_normalized_text, occurrences) in condition_map {
         if occurrences.len() > 1 {
             // Report diagnostic on each duplicate (not the first one)
-            // This matches bsl-language-server behavior: first occurrence is the reference
+            // First occurrence is the reference
             for (_idx, node) in occurrences.iter().skip(1) {
                 let range = node.text_range();
                 ctx.emit(BodyDiagnostic::IfElseDuplicatedCondition {
@@ -688,7 +688,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
                 param_id: opaque_param_id,
                 stmt_id: StmtId::from_raw(la_arena::RawIdx::from(0)), // Placeholder - will find via range in handler
                 stmt_range: node.text_range(), // Full statement range for BodySourceMap lookup
-                ident_range: range, // Identifier range for diagnostic display (bsl-language-server compatibility)
+                ident_range: range,            // Identifier range for diagnostic display
             });
         }
     }
@@ -1402,7 +1402,7 @@ pub(super) fn has_trailing_semicolon(node: &SyntaxNode) -> bool {
 ///
 /// Skips whitespace, newlines, and comments.
 /// Uses descendants_with_tokens() to find tokens at any depth.
-/// Used for SemicolonPresence diagnostic to match bsl-language-server behavior (ctx.getStop()).
+/// Used for SemicolonPresence diagnostic to find the last token of a statement.
 pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
     node.descendants_with_tokens()
         .filter_map(|el| el.into_token())

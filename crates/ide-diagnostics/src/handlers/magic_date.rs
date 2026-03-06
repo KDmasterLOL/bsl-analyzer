@@ -172,8 +172,8 @@ fn is_valid_date(date_str: &str) -> bool {
     }
 }
 
-/// Check if date is in authorized list
-/// Strips non-digit characters before checking (bsl-language-server behavior)
+/// Check if date is in authorized list.
+/// Strips non-digit characters before checking.
 fn is_authorized(date_str: &str, config: &Config) -> bool {
     // Strip all non-digit characters (NON_NUMBER_PATTERN)
     let digits_only: String = date_str.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -343,7 +343,7 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
     };
 
     // For STRING tokens, validate format strictly
-    // For DATE tokens, accept any format (bsl-language-server behavior)
+    // For DATE tokens, accept any format
     if token.kind() == SyntaxKind::STRING && !is_valid_date(&date_str) {
         return;
     }

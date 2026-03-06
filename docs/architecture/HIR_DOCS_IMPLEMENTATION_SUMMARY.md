@@ -216,7 +216,7 @@ All tests passing: **15/15 ✅**
 
 ## Compatibility
 
-- ✅ **100% compatible** with bsl-language-server documentation format
+- ✅ **Supports** standard BSL documentation format
 - ✅ Supports both **Russian** and **English** keywords
 - ✅ Handles all **real-world** documentation patterns from doc3 project
 

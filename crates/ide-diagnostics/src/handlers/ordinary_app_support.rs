@@ -109,7 +109,7 @@ fn is_session_module(ctx: &DiagnosticsContext) -> bool {
 
 fn get_module_range(ctx: &DiagnosticsContext) -> TextRange {
     let file_text = ctx.file_text();
-    // bsl-language-server uses 14 characters, we need byte offset for 14 chars
+    // Use byte offset for 14 chars
     let end_offset: usize = file_text.chars().take(14).map(|c| c.len_utf8()).sum();
     TextRange::new(0.into(), (end_offset as u32).into())
 }

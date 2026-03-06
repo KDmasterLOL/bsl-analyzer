@@ -5,8 +5,7 @@
 //! The intent of a thread is frozen at thread creation time,
 //! i.e. there is no API to change the intent of a thread once it has been spawned.
 //!
-//! As a system, rust-analyzer should have the property that
-//! old manual scheduling APIs are replaced entirely by `QoS`.
+//! As a system, old manual scheduling APIs are replaced entirely by `QoS`.
 //! To maintain this invariant, we panic when it is clear that
 //! old scheduling APIs have been used.
 //!

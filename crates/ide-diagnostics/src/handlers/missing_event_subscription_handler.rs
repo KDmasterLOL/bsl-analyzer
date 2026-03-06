@@ -266,8 +266,7 @@ enum DiagnosticType {
 
 /// Create diagnostic with Russian error message
 ///
-/// All diagnostics are reported at the SessionModule start (line 1, columns 1-8)
-/// to match bsl-language-server behavior.
+/// All diagnostics are reported at the SessionModule start (line 1, columns 1-8).
 fn create_diagnostic(
     ctx: &DiagnosticsContext,
     diagnostic_type: DiagnosticType,
@@ -316,7 +315,6 @@ fn create_diagnostic(
     let file_len = file_text.len();
 
     // Use range [0, min(14, file_len)) to avoid exceeding file bounds
-    // bsl-language-server uses (0, 0, 0, 14) but we need to be safe for small files
     let end_offset = std::cmp::min(14, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 

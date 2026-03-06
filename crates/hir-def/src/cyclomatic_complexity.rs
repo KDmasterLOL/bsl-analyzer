@@ -359,6 +359,6 @@ mod tests {
 
         let complexity = calculate_complexity(&result.body);
         // Ожидаем 21
-        assert_eq!(complexity, 21, "Should match bsl-language-server implementation");
+        assert_eq!(complexity, 21, "Expected complexity 21");
     }
 }

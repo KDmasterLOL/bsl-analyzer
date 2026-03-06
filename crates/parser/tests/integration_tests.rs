@@ -516,7 +516,6 @@ fn test_small_file_performance() {
 fn test_lexer_performance_large_file() {
     use lexer::tokenize;
 
-    // Source: bsl-parser/src/test/resources/Module.bsl
     let input = include_str!("fixtures/Module.bsl");
 
     println!("\nLexer performance test:");
@@ -535,7 +534,6 @@ fn test_lexer_performance_large_file() {
 
 #[test]
 fn benchmark_parser_performance() {
-    // Source: bsl-parser/src/test/resources/Module.bsl
     let input = include_str!("fixtures/Module.bsl");
 
     let file_size_bytes = input.len();
@@ -577,7 +575,6 @@ fn benchmark_parser_performance() {
 #[test]
 fn debug_tokens_around_1905() {
     use lexer::tokenize;
-    // Test file from bsl-parser project (grammar reference)
     let input = include_str!("fixtures/Module.bsl");
 
     let tokens = tokenize(input);
@@ -594,7 +591,6 @@ fn debug_tokens_around_1905() {
 #[test]
 fn debug_tokens_around_14467() {
     use lexer::tokenize;
-    // Test file from bsl-parser project (grammar reference)
     let input = include_str!("fixtures/Module.bsl");
 
     let tokens = tokenize(input);
@@ -610,7 +606,6 @@ fn debug_tokens_around_14467() {
 #[test]
 fn debug_tokens_around_68041() {
     use lexer::tokenize;
-    // Test file from bsl-parser project (grammar reference)
     let input = include_str!("fixtures/Module.bsl");
 
     let tokens = tokenize(input);
@@ -650,7 +645,6 @@ fn test_keyword_as_method_name() {
 
 #[test]
 fn test_large_file_performance() {
-    // Test file from bsl-parser project (grammar reference)
     // Large real-world BSL module for performance testing
     let input = include_str!("fixtures/Module.bsl");
 

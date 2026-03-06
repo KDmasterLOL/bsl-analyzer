@@ -187,7 +187,7 @@ mod tests {
         // Expected 20 diagnostics
         assert_eq!(collision_diags.len(), 20, "Expected 20 diagnostics");
 
-        // Verify all diagnostics match bsl-language-server ranges exactly
+        // Verify all diagnostic ranges
         // Format: line, start_col, end_col
         let expected_ranges = [
             (0, 8, 20),  // ПроверитьБит

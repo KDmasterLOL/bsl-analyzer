@@ -144,7 +144,7 @@ test: add snapshot tests for expression parsing
 1. Создайте файл в `crates/ide-diagnostics/src/handlers/`
 2. Добавьте код диагностики в `DiagnosticCode` enum
 3. Реализуйте функцию `check(ctx: &DiagnosticsContext) -> Vec<Diagnostic>`
-4. Добавьте тесты с тестовыми данными из bsl-language-server
+4. Добавьте тесты с тестовыми данными
 5. Обновите документацию
 
 ## Вопросы и помощь

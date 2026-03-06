@@ -12,8 +12,7 @@
 //!
 //! ## CFG-based approach advantage
 //!
-//! Unlike the simple stack-based linear analysis in bsl-language-server, this implementation uses CFG
-//! to analyze **all execution paths**. This catches errors that bsl-language-server misses:
+//! Uses CFG to analyze **all execution paths**, catching errors missed by simple stack-based analysis:
 //!
 //! ```bsl
 //! Если Условие Тогда
@@ -23,7 +22,7 @@
 //! КонецЕсли;
 //! ```
 //!
-//! bsl-language-server (stack-based): Considers this "paired" (1 begin, 1 commit)
+//! Stack-based analysis: Considers this "paired" (1 begin, 1 commit)
 //! CFG (path-based): Catches BOTH errors - orphaned begin AND orphaned commit
 //!
 //! ## Algorithm
@@ -532,8 +531,7 @@ mod tests {
         );
     }
 
-    /// CFG-based test: Begin in one branch, Commit in another
-    /// bsl-language-server misses this, CFG catches both errors
+    /// CFG-based test: Begin in one branch, Commit in another (CFG catches both errors)
     #[test]
     fn test_branch_imbalance() {
         let code = r#"
@@ -1115,8 +1113,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
 
-        // bsl-language-server produces 21 diagnostics
-        // CFG-based approach may find MORE issues due to path analysis
+        // CFG-based approach may find more issues due to path analysis
         assert!(
             pairing_diags.len() >= 10,
             "Expected at least 10 diagnostics from fixture, got {}",

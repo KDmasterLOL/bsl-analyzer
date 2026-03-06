@@ -338,12 +338,11 @@ mod tests {
 
     #[test]
     fn test_union_query() {
-        // UNION query - first query checked, UNION query not checked (per bsl-language-server)
+        // UNION query - first query checked, UNION parts not checked
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
         let diagnostics = check_standalone_query(query);
         // First query OK (Name AS N), second query (Title without alias) not checked
         // Because we only check main query, not UNION queries
-        // NOTE: This matches bsl-language-server implementation behavior
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -381,7 +380,7 @@ mod tests {
         // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
-        // UNION queries are skipped per bsl-language-server behavior
+        // UNION queries are skipped
         assert_eq!(
             diagnostics.len(),
             2,
@@ -501,7 +500,7 @@ mod tests {
         // Should have 2 diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
-        // UNION queries are skipped per bsl-language-server behavior
+        // UNION queries are skipped
         assert_eq!(
             diagnostics.len(),
             2,
@@ -601,7 +600,7 @@ mod tests {
     /// Two queries with UNION - each query has fields without AS keyword.
     ///
     /// Expected 2 diagnostics per query (before UNION only): Валюты.Ссылка and Валюты.Код Код.
-    /// UNION queries are skipped per bsl-language-server behavior.
+    /// UNION queries are skipped.
     #[test]
     fn test_query_with_union_two_diagnostics() {
         let code = r#"Запрос = Новый Запрос;

@@ -1,8 +1,8 @@
 //! [`Pool`] implements a basic custom thread pool
 //! inspired by the [`threadpool` crate](http://docs.rs/threadpool).
 //! When you spawn a task you specify a thread intent
-//! so the pool can schedule it to run on a thread with that intent.
-//! rust-analyzer uses this to prioritize work based on latency requirements.
+//! so the pool can schedule it to run on a thread with that intent,
+//! prioritizing work based on latency requirements.
 //!
 //! The thread pool is implemented entirely using
 //! the threading utilities in [`crate::thread`].

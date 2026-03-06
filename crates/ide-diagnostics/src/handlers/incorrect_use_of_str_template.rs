@@ -5,7 +5,7 @@
 //!
 //! ## Implementation
 //!
-//! Two-phase detection (rust-analyzer pattern):
+//! Two-phase detection:
 //!
 //! **Phase 1: HIR Lowering** (75% coverage)
 //! - Detects errors in string literal templates during AST→HIR lowering

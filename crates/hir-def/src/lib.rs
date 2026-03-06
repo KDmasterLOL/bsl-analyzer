@@ -421,7 +421,7 @@ pub struct VariableId {
     pub local_id: u32,
 }
 
-/// Owner of a Body (analogous to rust-analyzer's DefWithBodyId).
+/// Owner of a Body.
 ///
 /// Identifies which top-level definition contains a Body.
 /// Used to disambiguate ExprId across different bodies in the same file.
@@ -827,7 +827,7 @@ impl Default for ModuleBodies {
 /// Compute execution context for a CommonModule from its metadata properties.
 ///
 /// Returns the execution context based on the module's metadata attributes.
-/// Context determination follows the logic from bsl-language-server.
+/// Context determination follows module metadata properties.
 pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> ExecutionContext {
     // ServerCall takes precedence: serverCall=true, server=false, externalConnection=false
     if common_module.is_server_call() {
@@ -903,7 +903,7 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
         }
     }
 
-    // Deduplicate module variables (matching bsl-language-server behavior)
+    // Deduplicate module variables
     {
         let mut seen_names: FxHashSet<String> = FxHashSet::default();
         result.module_vars.retain(|var| {

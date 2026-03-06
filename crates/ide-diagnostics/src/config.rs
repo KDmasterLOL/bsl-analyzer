@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// Configuration for diagnostics.
 ///
-/// Supports bsl-language-server compatible format:
+/// Supports compatible format:
 /// ```json
 /// {
 ///   "diagnostics": {
@@ -30,7 +30,6 @@ use std::collections::HashMap;
 /// Metadata override from JSON configuration.
 ///
 /// Allows runtime override of compile-time metadata.
-/// Matches bsl-language-server's metadata override functionality.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataOverride {
     pub severity: Option<DiagnosticSeverityLevel>,

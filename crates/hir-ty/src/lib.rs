@@ -1,8 +1,7 @@
 //! # HIR Type Inference
 //!
 //! This crate implements type inference for BSL (1C:Enterprise) language.
-//! It follows the rust-analyzer architecture pattern with a separate hir-ty crate
-//! for type system and inference.
+//! It uses a separate hir-ty crate for type system and inference.
 //!
 //! ## Architecture
 //!

@@ -2,7 +2,7 @@
 //!
 //! This module implements type inference over HIR (Body/Expr/Stmt) instead of AST.
 //! This allows:
-//! - Diagnostics collection during inference (rust-analyzer pattern)
+//! - Diagnostics collection during inference
 //! - Efficient caching via Salsa
 //! - Simpler code (HIR is already normalized)
 //!
@@ -52,8 +52,7 @@ pub struct InferenceResult {
 
     /// Diagnostics collected during type inference.
     ///
-    /// Following rust-analyzer pattern: diagnostics are collected as a byproduct
-    /// of type inference, not emitted immediately.
+    /// Diagnostics are collected as a byproduct of type inference, not emitted immediately.
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 

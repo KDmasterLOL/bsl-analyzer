@@ -148,7 +148,7 @@ mod tests {
         // Line 9: Товары.Добавить(Товары);
         assert_eq!(diags.len(), 2, "Should find 2 diagnostics");
 
-        // Verify positions match bsl-language-server implementation
+        // Verify positions
         assert_diagnostic_range(code, diags[0], 3, 4, 57);
         assert_diagnostic_range(code, diags[1], 9, 4, 27);
     }

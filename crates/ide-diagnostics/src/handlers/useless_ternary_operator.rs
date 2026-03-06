@@ -20,7 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 /// Check a single syntax node for useless ternary operators (node-based API).
 ///
 /// This is called from `collect_syntax_single_pass()` for each node in single AST pass.
-/// Pattern from rust-analyzer: crates/ide-diagnostics/src/handlers/*.rs
 pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UselessTernaryOperator;
 

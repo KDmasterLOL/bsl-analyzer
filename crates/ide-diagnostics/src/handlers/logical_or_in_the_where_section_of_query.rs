@@ -202,8 +202,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 
-        // bsl-language-server uses 1-based line numbers, test file shows:
-        // Line 8 (bsl-language-server) = Line 7 (Rust 0-indexed)
+        // Uses 0-indexed lines (line 7 = 1-based line 8)
         assert_diagnostic_range(code, &diagnostics[0], 7, 15, 18);
         assert_diagnostic_range(code, &diagnostics[1], 19, 8, 11);
         assert_diagnostic_range(code, &diagnostics[2], 31, 38, 41);
