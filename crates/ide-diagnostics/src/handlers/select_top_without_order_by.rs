@@ -90,267 +90,301 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_sdbl_diagnostic};
     use crate::DiagnosticCode;
     #[test]
-    fn test_from_fixture() {
-        let code = r#"Процедура Первые1БезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 1                           // <-- Ошибка, но может исключаться параметром
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник";
+    fn test_top_10_in_batch_order_by_in_other_query() {
+        // TOP 10 in first batch query; second query has ORDER BY - still 1 diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ ПЕРВЫЕ 10
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |;
+             |///////////////////////////////////////////////
+             |ВЫБРАТЬ
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Пользователи КАК Справочник
+             |УПОРЯДОЧИТЬ ПО
+             |   Справочник.Код";
 КонецПроцедуры
-
-Процедура Первые1ССортировкой()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 1                           // <-- Нет ошибки
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |УПОРЯДОЧИТЬ ПО
-    |   Справочник.Код";
-КонецПроцедуры
-
-Процедура Первые1БезСортировкиИСортировкаВДругомЗапросе()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 1                           // <-- Ошибка, но может исключаться параметром
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |;
-    |///////////////////////////////////////////////
-    |ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Пользователи КАК Справочник
-    |УПОРЯДОЧИТЬ ПО
-    |   Справочник.Код";
-КонецПроцедуры
-
-Процедура Первые10БезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 10                           // <-- Ошибка
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник";
-КонецПроцедуры
-
-Процедура Первые10ССортировкой()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 10                          // <-- Нет ошибки
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |УПОРЯДОЧИТЬ ПО
-    |   Справочник.Код";
-КонецПроцедуры
-
-Процедура Первые10БезСортировкиИСортировкаВДругомЗапросе()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 10                          // <-- Ошибка
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |;
-    |///////////////////////////////////////////////
-    |ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Пользователи КАК Справочник
-    |УПОРЯДОЧИТЬ ПО
-    |   Справочник.Код";
-КонецПроцедуры
-
-Процедура Первые10СВПараметрахБезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |ГДЕ
-    |   Справочник.Ссылка В (
-    |       ВЫБРАТЬ ПЕРВЫЕ 10                   // <-- Ошибка
-    |           Ссылка
-    |       ИЗ
-    |           Справочник.Контрагенты)";
-КонецПроцедуры
-
-Процедура Первые1СВПараметрахБезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |ГДЕ
-    |   Справочник.Ссылка В (
-    |       ВЫБРАТЬ ПЕРВЫЕ 1                    // <-- Ошибка, но может исключаться параметром
-    |           Ссылка
-    |       ИЗ
-    |           Справочник.Контрагенты)";
-КонецПроцедуры
-
-Процедура Первые10ВоВложенномБезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 5
-    |	Справочник.Ссылка КАК Ссылка
-    |ИЗ
-    |	(ВЫБРАТЬ ПЕРВЫЕ 10                      // <-- Ошибка
-    |		Контрагенты.Ссылка КАК Ссылка
-    |	ИЗ
-    |		Справочник.Контрагенты КАК Контрагенты) КАК Справочник
-    |
-    |УПОРЯДОЧИТЬ ПО
-    |	Ссылка";
-КонецПроцедуры
-
-Процедура Первые1ВоВложенномБезСортировки()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 5
-    |	Справочник.Ссылка КАК Ссылка
-    |ИЗ
-    |	(ВЫБРАТЬ ПЕРВЫЕ 1                       // <-- Ошибка, но может исключаться параметром
-    |		Контрагенты.Ссылка КАК Ссылка
-    |	ИЗ
-    |		Справочник.Контрагенты КАК Контрагенты) КАК Справочник
-    |
-    |УПОРЯДОЧИТЬ ПО
-    |	Ссылка";
-КонецПроцедуры
-
-Процедура Первые10СВПараметрахБезСортировкиССортировкойВоВнешнем()
-    ТекстЗапроса =
-    "ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |ГДЕ
-    |   Справочник.Ссылка В (
-    |       ВЫБРАТЬ ПЕРВЫЕ 10                   // <-- Ошибка
-    |           Ссылка
-    |       ИЗ
-    |           Справочник.Контрагенты)
-    |УПОРЯДОЧИТЬ ПО
-    |   Справочник.Код";
-КонецПроцедуры
-
-Процедура Первые10ВОбъединенииСУпорядочить()
-    ТекстЗапроса =
-    "ВЫБРАТЬ
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |ГДЕ
-    |   Справочник.Ссылка В (
-    |       ВЫБРАТЬ ПЕРВЫЕ 10                   // <-- Ошибка
-    |           Ссылка
-    |       ИЗ
-    |           Справочник.Контрагенты)
-    |
-    |ОБЪЕДИНИТЬ ВСЕ
-    |
-    |ВЫБРАТЬ ПЕРВЫЕ 10                          // <-- Ошибка
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |
-    |ОБЪЕДИНИТЬ ВСЕ
-    |
-    |ВЫБРАТЬ ПЕРВЫЕ 1                          // <-- Всегда ошибка, даже 1
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |УПОРЯДОЧИТЬ ПО
-    |   Ссылка";
-КонецПроцедуры
-
-Процедура Первые10ВОбъединенииСУпорядочить()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 1                               // <-- Нет ошибки
-    |   ПодЗапрос.Ссылка
-    |ИЗ
-    |   (ВЫБРАТЬ
-    |       Справочник.Ссылка
-    |   ИЗ
-    |       Справочник.Контрагенты КАК Справочник
-    |   ГДЕ
-    |       Справочник.Ссылка В (
-    |           ВЫБРАТЬ ПЕРВЫЕ 10                   // <-- Ошибка
-    |               Ссылка
-    |           ИЗ
-    |               Справочник.Контрагенты)
-    |
-    |   ОБЪЕДИНИТЬ ВСЕ
-    |
-    |   ВЫБРАТЬ ПЕРВЫЕ 10                          // <-- Ошибка
-    |       Справочник.Ссылка
-    |   ИЗ
-    |       Справочник.Контрагенты КАК Справочник) КАК ПодЗапрос
-    |
-    |УПОРЯДОЧИТЬ ПО
-    |   Ссылка";
-КонецПроцедуры
-
-Процедура Первые1БезСортировкиСГде()
-    ТекстЗапроса =
-    "ВЫБРАТЬ ПЕРВЫЕ 1                           // <-- Нет ошибки
-    |   Справочник.Ссылка
-    |ИЗ
-    |   Справочник.Контрагенты КАК Справочник
-    |ГДЕ
-    |   Справочник.Код = 1";
-КонецПроцедуры
-
-Процедура ЗапросСПодстановкойЗапросаВОбъединение()
-    ТекстЗапроса =
-    "ВЫБРАТЬ
-    |   ОстаткиНоменклатуры.Номенклатура КАК Номенклатура
-    |ПОМЕСТИТЬ ВТ_ОстаткиНоменклатуры
-    |ИЗ
-    |   (ВЫБРАТЬ
-    |       ОстаткиНаКонецПериода.Номенклатура КАК Номенклатура
-    |   ИЗ
-    |       РегистрНакопления.ТоварыОрганизаций.Остатки() КАК ОстаткиНаКонецПериода
-    |
-    |   ОБЪЕДИНИТЬ ВСЕ
-    |
-    |   ВЫБРАТЬ &ТекстОстаткиПоМесяцам) КАК ОстаткиНоменклатуры";
-КонецПроцедуры
-
-Запрос = Новый Запрос;
-Запрос.Текст =
-// Нет ошибки
-"ВЫБРАТЬ ПЕРВЫЕ 0
-|   Истина КАК Поле
-|УПОРЯДОЧИТЬ ПО
-|   Поле""#;
+"#;
         let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "TOP 10 without ORDER BY should trigger even when another batch query has ORDER BY"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
+        assert_diagnostic_range(code, &diagnostics[0], 2, 22, 31);
+    }
 
-        // With default skipSelectTopOne=true, expect 10 diagnostics
-        assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics with default settings");
+    #[test]
+    fn test_top_10_in_where_in_subquery() {
+        // TOP 10 inside a WHERE ... IN (...) subquery - 1 diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |ГДЕ
+             |   Справочник.Ссылка В (
+             |       ВЫБРАТЬ ПЕРВЫЕ 10
+             |           Ссылка
+             |       ИЗ
+             |           Справочник.Контрагенты)";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "TOP 10 in WHERE IN subquery without ORDER BY should trigger"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
+        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
+    }
 
+    #[test]
+    fn test_top_1_in_where_in_subquery_skipped_by_default() {
+        // TOP 1 inside a WHERE ... IN (...) subquery - 0 diagnostics with default skipSelectTopOne=true
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |ГДЕ
+             |   Справочник.Ссылка В (
+             |       ВЫБРАТЬ ПЕРВЫЕ 1
+             |           Ссылка
+             |       ИЗ
+             |           Справочник.Контрагенты)";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "TOP 1 in WHERE IN subquery should be skipped by default skipSelectTopOne=true"
+        );
+    }
+
+    #[test]
+    fn test_top_10_in_nested_from_subquery() {
+        // TOP 10 inside a nested FROM subquery - outer query has ORDER BY but inner does not - 1 diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ ПЕРВЫЕ 5
+             |   Справочник.Ссылка КАК Ссылка
+             |ИЗ
+             |   (ВЫБРАТЬ ПЕРВЫЕ 10
+             |       Контрагенты.Ссылка КАК Ссылка
+             |   ИЗ
+             |       Справочник.Контрагенты КАК Контрагенты) КАК Справочник
+             |УПОРЯДОЧИТЬ ПО
+             |   Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "TOP 10 in nested FROM subquery without ORDER BY should trigger"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
+        assert_diagnostic_range(code, &diagnostics[0], 5, 26, 35);
+    }
+
+    #[test]
+    fn test_top_1_in_nested_from_subquery_skipped_by_default() {
+        // TOP 1 inside a nested FROM subquery - 0 diagnostics with default skipSelectTopOne=true
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ ПЕРВЫЕ 5
+             |   Справочник.Ссылка КАК Ссылка
+             |ИЗ
+             |   (ВЫБРАТЬ ПЕРВЫЕ 1
+             |       Контрагенты.Ссылка КАК Ссылка
+             |   ИЗ
+             |       Справочник.Контрагенты КАК Контрагенты) КАК Справочник
+             |УПОРЯДОЧИТЬ ПО
+             |   Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "TOP 1 in nested FROM subquery should be skipped by default skipSelectTopOne=true"
+        );
+    }
+
+    #[test]
+    fn test_top_10_in_where_in_subquery_order_by_only_in_outer() {
+        // TOP 10 in WHERE IN subquery; ORDER BY is only on the outer query - still 1 diagnostic
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |ГДЕ
+             |   Справочник.Ссылка В (
+             |       ВЫБРАТЬ ПЕРВЫЕ 10
+             |           Ссылка
+             |       ИЗ
+             |           Справочник.Контрагенты)
+             |УПОРЯДОЧИТЬ ПО
+             |   Справочник.Код";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "TOP 10 in WHERE IN subquery should trigger even when outer query has ORDER BY"
+        );
+        assert_eq!(diagnostics[0].code, DiagnosticCode::SelectTopWithoutOrderBy);
+        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
+    }
+
+    #[test]
+    fn test_union_with_where_subquery_and_union_members() {
+        // Query with WHERE IN subquery having TOP 10, then UNION ALL with TOP 10 and TOP 1 - 3 diagnostics
+        // TOP in UNION members is always reported regardless of skipSelectTopOne
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |ГДЕ
+             |   Справочник.Ссылка В (
+             |       ВЫБРАТЬ ПЕРВЫЕ 10
+             |           Ссылка
+             |       ИЗ
+             |           Справочник.Контрагенты)
+             |
+             |ОБЪЕДИНИТЬ ВСЕ
+             |
+             |ВЫБРАТЬ ПЕРВЫЕ 10
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |
+             |ОБЪЕДИНИТЬ ВСЕ
+             |
+             |ВЫБРАТЬ ПЕРВЫЕ 1
+             |   Справочник.Ссылка
+             |ИЗ
+             |   Справочник.Контрагенты КАК Справочник
+             |УПОРЯДОЧИТЬ ПО
+             |   Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            3,
+            "Expected 3 diagnostics: WHERE subquery TOP 10, UNION TOP 10, UNION TOP 1"
+        );
         for diag in &diagnostics {
             assert_eq!(diag.code, DiagnosticCode::SelectTopWithoutOrderBy);
         }
+        // WHERE IN subquery TOP 10
+        assert_diagnostic_range(code, &diagnostics[0], 8, 29, 38);
+        // UNION ALL member TOP 10
+        assert_diagnostic_range(code, &diagnostics[1], 15, 22, 31);
+        // UNION ALL member TOP 1 (always reported in UNION)
+        assert_diagnostic_range(code, &diagnostics[2], 22, 22, 30);
+    }
 
-        // Fixture line numbers are 0-indexed
-        // Процедура Первые10БезСортировки (line 37 in file = 36 0-indexed)
-        assert_diagnostic_range(code, &diagnostics[0], 36, 13, 22);
-        // Процедура Первые10БезСортировкиИСортировкаВДругомЗапросе (line 55)
-        assert_diagnostic_range(code, &diagnostics[1], 54, 13, 22);
-        // Процедура Первые10СВПараметрахБезСортировки - subquery (line 77)
-        assert_diagnostic_range(code, &diagnostics[2], 76, 20, 29);
-        // Процедура Первые10ВоВложенномБезСортировки - nested (line 102)
-        assert_diagnostic_range(code, &diagnostics[3], 101, 15, 24);
-        // Процедура Первые10СВПараметрахБезСортировкиССортировкойВоВнешнем (line 133)
-        assert_diagnostic_range(code, &diagnostics[4], 132, 20, 29);
-        // Процедура Первые10ВОбъединенииСУпорядочить - subquery in WHERE (line 149)
-        assert_diagnostic_range(code, &diagnostics[5], 148, 20, 29);
-        // Процедура Первые10ВОбъединенииСУпорядочить - UNION query (line 156)
-        assert_diagnostic_range(code, &diagnostics[6], 155, 13, 22);
-        // Процедура Первые10ВОбъединенииСУпорядочить - UNION query TOP 1 (line 163)
-        assert_diagnostic_range(code, &diagnostics[7], 162, 13, 21);
-        // Nested subquery with UNION - subquery in WHERE (line 182)
-        assert_diagnostic_range(code, &diagnostics[8], 181, 24, 33);
-        // Nested subquery with UNION - UNION query (line 189)
-        assert_diagnostic_range(code, &diagnostics[9], 188, 16, 25);
+    #[test]
+    fn test_complex_union_with_nested_subqueries() {
+        // Outer TOP 1 with ORDER BY (no diag); inner subquery has UNION with TOP 10 in WHERE and TOP 10 in UNION member
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ ПЕРВЫЕ 1
+             |   ПодЗапрос.Ссылка
+             |ИЗ
+             |   (ВЫБРАТЬ
+             |       Справочник.Ссылка
+             |   ИЗ
+             |       Справочник.Контрагенты КАК Справочник
+             |   ГДЕ
+             |       Справочник.Ссылка В (
+             |           ВЫБРАТЬ ПЕРВЫЕ 10
+             |               Ссылка
+             |           ИЗ
+             |               Справочник.Контрагенты)
+             |
+             |   ОБЪЕДИНИТЬ ВСЕ
+             |
+             |   ВЫБРАТЬ ПЕРВЫЕ 10
+             |       Справочник.Ссылка
+             |   ИЗ
+             |       Справочник.Контрагенты КАК Справочник) КАК ПодЗапрос
+             |
+             |УПОРЯДОЧИТЬ ПО
+             |   Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "Expected 2 diagnostics: nested WHERE subquery TOP 10 and nested UNION TOP 10"
+        );
+        for diag in &diagnostics {
+            assert_eq!(diag.code, DiagnosticCode::SelectTopWithoutOrderBy);
+        }
+        // Nested WHERE IN subquery TOP 10
+        assert_diagnostic_range(code, &diagnostics[0], 11, 33, 42);
+        // Nested UNION ALL member TOP 10
+        assert_diagnostic_range(code, &diagnostics[1], 18, 25, 34);
+    }
+
+    #[test]
+    fn test_parameter_substitution_in_union_no_top() {
+        // Query with &Parameter substitution in UNION member, no TOP - 0 diagnostics
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ
+             |   ОстаткиНоменклатуры.Номенклатура КАК Номенклатура
+             |ПОМЕСТИТЬ ВТ_ОстаткиНоменклатуры
+             |ИЗ
+             |   (ВЫБРАТЬ
+             |       ОстаткиНаКонецПериода.Номенклатура КАК Номенклатура
+             |   ИЗ
+             |       РегистрНакопления.ТоварыОрганизаций.Остатки() КАК ОстаткиНаКонецПериода
+             |
+             |   ОБЪЕДИНИТЬ ВСЕ
+             |
+             |   ВЫБРАТЬ &ТекстОстаткиПоМесяцам) КАК ОстаткиНоменклатуры";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Query with &Parameter substitution and no TOP should not trigger"
+        );
+    }
+
+    #[test]
+    fn test_top_0_with_order_by() {
+        // TOP 0 with ORDER BY - 0 diagnostics
+        let code = r#"
+Процедура Тест()
+    Запрос = "ВЫБРАТЬ ПЕРВЫЕ 0
+             |   Истина КАК Поле
+             |УПОРЯДОЧИТЬ ПО
+             |   Поле";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "TOP 0 with ORDER BY should not trigger");
     }
 
     #[test]

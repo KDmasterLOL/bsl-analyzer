@@ -62,7 +62,7 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     #[test]
-    fn test_using_synchronous_calls() {
+    fn test_sync_question() {
         let code = r#"Процедура ТестВопрос()
     Режим = РежимДиалогаВопрос.ДаНет;
     Ответ = Вопрос(НСтр("ru = 'Продолжить выполнение операции?';"
@@ -70,38 +70,54 @@ mod tests {
     Если Ответ = КодВозвратаДиалога.Нет Тогда
         Возврат;
     КонецЕсли;
-
-    ///////////////////////////////////////////////////////////////////
-
-    Режим = РежимДиалогаВопрос.ДаНет;
-    Оповещение = Новый ОписаниеОповещения("ПослеЗакрытияВопроса", ЭтаФорма, Параметры);
-    ПоказатьВопрос(Оповещение, НСтр("ru = 'Продолжить выполнение операции?';"
-        + " en = 'Do you want to continue?'"), Режим, 0);
-
-    Если Результат = КодВозвратаДиалога.Нет Тогда
-        Возврат;
-    КонецЕсли;
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        // Вопрос (multiline call): line 2 col 12 -> line 3 col 57
+        assert_diagnostic_range_multiline(code, sync_diags[0], 2, 12, 3, 57);
+    }
 
-Процедура ТестПредупреждение()
+    #[test]
+    fn test_sync_warning() {
+        let code = r#"Процедура ТестПредупреждение()
     Предупреждение(НСтр("ru = 'Выберите документ!'; en = 'Select a document!'"), 10);
-    ///////////////////////////////////////////////////////////////////
-    ПоказатьПредупреждение(,НСтр("ru = 'Выберите документ!'; en = 'Select a document!'"), 10);
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 1, 4, 84);
+    }
 
-Процедура ТестОткрытьЗначение()
+    #[test]
+    fn test_sync_open_value() {
+        let code = r#"Процедура ТестОткрытьЗначение()
 
     Товар = Справочники.Номенклатура.НайтиПоКоду(КодТовара);
     ОткрытьЗначение(Товар);
 
-    ///////////////////////////////////////////////////////////////////
-
-    Товар = Справочники.Номенклатура.НайтиПоКоду(КодТовара);
-    ПоказатьЗначение(,Товар);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 4, 26);
+    }
 
-Процедура ТестВвестиДату()
+    #[test]
+    fn test_sync_input_date() {
+        let code = r#"Процедура ТестВвестиДату()
 
     ДатаНапоминания = РабочаяДата;
     Подсказка = "Введите дату и время";
@@ -110,21 +126,20 @@ mod tests {
         // запомнить дату напоминания
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    ДатаНапоминания = РабочаяДата;
-    Подсказка = "Введите дату и время";
-    ЧастьДаты = ЧастиДаты.ДатаВремя;
-    Оповещение = Новый ОписаниеОповещения("ПослеВводаДаты", , Параметры);
-    ПоказатьВводДаты(Оповещение, ДатаНапоминания, Подсказка, ЧастьДаты);
-
-    Если НЕ Дата = Неопределено Тогда
-        // запомнить дату напоминания
-    КонецЕсли;
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 5, 9, 58);
+    }
 
-Процедура ТестВвестиЗначение()
+    #[test]
+    fn test_sync_input_value() {
+        let code = r#"Процедура ТестВвестиЗначение()
 
     Перем ВыбЗнач;
     Массив = Новый Массив;
@@ -139,30 +154,20 @@ mod tests {
         Сообщить("Введенное значение: "+ВыбЗнач);
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    ВыбЗнач = Неопределено;
-    Массив = Новый Массив;
-    Массив.Добавить(Тип("Число"));
-    Массив.Добавить(Тип("Строка"));
-    Массив.Добавить(Тип("Дата"));
-    КЧ = Новый КвалификаторыЧисла(12,2);
-    КС = Новый КвалификаторыСтроки(20);
-    КД = Новый КвалификаторыДаты(ЧастиДаты.Дата);
-    ОписаниеТипов = Новый ОписаниеТипов(Массив, КЧ, КС, КД);
-    Оповещение =
-        Новый ОписаниеОповещения("ПослеВводаЗначения", ЭтотОбъект);
-    ПоказатьВводЗначения(Оповещение,
-        ВыбЗнач, "Введите значение", ОписаниеТипов);
-
-    Если ВыбЗнач<>Неопределено Тогда
-        // обработка введенного значения
-        Сообщить("Введенное значение: " + ВыбЗнач);
-    КонецЕсли;
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 11, 9, 67);
+    }
 
-Процедура ТестВвестиСтроку()
+    #[test]
+    fn test_sync_input_string() {
+        let code = r#"Процедура ТестВвестиСтроку()
 
     Текст = "";
     Подсказка = "Введите текст напоминания";
@@ -170,156 +175,226 @@ mod tests {
         // запомнить текст напоминания
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Подсказка = "Введите текст напоминания";
-    Оповещение = Новый ОписаниеОповещения("ПослеВводаСтроки", , Параметры);
-    ПоказатьВводСтроки(Оповещение, "", Подсказка, 0, Истина);
-
-    Если НЕ Строка = Неопределено Тогда
-        // запомнить текст напоминания
-    КонецЕсли;
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 4, 9, 50);
+    }
 
-Процедура ТестВвестиЧисло()
+    #[test]
+    fn test_sync_input_number() {
+        let code = r#"Процедура ТестВвестиЧисло()
 
     Количество = 1;
     Если ВвестиЧисло(Количество, "Введите количество", 10, 2) Тогда
         // обработка введенного количества
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("ПослеВводаКоличества", ЭтотОбъект);
-    ПоказатьВводЧисла(Оповещение, 1, "Введите количество", 10, 2);
-
-    Если НЕ Число = Неопределено Тогда
-        // обработка введенного количества
-    КонецЕсли;
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 9, 61);
+    }
 
-Процедура ТестУстановитьВнешнююКомпоненту()
+    #[test]
+    fn test_sync_install_addon() {
+        let code = r#"Процедура ТестУстановитьВнешнююКомпоненту()
 
     УстановитьВнешнююКомпоненту("ПутьККомпоненте");
 
-    ///////////////////////////////////////////////////////////////////
-
-    НачатьУстановкуВнешнейКомпоненты(ОписаниеОповещения, "ОбщийМакет.КомпонентаВырезанияКартинки");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 4, 50);
+    }
 
-Процедура ТестОткрытьФормуМодально()
+    #[test]
+    fn test_sync_open_form_modally() {
+        let code = r#"Процедура ТестОткрытьФормуМодально()
 
     ОткрытьФормуМодально("Форма");
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОткрытьФорму(Форма);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 4, 33);
+    }
 
-Процедура ТестУстановитьРасширениеРаботыСФайлами()
+    #[test]
+    fn test_sync_install_file_ext() {
+        let code = r#"Процедура ТестУстановитьРасширениеРаботыСФайлами()
 
     #Если ВебКлиент Тогда
         Результат = УстановитьРасширениеРаботыСФайлами();
     #КонецЕсли
 
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("НачатьПодключениеРасширенияРаботыСФайламиЗавершение", ЭтотОбъект);
-    НачатьПодключениеРасширенияРаботыСФайлами(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 20, 56);
+    }
 
-Процедура ТестУстановитьРасширениеРаботыСКриптографией()
+    #[test]
+    fn test_sync_install_crypto_ext() {
+        let code = r#"Процедура ТестУстановитьРасширениеРаботыСКриптографией()
 
     #Если ВебКлиент Тогда
         Результат = УстановитьРасширениеРаботыСКриптографией();
     #КонецЕсли
 
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("НачатьУстановкуРасширенияРаботыСКриптографиейЗавершение", ЭтотОбъект);
-    НачатьУстановкуРасширенияРаботыСКриптографией(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 20, 62);
+    }
 
-Процедура ТестПодключитьРасширениеРаботыСКриптографией()
+    #[test]
+    fn test_sync_connect_crypto_ext() {
+        // Two diagnostics: ПодключитьРасширениеРаботыСКриптографией + Предупреждение inside
+        let code = r#"Процедура ТестПодключитьРасширениеРаботыСКриптографией()
 
     Если НЕ ПодключитьРасширениеРаботыСКриптографией() Тогда
         Предупреждение(НСтр("ru='Для выполнения команды ""Подписать"" вам нужно установить расширение работы с криптографией.'"));
         Возврат;
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("РасширениеПодключено", ЭтотОбъект);
-    НачатьПодключениеРасширенияРаботыСКриптографией(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 2);
+        assert_diagnostic_range(code, sync_diags[0], 2, 12, 54);
+        assert_diagnostic_range(code, sync_diags[1], 3, 8, 129);
+    }
 
-Процедура ТестПодключитьРасширениеРаботыСФайлами()
+    #[test]
+    fn test_sync_connect_file_ext() {
+        // Two diagnostics: ПодключитьРасширениеРаботыСФайлами + Предупреждение inside
+        let code = r#"Процедура ТестПодключитьРасширениеРаботыСФайлами()
 
     Если НЕ ПодключитьРасширениеРаботыСФайлами() Тогда
         Предупреждение(НСтр("ru='Для выполнения команды вам нужно установить расширение работы с файлами.'"));
         Возврат;
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("РасширениеПодключено", ЭтотОбъект);
-    НачатьПодключениеРасширенияРаботыСФайлами(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 2);
+        assert_diagnostic_range(code, sync_diags[0], 2, 12, 48);
+        assert_diagnostic_range(code, sync_diags[1], 3, 8, 109);
+    }
 
-Процедура ТестПоместитьФайл()
+    #[test]
+    fn test_sync_put_file() {
+        let code = r#"Процедура ТестПоместитьФайл()
 
     Перем АдресХранилища;
 
     ПоместитьФайл(АдресХранилища, ПутьКФайлу, ПутьКФайлу, Ложь, УникальныйИдентификатор);
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ВыполнитьПосле", ЭтотОбъект,мШиринаКолонокПоУмолчанию);
-    НачатьПомещениеФайла(ОписаниеОповещения, АдресХранилища, ПутьКФайлу, Ложь, УникальныйИдентификатор);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 4, 4, 88);
+    }
 
-Процедура ТестКопироватьФайл()
+    #[test]
+    fn test_sync_copy_file() {
+        let code = r#"Процедура ТестКопироватьФайл()
 
     КопироватьФайл("C:\Temp\Order.htm", "C:\My Documents\Order.htm");
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеКопирования");
-    НачатьКопированиеФайла(ОписаниеОповещения, "C:\Temp\Order.htm", "C:\My Documents\Order.htm");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 4, 68);
+    }
 
-Процедура ТестПереместитьФайл()
+    #[test]
+    fn test_sync_move_file() {
+        let code = r#"Процедура ТестПереместитьФайл()
 
     ПереместитьФайл("C:\Temp\Order.htm", "C:\My Documents\Order.htm");
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеПеремещения");
-    НачатьПеремещениеФайла(ОписаниеОповещения, "C:\Temp\Order.htm", "C:\My Documents\Order.htm");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 4, 69);
+    }
 
-Процедура ТестНайтиФайлы()
+    #[test]
+    fn test_sync_find_files() {
+        let code = r#"Процедура ТестНайтиФайлы()
 
     НайденныеФайлы = НайтиФайлы("C:\Temp", "*.cdx");
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеПоиска");
-    НачатьПоискФайлов(Оповещение, "C:\Temp", "*.cdx");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 21, 51);
+    }
 
-Процедура ТестУдалитьФайлы()
+    #[test]
+    fn test_sync_delete_files() {
+        let code = r#"Процедура ТестУдалитьФайлы()
 
     // Удаление каталога и всех вложенных в него каталогов и файлов
     Попытка
@@ -328,58 +403,88 @@ mod tests {
         Сообщить(ОписаниеОшибки());
     КонецПопытки;
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеУдаления");
-    НачатьУдалениеФайлов(Оповещение, "C:\temp\Works");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 4, 8, 37);
+    }
 
-Процедура ТестСоздатьКаталог()
+    #[test]
+    fn test_sync_create_directory() {
+        let code = r#"Процедура ТестСоздатьКаталог()
 
     СоздатьКаталог("C:\Temp");
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ПослеСоздания");
-    НачатьСозданиеКаталога(Оповещение, "C:\Temp");
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 4, 29);
+    }
 
-Процедура ТестКаталогВременныхФайлов()
+    #[test]
+    fn test_sync_temp_files_dir() {
+        let code = r#"Процедура ТестКаталогВременныхФайлов()
 
     ГдеИскать = КаталогВременныхФайлов();
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("После");
-    НачатьПолучениеКаталогаВременныхФайлов(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 16, 40);
+    }
 
-Процедура ТестКаталогДокументов()
+    #[test]
+    fn test_sync_documents_dir() {
+        let code = r#"Процедура ТестКаталогДокументов()
 
     ГдеИскать = КаталогДокументов();
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("После");
-    НачатьПолучениеКаталогаДокументов(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 16, 35);
+    }
 
-Процедура ТестРабочийКаталогДанныхПользователя()
+    #[test]
+    fn test_sync_user_data_dir() {
+        let code = r#"Процедура ТестРабочийКаталогДанныхПользователя()
 
     ГдеИскать = РабочийКаталогДанныхПользователя();
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("После");
-    НачатьПолучениеРабочегоКаталогаДанныхПользователя(Оповещение);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 16, 50);
+    }
 
-Процедура ТестПолучитьФайлы()
+    #[test]
+    fn test_sync_get_files() {
+        let code = r#"Процедура ТестПолучитьФайлы()
 
     Результат = ПолучитьФайлы(МассивФайлов, ПолученныеФайлы, ПутьВыгружаемыхФайлов, Ложь);
     Если НЕ Результат Тогда
@@ -388,38 +493,38 @@ mod tests {
         Сообщение.Сообщить();
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Адрес        = ПоместитьВоВременноеХранилище(Неопределено, УникальныйИдентификатор);
-    ИмяФайла    = "";
-
-    ПолучитьДанныеФайлаНаСервереБезКонтекста(Адрес, ИмяФайла);
-
-    ПолноеИмяФайла = ИмяКаталогаДокументов + ИмяФайла;
-
-    МассивПолучаемыхФайлов = Новый Массив;
-    МассивПолучаемыхФайлов.Добавить(Новый ОписаниеПередаваемогоФайла(ПолноеИмяФайла, Адрес));
-
-    НачатьПолучениеФайлов(Новый ОписаниеОповещения("ОткрытьФайлЗавершение", ЭтотОбъект), МассивПолучаемыхФайлов,, Ложь);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 2, 16, 89);
+    }
 
-Процедура ТестПоместитьФайлы()
+    #[test]
+    fn test_sync_put_files() {
+        let code = r#"Процедура ТестПоместитьФайлы()
 
     МассивВнутреннихАдресовСервера = Новый Массив;
     Результат = ПоместитьФайлы(, МассивВнутреннихАдресовСервера);
 
-    ///////////////////////////////////////////////////////////////////
-
-    ОписаниеОповещения = Новый ОписаниеОповещения("ОбработатьВыборФайла", ЭтаФорма);
-    ДиалогОткрытияФайла = Новый ДиалогВыбораФайла(РежимДиалогаВыбораФайла.Открытие);
-    ДиалогОткрытияФайла.МножественныйВыбор = Ложь;
-
-    НачатьПомещениеФайлов(ОписаниеОповещения, , ДиалогОткрытияФайла, Истина, УникальныйИдентификатор);
-
 КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 16, 64);
+    }
 
-Процедура ТестЗапроситьРазрешениеПользователя()
+    #[test]
+    fn test_sync_request_user_permission() {
+        let code = r#"Процедура ТестЗапроситьРазрешениеПользователя()
 
     ОписаниеВызова = Новый Массив;
     ОписаниеВызова.Добавить("ПоместитьФайлы");
@@ -436,122 +541,33 @@ mod tests {
         Возврат;
     КонецЕсли;
 
-    ///////////////////////////////////////////////////////////////////
-
-    Вызовы = Новый Массив;
-    Вызов = Новый Массив;
-    Вызов.Добавить("НачатьПолучениеФайлов");
-    Вызов.Добавить(ПолучаемыеФайлы);
-    Вызов.Добавить(ПутьКФайлам);
-    Вызов.Добавить(Ложь);
-    Вызовы.Добавить(Вызов);
-
-    ОбработкаПродолжения = Новый ОписаниеОповещения("СохранитьДанныеВместеСПодписью", ЭтотОбъект, ДопПараметры);
-    НачатьЗапросРазрешенияПользователя(ОбработкаПродолжения, Вызовы);
-
-КонецПроцедуры
-
-Процедура ТестЗапуститьПриложение()
-
-    // открытие файла MS Excel
-    ЗапуститьПриложение("Таблица.xls");
-
-    ///////////////////////////////////////////////////////////////////
-
-    Оповещение = Новый ОписаниеОповещения("ЗапускПриложения");
-    НачатьЗапускПриложения(Оповещение, "Таблица.xls", , Истина);
-
-КонецПроцедуры
-
-&НаСервере
-Процедура ТестЗапуститьПриложение()
-
-    // открытие файла MS Excel
-    ЗапуститьПриложение("Таблица.xls"); // пропускаем, на сервере
-
-КонецПроцедуры
-
-&НаСервереБезКонтекста
-Процедура ТестЗапуститьПриложение()
-
-    // открытие файла MS Excel
-    ЗапуститьПриложение("Таблица.xls"); // пропускаем, на сервере
-
-КонецПроцедуры
-
-&AtServer
-Процедура ТестЗапуститьПриложение()
-
-    // открытие файла MS Excel
-    ЗапуститьПриложение("Таблица.xls"); // пропускаем, на сервере
-
 КонецПроцедуры
 "#;
         let diagnostics = check_hir_diagnostic(code);
-
         let sync_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
             .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 12, 12, 59);
+    }
 
-        assert_eq!(sync_diags.len(), 28, "Expected 28 synchronous call diagnostics");
+    #[test]
+    fn test_sync_run_application() {
+        let code = r#"Процедура ТестЗапуститьПриложение()
 
-        // Вопрос (multiline call)
-        assert_diagnostic_range_multiline(code, sync_diags[0], 2, 12, 3, 57);
-        // Предупреждение
-        assert_diagnostic_range(code, sync_diags[1], 21, 4, 84);
-        // ОткрытьЗначение
-        assert_diagnostic_range(code, sync_diags[2], 29, 4, 26);
-        // ВвестиДату
-        assert_diagnostic_range(code, sync_diags[3], 43, 9, 58);
-        // ВвестиЗначение
-        assert_diagnostic_range(code, sync_diags[4], 72, 9, 67);
-        // ВвестиСтроку
-        assert_diagnostic_range(code, sync_diags[5], 103, 9, 50);
-        // ВвестиЧисло
-        assert_diagnostic_range(code, sync_diags[6], 122, 9, 61);
-        // УстановитьВнешнююКомпоненту
-        assert_diagnostic_range(code, sync_diags[7], 138, 4, 50);
-        // ОткрытьФормуМодально
-        assert_diagnostic_range(code, sync_diags[8], 148, 4, 33);
-        // УстановитьРасширениеРаботыСФайлами
-        assert_diagnostic_range(code, sync_diags[9], 159, 20, 56);
-        // УстановитьРасширениеРаботыСКриптографией
-        assert_diagnostic_range(code, sync_diags[10], 172, 20, 62);
-        // ПодключитьРасширениеРаботыСКриптографией
-        assert_diagnostic_range(code, sync_diags[11], 184, 12, 54);
-        // Предупреждение
-        assert_diagnostic_range(code, sync_diags[12], 185, 8, 129);
-        // ПодключитьРасширениеРаботыСФайлами
-        assert_diagnostic_range(code, sync_diags[13], 198, 12, 48);
-        // Предупреждение
-        assert_diagnostic_range(code, sync_diags[14], 199, 8, 109);
-        // ПоместитьФайл
-        assert_diagnostic_range(code, sync_diags[15], 214, 4, 88);
-        // КопироватьФайл
-        assert_diagnostic_range(code, sync_diags[16], 225, 4, 68);
-        // ПереместитьФайл
-        assert_diagnostic_range(code, sync_diags[17], 236, 4, 69);
-        // НайтиФайлы
-        assert_diagnostic_range(code, sync_diags[18], 247, 21, 51);
-        // УдалитьФайлы
-        assert_diagnostic_range(code, sync_diags[19], 260, 8, 37);
-        // СоздатьКаталог
-        assert_diagnostic_range(code, sync_diags[20], 274, 4, 29);
-        // КаталогВременныхФайлов
-        assert_diagnostic_range(code, sync_diags[21], 285, 16, 40);
-        // КаталогДокументов
-        assert_diagnostic_range(code, sync_diags[22], 296, 16, 35);
-        // РабочийКаталогДанныхПользователя
-        assert_diagnostic_range(code, sync_diags[23], 307, 16, 50);
-        // ПолучитьФайлы
-        assert_diagnostic_range(code, sync_diags[24], 318, 16, 89);
-        // ПоместитьФайлы
-        assert_diagnostic_range(code, sync_diags[25], 344, 16, 64);
-        // ЗапроситьРазрешениеПользователя
-        assert_diagnostic_range(code, sync_diags[26], 368, 12, 59);
-        // ЗапуститьПриложение
-        assert_diagnostic_range(code, sync_diags[27], 391, 4, 38);
+    // открытие файла MS Excel
+    ЗапуститьПриложение("Таблица.xls");
+
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let sync_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UsingSynchronousCalls)
+            .collect();
+        assert_eq!(sync_diags.len(), 1);
+        assert_diagnostic_range(code, sync_diags[0], 3, 4, 38);
     }
 
     #[test]
