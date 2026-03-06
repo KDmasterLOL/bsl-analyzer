@@ -7,9 +7,7 @@ mod definition;
 use hir_def::{DefDatabase, QualifiedName};
 
 pub use definition::Definition;
-pub use hir_def::{
-    MethodData, MethodId, ModuleData, ModuleId, ParameterData, VariableData, VariableId,
-};
+pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 
 // Re-export HIR body types for diagnostics
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};

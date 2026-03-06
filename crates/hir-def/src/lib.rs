@@ -483,30 +483,6 @@ impl ModuleData {
     }
 }
 
-/// Data about a method (procedure or function).
-#[derive(Debug, Clone)]
-pub struct MethodData {
-    pub name: String,
-    pub is_function: bool,
-    pub is_export: bool,
-    pub parameters: Vec<ParameterData>,
-}
-
-/// Data about a parameter.
-#[derive(Debug, Clone)]
-pub struct ParameterData {
-    pub name: String,
-    pub is_val: bool,
-    pub has_default: bool,
-}
-
-/// Data about a variable.
-#[derive(Debug, Clone)]
-pub struct VariableData {
-    pub name: String,
-    pub is_export: bool,
-}
-
 /// Module-level variable declaration for tracking usage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleVarDecl {

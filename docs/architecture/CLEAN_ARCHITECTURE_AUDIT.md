@@ -188,13 +188,9 @@ self.db.X()
 
 **Решение:** Вынести в `utils/nstr.rs`.
 
-### NEW-M6. `MethodData`/`ParameterData`/`VariableData` используют `String` вместо `Name`
+### NEW-M6. [ИСПРАВЛЕНО] `MethodData`/`ParameterData`/`VariableData` используют `String` вместо `Name`
 
-| Файл | Строка |
-|---|---|
-| `crates/hir-def/src/lib.rs` | 502-535 |
-
-Проект определяет тип `Name` (SmolStr, case-insensitive compare), но 4 публичных struct используют raw `String`. Каждое сравнение требует ручного `.to_lowercase()`. Риск case-sensitivity багов.
+**Статус:** [x] Исправлено — все три struct'а оказались мёртвым кодом (0 consumers, нигде не создаются). Удалены полностью.
 
 ### NEW-M7. ItemTree traversal дублируется 7+ раз в `hir/src/definition.rs`
 
@@ -308,7 +304,7 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 |---|---|---|---|---|---|
 | **CRITICAL** | 4 | 4 | 0 | 0 | 0 |
 | **HIGH** | 11 | 11 | 2 | 1 | 0 |
-| **MEDIUM** | 18 | 6 | 0 | 0 | 12 |
+| **MEDIUM** | 18 | 7 | 0 | 0 | 11 |
 | **LOW** | 10 | 5 | 0 | 0 | 5 |
 
 ### Исправлено в этом аудите
