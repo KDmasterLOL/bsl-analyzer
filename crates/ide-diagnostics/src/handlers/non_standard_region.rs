@@ -30,8 +30,6 @@
 //! ## Implementation
 //! Uses Salsa-cached `module_level_regions()` query for performance.
 //! Ported from:
-//! - NonStandardRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - Regions.java (bsl-language-server) - standard regions mapping
 
 use crate::define_metadata;
 use crate::metadata::*;

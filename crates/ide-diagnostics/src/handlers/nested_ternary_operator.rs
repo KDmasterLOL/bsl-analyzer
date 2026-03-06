@@ -46,7 +46,6 @@
 //! - **Minutes to fix:** 10
 //!
 //! ## Implementation
-//! Ported from: NestedTernaryOperatorDiagnostic.java (bsl-language-server)
 //!
 //! Uses node-based API pattern from rust-analyzer. Checks three cases:
 //! 1. `IF_STMT` - finds ternary operators in IF conditions
@@ -204,7 +203,7 @@ mod tests {
         assert_eq!(
             diagnostics.len(),
             4,
-            "Should find exactly 4 diagnostics (matching Java implementation)"
+            "Should find exactly 4 diagnostics (matching reference implementation)"
         );
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 13, 8, 14);

@@ -2,8 +2,6 @@
 //!
 //! Detects empty code blocks in control structures (if/while/for/etc).
 //!
-//! **Source (Java):** bsl-language-server/EmptyCodeBlockDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/empty_code_block.rs
 //!
 //! BSL supports empty code blocks in control structures, but they often indicate
 //! incomplete implementation or unintended code.  This diagnostic helps detect such cases.
@@ -67,9 +65,13 @@ mod tests {
         let empty_block_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
 
-        // Java expects 6 diagnostics at specific positions
-        // HIR lowering now matches Java behavior (excludes try/except blocks)
-        assert_eq!(empty_block_diags.len(), 6, "Expected 6 diagnostics to match Java");
+        // Expected 6 diagnostics at specific positions
+        // HIR lowering now matches bsl-language-server behavior (excludes try/except blocks)
+        assert_eq!(
+            empty_block_diags.len(),
+            6,
+            "Expected 6 diagnostics to match bsl-language-server"
+        );
 
         // Line 6 (0-indexed line 5), cols 1-6 (Иначе)
         assert_diagnostic_range_multiline(code, empty_block_diags[0], 5, 1, 5, 6);

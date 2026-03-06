@@ -2,7 +2,6 @@
 //!
 //! CommonModule name should not contain generic words like "Procedures", "Functions", "Module", etc.
 //!
-//! Ported from: CommonModuleNameWordsDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

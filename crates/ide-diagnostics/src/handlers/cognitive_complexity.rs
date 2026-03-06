@@ -73,7 +73,7 @@
 //! ## Configuration
 //! - **complexityThreshold** (default: 15) - Maximum allowed cognitive complexity
 //! - **Enabled by default:** Yes
-//! - **Severity:** Warning (CRITICAL in Java for compatibility)
+//! - **Severity:** Warning (CRITICAL in bsl-language-server for compatibility)
 //! - **Tags:** BRAINOVERLOAD
 //! - **Minutes to fix:** 15
 //!
@@ -287,10 +287,10 @@ mod tests {
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::CognitiveComplexity).collect();
 
-        // Java expects 1 diagnostic for function СерверныйМодульМенеджера
-        assert_eq!(diagnostics.len(), 1, "Should match Java implementation (1 diagnostic)");
+        // Expected 1 diagnostic for function СерверныйМодульМенеджера
+        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostics");
 
-        // Java expects diagnostic at line 0, columns 8-32 (function name)
+        // Expected diagnostic at line 0, columns 8-32 (function name)
         assert_diagnostic_range(code, diagnostics[0], 0, 8, 32);
 
         // Verify diagnostic details

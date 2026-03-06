@@ -38,8 +38,6 @@
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!
 //! Ported from:
-//! - DeprecatedTypeManagedFormDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - deprecated_type_managed_form.rs (bsl-language-server-rust) - Rust reference
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -189,7 +187,7 @@ EndProcedure
 
         assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
 
-        // Verify diagnostic positions match Java test expectations
+        // Verify diagnostic positions match bsl-language-server test expectations
         assert_diagnostic_range_multiline(input, deprecated_diags[0], 1, 29, 1, 47);
         assert_diagnostic_range_multiline(input, deprecated_diags[1], 11, 27, 11, 40);
     }

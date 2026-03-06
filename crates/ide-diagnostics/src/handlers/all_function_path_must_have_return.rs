@@ -55,7 +55,6 @@
 //! to a Diagnostic for display.
 //!
 //! Ported from:
-//! - AllFunctionPathMustHaveReturnDiagnostic.java (bsl-language-server)
 //!
 //! This HIR-based implementation replaces the AST-based version to leverage
 //! Salsa caching and the rust-analyzer architecture pattern.
@@ -242,11 +241,11 @@ fn message_ru() -> String {
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
     use crate::DiagnosticCode;
-    /// Integration test matching AllFunctionPathMustHaveReturnDiagnosticTest.java
+    /// Integration test matching reference test
     ///
     /// Uses the same test file: AllFunctionPathMustHaveReturnDiagnostic.bsl
     /// This test validates that the HIR-based implementation produces the same
-    /// results as the Java version.
+    /// results as the bsl-language-server.
     #[test]
     fn test_missing_return_from_fixture() {
         let code = include_str!("../../test_data/AllFunctionPathMustHaveReturnDiagnostic.bsl");

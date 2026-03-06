@@ -37,8 +37,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - CodeBlockBeforeSubDiagnostic.java (bsl-language-server) - PRIMARY
-//! - code_block_before_sub_declaration.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Adapted to use Rowan SyntaxNode traversal.
 
@@ -168,7 +166,7 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
 ///
 /// Combines ranges from first block to last block (inclusive).
 /// For preprocessor regions, adjusts the range to start from the first executable code inside,
-/// matching Java's behavior.
+/// matching bsl-language-server's behavior.
 fn create_diagnostic(
     code_blocks: &[SyntaxNode],
     code: DiagnosticCode,
@@ -229,7 +227,7 @@ mod tests {
         let code = include_str!("../../test_data/CodeBlockBeforeSubDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 1, "Should match Java implementation (1 diagnostic)");
+        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostics");
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 3, 0, 5, 13);
     }

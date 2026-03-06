@@ -110,7 +110,7 @@ mod tests {
         let code = include_str!("../test_data/UnsafeSafeModeMethodCallDiagnostic.bsl");
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
-        assert_eq!(diags.len(), 10, "Expected exactly 10 diagnostics matching Java");
+        assert_eq!(diags.len(), 10, "Expected exactly 10 diagnostics");
     }
 
     #[test]

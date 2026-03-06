@@ -64,8 +64,6 @@
 //! **This is a HIR-based diagnostic** - detects file system access during HIR lowering.
 //!
 //! Ported from:
-//! - FileSystemAccessDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - file_system_access.rs (bsl-language-server-rust) - Rust reference (regex-based)
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -112,7 +110,7 @@ mod tests {
 
         assert_eq!(fs_diags.len(), 23, "Expected 23 diagnostics");
 
-        // NEW_EXPR diagnostics (lines are 0-indexed, ranges match Java test)
+        // NEW_EXPR diagnostics (lines are 0-indexed, ranges match bsl-language-server test)
         assert_diagnostic_range(code, fs_diags[0], 1, 15, 35); // Новый File(ИмяФайла)
         assert_diagnostic_range(code, fs_diags[1], 2, 15, 41); // Новый xBase("C:\temp.dbf")
         assert_diagnostic_range(code, fs_diags[2], 3, 15, 31); // Новый HTMLWriter

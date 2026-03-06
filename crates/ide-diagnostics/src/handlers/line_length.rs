@@ -441,15 +441,15 @@ mod tests {
         let code = include_str!("../../test_data/LineLengthDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // CRITICAL: Must match Java implementation (13 diagnostics)
+        // CRITICAL: Must match bsl-language-server implementation (13 diagnostics)
         assert_eq!(
             diagnostics.len(),
             13,
-            "Must match Java implementation exactly (13 diagnostics)"
+            "Must match bsl-language-server implementation exactly (13 diagnostics)"
         );
 
-        // Verify exact positions (Java uses 0-based line numbers in hasRange)
-        // Java lines: 4, 5, 8, 11, 12, 36, 40, 44, 47, 49, 52, 56, 60
+        // Verify exact positions (bsl-language-server uses 0-based line numbers in hasRange)
+        // Expected lines: 4, 5, 8, 11, 12, 36, 40, 44, 47, 49, 52, 56, 60
         assert_diagnostic_range(code, &diagnostics[0], 4, 0, 121);
         assert_diagnostic_range(code, &diagnostics[1], 5, 0, 122);
         assert_diagnostic_range(code, &diagnostics[2], 8, 0, 127);

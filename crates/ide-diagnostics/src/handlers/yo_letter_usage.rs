@@ -81,12 +81,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics");
 
-        // Java test positions:
-        // .hasRange(0, 6, 0, 11)   - ёжики
-        // .hasRange(2, 10, 2, 20)  - ЁлкиИголки
-        // .hasRange(2, 21, 2, 25)  - Ёлки
-        // .hasRange(3, 13, 3, 17)  - Ёлки
-        // .hasRange(5, 39, 5, 43)  - Ёлки
+        // Reference test positions:
         assert_diagnostic_range(code, &diagnostics[0], 0, 6, 11);
         assert_diagnostic_range(code, &diagnostics[1], 2, 10, 20);
         assert_diagnostic_range(code, &diagnostics[2], 2, 21, 25);

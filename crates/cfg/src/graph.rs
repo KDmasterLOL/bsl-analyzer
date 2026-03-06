@@ -1,7 +1,4 @@
 //! Control Flow Graph structure
-//!
-//! Ported from BSL Language Server (Java) via bsl-language-server-rust:
-//! - ControlFlowGraph.java
 
 use crate::edge::CfgEdgeType;
 use crate::vertex::CfgVertex;
@@ -10,9 +7,6 @@ use petgraph::visit::{DfsPostOrder, EdgeRef, Reversed};
 use petgraph::Direction;
 
 /// Control Flow Graph for a BSL method/function
-///
-/// Maps to ControlFlowGraph.java which extends DefaultDirectedGraph.
-/// Uses petgraph (Rust) instead of JGraphT (Java).
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
     /// The underlying directed graph
@@ -55,8 +49,6 @@ impl Eq for ControlFlowGraph {}
 
 impl ControlFlowGraph {
     /// Create a new control flow graph
-    ///
-    /// Maps to ControlFlowGraph() constructor in Java
     pub fn new() -> Self {
         let mut graph = DiGraph::new();
 
@@ -67,15 +59,11 @@ impl ControlFlowGraph {
     }
 
     /// Add a vertex to the graph
-    ///
-    /// Maps to addVertex() in Java
     pub fn add_vertex(&mut self, vertex: CfgVertex) -> NodeIndex {
         self.graph.add_node(vertex)
     }
 
     /// Add an edge between two vertices with specified edge type
-    ///
-    /// Maps to addEdge(source, target, type) in Java
     pub fn add_edge(
         &mut self,
         source: NodeIndex,
@@ -92,8 +80,6 @@ impl ControlFlowGraph {
     }
 
     /// Validate that an edge type is valid for a given source vertex
-    ///
-    /// Maps to CfgVertex.onConnectOutgoing() validation in Java
     fn validate_outgoing_edge(
         &self,
         source_vertex: &CfgVertex,
@@ -118,22 +104,16 @@ impl ControlFlowGraph {
     }
 
     /// Set the entry point of the graph
-    ///
-    /// Maps to setEntryPoint() in Java
     pub fn set_entry_point(&mut self, entry: NodeIndex) {
         self.entry_point = Some(entry);
     }
 
     /// Get the entry point of the graph
-    ///
-    /// Maps to getEntryPoint() in Java
     pub fn entry_point(&self) -> Option<NodeIndex> {
         self.entry_point
     }
 
     /// Get the exit point of the graph
-    ///
-    /// Maps to getExitPoint() in Java
     pub fn exit_point(&self) -> NodeIndex {
         self.exit_point
     }
@@ -154,8 +134,6 @@ impl ControlFlowGraph {
     }
 
     /// Get all outgoing edges from a vertex
-    ///
-    /// Maps to outgoingEdgesOf() in Java
     pub fn outgoing_edges(
         &self,
         vertex: NodeIndex,
@@ -166,8 +144,6 @@ impl ControlFlowGraph {
     }
 
     /// Get all incoming edges to a vertex
-    ///
-    /// Maps to incomingEdgesOf() in Java
     pub fn incoming_edges(
         &self,
         vertex: NodeIndex,
@@ -183,8 +159,6 @@ impl ControlFlowGraph {
     }
 
     /// Remove a vertex from the graph
-    ///
-    /// Maps to removeVertex() in Java
     pub fn remove_vertex(&mut self, vertex: NodeIndex) -> Option<CfgVertex> {
         self.graph.remove_node(vertex)
     }
@@ -205,22 +179,16 @@ impl ControlFlowGraph {
     }
 
     /// Get all vertices in the graph
-    ///
-    /// Maps to vertexSet() in Java
     pub fn vertices(&self) -> impl Iterator<Item = (NodeIndex, &CfgVertex)> {
         self.graph.node_indices().map(|idx| (idx, self.graph.node_weight(idx).unwrap()))
     }
 
     /// Get the in-degree of a vertex (number of incoming edges)
-    ///
-    /// Maps to inDegreeOf() in Java
     pub fn in_degree(&self, vertex: NodeIndex) -> usize {
         self.graph.edges_directed(vertex, Direction::Incoming).count()
     }
 
     /// Create a presentation string for an edge (for debugging)
-    ///
-    /// Maps to edgePresentation() in Java
     pub fn edge_presentation(&self, source: NodeIndex, target: NodeIndex) -> String {
         let source_name = self.vertex(source).map(|v| v.type_name()).unwrap_or("?");
         let target_name = self.vertex(target).map(|v| v.type_name()).unwrap_or("?");

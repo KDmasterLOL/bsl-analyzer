@@ -29,18 +29,14 @@
 //! Migrated to HIR-based collection (rust-analyzer pattern).
 //!
 //! Ported from:
-//! - IfConditionComplexityDiagnostic.java (bsl-language-server)
-//! - if_condition_complexity.rs (bsl-language-server-rust)
 //!
 //! Adapted to use Rowan SyntaxNode during HIR lowering.
 //!
 //! ### Key algorithm:
-//! - Java: `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size() + 1`
 //! - Rust: Count all BINARY_EXPR nodes with AND/OR operators + 1
 //! - Default max complexity: 3
 //!
 //! ### Diagnostic range:
-//! - Java: `diagnosticStorage.addDiagnostic(expression)` - entire expression
 //! - Rust: Same - entire expression range
 
 use crate::define_metadata;
@@ -215,12 +211,12 @@ EndProcedure"#;
         assert_eq!(if_diags.len(), 1);
     }
 
-    /// Integration test matching Java test structure
+    /// Integration test matching reference test structure
     ///
-    /// Based on IfConditionComplexityDiagnosticTest.java
+    /// Based on reference test
     /// Uses the same test file: IfConditionComplexityDiagnostic.bsl
     ///
-    /// Expected diagnostics (from Java test):
+    /// Expected diagnostics (from reference test):
     /// - Line 2, col 5 → line 10, col 51
     /// - Line 27, col 6 → line 30, col 60
     /// - Line 45, col 5 → line 48, col 36
@@ -235,11 +231,11 @@ EndProcedure"#;
             .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
             .collect();
 
-        // Java test expects: assertThat(diagnostics).hasSize(4);
+        // Expected: assertThat(diagnostics).hasSize(4);
         assert_eq!(if_diags.len(), 4, "Expected 4 diagnostics");
 
-        // Verify each diagnostic range matches Java implementation
-        // Java uses 0-based line/column indexing
+        // Verify each diagnostic range matches bsl-language-server implementation
+        // bsl-language-server uses 0-based line/column indexing
         assert_diagnostic_range_multiline(code, if_diags[0], 2, 5, 10, 51);
         assert_diagnostic_range_multiline(code, if_diags[1], 27, 6, 30, 60);
         assert_diagnostic_range_multiline(code, if_diags[2], 45, 5, 48, 36);

@@ -30,7 +30,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - NestedConstructorsInStructureDeclarationDiagnostic.java (bsl-language-server)
 //!
 //! **HIR-based implementation** using semantic analysis instead of AST traversal.
 //!
@@ -229,11 +228,11 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
         assert_eq!(
             diagnostics.len(),
             8,
-            "Should find exactly 8 diagnostics (matching Java implementation)"
+            "Should find exactly 8 diagnostics (matching reference implementation)"
         );
 
-        // Verify exact positions matching bsl-language-server (Java) implementation
-        // Java uses 0-indexed lines
+        // Verify exact positions matching bsl-language-server (bsl-language-server) implementation
+        // bsl-language-server uses 0-indexed lines
         assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 14, 16, 23, 62);
         assert_diagnostic_range_multiline(code, &diagnostics[2], 25, 16, 27, 96);

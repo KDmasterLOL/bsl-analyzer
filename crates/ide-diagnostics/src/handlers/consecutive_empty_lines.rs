@@ -206,7 +206,7 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java expects 9 diagnostics, but we get 8 because test fixture normalizes trailing newlines.
+        // Expected 9 diagnostics, but we get 8 because test fixture normalizes trailing newlines.
         // The original file ends with "\n\n" (two empty lines: 33-34), but fixture loads it as "\n"
         // (one empty line: 33). LineIndex doesn't count the trailing newline that creates line 34.
         // This is expected behavior - fixing would require changing fixture/LineIndex behavior.

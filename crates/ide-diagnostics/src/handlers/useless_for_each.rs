@@ -209,7 +209,7 @@ mod tests {
         let mut diags = filter(&all);
         diags.sort_by_key(|d| d.range.start());
 
-        assert_eq!(diags.len(), 2, "Should match Java: 2 diagnostics");
+        assert_eq!(diags.len(), 2, "Should find 2 diagnostics");
 
         assert_diagnostic_range(code, diags[0], 2, 12, 20);
         assert_diagnostic_range(code, diags[1], 39, 16, 26);

@@ -44,7 +44,6 @@
 //!
 //! ## References
 //! - 1C Standard: https://its.1c.ru/db/v8std#content:669:hdoc
-//! - Java implementation: bsl-language-server/diagnostics/UsingExternalCodeToolsDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

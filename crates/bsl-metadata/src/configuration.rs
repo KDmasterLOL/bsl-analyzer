@@ -1,6 +1,4 @@
 //! Configuration metadata root object
-//!
-//! Ported from <https://github.com/1c-syntax/mdclasses>
 
 use crate::common_module::CommonModule;
 use crate::defined_type::DefinedType;
@@ -19,8 +17,6 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// Configuration - root metadata object
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdclasses.Configuration`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Configuration UUID
@@ -237,23 +233,17 @@ impl Configuration {
     }
 
     /// Get all common modules
-    ///
-    /// Java equivalent: `getCommonModules()`
     pub fn common_modules(&self) -> &[CommonModule] {
         &self.common_modules
     }
 
     /// Find common module by name (case-insensitive)
-    ///
-    /// Java equivalent: `findCommonModule(String)`
     pub fn find_common_module(&self, name: &str) -> Option<&CommonModule> {
         let name_lower = name.to_lowercase();
         self.name_to_common_module.get(&name_lower).and_then(|&idx| self.common_modules.get(idx))
     }
 
     /// Find module by URI
-    ///
-    /// Java equivalent: `getModuleByUri(URI)`
     pub fn find_module_by_uri(&self, uri: &str) -> Option<&dyn Module> {
         self.uri_to_module
             .get(uri)
@@ -262,8 +252,6 @@ impl Configuration {
     }
 
     /// Find any metadata object by URI
-    ///
-    /// Java equivalent: `findChild(URI)`
     pub fn find_child_by_uri(&self, uri: &str) -> Option<&dyn MdObject> {
         // For now, only common modules are supported
         // TODO: Add other MDO types (Documents, Catalogs, etc.)
@@ -286,15 +274,11 @@ impl Configuration {
     }
 
     /// Check if managed forms are used in ordinary application
-    ///
-    /// Java equivalent: `isUseManagedFormInOrdinaryApplication()`
     pub fn use_managed_form_in_ordinary_application(&self) -> bool {
         self.use_managed_form_in_ordinary_application
     }
 
     /// Check if ordinary forms are used in managed application
-    ///
-    /// Java equivalent: `isUseOrdinaryFormInManagedApplication()`
     pub fn use_ordinary_form_in_managed_application(&self) -> bool {
         self.use_ordinary_form_in_managed_application
     }
@@ -386,15 +370,11 @@ impl Configuration {
     }
 
     /// Get all event subscriptions
-    ///
-    /// Java equivalent: `getEventSubscriptions()`
     pub fn event_subscriptions(&self) -> &[EventSubscription] {
         &self.event_subscriptions
     }
 
     /// Find event subscription by name (case-insensitive)
-    ///
-    /// Java equivalent: `findEventSubscription(String)`
     pub fn find_event_subscription(&self, name: &str) -> Option<&EventSubscription> {
         let name_lower = name.to_lowercase();
         self.name_to_event_subscription
@@ -428,15 +408,11 @@ impl Configuration {
     }
 
     /// Get all scheduled jobs
-    ///
-    /// Java equivalent: `getScheduledJobs()`
     pub fn scheduled_jobs(&self) -> &[ScheduledJob] {
         &self.scheduled_jobs
     }
 
     /// Find scheduled job by name (case-insensitive)
-    ///
-    /// Java equivalent: `findScheduledJob(String)`
     pub fn find_scheduled_job(&self, name: &str) -> Option<&ScheduledJob> {
         let name_lower = name.to_lowercase();
         self.name_to_scheduled_job.get(&name_lower).and_then(|&idx| self.scheduled_jobs.get(idx))
@@ -450,15 +426,11 @@ impl Configuration {
     }
 
     /// Get all roles
-    ///
-    /// Java equivalent: `getRoles()`
     pub fn roles(&self) -> &[Role] {
         &self.roles
     }
 
     /// Find role by name (case-insensitive)
-    ///
-    /// Java equivalent: `findRole(String)`
     pub fn find_role(&self, name: &str) -> Option<&Role> {
         let name_lower = name.to_lowercase();
         self.name_to_role.get(&name_lower).and_then(|&idx| self.roles.get(idx))

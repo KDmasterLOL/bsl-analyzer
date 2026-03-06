@@ -31,7 +31,7 @@ fn test_lower_empty_procedure() {
 
     assert_eq!(result.body.params.len(), 0);
     // Empty procedure body should NOT emit EmptyCodeBlock diagnostic
-    // (per Java fixture comment: "Ошибка быть не должно, есть другая проверка")
+    // (per test fixture comment: "Ошибка быть не должно, есть другая проверка")
     // Empty functions/procedures are handled by FunctionShouldHaveReturn or similar
     assert!(!result.diagnostics.iter().any(|d| matches!(d, BodyDiagnostic::EmptyCodeBlock { .. })));
 }

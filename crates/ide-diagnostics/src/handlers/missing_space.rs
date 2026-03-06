@@ -2,7 +2,6 @@
 //!
 //! Detects missing spaces around operators and keywords in BSL code.
 //!
-//! **Source:** bsl-language-server/MissingSpaceDiagnostic.java
 //!
 //! ## Why?
 //!
@@ -466,8 +465,8 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 44 diagnostics with default configuration
-        assert_eq!(diagnostics.len(), 44, "Must match Java implementation (44 diagnostics)");
+        // Expected 44 diagnostics with default configuration
+        assert_eq!(diagnostics.len(), 44, "Should find 44 diagnostics");
     }
 
     #[test]

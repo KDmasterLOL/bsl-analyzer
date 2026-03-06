@@ -2,8 +2,6 @@
 //!
 //! Detects when a function modifies its by-reference parameters (output parameters).
 //!
-//! **Source (Java):** bsl-language-server/FunctionOutParameterDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/using_cancel_parameter.rs (similar pattern)
 //!
 //! ## Why?
 //! Functions in BSL should not modify their parameters. This is a code smell that makes

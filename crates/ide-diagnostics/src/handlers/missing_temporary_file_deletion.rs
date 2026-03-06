@@ -64,7 +64,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - MissingTemporaryFileDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use cfg_types::{IdConversion, StmtId};
 use hir::{Body, BodySourceMap, Expr, ExprIdx, Stmt};
@@ -457,7 +456,7 @@ mod tests {
         // Expect 7 diagnostics with default configuration
         assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics with default config");
 
-        // Verify exact positions match Java implementation
+        // Verify exact positions match bsl-language-server implementation
         // Line 6: ИмяПромежуточногоФайла = ПолучитьИмяВременногоФайла("xml")
         assert_diagnostic_range(code, &diagnostics[0], 6, 29, 62);
 
@@ -573,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_inline_usage() {
-        // Java version creates diagnostic for inline GetTempFileName usage (without assignment)
+        // bsl-language-server creates diagnostic for inline GetTempFileName usage (without assignment)
         // Example: Func(GetTempFileName("xml"))
         // This is ALWAYS an error because deletion cannot be tracked
 
@@ -589,7 +588,7 @@ mod tests {
         assert_eq!(
             diagnostics.len(),
             2,
-            "Should create diagnostic for inline usage (matches Java behavior)"
+            "Should create diagnostic for inline usage (matches bsl-language-server behavior)"
         );
 
         // Both should have generic message (no variable name)
@@ -612,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_comprehensive_java_compatibility() {
-        // Comprehensive test to ensure 100% compatibility with Java implementation
+        // Comprehensive test to ensure 100% compatibility with bsl-language-server implementation
         let code = r#"
             Процедура ТестВсехКейсов()
                 // Case 1: Normal assignment with deletion - OK

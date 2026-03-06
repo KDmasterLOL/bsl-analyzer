@@ -44,7 +44,7 @@ impl LoweringContext {
         }
 
         // Check if this FROM data source is a virtual table with JOINs
-        // Java: visitDataSources() checks dataSource has joinPart AND virtualTable
+        // bsl-language-server: visitDataSources() checks dataSource has joinPart AND virtualTable
         if let Some(table_ref) = ds.table_ref() {
             if ds.join_clauses().next().is_some() {
                 let parts: Vec<String> = table_ref
@@ -869,7 +869,7 @@ impl LoweringContext {
             return;
         }
 
-        // Java logic: skip first param (period), check remaining
+        // Skip first param (period), check remaining
         // If there's more than one slot, at least one after first must be non-empty
         if params.len() > 1 {
             let has_non_empty_after_first =

@@ -2,7 +2,6 @@
 //!
 //! Cannot assign value to CommonModule (will cause runtime error).
 //!
-//! Ported from: CommonModuleAssignDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

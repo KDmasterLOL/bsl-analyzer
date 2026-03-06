@@ -38,8 +38,6 @@
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!
 //! Ported from:
-//! - DeprecatedCurrentDateDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - deprecated_current_date.rs (bsl-language-server-rust) - Rust reference
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -179,7 +177,7 @@ EndProcedure
 
         assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
 
-        // Verify diagnostic positions match Java test expectations
+        // Verify diagnostic positions match bsl-language-server test expectations
         assert_diagnostic_range(input, deprecated_diags[0], 2, 19, 30);
         assert_diagnostic_range(input, deprecated_diags[1], 11, 16, 27);
     }

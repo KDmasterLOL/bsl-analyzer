@@ -12,7 +12,6 @@
 //! - `ЭтотОбъект["Поле"]` is NOT an error (INDEX_EXPR handled separately)
 //! - CommonModule with ReturnValueReuse != DontUse are NOT checked
 //!
-//! Ported from: RedundantAccessToObjectDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

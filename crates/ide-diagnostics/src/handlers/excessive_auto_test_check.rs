@@ -19,7 +19,6 @@
 //! This pattern should be removed from code.
 //!
 //! ## Sources
-//! - **Java:** bsl-language-server/ExcessiveAutoTestCheckDiagnostic.java
 //! - **Rust:** bsl-language-server-rust/rules/excessive_auto_test_check.rs
 
 use crate::define_metadata;
@@ -192,12 +191,12 @@ mod tests {
         let code = include_str!("../../test_data/ExcessiveAutoTestCheckDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Should find 6 diagnostics (matching Java implementation)
+        // Should find 6 diagnostics (matching reference implementation)
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 
         // Assert exact ranges (adapted for Rowan parser)
-        // Note: Ranges differ slightly from Java due to different parser implementations
-        // Java ranges (0-indexed): (3,4,7,13), (14,4,16,13), (22,4,26,13), (46,4,48,9), (54,4,56,9), (62,4,66,9)
+        // Note: Ranges differ slightly from bsl-language-server due to different parser implementations
+        // bsl-language-server ranges (0-indexed): (3,4,7,13), (14,4,16,13), (22,4,26,13), (46,4,48,9), (54,4,56,9), (62,4,66,9)
         // Our ranges (with +1 line offset for comment, and adjusted end columns):
         assert_diagnostic_range_multiline(code, &diagnostics[0], 4, 4, 8, 14);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 15, 4, 17, 14);

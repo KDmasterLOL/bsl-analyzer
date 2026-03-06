@@ -46,7 +46,7 @@ enum Commands {
     /// Run static analysis on a project
     Analyze {
         /// Source directory containing BSL files (default: current directory)
-        /// Java-compatible aliases: --srcDir, --src, --project
+        /// Aliases: --srcDir, --src, --project
         #[arg(
             short = 's',
             long = "source-dir",
@@ -58,26 +58,26 @@ enum Commands {
         source_dir: PathBuf,
 
         /// Workspace directory for relative paths in reports (default: source directory)
-        /// Java-compatible alias: --workspaceDir
+        /// Alias: --workspaceDir
         #[arg(short = 'w', long = "workspace-dir", alias = "workspaceDir")]
         workspace_dir: Option<PathBuf>,
 
         /// Output directory for analysis reports (default: current directory)
-        /// Java-compatible alias: --outputDir
+        /// Alias: --outputDir
         #[arg(short = 'o', long = "output-dir", alias = "outputDir")]
         output_dir: Option<PathBuf>,
 
-        /// Configuration file path (Java-compatible alias: --configuration)
+        /// Configuration file path (Alias: --configuration)
         #[arg(short = 'c', long = "config", alias = "configuration")]
         config: Option<PathBuf>,
 
         /// Reporters to use (can be specified multiple times or comma-separated)
         /// Valid values: console, json, sarif, tslint, junit, generic, code-quality
-        /// (Java-compatible alias: --reporter)
+        /// (Alias: --reporter)
         #[arg(short = 'r', long = "reporters", alias = "reporter", value_delimiter = ',')]
         reporters: Vec<String>,
 
-        /// Silent mode - disable progress bar (Java-compatible alias: --silent)
+        /// Silent mode - disable progress bar (Alias: --silent)
         #[arg(short = 'q', long = "quiet", alias = "silent")]
         quiet: bool,
 
@@ -544,7 +544,7 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // CLI compatibility with Java bsl-language-server
+#[allow(clippy::too_many_arguments)] // CLI compatibility with bsl-language-server
 fn analyze(
     source_dir: PathBuf,
     workspace_dir: Option<PathBuf>,
@@ -692,9 +692,9 @@ fn analyze_salsa(
     let start = Instant::now();
 
     // Determine workspace and output directories
-    // workspace_dir defaults to source_dir (Java behavior)
+    // workspace_dir defaults to source_dir (bsl-language-server behavior)
     let workspace_dir = workspace_dir.unwrap_or_else(|| source_dir.clone());
-    // output_dir defaults to current directory "." (Java behavior)
+    // output_dir defaults to current directory "." (bsl-language-server behavior)
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
     // Load project configuration

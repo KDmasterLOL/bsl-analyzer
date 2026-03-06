@@ -6,7 +6,7 @@ Guidance for Claude Code when working with bsl-analyzer codebase.
 
 **BSL Analyzer** - High-performance LSP for BSL (1C:Enterprise) in Rust. Target: drop-in replacement for bsl-language-server with 5x speed, 2.7x less memory.
 
-**Performance (doc3: 121 MB, 6,540 files):** 11.2s vs 58.9s Java (5.3x faster), 1.4 GB vs 3.8 GB memory (2.7x less)
+**Performance (doc3: 121 MB, 6,540 files):** 11.2s vs 58.9s bsl-language-server (5.3x faster), 1.4 GB vs 3.8 GB memory (2.7x less)
 
 See `docs/planning/PERFORMANCE_REAL_DATA.md` for benchmarks.
 
@@ -52,7 +52,7 @@ bsl-analyzer (LSP Server)
 - Compile-time const metadata + runtime JSON overrides
 - `ctx.severity(code)`, `ctx.tags(code)` instead of hardcoded values
 - Automatic LSP severity mapping from type+severity
-- 100% compatible with Java `@DiagnosticMetadata`
+- 100% compatible with bsl-language-server `@DiagnosticMetadata`
 
 **HIR Diagnostics** - Collected during HIR lowering, cached by Salsa, see `docs/architecture/ARCHITECTURE.md`
 
@@ -150,19 +150,19 @@ All test files in repo. Never use absolute paths: `include_str!("fixtures/Module
 
 ## Compatibility & Architecture
 
-**User-facing compatibility** with bsl-language-server (Java):
+**User-facing compatibility** with bsl-language-server:
 - 100% compatible diagnostic codes, messages, severity levels
 - Same config format (`.bsl-analyzer.json` or `.bsl-language-server.json`)
 - Same diagnostic parameters and metadata
 
-**Architecture advantages** over Java implementation:
-- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON (vs Java annotations only)
+**Architecture advantages** over bsl-language-server:
+- ✅ **DiagnosticMetadata:** Compile-time const + runtime JSON (vs annotations only)
 - ✅ **HIR-based diagnostics:** Collected during lowering, Salsa-cached (vs separate AST passes)
 - ✅ **Text-based single pass:** One traversal for all text diagnostics (vs N separate passes)
-- ✅ **Dataflow analysis:** CFG + liveness for intra-procedural checks (Java has limited CFG)
+- ✅ **Dataflow analysis:** CFG + liveness for intra-procedural checks
 - 🚧 **CallGraph (planned):** Inter-procedural analysis infrastructure inspired by rust-analyzer
 
-**Reference architecture:** rust-analyzer (not Java) for all new infrastructure
+**Reference architecture:** rust-analyzer for all new infrastructure
 
 ## Общие правила
 

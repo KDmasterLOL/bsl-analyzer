@@ -17,7 +17,7 @@
 //! ```
 //!
 //! ## Source
-//! bsl-language-server/SelfAssignDiagnostic.java
+//! bsl-language-server/bsl-language-server
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -96,8 +96,8 @@ mod tests {
         );
     }
 
-    /// Test based on Java fixture content
-    /// Java test expects: hasSize(2), hasRange(4, 0, 4, 5), hasRange(7, 0, 7, 33)
+    /// Test based on test fixture content
+    /// Expected: hasSize(2), hasRange(4, 0, 4, 5), hasRange(7, 0, 7, 33)
     ///
     /// NOTE: HIR lowering only processes method bodies, so we wrap fixture content in a procedure.
     /// Line numbers in this test are offset by +1 due to wrapping.
@@ -122,15 +122,15 @@ mod tests {
         let self_assign_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::SelfAssign).collect();
 
-        // Java expects 2 diagnostics (our lines are +1 due to procedure wrapper):
-        // Line 5 (Java line 4): А = а; - simple path self-assign
-        // Line 8 (Java line 7): Структура.Чтото = СтруКтура.ЧТото; - property self-assign
+        // Expected 2 diagnostics (our lines are +1 due to procedure wrapper):
+        // Line 5 (line 4, 1-indexed): А = а; - simple path self-assign
+        // Line 8 (line 7, 1-indexed): Структура.Чтото = СтруКтура.ЧТото; - property self-assign
         //
         // Line 7: Структура.Чтото = Структура.ЧтотоДругое; - NOT self-assign (different props)
         assert_eq!(
             self_assign_diags.len(),
             2,
-            "Should detect exactly 2 SelfAssign diagnostics (matching Java), got {}",
+            "Should detect exactly 2 SelfAssign diagnostics , got {}",
             self_assign_diags.len()
         );
 

@@ -43,7 +43,6 @@
 //! - **Minutes to fix:** 30
 //!
 //! ## Implementation
-//! Ported from: NestedStatementsDiagnostic.java (bsl-language-server)
 //!
 //! Algorithm:
 //! - Recursive AST traversal with depth tracking
@@ -196,7 +195,7 @@ mod tests {
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::NestedStatements).collect();
 
-        assert_eq!(diagnostics.len(), 2, "Should match Java implementation (2 diagnostics)");
+        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics");
 
         assert_diagnostic_range(code, diagnostics[0], 35, 8, 12);
         assert_diagnostic_range(code, diagnostics[1], 50, 6, 10);

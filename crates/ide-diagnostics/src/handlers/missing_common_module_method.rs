@@ -52,7 +52,6 @@
 //! ## Reference
 //!
 //! Ported from:
-//! - MissingCommonModuleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;

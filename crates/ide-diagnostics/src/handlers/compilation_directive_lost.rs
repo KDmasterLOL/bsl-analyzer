@@ -33,8 +33,6 @@
 //!
 //! Uses HIR ItemTree for efficient cached access to method annotations.
 //! Ported from:
-//! - CompilationDirectiveLostDiagnostic.java (bsl-language-server) - PRIMARY
-//! - compilation_directive_lost.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Only applies to FormModule and CommandModule (not CommonModule).
 

@@ -215,7 +215,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::MissingParameterDescription)
             .collect();
 
-        assert_eq!(mpd.len(), 12, "Expected 12 diagnostics from Java fixture");
+        assert_eq!(mpd.len(), 12, "Expected 12 diagnostics");
 
         assert_diagnostic_message_at_line(
             FIXTURE,

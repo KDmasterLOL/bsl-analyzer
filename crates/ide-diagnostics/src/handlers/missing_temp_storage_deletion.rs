@@ -56,7 +56,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - MissingTempStorageDeletionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! Key difference from MissingTemporaryFileDeletion:
 //! - Uses STRUCTURAL HIR EQUALITY for parameter comparison (not string matching)

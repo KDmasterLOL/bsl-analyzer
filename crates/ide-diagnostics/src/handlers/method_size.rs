@@ -31,9 +31,8 @@
 //! - **Minutes to fix:** 30
 //!
 //! ## Implementation
-//! Ported from: MethodSizeDiagnostic.java (bsl-language-server)
 //!
-//! Algorithm: Calculates line difference (stop_line - start_line) matching Java's ANTLR behavior.
+//! Algorithm: Calculates line difference (stop_line - start_line) matching bsl-language-server's ANTLR behavior.
 //!
 //! ## Performance
 //! Uses LineIndex for O(1) line number lookups instead of scanning the entire
@@ -121,7 +120,7 @@ mod tests {
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
 
-        assert_eq!(diagnostics.len(), 2, "Should match Java implementation (2 diagnostics)");
+        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics");
 
         // First diagnostic: Процедура201Строка at line 6 (0-indexed), cols 10-28
         assert_diagnostic_range(code, diagnostics[0], 6, 10, 28);
@@ -154,7 +153,7 @@ mod tests {
         let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
-        assert_eq!(diagnostics.len(), 4, "Should match Java: 4 diagnostics with threshold 20");
+        assert_eq!(diagnostics.len(), 4, "Should find 4 diagnostics with threshold 20");
     }
 
     #[test]

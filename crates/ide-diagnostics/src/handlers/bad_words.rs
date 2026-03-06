@@ -325,8 +325,8 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 6 diagnostics with badWords="лотус|шмотус", findInComments=true
-        assert_eq!(diagnostics.len(), 6, "Should match Java implementation (6 diagnostics)");
+        // Expected 6 diagnostics with badWords="лотус|шмотус", findInComments=true
+        assert_eq!(diagnostics.len(), 6, "Should find 6 diagnostics");
 
         // Verify exact positions
         // Line 0, cols 42-47: лотус (in comment)
@@ -369,12 +369,12 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 4 diagnostics with badWords="лотус|шмотус", findInComments=false
+        // Expected 4 diagnostics with badWords="лотус|шмотус", findInComments=false
         // (excludes first two from comment line)
         assert_eq!(
             diagnostics.len(),
             4,
-            "Should match Java implementation (4 diagnostics without comments)"
+            "Should match bsl-language-server implementation (4 diagnostics without comments)"
         );
 
         // Verify exact positions (same as above, but without first two)

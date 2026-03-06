@@ -2,7 +2,6 @@
 //!
 //! CommonModule must be one of four types: Server, ServerCall, Client, ClientServer.
 //!
-//! Ported from: CommonModuleInvalidTypeDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

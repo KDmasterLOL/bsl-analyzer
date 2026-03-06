@@ -127,7 +127,7 @@ fn find_else_range(else_clause: &SyntaxNode) -> TextRange {
 
 /// Count boolean operations (AND/OR) in an expression.
 ///
-/// This matches Java's `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size()`
+/// This's `Trees.findAllRuleNodes(expression, BSLParser.RULE_boolOperation).size()`
 /// Complexity = number of boolean operations + 1
 fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
     let mut count = 0;
@@ -152,8 +152,8 @@ fn count_bool_operations(expr_node: &SyntaxNode) -> usize {
 
 /// Get condition range, trimming trailing whitespace.
 ///
-/// Java ANTLR parser doesn't include trailing whitespace in expression nodes,
-/// but Rowan CST includes all tokens. This trims trailing whitespace to match Java.
+/// ANTLR parser doesn't include trailing whitespace in expression nodes,
+/// but Rowan CST includes all tokens. This trims trailing whitespace to match bsl-language-server.
 fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
     let text = expr_node.text().to_string();
     let trimmed = text.trim_end();
@@ -174,7 +174,7 @@ fn get_condition_range(expr_node: &SyntaxNode) -> TextRange {
 /// Default max complexity is 3 (hardcoded here as we don't have config during lowering).
 /// The actual config check happens in from_hir().
 fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode) {
-    // Default max complexity (matches Java default)
+    // Default max complexity (matches bsl-language-server default)
     const DEFAULT_MAX_COMPLEXITY: usize = 3;
 
     let bool_op_count = count_bool_operations(condition_node);
@@ -194,7 +194,7 @@ fn check_condition_complexity(ctx: &mut LoweringCtx, condition_node: &SyntaxNode
 
 /// Normalize condition text for comparison.
 ///
-/// Matches Java behavior:
+/// Behavior:
 /// - Remove whitespace (except inside string literals)
 /// - Convert to lowercase (except inside string literals)
 /// - String literals remain case-sensitive
@@ -253,7 +253,7 @@ fn check_duplicated_conditions(ctx: &mut LoweringCtx, condition_nodes: &[SyntaxN
     for (_normalized_text, occurrences) in condition_map {
         if occurrences.len() > 1 {
             // Report diagnostic on each duplicate (not the first one)
-            // This matches Java behavior: first occurrence is the reference
+            // This matches bsl-language-server behavior: first occurrence is the reference
             for (_idx, node) in occurrences.iter().skip(1) {
                 let range = node.text_range();
                 ctx.emit(BodyDiagnostic::IfElseDuplicatedCondition {
@@ -609,7 +609,7 @@ pub(crate) fn lower_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stm
         SyntaxKind::REMOVE_HANDLER_STMT => lower_remove_handler_stmt(ctx, node),
         SyntaxKind::EMPTY_STMT => {
             // Check if parent or siblings contain ERROR nodes
-            // (Java: !Trees.treeContainsErrors(previousNode))
+            // (!Trees.treeContainsErrors(previousNode) in ANTLR)
             let has_error = node
                 .parent()
                 .map(|p| p.children().any(|c| c.kind() == SyntaxKind::ERROR))
@@ -688,7 +688,7 @@ fn lower_assign_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt> {
                 param_id: opaque_param_id,
                 stmt_id: StmtId::from_raw(la_arena::RawIdx::from(0)), // Placeholder - will find via range in handler
                 stmt_range: node.text_range(), // Full statement range for BodySourceMap lookup
-                ident_range: range, // Identifier range for diagnostic display (Java compatibility)
+                ident_range: range, // Identifier range for diagnostic display (bsl-language-server compatibility)
             });
         }
     }
@@ -1283,7 +1283,7 @@ fn lower_remove_handler_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option
 
 /// Check if a statement should be skipped for OneStatementPerLine diagnostic.
 ///
-/// Matches Java behavior - excludes:
+/// Excludes:
 /// 1. Empty statements (standalone `;`)
 /// 2. Statements containing preprocessor directives
 /// 3. Statements with parse errors
@@ -1402,7 +1402,7 @@ pub(super) fn has_trailing_semicolon(node: &SyntaxNode) -> bool {
 ///
 /// Skips whitespace, newlines, and comments.
 /// Uses descendants_with_tokens() to find tokens at any depth.
-/// Used for SemicolonPresence diagnostic to match Java behavior (ctx.getStop()).
+/// Used for SemicolonPresence diagnostic to match bsl-language-server behavior (ctx.getStop()).
 pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
     node.descendants_with_tokens()
         .filter_map(|el| el.into_token())

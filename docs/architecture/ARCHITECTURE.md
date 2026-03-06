@@ -138,7 +138,7 @@ Metadata-driven система для всех 144 диагностик (100% co
 - **Центральный registry**: все severity/tags/minutesToFix в `metadata_registry.rs`
 - **Runtime overrides**: JSON config может переопределить severity/type/tags
 - **Автоматический LSP mapping**: DiagnosticType + SeverityLevel → LSP Severity
-- **Совместимость с Java**: 1:1 соответствие с @DiagnosticMetadata annotations
+- **Совместимость с bsl-language-server**: 1:1 соответствие с @DiagnosticMetadata annotations
 
 Вместо hardcoded значений handlers используют `ctx.severity(code)` и `ctx.tags(code)`.
 
@@ -189,7 +189,7 @@ File Change → VFS → Salsa Invalidation → Recompute affected queries only
 
 **Проект doc3 (121 MB, 6,540 файлов):**
 
-| Метрика | Java (bsl-ls) | Rust (bsl-analyzer) | Улучшение |
+| Метрика | bsl-ls | Rust (bsl-analyzer) | Улучшение |
 |---------|---------------|---------------------|-----------|
 | Full analysis | 58.9s | **11.2s** | **5.3x** |
 | CPU time | 337.1s | 59.3s | **5.7x** |

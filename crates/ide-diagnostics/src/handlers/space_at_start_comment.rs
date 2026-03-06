@@ -2,7 +2,6 @@
 //!
 //! Detects comments without space after // delimiter.
 //!
-//! **Source (Java):** bsl-language-server/SpaceAtStartCommentDiagnostic.java
 //!
 //! Between comment symbols "//" and comment text there should be a space.
 //! Exceptions are comment-annotations (starting with specific sequences like //@, //(c), //©).
@@ -35,17 +34,17 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-// Default comment annotations (same as Java)
+// Default comment annotations (same as bsl-language-server)
 const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
 
-// Good comment patterns (from Java)
-// Java GOOD_COMMENT_PATTERN_STRICT: "(?:(?:\\/\\/[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
+// Good comment patterns (from bsl-language-server)
+// bsl-language-server GOOD_COMMENT_PATTERN_STRICT: "(?:(?:\\/\\/[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
 // - First alternative: exactly // followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators like ////////)
 static GOOD_COMMENT_PATTERN_STRICT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^//[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
 
-// Java GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
+// bsl-language-server GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
 // - First alternative: 2+ slashes followed by space/tab and text
 // - Second alternative: 2+ slashes followed by space/tab (separators)
 static GOOD_COMMENT_PATTERN: Lazy<Regex> =
@@ -84,9 +83,9 @@ fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String])
         return true;
     }
 
-    // Check if it's commented code (Java uses CodeRecognizer with 0.9 threshold)
+    // Check if it's commented code (bsl-language-server uses CodeRecognizer with 0.9 threshold)
     // For now, skip this check - we'll implement it later if needed
-    // TODO: Port CodeRecognizer from Java
+    // TODO: Port CodeRecognizer from bsl-language-server
 
     false
 }
@@ -104,7 +103,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Get configuration (using defaults for now, TODO: support configuration)
-    let use_strict = true; // Java default: USE_STRICT_VALIDATION = true
+    let use_strict = true; // Default: USE_STRICT_VALIDATION = true
     let comments_annotation = parse_comments_annotation(DEFAULT_COMMENTS_ANNOTATION);
 
     let parse = ctx.parse();
@@ -155,15 +154,15 @@ mod tests {
         let code = include_str!("../../test_data/SpaceAtStartCommentDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // TODO: Port CodeRecognizer from Java to skip commented code (lines 31-33)
-        // Java expects 7 diagnostics, we get 10 because we don't skip commented code yet.
-        // Expected Java diagnostics:
+        // TODO: Port CodeRecognizer from bsl-language-server to skip commented code (lines 31-33)
+        // Expected 7 diagnostics, we get 10 because we don't skip commented code yet.
+        // Expected diagnostics:
         // 1. Line 6: //Плохой комментарий
         // 2. Line 8: //И это плохой (inline comment)
         // 3. Line 9: //Так тоже плохо
         // 4. Line 20: //(с) Похоже... (cyrillic 'с', not in default annotations)
         // 5. Line 22: //// Плохой... (4 slashes without space in strict mode)
-        // 6. Line 30: //&НаКлиенте (commented code, skipped in Java)
+        // 6. Line 30: //&НаКлиенте (commented code, skipped in bsl-language-server)
         // 7. Line 34: /// Текст... (3 slashes with text, error in strict mode)
         // 8. Line 35: ////Текст... (4 slashes with text)
 

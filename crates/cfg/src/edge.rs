@@ -1,12 +1,6 @@
 //! CFG Edge types
-//!
-//! Ported from BSL Language Server (Java) via bsl-language-server-rust:
-//! - CfgEdge.java
-//! - CfgEdgeType.java
 
 /// Type of edge in the control flow graph
-///
-/// Maps to CfgEdgeType enum in Java
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CfgEdgeType {
     /// Direct/sequential control flow

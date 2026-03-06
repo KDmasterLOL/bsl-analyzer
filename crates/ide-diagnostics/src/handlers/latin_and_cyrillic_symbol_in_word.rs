@@ -591,10 +591,10 @@ mod tests {
         let code = include_str!("../../test_data/LatinAndCyrillicSymbolInWordDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java expects 15 diagnostics
+        // Expected 15 diagnostics
         assert_eq!(diagnostics.len(), 15, "Expected 15 diagnostics");
 
-        // Verify all positions match Java test
+        // Verify all positions match bsl-language-server test
         // Methods
         assert_diagnostic_range(code, &diagnostics[8], 30, 17, 26); // ПараметрY
         assert_diagnostic_range(code, &diagnostics[9], 30, 33, 39); // ParamЫ

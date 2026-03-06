@@ -2,8 +2,6 @@
 //!
 //! Detects functions with names starting with "Получить" (Russian for "Get").
 //!
-//! **Source (Java):** bsl-language-server/FunctionNameStartsWithGetDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/function_name_starts_with_get.rs
 //!
 //! ## Why?
 //! Function names starting with "Получить" are considered a code smell in 1C:Enterprise.
@@ -11,7 +9,7 @@
 //! descriptive alternatives that don't use the "Получить" prefix.
 //!
 //! **Note:** This diagnostic only checks Russian "Получить" prefix, not English "Get".
-//! This matches the behavior of bsl-language-server (Java implementation).
+//! This matches the behavior of bsl-language-server (bsl-language-server).
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - detects function names during HIR lowering.
@@ -83,7 +81,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
 
-        // Java expects 1 diagnostic at line 0 (1-based line 1), cols 8-25
+        // Expected 1 diagnostic at line 0 (1-based line 1), cols 8-25
         // The diagnostic should be on "ПолучитьИмяПоКоду" (the function name)
         assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
 

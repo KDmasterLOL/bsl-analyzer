@@ -165,8 +165,8 @@ EndFunction"#;
         assert_eq!(return_diags.len(), 1, "English function without return should trigger");
     }
 
-    /// Test with Java fixture - must match Java test expectations exactly
-    /// Java test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
+    /// Test with test fixture - must match bsl-language-server test expectations exactly
+    /// reference test: assertThat(diagnostics).hasSize(1); hasRange(0, 8, 0, 26);
     #[test]
     fn test_fixture_function_should_have_return() {
         let code = include_str!("../../test_data/FunctionShouldHaveReturnDiagnostic.bsl");
@@ -177,15 +177,15 @@ EndFunction"#;
             .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
             .collect();
 
-        // Java expects exactly 1 diagnostic
+        // Expected exactly 1 diagnostic
         assert_eq!(
             return_diags.len(),
             1,
-            "Java test expects 1 diagnostic, got {}",
+            "reference test expects 1 diagnostic, got {}",
             return_diags.len()
         );
 
-        // Java expects: hasRange(0, 8, 0, 26) - function name "ФункцияБезВозврата"
+        // Expected: hasRange(0, 8, 0, 26) - function name "ФункцияБезВозврата"
         assert_diagnostic_range(code, return_diags[0], 0, 8, 26);
     }
 }

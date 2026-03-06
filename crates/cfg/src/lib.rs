@@ -2,9 +2,6 @@
 //!
 //! Control Flow Graph construction and analysis for BSL Language Server.
 //!
-//! Ported from BSL Language Server (Java) CFG package via bsl-language-server-rust:
-//! - `com.github._1c_syntax.bsl.languageserver.cfg`
-//!
 //! ## Overview
 //!
 //! The Control Flow Graph represents the flow of execution through a BSL method/function.

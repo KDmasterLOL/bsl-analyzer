@@ -2,7 +2,6 @@
 //!
 //! Checks if all NStr() multilingual strings have text for all declared languages.
 //!
-//! **Source:** bsl-language-server/MultilingualStringHasAllDeclaredLanguagesDiagnostic.java
 //!
 //! ## Why?
 //! NStr in a multilingual configuration has different fragments for different languages.
@@ -371,15 +370,12 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 3 diagnostics with default config (declaredLanguages = "ru")
-        assert_eq!(diagnostics.len(), 3, "Must match Java (3 diagnostics for ru only)");
+        // Expected 3 diagnostics with default config (declaredLanguages = "ru")
+        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics for ru only");
 
-        // Verify exact positions (0-indexed in Java)
-        // hasRange(12, 16, 12, 22) - Line 13: empty NStr()
+        // Verify exact positions (0-indexed in bsl-language-server)
         assert_diagnostic_range_multiline(code, &diagnostics[0], 12, 16, 12, 22);
-        // hasRange(13, 30, 13, 86) - Line 14: invalid format
         assert_diagnostic_range_multiline(code, &diagnostics[1], 13, 30, 13, 86);
-        // hasRange(16, 30, 16, 66) - Line 17: only English
         assert_diagnostic_range_multiline(code, &diagnostics[2], 16, 30, 16, 66);
     }
 
@@ -397,8 +393,8 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 8 diagnostics with declaredLanguages = "ru,en"
-        assert_eq!(diagnostics.len(), 8, "Must match Java (8 diagnostics for ru,en)");
+        // Expected 8 diagnostics with declaredLanguages = "ru,en"
+        assert_eq!(diagnostics.len(), 8, "Should find 8 diagnostics for ru,en");
     }
 
     #[test]

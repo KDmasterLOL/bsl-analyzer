@@ -87,8 +87,7 @@ mod tests {
         let mut sorted_diagnostics = diagnostics.clone();
         sorted_diagnostics.sort_by_key(|d| d.range.start());
 
-        // Verify diagnostic positions (lines must match Java, columns may differ by +-1)
-        // Java: .hasRange(6, 8, 44), .hasRange(7, 9, 48), .hasRange(8, 8, 39), etc.
+        // Verify diagnostic positions (lines must match bsl-language-server, columns may differ by +-1)
         assert_diagnostic_range(code, &sorted_diagnostics[0], 6, 8, 44);
         assert_diagnostic_range(code, &sorted_diagnostics[1], 7, 8, 48);
         assert_diagnostic_range(code, &sorted_diagnostics[2], 8, 8, 39);

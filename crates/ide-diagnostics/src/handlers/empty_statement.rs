@@ -2,8 +2,6 @@
 //!
 //! Detects empty statements (standalone semicolons) in code.
 //!
-//! **Source (Java):** bsl-language-server/EmptyStatementDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/empty_statement.rs
 //!
 //! Empty statements are usually typos or leftover from refactoring.
 //! They make code less readable and can be confusing.
@@ -68,7 +66,7 @@ mod tests {
         let empty_stmt_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyStatement).collect();
 
-        // Java expects 2 diagnostics
+        // Expected 2 diagnostics
         assert_eq!(empty_stmt_diags.len(), 2, "Expected 2 diagnostics");
 
         // Line 1 (0-indexed), cols 18-19: semicolon after "Тогда"

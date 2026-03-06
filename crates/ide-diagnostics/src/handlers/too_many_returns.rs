@@ -2,7 +2,6 @@
 //!
 //! Detects methods with too many return statements.
 //!
-//! **Source:** bsl-language-server/TooManyReturnsDiagnostic.java
 //!
 //! ## Why?
 //!

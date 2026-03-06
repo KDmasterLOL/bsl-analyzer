@@ -642,7 +642,7 @@ impl<'a> InsertionTracker<'a> {
 
                 for group in grouped.values() {
                     if group.len() > 1 {
-                        // Report only SECOND insertion (Java compatibility)
+                        // Report only SECOND insertion (bsl-language-server compatibility)
                         if let Some(second_insertion) = group.get(1) {
                             // Generate display strings only when actually reporting
                             let collection_display =
@@ -1203,7 +1203,7 @@ mod tests {
     fn test_preprocessor_duplicate() {
         // NOTE: HIR currently does not lower statements inside preprocessor directives.
         // This is a known limitation. Code inside #Если/#Иначе is not included in body.body_stmts.
-        // The Java implementation does detect duplicates across preprocessor branches,
+        // The bsl-language-server does detect duplicates across preprocessor branches,
         // but our HIR-based implementation cannot until HIR is extended to support this.
         let code = r#"
 Процедура Тест()
@@ -1216,7 +1216,7 @@ mod tests {
         "#;
         let diagnostics = check_ast_diagnostic(code, check);
         // Current HIR limitation: 0 diagnostics (code inside preprocessor not analyzed)
-        // Java expectation: 1 diagnostic (duplicate key across branches)
+        // Expected: 1 diagnostic (duplicate key across branches)
         assert_eq!(
             diagnostics.len(),
             0,

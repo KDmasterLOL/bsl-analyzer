@@ -132,7 +132,7 @@ fn search_configuration_xml_recursive(
 
 /// Project configuration (from .bsl-analyzer.json or .bsl-language-server.json).
 ///
-/// ## JSON Format (Java BSL-LS compatible)
+/// ## JSON Format (bsl-language-server compatible)
 ///
 /// ```json
 /// {

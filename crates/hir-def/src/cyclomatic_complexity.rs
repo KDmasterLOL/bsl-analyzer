@@ -303,7 +303,7 @@ mod tests {
         let result = lower_method(&method_node, is_function);
 
         let complexity = calculate_complexity(&result.body);
-        // Ожидаем 21 (как в Java)
-        assert_eq!(complexity, 21, "Should match Java implementation");
+        // Ожидаем 21
+        assert_eq!(complexity, 21, "Should match bsl-language-server implementation");
     }
 }

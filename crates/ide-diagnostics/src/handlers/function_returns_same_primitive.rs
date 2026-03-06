@@ -2,8 +2,6 @@
 //!
 //! Detects functions that always return the same primitive value in all branches.
 //!
-//! **Source (Java):** bsl-language-server/FunctionReturnsSamePrimitiveDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/function_returns_same_primitive.rs
 //!
 //! ## Why?
 //! Functions that always return the same constant value are useless and indicate poor design:
@@ -94,7 +92,7 @@ mod tests {
             .collect();
 
         // With default parameters (skipAttachable=true, caseSensitiveForString=false)
-        // Java expects 5 diagnostics at:
+        // Expected 5 diagnostics at:
         // - Line 0 (ПроверитьСтроку), cols 8-23
         // - Line 25 (Метод1), cols 8-14
         // - Line 35 (СтавкаНДС), cols 8-17
@@ -103,8 +101,8 @@ mod tests {
 
         assert_eq!(func_diags.len(), 5, "Expected 5 diagnostics with default config");
 
-        // Java test uses 0-based line numbers
-        // Our fixture is identical to Java (no extra comments at start)
+        // reference test uses 0-based line numbers
+        // Our fixture is identical to bsl-language-server (no extra comments at start)
 
         // ПроверитьСтроку - line 0
         assert_diagnostic_range(code, func_diags[0], 0, 8, 23);

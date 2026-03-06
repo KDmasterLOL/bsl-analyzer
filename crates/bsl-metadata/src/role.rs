@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Role metadata object
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdo.Role`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Role {
     /// UUID

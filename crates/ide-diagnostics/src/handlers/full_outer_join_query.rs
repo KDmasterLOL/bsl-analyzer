@@ -30,8 +30,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - FullOuterJoinQueryDiagnostic.java (bsl-language-server)
-//! - full_outer_join_query.rs (bsl-language-server-rust)
 
 use crate::define_metadata;
 use crate::metadata::*;

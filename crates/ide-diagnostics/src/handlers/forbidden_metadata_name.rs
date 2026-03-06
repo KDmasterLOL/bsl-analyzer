@@ -2,7 +2,6 @@
 //!
 //! Checks that metadata objects are not named using reserved query language words.
 //!
-//! Ported from: ForbiddenMetadataNameDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

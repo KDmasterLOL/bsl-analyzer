@@ -26,7 +26,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - JoinWithVirtualTableDiagnostic.java (bsl-language-server)
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -122,16 +121,11 @@ mod tests {
         let mut sorted = diagnostics.clone();
         sorted.sort_by_key(|d| d.range.start());
 
-        // Verify positions match Java test expectations (lines must match, columns +-1)
-        // Java: hasRange(3, 84, 119)
+        // Verify positions match bsl-language-server test expectations (lines must match, columns +-1)
         assert_diagnostic_range(code, &sorted[0], 3, 84, 120);
-        // Java: hasRange(12, 5, 56)
         assert_diagnostic_range(code, &sorted[1], 12, 5, 56);
-        // Java: hasRange(22, 5, 56)
         assert_diagnostic_range(code, &sorted[2], 22, 5, 56);
-        // Java: hasRange(31, 9, 53)
         assert_diagnostic_range(code, &sorted[3], 31, 9, 53);
-        // Java: hasRange(33, 5, 56)
         assert_diagnostic_range(code, &sorted[4], 33, 5, 56);
     }
 

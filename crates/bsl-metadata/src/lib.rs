@@ -3,8 +3,6 @@
 //! This crate provides structures and utilities for working with 1C:Enterprise
 //! metadata (configurations, extensions, common modules, etc.) in Designer format.
 //!
-//! This is a Rust port of the Java mdclasses library:
-//! <https://github.com/1c-syntax/mdclasses>
 //!
 //! ## Features
 //!

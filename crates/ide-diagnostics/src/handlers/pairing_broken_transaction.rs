@@ -12,8 +12,8 @@
 //!
 //! ## CFG-based approach advantage
 //!
-//! Unlike Java's simple stack-based linear analysis, this implementation uses CFG
-//! to analyze **all execution paths**. This catches errors that Java misses:
+//! Unlike the simple stack-based linear analysis in bsl-language-server, this implementation uses CFG
+//! to analyze **all execution paths**. This catches errors that bsl-language-server misses:
 //!
 //! ```bsl
 //! Если Условие Тогда
@@ -23,7 +23,7 @@
 //! КонецЕсли;
 //! ```
 //!
-//! Java (stack-based): Considers this "paired" (1 begin, 1 commit)
+//! bsl-language-server (stack-based): Considers this "paired" (1 begin, 1 commit)
 //! CFG (path-based): Catches BOTH errors - orphaned begin AND orphaned commit
 //!
 //! ## Algorithm
@@ -38,7 +38,6 @@
 //! 5. If level > 0 at exit → orphaned begin (missing Commit OR Rollback)
 //!
 //! Ported from:
-//! - PairingBrokenTransactionDiagnostic.java (bsl-language-server) - logic reference
 //! - Enhanced with CFG-based path analysis for higher precision
 
 use crate::define_metadata;
@@ -534,7 +533,7 @@ mod tests {
     }
 
     /// CFG-based test: Begin in one branch, Commit in another
-    /// Java misses this, CFG catches both errors
+    /// bsl-language-server misses this, CFG catches both errors
     #[test]
     fn test_branch_imbalance() {
         let code = r#"
@@ -1000,7 +999,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::PairingBrokenTransaction)
             .collect();
 
-        // Java produces 21 diagnostics
+        // bsl-language-server produces 21 diagnostics
         // CFG-based approach may find MORE issues due to path analysis
         assert!(
             pairing_diags.len() >= 10,

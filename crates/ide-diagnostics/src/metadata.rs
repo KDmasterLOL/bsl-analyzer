@@ -144,7 +144,7 @@ pub const fn derive_primary_impact(
     Impact::new(software_quality, impact_severity)
 }
 
-/// Diagnostic type (matches Java DiagnosticType).
+/// Diagnostic type (matches bsl-language-server DiagnosticType).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticType {
     /// Ошибка в коде
@@ -157,7 +157,7 @@ pub enum DiagnosticType {
     SecurityHotspot,
 }
 
-/// Diagnostic severity level (matches Java DiagnosticSeverity).
+/// Diagnostic severity level (matches bsl-language-server DiagnosticSeverity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticSeverityLevel {
     /// Информация
@@ -172,7 +172,7 @@ pub enum DiagnosticSeverityLevel {
     Blocker,
 }
 
-/// Diagnostic tag (matches Java DiagnosticTag).
+/// Diagnostic tag (matches bsl-language-server DiagnosticTag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MetadataTag {
     /// Нарушение стандартов 1С
@@ -205,7 +205,7 @@ pub enum MetadataTag {
     Localize,
 }
 
-/// Diagnostic scope (matches Java DiagnosticScope).
+/// Diagnostic scope (matches bsl-language-server DiagnosticScope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticScope {
     /// BSL и OneScript
@@ -216,7 +216,7 @@ pub enum DiagnosticScope {
     Bsl,
 }
 
-/// Diagnostic compatibility mode (matches Java DiagnosticCompatibilityMode).
+/// Diagnostic compatibility mode (matches bsl-language-server DiagnosticCompatibilityMode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCompatibilityMode {
     Undefined,
@@ -232,7 +232,7 @@ pub enum DiagnosticCompatibilityMode {
 
 /// Compile-time diagnostic metadata (zero-cost).
 ///
-/// This struct mirrors Java's @DiagnosticMetadata annotation.
+/// This struct mirrors bsl-language-server's @DiagnosticMetadata annotation.
 /// All fields are const-friendly for compile-time definitions.
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticMetadata {
@@ -256,9 +256,9 @@ pub struct DiagnosticMetadata {
 }
 
 impl DiagnosticMetadata {
-    /// Calculate severity (matches Java logic).
+    /// Calculate severity (matches bsl-language-server logic).
     ///
-    /// Java DiagnosticSeverityMapper::getDiagnosticSeverity logic:
+    /// bsl-language-server DiagnosticSeverityMapper::getDiagnosticSeverity logic:
     /// - CODE_SMELL + INFO → Hint
     /// - CODE_SMELL + MINOR → Information
     /// - CODE_SMELL + MAJOR/CRITICAL/BLOCKER → Warning

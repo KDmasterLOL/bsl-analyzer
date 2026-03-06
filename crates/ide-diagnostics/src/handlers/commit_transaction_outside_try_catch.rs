@@ -54,8 +54,6 @@
 //! The `from_hir` function converts the BodyDiagnostic to a Diagnostic for display.
 //!
 //! Ported from:
-//! - CommitTransactionOutsideTryCatchDiagnostic.java (bsl-language-server) - PRIMARY
-//! - commit_transaction_outside_try_catch.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Adapted to use HIR-based collection during AST→HIR lowering.
 
@@ -236,13 +234,13 @@ EndProcedure"#;
             .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
             .collect();
 
-        // Java expects 8 diagnostics, but we get 7 because we don't check module-level code.
+        // Expected 8 diagnostics, but we get 7 because we don't check module-level code.
         // The 8th diagnostic (line 107: ЗафиксироватьТранзакцию() outside any method) is a rare
         // edge case mostly relevant for OneScript. In standard 1C:Enterprise, code is always
         // inside procedures/functions. Not worth complicating lower_module_code for this.
         assert_eq!(diags.len(), 7, "Should detect 7 diagnostics (excluding module-level code)");
 
-        // Verify exact positions match Java test expectations
+        // Verify exact positions match bsl-language-server test expectations
         // Note: Line numbers are 0-indexed in Rowan
         assert_diagnostic_range(code, diags[0], 36, 4, 30); // Пример2: вне попытки (line 37 in 1-indexed)
         assert_diagnostic_range(code, diags[1], 45, 12, 38); // Пример3: в исключении (line 46)

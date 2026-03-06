@@ -36,8 +36,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - DataExchangeLoadingDiagnostic.java (bsl-language-server) - Java reference
-//! - data_exchange_loading.rs (bsl-language-server-rust) - Rust reference
 
 use cfg_types::IdConversion;
 
@@ -199,7 +197,7 @@ fn is_guard_if_statement(body: &Body, stmt_id: StmtId) -> bool {
 }
 
 /// Recursively check if HIR expression contains DataExchange.Load pattern.
-/// NOTE: Java implementation checks for any mention of DataExchange.Load in condition,
+/// NOTE: bsl-language-server checks for any mention of DataExchange.Load in condition,
 /// even if negated. The guard is valid as long as there's a Return in then_branch.
 fn condition_has_data_exchange_load(body: &Body, expr_id: ExprId) -> bool {
     let expr = body.expr(expr_id);
@@ -249,13 +247,13 @@ fn is_data_exchange_load_field(body: &Body, base_id: ExprId, field: &Name) -> bo
 }
 
 /// Check if branch contains Return statement.
-/// For DataExchangeLoading guard pattern, match Java behavior:
+/// For DataExchangeLoading guard pattern, match bsl-language-server behavior:
 /// The guard pattern should be simple: just a Return statement, possibly with other
 /// simple statements but Return should be present.
-/// However, Java seems to accept any Return in the branch.
+/// However, bsl-language-server seems to accept any Return in the branch.
 fn has_return_in_branch(body: &Body, stmts: &[StmtId]) -> bool {
-    // Java implementation uses descendants().any(Return), which finds Return anywhere
-    // But based on test failures, it seems Java may have stricter requirements
+    // bsl-language-server uses descendants().any(Return), which finds Return anywhere
+    // But based on test failures, it seems bsl-language-server may have stricter requirements
     // Let's check if Return exists anywhere in the statements
     for &stmt_id in stmts {
         if has_return_anywhere(body, stmt_id) {
@@ -394,7 +392,7 @@ EndProcedure
         assert_eq!(
             diagnostics.len(),
             3,
-            "Should match Java implementation (3 diagnostics with findFirst=false)"
+            "Should match bsl-language-server implementation (3 diagnostics with findFirst=false)"
         );
 
         assert_diagnostic_range(code, &diagnostics[0], 7, 10, 22);

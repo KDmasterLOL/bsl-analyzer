@@ -22,7 +22,7 @@ use syntax::{extract_leading_comments_at_offset, SyntaxNode};
 
 /// Parsed documentation for a BSL method (procedure or function).
 ///
-/// This is analogous to `MethodDescription` in bsl-language-server (Java).
+/// This is analogous to `MethodDescription` in bsl-language-server (bsl-language-server).
 /// All fields are optional because documentation sections may be missing.
 ///
 /// ## Example

@@ -1,10 +1,10 @@
 # DiagnosticMetadata Compatibility Verification
 
-This document describes the metadata compatibility verification between the Rust and Java implementations.
+This document describes the metadata compatibility verification between bsl-analyzer and bsl-language-server.
 
 ## Overview
 
-The Rust implementation maintains 100% compatibility with bsl-language-server (Java) metadata definitions.
+The Rust implementation maintains 100% compatibility with bsl-language-server metadata definitions.
 
 ## Verification Status
 
@@ -27,7 +27,7 @@ The following diagnostic categories have been verified for compatibility:
 - ✅ InternetAccess
 - ✅ MissingTempStorageDeletion
 
-All 11 diagnostics have `activatedByDefault = false` matching Java.
+All 11 diagnostics have `activatedByDefault = false` matching bsl-language-server.
 
 #### Error Diagnostics
 - ✅ DataExchangeLoading (ERROR/CRITICAL, 5min)
@@ -46,7 +46,7 @@ All 11 diagnostics have `activatedByDefault = false` matching Java.
 
 ### Severity Levels
 
-| Java                      | Rust                         | LSP Severity |
+| bsl-language-server       | Rust                         | LSP Severity |
 |---------------------------|------------------------------|--------------|
 | DiagnosticType.ERROR      | DiagnosticType::Error        | Error        |
 | DiagnosticType.VULNERABILITY | DiagnosticType::Vulnerability | Error     |
@@ -55,7 +55,7 @@ All 11 diagnostics have `activatedByDefault = false` matching Java.
 
 ### LSP Severity Calculation
 
-The Rust implementation uses the same severity calculation logic as Java:
+The Rust implementation uses the same severity calculation logic as bsl-language-server:
 
 ```rust
 DiagnosticType::CodeSmell => match severity {
@@ -74,7 +74,7 @@ DiagnosticType::Error | Vulnerability => match severity {
 
 ### Tags Mapping
 
-All Java tags are mapped to equivalent Rust enum variants:
+All bsl-language-server tags are mapped to equivalent Rust enum variants:
 
 - STANDARD → Standard
 - BADPRACTICE → Badpractice
@@ -90,19 +90,6 @@ All Java tags are mapped to equivalent Rust enum variants:
 - DEPRECATED → Deprecated
 - UNUSED → Unused
 - LOCALIZE → Localize
-
-## Verification Script
-
-Run the compatibility verification script:
-
-```bash
-./scripts/verify-metadata-compatibility.py
-```
-
-This script:
-1. Parses Java `@DiagnosticMetadata` annotations
-2. Compares with Rust const definitions
-3. Reports any mismatches
 
 ## Test Suite
 
@@ -131,7 +118,7 @@ The following 5 diagnostics were recently added to achieve 100% coverage:
 4. **SameMetadataObjectAndChildNames** - Detects child names matching parent
 5. **UnusedLocalVariable** - Detects unused local variables
 
-All match Java implementation exactly.
+All match bsl-language-server exactly.
 
 ## Known Differences
 
@@ -141,7 +128,7 @@ The Rust implementation does not have `HTTPServiceModule` (not available in curr
 
 **Affected diagnostic:** ExecuteExternalCode
 
-**Java modules:**
+**bsl-language-server modules:**
 - CommandModule
 - ExternalConnectionModule
 - FormModule
@@ -162,4 +149,4 @@ This is the only known difference and does not affect compatibility.
 
 **✅ 100% Compatibility Achieved**
 
-All 171 DiagnosticCode variants have metadata definitions that match Java implementation.
+All 171 DiagnosticCode variants have metadata definitions that match bsl-language-server.

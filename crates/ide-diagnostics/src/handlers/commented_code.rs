@@ -36,8 +36,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - commented_code.rs (bsl-language-server-rust) - PRIMARY REFERENCE
-//! - CommentedCodeDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! Migrated to text-based API using Rowan tokens instead of text processing.
 
@@ -149,7 +147,7 @@ fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
 /// Comments are considered consecutive if they are on immediately adjacent lines
 /// with no non-comment lines between them (including blank lines or code lines).
 ///
-/// This mimics the Java implementation which processes line-by-line and breaks
+/// This mimics the bsl-language-server which processes line-by-line and breaks
 /// groups when a non-comment line is encountered.
 fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<CommentGroup> {
     if tokens.is_empty() {
@@ -178,7 +176,7 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
         let curr_line = get_line(curr_offset);
 
         // Strict consecutive check: comments must be on immediately adjacent lines
-        // This matches the Java behavior where groups break on any non-comment line
+        // Groups break on any non-comment line
         let is_consecutive = curr_line == prev_line + 1;
 
         if is_consecutive {
@@ -597,7 +595,7 @@ mod tests {
         let code = include_str!("../../test_data/CommentedCodeDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 12, "Should match Java implementation (12 diagnostics)");
+        assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics");
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 6, 81);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 16, 4, 34, 16);

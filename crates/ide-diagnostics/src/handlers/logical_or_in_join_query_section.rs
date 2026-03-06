@@ -39,9 +39,7 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - LogicalOrInJoinQuerySectionDiagnostic.java (bsl-language-server)
 //!
-//! Source: `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/LogicalOrInJoinQuerySectionDiagnostic.bsl`
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -134,8 +132,12 @@ mod tests {
         let code = include_str!("../../test_data/LogicalOrInJoinQuerySectionDiagnostic.bsl");
         let diagnostics = check_sdbl_diagnostic(code, check);
 
-        // Expect exactly 8 diagnostics matching Java implementation
-        assert_eq!(diagnostics.len(), 8, "Expected 8 diagnostics matching Java implementation");
+        // Expect exactly 8 diagnostics matching reference implementation
+        assert_eq!(
+            diagnostics.len(),
+            8,
+            "Expected 8 diagnostics matching reference implementation"
+        );
 
         // Verify all are on correct code
         for diag in &diagnostics {
@@ -146,7 +148,7 @@ mod tests {
         }
 
         // Use proper test helpers for position verification
-        // Expected positions from Java: lines 13 (2 ORs), 19, 24, 26, 27, 29, 30
+        // Expected positions from bsl-language-server: lines 13 (2 ORs), 19, 24, 26, 27, 29, 30
 
         // Line 13: first OR in "Сумма > 0 ИЛИ СуммаНДС > 0 ИЛИ СуммаСНДС > 0"
         assert_diagnostic_range(code, &diagnostics[0], 12, 62, 65);

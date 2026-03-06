@@ -50,8 +50,6 @@
 //! The `from_hir` function converts the BodyDiagnostic to a Diagnostic for display.
 //!
 //! Ported from:
-//! - BeginTransactionBeforeTryCatchDiagnostic.java (bsl-language-server) - PRIMARY
-//! - begin_transaction_before_try_catch.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Adapted to use HIR-based collection during AST→HIR lowering.
 
@@ -226,14 +224,14 @@ EndProcedure"#;
             .filter(|d| d.code == DiagnosticCode::BeginTransactionBeforeTryCatch)
             .collect();
 
-        // Java expects 7 diagnostics, but we get 6 because we don't check module-level code.
+        // Expected 7 diagnostics, but we get 6 because we don't check module-level code.
         // The 7th diagnostic (line 102: НачатьТранзакцию() outside any method) is a rare
         // edge case mostly relevant for OneScript. In standard 1C:Enterprise, code is always
         // inside procedures/functions. Not worth complicating lower_module_code for this.
         assert_eq!(diags.len(), 6, "Should detect 6 diagnostics (excluding module-level code)");
 
-        // Verify exact positions match Java test expectations
-        // Java format: .hasRange(line, startCol, line, endCol) where line is 0-indexed
+        // Verify exact positions match bsl-language-server test expectations
+        // Format: .hasRange(line, startCol, line, endCol) where line is 0-indexed
         assert_diagnostic_range(code, diags[0], 29, 4, 23); // Пример2: код перед попыткой
         assert_diagnostic_range(code, diags[1], 42, 8, 27); // Пример3: в попытке
         assert_diagnostic_range(code, diags[2], 55, 4, 23); // Пример4: код после начала

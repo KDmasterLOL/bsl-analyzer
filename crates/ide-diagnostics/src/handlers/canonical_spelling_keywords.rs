@@ -400,15 +400,15 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // CRITICAL: Must match Java implementation (127 diagnostics)
+        // CRITICAL: Must match bsl-language-server implementation (127 diagnostics)
         assert_eq!(
             diagnostics.len(),
             127,
-            "Must match Java implementation exactly (127 diagnostics)"
+            "Must match bsl-language-server implementation exactly (127 diagnostics)"
         );
 
         // Verify exact positions (spot-check key diagnostics)
-        // Using Java test line/column numbers directly (0-based)
+        // Using reference test line/column numbers directly (0-based)
 
         // ПерЕМ
         assert_diagnostic_range(code, &diagnostics[0], 8, 4, 9);

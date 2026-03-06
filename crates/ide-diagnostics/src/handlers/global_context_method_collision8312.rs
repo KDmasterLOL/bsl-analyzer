@@ -37,7 +37,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - GlobalContextMethodCollision8312Diagnostic.java (bsl-language-server)
 //!
 //! ### Algorithm:
 //! - O(n) complexity: single pass through function definitions
@@ -45,7 +44,6 @@
 //! - Checks both Russian and English method names
 //!
 //! ### Diagnostic range:
-//! - Java: `diagnosticStorage.addDiagnostic(method.getSubNameRange())`
 //! - Rust: First IDENT token before PARAM_LIST (function name)
 //!
 //! ## References
@@ -101,9 +99,9 @@ pub fn from_hir(
 mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, Severity};
-    /// Integration test matching Java test structure.
+    /// Integration test matching reference test structure.
     ///
-    /// Based on GlobalContextMethodCollision8312DiagnosticTest.java
+    /// Based on reference test
     /// Uses the same test file: GlobalContextMethodCollision8312Diagnostic.bsl
     ///
     /// Expected: 20 diagnostics (all conflicting method names)
@@ -118,10 +116,10 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::GlobalContextMethodCollision8312)
             .collect();
 
-        // Java test expects 20 diagnostics
+        // Expected 20 diagnostics
         assert_eq!(collision_diags.len(), 20, "Expected 20 diagnostics");
 
-        // Verify all diagnostics match Java ranges exactly
+        // Verify all diagnostics match bsl-language-server ranges exactly
         // Format: line, start_col, end_col
         let expected_ranges = [
             (0, 8, 20),  // ПроверитьБит

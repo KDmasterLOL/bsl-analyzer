@@ -11,7 +11,7 @@ Real-world benchmark results from actual projects.
 - Platform: macOS (Darwin 24.6.0)
 - Hardware: Multi-core CPU (~6 cores utilized)
 
-### Java bsl-language-server v0.25.2
+### bsl-language-server v0.25.2
 
 ```bash
 bsl-language-server analyze -c=.bsl-language-server.json -o=./.build -r=json -s=./src/cf/
@@ -41,7 +41,7 @@ bsl-analyzer analyze -s=./src/cf/
 
 ### Performance Comparison
 
-| Metric | Java | Rust | Improvement |
+| Metric | bsl-ls | Rust | Improvement |
 |--------|------|------|-------------|
 | **Wall time** | 58.87s | 11.17s | **5.27x faster** ⚡ |
 | **User time** | 337.13s | 59.32s | **5.68x less CPU** 🚀 |
@@ -75,7 +75,7 @@ Recent optimizations that contributed to these results:
 Based on doc3 results (121 MB, 6,540 files):
 
 **4 GB project** (~33x larger):
-- **Java**: ~32 minutes (59s × 33 ≈ 1,947s), **~123 GB memory**
+- **bsl-language-server**: ~32 minutes (59s × 33 ≈ 1,947s), **~123 GB memory**
 - **Rust**: ~6 minutes (11s × 33 ≈ 369s), **~46 GB memory**
 - **Improvement**: Still **5-6x faster**, **2.7x less memory**
 
@@ -87,7 +87,7 @@ Based on doc3 results (121 MB, 6,540 files):
 
 ### Notes
 
-- Java version uses JVM with JIT compilation (warm-up time included)
+- bsl-language-server uses JVM with JIT compilation (warm-up time included)
 - Rust version is native binary (no startup overhead)
 - Both tests run on same hardware with similar CPU core utilization
 - Rust version has significantly lower system time (better I/O efficiency)

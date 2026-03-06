@@ -2,7 +2,6 @@
 //!
 //! Checks if partially localized NStr() strings are used in StrTemplate function.
 //!
-//! **Source:** bsl-language-server/MultilingualStringUsingWithTemplateDiagnostic.java
 //!
 //! ## Why?
 //! NStr in a multilingual configuration has different fragments for different languages.
@@ -353,9 +352,8 @@ mod tests {
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 2 diagnostics with default config (declaredLanguages = "ru")
-        // hasRange(19, 38, 19, 89) and hasRange(24, 31, 24, 82)
-        assert_eq!(diagnostics.len(), 2, "Must match Java (2 diagnostics for ru only)");
+        // Expected 2 diagnostics with default config (declaredLanguages = "ru")
+        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics for ru only");
 
         // Verify exact positions (0-indexed)
         assert_diagnostic_range_multiline(code, &diagnostics[0], 19, 38, 19, 89);
@@ -376,12 +374,8 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 4 diagnostics with declaredLanguages = "ru,en"
-        // hasRange(18, 38, 18, 89)
-        // hasRange(19, 38, 19, 89)
-        // hasRange(21, 28, 21, 79)
-        // hasRange(24, 31, 24, 82)
-        assert_eq!(diagnostics.len(), 4, "Must match Java (4 diagnostics for ru,en)");
+        // Expected 4 diagnostics with declaredLanguages = "ru,en"
+        assert_eq!(diagnostics.len(), 4, "Should find 4 diagnostics for ru,en");
 
         assert_diagnostic_range_multiline(code, &diagnostics[0], 18, 38, 18, 89);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 19, 38, 19, 89);

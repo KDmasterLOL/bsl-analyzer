@@ -39,7 +39,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - IsInRoleMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! **Architecture:** HIR-based diagnostic (migrated from AST).
 //!
@@ -351,7 +350,7 @@ mod tests {
         let code = include_str!("../../test_data/IsInRoleMethodDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 3, "Should match Java: 3 diagnostics");
+        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics");
 
         // Line 33 (0-indexed 32), cols 9-35: Direct РольДоступна() in if
         assert_diagnostic_range(code, &diagnostics[0], 32, 9, 35);

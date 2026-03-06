@@ -144,7 +144,7 @@ mod tests {
         let code = include_str!("../../test_data/QueryParseErrorDiagnostic.bsl");
         let diagnostics = check_sdbl_diagnostic(code, check);
 
-        // Java expects 3 diagnostics:
+        // Expected 3 diagnostics:
         // - Lines 10-11: incomplete JOIN (first part of concatenated string)
         // - Lines 15-20: incomplete WHERE (Условие >)
         // - Lines 28-29: incomplete FROM in batch (we detect whole batch 23-30)

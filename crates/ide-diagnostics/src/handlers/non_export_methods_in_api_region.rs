@@ -53,7 +53,6 @@
 //! - **Minutes to fix:** 5
 //!
 //! ## Implementation
-//! Ported from: NonExportMethodsInApiRegionDiagnostic.java (bsl-language-server)
 //!
 //! Uses HIR infrastructure:
 //! - **ItemTree** - method signatures (is_export, annotations, name_range)

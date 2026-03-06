@@ -198,7 +198,7 @@ mod tests {
         let code = include_str!("../../test_data/UsingServiceTagDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 21, "Should match Java implementation (21 diagnostics)");
+        assert_eq!(diagnostics.len(), 21, "Should find 21 diagnostics");
 
         assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36);
         assert_diagnostic_range(code, &diagnostics[1], 13, 4, 50);

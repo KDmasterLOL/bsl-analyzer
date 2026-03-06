@@ -693,9 +693,9 @@ mod tests {
         );
     }
 
-    /// Test based on Java fixture content (UnusedLocalVariableDiagnostic.bsl)
+    /// Test based on test fixture content (UnusedLocalVariableDiagnostic.bsl)
     ///
-    /// Java test expects 5 diagnostics total:
+    /// Expected 5 diagnostics total:
     /// - Line 1, col 6-36: module variable (NOT YET IMPLEMENTED - module-level)
     /// - Line 19, col 10-35: `ЛокальнаяБезИспользования` - declared but never used ✓
     /// - Line 19, col 37-63: `ТолькоСПрисвоениемЗначения` - assigned but never read ✓
@@ -705,7 +705,7 @@ mod tests {
     /// This test covers only the local variables we currently handle (3 of 5).
     #[test]
     fn test_fixture_local_variables_in_function() {
-        // Excerpt from Java fixture: function Вторая()
+        // Excerpt from test fixture: function Вторая()
         let code = r#"Функция Вторая()
     Перем ЛокальнаяБезИспользования, ТолькоСПрисвоениемЗначения, ЛокальнаяСИспользованием;
 
@@ -844,18 +844,18 @@ mod tests {
         );
     }
 
-    /// Full Java fixture test.
+    /// Full test fixture test.
     ///
-    /// Java test expects 5 diagnostics:
+    /// Expected 5 diagnostics:
     /// - hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
     /// - hasRange(19, 10, 35): Line 19, `ЛокальнаяБезИспользования`
     /// - hasRange(19, 37, 63): Line 19, `ТолькоСПрисвоениемЗначения`
     /// - hasRange(24, 4, 28): Line 24, `ВПроцедуреНеИспользуемая`
     /// - hasRange(83, 0, 25): Line 83, `ВнеПроцедурНеИспользуемая`
     ///
-    /// Note: Java uses 0-indexed lines. Our implementation may differ because:
+    /// Note: bsl-language-server uses 0-indexed lines. Our implementation may differ because:
     /// - We don't handle `&НаКлиенте`/`&НаСервере` annotations (both vars with same name flagged)
-    /// - We may detect additional unused variables Java doesn't flag
+    /// - We may detect additional unused variables that bsl-language-server doesn't flag
     #[test]
     fn test_java_fixture_full() {
         let code = include_str!("../../test_data/UnusedLocalVariableDiagnostic.bsl");
@@ -864,10 +864,10 @@ mod tests {
         let unused_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
 
-        // Check that we detect the key cases from Java test
+        // Check that we detect the key cases from reference test
         let messages: Vec<&str> = unused_diags.iter().map(|d| d.message.as_str()).collect();
 
-        // These should be detected (matching Java):
+        // These should be detected :
         assert!(
             messages.iter().any(|m| m.contains("ЛокальнаяБезИспользования")),
             "Should detect ЛокальнаяБезИспользования"
@@ -889,16 +889,16 @@ mod tests {
             "Should detect ПеременнаяМодуляНеИспользуемая"
         );
 
-        // Java expects exactly 5 diagnostics.
+        // Expected exactly 5 diagnostics.
         // Note: ПеременнаяМодуляНеИспользуемая appears twice in fixture:
         // - Line 2: &НаКлиенте Перем ПеременнаяМодуляНеИспользуемая; // Error (first declaration)
         // - Line 5: &НаСервере Перем ПеременнаяМодуляНеИспользуемая; // Ignored (duplicate name)
         //
-        // Java ignores duplicate module variable declarations (VariableSymbolComputer.visitModuleVarDeclaration:88-89).
+        // bsl-language-server ignores duplicate module variable declarations (VariableSymbolComputer.visitModuleVarDeclaration:88-89).
         // We now match this behavior by skipping duplicates in SymbolTreeBuilder.add_variable.
-        assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables (matching Java)");
+        assert_eq!(unused_diags.len(), 5, "Should detect 5 unused variables ");
 
-        // Verify exact positions (matching Java test)
+        // Verify exact positions (matching reference test)
         // Sort diagnostics by line number for consistent comparison
         use crate::test_utils::{assert_diagnostic_range, range_to_line_col};
         let mut sorted_diags = unused_diags.clone();
@@ -907,7 +907,7 @@ mod tests {
             (line, col)
         });
 
-        // Java expectations (sorted by line):
+        // Expected values (sorted by line):
         // 1. hasRange(1, 6, 36): Line 1, `ПеременнаяМодуляНеИспользуемая` with `&НаКлиенте`
         assert_diagnostic_range(code, sorted_diags[0], 1, 6, 36);
 

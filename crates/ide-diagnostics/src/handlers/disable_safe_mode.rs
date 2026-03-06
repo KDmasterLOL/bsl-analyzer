@@ -55,8 +55,6 @@
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!
 //! Ported from:
-//! - DisableSafeModeDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - disable_safe_mode.rs (bsl-language-server-rust) - Rust reference
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -250,9 +248,9 @@ mod tests {
         let safe_mode_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
 
-        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics to match Java");
+        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics to match bsl-language-server");
 
-        // Verify diagnostic positions match Java test expectations
+        // Verify diagnostic positions match bsl-language-server test expectations
         assert_diagnostic_range(input, safe_mode_diags[0], 2, 4, 29);
         assert_diagnostic_range(input, safe_mode_diags[1], 5, 4, 29);
         assert_diagnostic_range(input, safe_mode_diags[2], 9, 4, 41);

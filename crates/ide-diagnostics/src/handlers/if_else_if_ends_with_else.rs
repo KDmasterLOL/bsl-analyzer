@@ -37,7 +37,6 @@
 //!
 //! Migrated to HIR-based collection (rust-analyzer pattern).
 //!
-//! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseIfEndsWithElseDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_if_ends_with_else.rs
 
 use crate::define_metadata;
@@ -226,11 +225,11 @@ mod tests {
         let endif_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::IfElseIfEndsWithElse).collect();
 
-        // Java test expects: assertThat(diagnostics).hasSize(1);
+        // Expected: assertThat(diagnostics).hasSize(1);
         assert_eq!(endif_diags.len(), 1, "Expected 1 diagnostic");
 
-        // Verify the diagnostic range matches Java implementation
-        // Java: assertThat(diagnostics, true).hasRange(20, 0, 20, 9);
+        // Verify the diagnostic range matches bsl-language-server implementation
+        // bsl-language-server: assertThat(diagnostics, true).hasRange(20, 0, 20, 9);
         assert_diagnostic_range(code, endif_diags[0], 20, 0, 9);
     }
 }

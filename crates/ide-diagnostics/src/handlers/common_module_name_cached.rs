@@ -2,7 +2,6 @@
 //!
 //! Cached CommonModules must contain "Cached" or "ПовтИсп" in their name.
 //!
-//! Ported from: CommonModuleNameCachedDiagnostic.java
 
 use crate::define_common_module_name_check;
 use crate::metadata::*;

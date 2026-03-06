@@ -39,7 +39,6 @@
 //! ```
 //!
 //! ## References
-//! - Java implementation: bsl-language-server/diagnostics/UsingFindElementByStringDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

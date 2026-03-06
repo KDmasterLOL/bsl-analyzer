@@ -25,7 +25,6 @@
 //! ```
 //!
 //! ## Source
-//! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedCodeBlockDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_code_block.rs
 
 use crate::define_metadata;
@@ -150,14 +149,10 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
 
-        // Java version finds 5 diagnostics
+        // Expected 5 diagnostics
         let found_count = diags.len();
 
-        assert_eq!(
-            found_count, 5,
-            "Should find 5 diagnostics (100% Java compatibility), found {}",
-            found_count
-        );
+        assert_eq!(found_count, 5, "Should find 5 diagnostics (), found {}", found_count);
 
         // Sort diagnostics by line number for consistent checking
         let mut sorted_diagnostics: Vec<_> = diags.into_iter().collect();

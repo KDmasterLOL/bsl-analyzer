@@ -33,7 +33,6 @@
 //! ```
 //!
 //! ## Source
-//! Source: bsl-language-server/src/main/java/.../diagnostics/IdenticalExpressionsDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/identical_expressions.rs
 //!
 //! ## Implementation
@@ -846,7 +845,7 @@ fn extract_assign_rhs(assign_stmt: &SyntaxNode) -> Option<String> {
 /// 3. Normalize text (remove whitespace, parentheses)
 /// 4. Deduplicate while preserving order
 ///
-/// NOTE: This is MORE comprehensive than Java - we also find complex expressions!
+/// NOTE: This is MORE comprehensive than bsl-language-server - we also find complex expressions!
 fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
     let mut operands = Vec::new();
 
@@ -973,11 +972,15 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java test expects 20 diagnostics
+        // Expected 20 diagnostics
         // Check how many we find
         let found_count = diagnostics.len();
 
-        assert_eq!(found_count, 21, "Should find 21 diagnostics (105% Java compatibility - fixed Java bug on line 57!), found {}", found_count);
+        assert_eq!(
+            found_count, 21,
+            "Should find 21 diagnostics (fixed bsl-language-server bug on line 57!), found {}",
+            found_count
+        );
 
         // Helper to find diagnostic on specific line
         let find_diag_on_line = |target_line: u32| -> &Diagnostic {
@@ -990,7 +993,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("No diagnostic found on line {}", target_line))
         };
 
-        // Verify diagnostic positions match Java implementation using test_utils helpers
+        // Verify diagnostic positions match bsl-language-server implementation using test_utils helpers
         let diag_line_4 = find_diag_on_line(4);
         let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_4.range);
         crate::test_utils::assert_diagnostic_range(code, diag_line_4, 4, 9, end_col);

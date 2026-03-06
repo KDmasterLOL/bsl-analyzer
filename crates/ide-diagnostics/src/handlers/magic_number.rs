@@ -2,7 +2,6 @@
 //!
 //! Detects hard-coded numeric literals in BSL code.
 //!
-//! **Source:** bsl-language-server/MagicNumberDiagnostic.java
 //!
 //! ## Why?
 //!
@@ -207,7 +206,7 @@ mod tests {
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
 
-        assert_eq!(diags.len(), 10, "Must match Java (10 diagnostics)");
+        assert_eq!(diags.len(), 10, "Must match bsl-language-server (10 diagnostics)");
 
         assert_diagnostic_range(code, diags[0], 3, 18, 20); // 60
         assert_diagnostic_range(code, diags[1], 3, 23, 25); // 60
@@ -286,11 +285,7 @@ mod tests {
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diags = filter(&all);
 
-        assert_eq!(
-            diags.len(),
-            12,
-            "Must match Java (12 diagnostics with allowMagicIndexes=false)"
-        );
+        assert_eq!(diags.len(), 12, "Should find 12 diagnostics with allowMagicIndexes=false");
 
         assert_diagnostic_range(code, diags[10], 49, 32, 34);
         assert_diagnostic_range(code, diags[11], 50, 18, 20);

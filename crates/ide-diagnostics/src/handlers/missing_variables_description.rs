@@ -137,7 +137,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::MissingVariablesDescription)
             .collect();
 
-        assert_eq!(mvd.len(), 5, "Expected 5 diagnostics from Java fixture");
+        assert_eq!(mvd.len(), 5, "Expected 5 diagnostics");
 
         assert_diagnostic_range(FIXTURE, mvd[0], 1, 6, 27);
         assert_diagnostic_range(FIXTURE, mvd[1], 3, 6, 45);

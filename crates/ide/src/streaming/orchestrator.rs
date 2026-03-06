@@ -446,7 +446,7 @@ impl AnalysisOrchestrator {
     /// Uses `project_model::ProjectConfig` to load configuration,
     /// then deserializes the `diagnostics` field into `DiagnosticsConfig`.
     ///
-    /// ## Config Format (Java BSL-LS compatible)
+    /// ## Config Format (bsl-language-server compatible)
     ///
     /// ```json
     /// {

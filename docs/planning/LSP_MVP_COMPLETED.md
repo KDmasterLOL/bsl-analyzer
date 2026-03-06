@@ -309,7 +309,7 @@ RequestDispatcher { req: Some(req), global_state: state }
 
 ## Compatibility
 
-### С bsl-language-server (Java):
+### С bsl-language-server:
 ✅ Diagnostic codes (100% совместимость)
 ✅ Severity levels
 ✅ Configuration format (.bsl-analyzer.json)

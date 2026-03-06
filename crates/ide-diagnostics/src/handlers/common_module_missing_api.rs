@@ -2,7 +2,6 @@
 //!
 //! CommonModule should contain export methods AND API regions.
 //!
-//! Ported from: CommonModuleMissingAPIDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

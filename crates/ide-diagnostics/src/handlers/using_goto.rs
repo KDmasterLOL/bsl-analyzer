@@ -2,7 +2,6 @@
 //!
 //! Detects usage of Goto/Перейти statement.
 //!
-//! **Source (Java):** bsl-language-server/UsingGotoDiagnostic.java
 //!
 //! Goto is an unstructured control flow statement that makes code less readable
 //! and harder to maintain. Should use structured control flow instead

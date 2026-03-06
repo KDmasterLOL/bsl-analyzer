@@ -25,7 +25,6 @@
 //! - **Severity:** Error (MAJOR)
 //!
 //! ## Implementation
-//! Ported from SelfInsertionDiagnostic.java (bsl-language-server).
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -130,9 +129,9 @@ mod tests {
         // Expected: 2 diagnostics
         // Line 3: НастройкиПроверки.Вставить("ТутЯ", НастройкиПроверки);
         // Line 9: Товары.Добавить(Товары);
-        assert_eq!(diags.len(), 2, "Should match Java: 2 diagnostics");
+        assert_eq!(diags.len(), 2, "Should find 2 diagnostics");
 
-        // Verify positions match Java implementation
+        // Verify positions match bsl-language-server implementation
         assert_diagnostic_range(code, diags[0], 3, 4, 57);
         assert_diagnostic_range(code, diags[1], 9, 4, 27);
     }

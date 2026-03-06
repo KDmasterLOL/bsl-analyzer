@@ -52,7 +52,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - InternetAccessDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! **Architecture:** HIR-based diagnostic (migrated from AST).
 //!
@@ -218,49 +217,36 @@ mod tests {
         let code = include_str!("../../test_data/InternetAccessDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // 13 internet access detections (matching Java test: hasSize(13))
+        // 13 internet access detections (matching reference test: hasSize(13))
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics");
 
-        // All diagnostics match Java test expectations
-        // Both Java and assert_diagnostic_range use 0-indexed lines
+        // All diagnostics match bsl-language-server test expectations
+        // assert_diagnostic_range uses 0-indexed lines
 
-        // Java: .hasRange(1, 20, 75)
         assert_diagnostic_range(code, &diagnostics[0], 1, 20, 75);
 
-        // Java: .hasRange(3, 18, 72)
         assert_diagnostic_range(code, &diagnostics[1], 3, 18, 72);
 
-        // Java: .hasRange(5, 16, 80)
         assert_diagnostic_range(code, &diagnostics[2], 5, 16, 80);
 
-        // Java: .hasRange(8, 8, 111)
         assert_diagnostic_range(code, &diagnostics[3], 8, 8, 111);
 
-        // Java: .hasRange(13, 21, 65)
         assert_diagnostic_range(code, &diagnostics[4], 13, 21, 65);
 
-        // Java: .hasRange(14, 17, 35)
         assert_diagnostic_range(code, &diagnostics[5], 14, 17, 35);
 
-        // Java: .hasRange(15, 17, 47)
         assert_diagnostic_range(code, &diagnostics[6], 15, 17, 47);
 
-        // Java: .hasRange(16, 17, 43)
         assert_diagnostic_range(code, &diagnostics[7], 16, 17, 43);
 
-        // Java: .hasRange(17, 21, 51)
         assert_diagnostic_range(code, &diagnostics[8], 17, 21, 51);
 
-        // Java: .hasRange(21, 14, 43)
         assert_diagnostic_range(code, &diagnostics[9], 21, 14, 43);
 
-        // Java: .hasRange(27, 14, 32)
         assert_diagnostic_range(code, &diagnostics[10], 27, 14, 32);
 
-        // Java: .hasRange(31, 14, 35)
         assert_diagnostic_range(code, &diagnostics[11], 31, 14, 35);
 
-        // Java: .hasRange(34, 10, 21)
         assert_diagnostic_range(code, &diagnostics[12], 34, 10, 21);
     }
 

@@ -49,10 +49,7 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - FieldsFromJoinsWithoutIsNullDiagnostic.java (bsl-language-server)
-//! - Rust SDBL utilities (bsl-language-server-rust)
 //!
-//! Source: `~/src/lsp/bsl-language-server/src/test/resources/diagnostics/FieldsFromJoinsWithoutIsNullDiagnostic.bsl`
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -191,7 +188,7 @@ mod tests {
         let diagnostics = check_sdbl_diagnostic(code, check);
 
         // Per-field diagnostic mode: one diagnostic per unprotected field reference.
-        // Java implementation emitted 9 diagnostics (one per JOIN), but we now emit
+        // bsl-language-server emitted 9 diagnostics (one per JOIN), but we now emit
         // one per field for better UX - highlighting the exact field that needs protection.
         // Test8 (FULL JOIN) has 3 unprotected fields: lines 99, 100, 101.
 

@@ -67,8 +67,6 @@
 //! to a Diagnostic for display.
 //!
 //! Ported from:
-//! - code_after_async_call.rs (bsl-language-server-rust) - PRIMARY
-//! - CodeAfterAsyncCallDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -229,11 +227,11 @@ EndProcedure
 
         let diagnostics = check_diagnostic(code);
 
-        // Java expects 10 diagnostics (from CodeAfterAsyncCallDiagnosticTest.java)
-        assert_eq!(diagnostics.len(), 10, "Should match Java implementation (10 diagnostics)");
+        // Expected 10 diagnostics (from reference test)
+        assert_eq!(diagnostics.len(), 10, "Should find 10 diagnostics");
 
-        // Verify exact positions match Java test expectations (line:col ranges)
-        // Java format: hasRange(line, startCol, endCol) from CodeAfterAsyncCallDiagnosticTest.java
+        // Verify exact positions match bsl-language-server test expectations (line:col ranges)
+        // Format: hasRange(line, startCol, endCol) from reference test
         assert_diagnostic_range(code, &diagnostics[0], 4, 4, 97);
         assert_diagnostic_range(code, &diagnostics[1], 21, 8, 101);
         assert_diagnostic_range(code, &diagnostics[2], 34, 8, 101);

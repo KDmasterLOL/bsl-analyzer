@@ -39,8 +39,6 @@
 //! **This is a HIR-based diagnostic** - detects external app calls during HIR lowering.
 //!
 //! Ported from:
-//! - ExternalAppStartingDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - external_app_starting.rs (bsl-language-server-rust) - Rust reference
 
 use crate::define_metadata;
 use crate::metadata::*;

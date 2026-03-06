@@ -44,13 +44,10 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - GetFormMethodDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - get_form_method.rs (bsl-language-server-rust) - REFERENCE IMPLEMENTATION
 //!
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter or ANTLR visitor.
 //!
 //! ## References
-//! Source: bsl-language-server/src/main/java/com/github/_1c_syntax/bsl/languageserver/diagnostics/GetFormMethodDiagnostic.java
 //! Uses AbstractFindMethodDiagnostic pattern - checks both global and object method calls.
 
 use crate::define_metadata;
@@ -214,14 +211,14 @@ EndProcedure
         let get_form_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();
 
-        // Java expects 4 diagnostics
-        assert_eq!(get_form_diags.len(), 4, "Should match Java implementation: 4 diagnostics");
+        // Expected 4 diagnostics
+        assert_eq!(
+            get_form_diags.len(),
+            4,
+            "Should match bsl-language-server implementation: 4 diagnostics"
+        );
 
-        // Java test expectations (0-based lines):
-        // .hasRange(2, 14, 2, 27)   // Док.ПолучитьФорму
-        // .hasRange(6, 21, 6, 34)   // ПолучитьФорму (global)
-        // .hasRange(11, 15, 11, 22) // Doc.GetForm
-        // .hasRange(15, 11, 15, 18) // GetForm (global)
+        // reference test expectations (0-based lines):
 
         assert_diagnostic_range(code, get_form_diags[0], 2, 14, 27);
         assert_diagnostic_range(code, get_form_diags[1], 6, 21, 34);

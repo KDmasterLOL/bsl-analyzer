@@ -32,7 +32,6 @@
 //! are detected and emitted as BodyDiagnostic::TryNumber.
 //!
 //! Ported from:
-//! - TryNumberDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;

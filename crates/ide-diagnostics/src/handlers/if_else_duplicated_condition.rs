@@ -32,7 +32,6 @@
 //!
 //! Migrated to HIR-based collection (rust-analyzer pattern).
 //!
-//! Source: bsl-language-server/src/main/java/.../diagnostics/IfElseDuplicatedConditionDiagnostic.java
 //! Source: bsl-language-server-rust/crates/bsl-diagnostics/src/rules/if_else_duplicated_condition.rs
 
 use crate::define_metadata;
@@ -280,7 +279,7 @@ mod tests {
         // Lines 42, 44, 46 - duplicates of (Знак = "ё") -> 2 diagnostics (44, 46)
         // Total: 2 + 1 + 1 + 2 = 6 diagnostics
 
-        // Note: Java approach reports 4 diagnostics (one per group with relatedInformation)
+        // Note: bsl-language-server reports 4 diagnostics (one per group with relatedInformation)
         // Our approach reports 6 diagnostics (one per duplicate, not counting first occurrence)
         // Both are valid, ours is more explicit
 

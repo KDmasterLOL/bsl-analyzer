@@ -34,8 +34,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - AssignAliasFieldsInQueryDiagnostic.java (bsl-language-server)
-//! - assign_alias_fields_in_query.rs (bsl-language-server-rust)
 //!
 //! Now uses SDBL HIR with diagnostics collected during lowering.
 
@@ -343,12 +341,12 @@ mod tests {
 
     #[test]
     fn test_union_query() {
-        // UNION query - first query checked, UNION query not checked (per Java impl)
+        // UNION query - first query checked, UNION query not checked (per bsl-language-server)
         let query = "SELECT Name AS N FROM Products UNION SELECT Title FROM Services";
         let diagnostics = check_standalone_query(query);
         // First query OK (Name AS N), second query (Title without alias) not checked
         // Because we only check main query, not UNION queries
-        // NOTE: This matches Java implementation behavior
+        // NOTE: This matches bsl-language-server implementation behavior
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -386,7 +384,7 @@ mod tests {
         // Should have 2 AliasWithoutAsKeyword diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
-        // UNION queries are skipped per Java implementation behavior
+        // UNION queries are skipped per bsl-language-server behavior
         assert_eq!(
             diagnostics.len(),
             2,
@@ -506,7 +504,7 @@ mod tests {
         // Should have 2 diagnostics from first SELECT (before UNION):
         // - Валюты.Ссылка without alias
         // - Валюты.Код Код without AS keyword
-        // UNION queries are skipped per Java implementation behavior
+        // UNION queries are skipped per bsl-language-server behavior
         assert_eq!(
             diagnostics.len(),
             2,
@@ -603,7 +601,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "TOP DISTINCT with explicit alias should pass");
     }
 
-    /// Test from Java: AssignAliasFieldsInQueryDiagnosticTest.java
+    /// Test from bsl-language-server: reference test
     ///
     /// Expected 6 diagnostics:
     /// - Line 3, columns 3-16 (Валюты.Ссылка without alias)
@@ -614,14 +612,14 @@ mod tests {
     /// - Line 61, columns 3-20 (ВТ_ТЧ.НомерСтроки without alias - query with leading newline)
     #[test]
     fn test_java_diagnostic_compatibility() {
-        // Load exact copy of Java test fixture
+        // Load exact copy of reference test fixture
         let code = include_str!("../../test_data/AssignAliasFieldsInQueryDiagnostic.bsl");
         let config = DiagnosticsConfig::default();
 
         // Run diagnostic check
         let (diagnostics, file_content) = check_diagnostic(code, config);
 
-        // Java test expects exactly 5 diagnostics at (0-indexed lines):
+        // Expected exactly 5 diagnostics at (0-indexed lines):
         // - Line 3, cols 3-16 (Валюты.Ссылка without alias)
         // - Line 5, cols 3-17 (Валюты.Код Код without AS)
         // - Line 21, cols 3-16 (Валюты.Ссылка without alias)
@@ -630,7 +628,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
 
-        // Verify exact positions match Java test expectations
+        // Verify exact positions match bsl-language-server test expectations
         assert_diagnostic_range(&file_content, &diagnostics[0], 3, 3, 16); // Валюты.Ссылка
         assert_diagnostic_range(&file_content, &diagnostics[1], 5, 3, 17); // Валюты.Код Код
         assert_diagnostic_range(&file_content, &diagnostics[2], 21, 3, 16); // Second query

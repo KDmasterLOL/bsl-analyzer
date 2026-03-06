@@ -19,8 +19,6 @@
 //! **This is a HIR-based diagnostic** - detects FormDataToValue calls during HIR lowering.
 //!
 //! Ported from:
-//! - FormDataToValueDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - form_data_to_value.rs (bsl-language-server-rust) - Reference implementation
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -66,8 +64,8 @@ mod tests {
 
         assert_eq!(form_diags.len(), 4, "Expected 4 diagnostics");
 
-        // Java reports 1-indexed, Rust uses 0-indexed
-        // Java Line 3 = Rust Line 2, etc.
+        // bsl-language-server reports 1-indexed, we use 0-indexed
+        // bsl-ls line 3 = 0-indexed line 2, etc.
         assert_diagnostic_range(code, form_diags[0], 2, 15, 35); // Line 3: Форма.ДанныеФормыВЗначение
         assert_diagnostic_range(code, form_diags[1], 7, 9, 29); // Line 8: ДанныеФормыВЗначение
         assert_diagnostic_range(code, form_diags[2], 22, 14, 29); // Line 23: Form.FormDataToValue

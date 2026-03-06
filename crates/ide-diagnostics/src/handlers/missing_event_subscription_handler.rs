@@ -55,7 +55,6 @@
 //! ## Reference
 //!
 //! Ported from:
-//! - MissingEventSubscriptionHandlerDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -317,7 +316,7 @@ fn create_diagnostic(
     let file_len = file_text.len();
 
     // Use range [0, min(14, file_len)) to avoid exceeding file bounds
-    // Java implementation uses (0, 0, 0, 14) but we need to be safe for small files
+    // bsl-language-server uses (0, 0, 0, 14) but we need to be safe for small files
     let end_offset = std::cmp::min(14, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 

@@ -37,7 +37,6 @@
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!
 //! Ported from:
-//! - DeprecatedMessageDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -169,7 +168,7 @@ EndProcedure
 
         assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
 
-        // Verify diagnostic positions match Java test expectations
+        // Verify diagnostic positions match bsl-language-server test expectations
         assert_diagnostic_range(input, deprecated_diags[0], 4, 8, 15);
         assert_diagnostic_range(input, deprecated_diags[1], 10, 0, 8);
     }

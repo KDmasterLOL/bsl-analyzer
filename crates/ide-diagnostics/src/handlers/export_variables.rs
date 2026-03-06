@@ -2,8 +2,6 @@
 //!
 //! Detects exported module variables.
 //!
-//! **Source (Java):** bsl-language-server/ExportVariablesDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/export_variables.rs
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - uses module variables collected during HIR lowering.

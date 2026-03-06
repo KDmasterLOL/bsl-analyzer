@@ -2,8 +2,6 @@
 //!
 //! Detects trailing commas in function/method call argument lists.
 //!
-//! **Source (Java):** bsl-language-server/ExtraCommasDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/extra_commas.rs
 //! **Test file:** ExtraCommasDiagnostic.bsl
 //!
 //! ## Implementation

@@ -2,7 +2,6 @@
 //!
 //! Detects invalid Unicode characters in BSL files that cause unpredictable behavior.
 //!
-//! **Source:** bsl-language-server/InvalidCharacterInFileDiagnostic.java
 //!
 //! ## Why?
 //!
@@ -100,7 +99,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Scan STRING, COMMENT, and ERROR tokens for illegal characters
-    // Matches Java: HIDDEN channel (comments) + string tokens
+    // Matches bsl-language-server: HIDDEN channel (comments) + string tokens
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.as_token() {
             let should_check = matches!(
@@ -121,7 +120,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 let has_illegal_dash = text.chars().any(|ch| ILLEGAL_DASHES.contains(&ch));
 
                 if has_illegal_space || has_illegal_dash {
-                    // Prefer space message if both types exist (matches Java)
+                    // Prefer space message if both types exist
                     let char_type = if has_illegal_space {
                         InvalidCharType::IllegalSpace
                     } else {
@@ -146,7 +145,7 @@ mod tests {
         let code = include_str!("../../test_data/InvalidCharacterInFileDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java test expects 14 diagnostics
+        // Expected 14 diagnostics
         assert_eq!(diagnostics.len(), 14, "Expected 14 diagnostics");
 
         // Line 1 (0-indexed): СреднееТире = "–";

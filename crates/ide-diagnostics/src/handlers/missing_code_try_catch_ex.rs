@@ -33,7 +33,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - MissingCodeTryCatchExDiagnostic.java (bsl-language-server) - PRIMARY
 //!
 //! **Architecture:** HIR-based diagnostic with AST fallback for commentAsCode.
 //!
@@ -354,7 +353,7 @@ mod tests {
         let code = include_str!("../../test_data/MissingCodeTryCatchExDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java expects 3 diagnostics at specific positions
+        // Expected 3 diagnostics at specific positions
         assert_eq!(diagnostics.len(), 3, "Should detect 3 empty exception handlers");
 
         // Line 23, columns 4-14 (Исключение keyword in Проц2)
@@ -381,7 +380,7 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 2 diagnostics (line 32 is now suppressed because it has comments)
+        // Expected 2 diagnostics (line 32 is now suppressed because it has comments)
         assert_eq!(diagnostics.len(), 2, "Should detect only 2 when comments count as code");
 
         // Line 23 still reported (no comments)

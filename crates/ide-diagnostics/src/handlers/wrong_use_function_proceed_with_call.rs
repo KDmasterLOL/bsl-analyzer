@@ -2,7 +2,6 @@
 //!
 //! Detects wrong usage of ПродолжитьВызов/ProceedWithCall function.
 //!
-//! **Source (Java):** bsl-language-server/WrongUseFunctionProceedWithCallDiagnostic.java
 //!
 //! The ПродолжитьВызов/ProceedWithCall function can only be called inside extension
 //! methods with &Вместо (&Around) annotation. Calling it from methods with &До (&Before),

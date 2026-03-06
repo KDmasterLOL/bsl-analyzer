@@ -2,7 +2,6 @@
 //!
 //! Detects multiple statements on the same line.
 //!
-//! **Source (Java):** bsl-language-server/OneStatementPerLineDiagnostic.java
 //!
 //! Each statement should be on its own line for better readability.
 //! Multiple statements on one line make code harder to read and debug.
@@ -14,7 +13,7 @@
 //! statements start on the same line (excluding preprocessor directives,
 //! empty statements, and statements with parse errors).
 //!
-//! ## Exclusions (matching Java behavior):
+//! ## Exclusions (matching bsl-language-server behavior):
 //! - Empty statements (standalone `;`)
 //! - Statements containing preprocessor directives
 //! - Statements with parse errors
@@ -62,7 +61,7 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
 
-        // Java expects diagnostics for:
+        // Expected diagnostics for:
         // Line 4:  "  А = 0;А = 1;" - second statement "А = 1" at (3, 8, 3, 13) without semicolon
         // Line 9:  "Если Истина Тогда Сообщить(А=1); F=0; КонецЕсли;" - statements inside IF
         // Line 13: "А=1; А=2; А=3;" - (12, 5, 12, 8), (12, 10, 12, 13) without semicolons
@@ -95,7 +94,7 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::OneStatementPerLine).collect();
 
-        // Java expects 2 diagnostics (0-indexed lines/cols):
+        // Expected 2 diagnostics (0-indexed lines/cols):
         // Line 2: "Ф=1; У=2; Е=3;" → (1, 5, 1, 9), (1, 10, 1, 14)
         // Note: BSL parser doesn't include semicolon in expression range, so end col is one less
         assert_eq!(diags.len(), 2, "Expected 2 diagnostics, got {}", diags.len());

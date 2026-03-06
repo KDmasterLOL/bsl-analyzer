@@ -2,8 +2,6 @@
 //!
 //! Detects incorrect usage of СтрШаблон/StrTemplate method.
 //!
-//! **Source (Java):** bsl-language-server/IncorrectUseOfStrTemplateDiagnostic.java
-//! **Source (Rust tree-sitter):** bsl-language-server-rust/rules/incorrect_use_of_str_template.rs
 //!
 //! ## Implementation
 //!
@@ -613,7 +611,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IncorrectUseOfStrTemplate)
             .collect();
 
-        // Java expects 12 diagnostics total
+        // Expected 12 diagnostics total
         // Now detecting all 12:
         // - 9 direct string literals (from HIR lowering)
         // - 3 variable resolution cases (lines 17, 21, 25) - now supported via ReachingDefs

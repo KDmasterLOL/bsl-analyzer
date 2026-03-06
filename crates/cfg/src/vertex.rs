@@ -1,15 +1,5 @@
 //! CFG Vertex types
 //!
-//! Ported from BSL Language Server (Java) via bsl-language-server-rust:
-//! - CfgVertex.java
-//! - BasicBlockVertex.java
-//! - ConditionalVertex.java
-//! - BranchingVertex.java
-//! - LoopVertex.java (WhileLoopVertex, ForLoopVertex, ForeachLoopVertex)
-//! - TryExceptVertex.java
-//! - LabelVertex.java
-//! - ExitVertex.java
-//!
 //! ## Design Decision: HIR-based CFG
 //!
 //! **Migrated from SyntaxNode to HIR indices (Phase 6.1)**
@@ -35,44 +25,33 @@ use hir_def::Name;
 use syntax::TextRange;
 
 /// Vertex in the control flow graph
-///
-/// Maps to CfgVertex hierarchy in Java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CfgVertex {
     /// Basic block - sequence of sequential statements
-    /// Maps to BasicBlockVertex.java
     BasicBlock(BasicBlockVertex),
 
     /// Conditional branching (if/elsif)
-    /// Maps to ConditionalVertex.java
     Conditional(ConditionalVertex),
 
     /// While loop
-    /// Maps to WhileLoopVertex.java
     WhileLoop(WhileLoopVertex),
 
     /// For loop
-    /// Maps to ForLoopVertex.java
     ForLoop(ForLoopVertex),
 
     /// ForEach loop
-    /// Maps to ForeachLoopVertex.java
     ForEachLoop(ForEachLoopVertex),
 
     /// Try-Except block
-    /// Maps to TryExceptVertex.java
     TryExcept(TryExceptVertex),
 
     /// Label (target for Goto)
-    /// Maps to LabelVertex.java
     Label(LabelVertex),
 
     /// Preprocessor conditional (#Если/#ИначеЕсли)
-    /// Maps to PreprocessorConditionVertex.java
     PreprocCondition(PreprocConditionVertex),
 
     /// Exit point of the method
-    /// Maps to ExitVertex.java
     Exit,
 }
 
@@ -125,8 +104,6 @@ impl CfgVertex {
 }
 
 /// Basic block vertex - sequence of statements with no branches
-///
-/// Maps to BasicBlockVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlockVertex {
     /// Sequential statements in this basic block
@@ -171,8 +148,6 @@ impl Default for BasicBlockVertex {
 }
 
 /// Conditional vertex - if/elsif branching
-///
-/// Maps to ConditionalVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionalVertex {
     /// Condition expression (HIR index from Body)
@@ -186,8 +161,6 @@ impl ConditionalVertex {
 }
 
 /// Preprocessor conditional vertex (#Если/#ИначеЕсли)
-///
-/// Maps to PreprocessorConditionVertex.java
 ///
 /// Unlike ConditionalVertex, preprocessor conditions are symbolic expressions
 /// (e.g., `Сервер И НЕ Клиент`) that are not runtime-evaluable.
@@ -225,8 +198,6 @@ impl PreprocConditionVertex {
 }
 
 /// While loop vertex
-///
-/// Maps to WhileLoopVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhileLoopVertex {
     /// Loop condition (HIR index from Body)
@@ -248,8 +219,6 @@ impl WhileLoopVertex {
 }
 
 /// For loop vertex
-///
-/// Maps to ForLoopVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForLoopVertex {
     /// Loop variable (HIR binding from Body)
@@ -269,8 +238,6 @@ impl ForLoopVertex {
 }
 
 /// ForEach loop vertex
-///
-/// Maps to ForeachLoopVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForEachLoopVertex {
     /// Loop variable (HIR binding from Body)
@@ -293,8 +260,6 @@ impl ForEachLoopVertex {
 
 /// Try-Except block vertex
 ///
-/// Maps to TryExceptVertex.java
-///
 /// Note: CFG doesn't need to store any data for Try-Except blocks,
 /// just mark their presence in the control flow. Body statements
 /// are tracked in BasicBlock vertices.
@@ -314,8 +279,6 @@ impl Default for TryExceptVertex {
 }
 
 /// Label vertex (for Goto statements)
-///
-/// Maps to LabelVertex.java
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelVertex {
     /// Label name (HIR Name from Body)

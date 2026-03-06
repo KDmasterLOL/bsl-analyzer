@@ -930,9 +930,9 @@ pub(crate) fn is_followed_by_loop_exit(expr_node: &SyntaxNode) -> bool {
 
 /// Extend a text range to include the following semicolon token if present.
 ///
-/// Java BSLParser.StatementContext includes the SEMICOLON in the statement range.
+/// BSL parser (ANTLR).StatementContext includes the SEMICOLON in the statement range.
 /// Our CALL_STMT does not include SEMICOLON (it's a separate token).
-/// To match Java ranges, we extend the range to include the semicolon.
+/// To match bsl-language-server ranges, we extend the range to include the semicolon.
 pub(crate) fn extend_range_with_semicolon(
     node: &SyntaxNode,
     original_range: TextRange,

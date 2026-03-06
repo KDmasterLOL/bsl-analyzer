@@ -3,7 +3,6 @@
 //! Detects when a child metadata object (attribute, dimension, resource, tabular section)
 //! has the same name as its parent metadata object.
 //!
-//! Java equivalent: `SameMetadataObjectAndChildNamesDiagnostic.java`
 
 use crate::define_metadata;
 use crate::metadata::*;

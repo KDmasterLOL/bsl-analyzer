@@ -2,7 +2,6 @@
 //!
 //! ClientServer CommonModules must contain "ClientServer" or "КлиентСервер" in their name.
 //!
-//! Ported from: CommonModuleNameClientServerDiagnostic.java
 
 use crate::define_common_module_name_check;
 use crate::metadata::*;

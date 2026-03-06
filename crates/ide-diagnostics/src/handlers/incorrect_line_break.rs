@@ -85,7 +85,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    // Java processes in this order: all line-end checks first, then all line-start checks
+    // bsl-language-server processes in this order: all line-end checks first, then all line-start checks
     // This order is required for test compatibility
 
     // First pass: check line END (operators/keywords at the end)
@@ -220,10 +220,14 @@ mod tests {
         let code = include_str!("../../test_data/IncorrectLineBreakDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // Java expects 14 diagnostics with specific positions
-        assert_eq!(diagnostics.len(), 14, "Should match Java implementation: 14 diagnostics");
+        // Expected 14 diagnostics with specific positions
+        assert_eq!(
+            diagnostics.len(),
+            14,
+            "Should match bsl-language-server implementation: 14 diagnostics"
+        );
 
-        // Verify exact positions match Java test expectations (0-indexed lines)
+        // Verify exact positions match bsl-language-server test expectations (0-indexed lines)
         // Line 7: + at end
         assert_diagnostic_range_multiline(code, &diagnostics[0], 6, 32, 6, 33);
         // Line 8: + at end

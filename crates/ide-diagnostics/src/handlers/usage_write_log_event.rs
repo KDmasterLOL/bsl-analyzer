@@ -22,7 +22,6 @@
 //! Uses `bsl-platform` crate for method name resolution (bilingual, case-insensitive).
 //!
 //! Ported from:
-//! - UsageWriteLogEventDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -152,7 +151,7 @@ mod tests {
         let code = include_str!("../../test_data/UsageWriteLogEventDiagnostic.bsl");
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
-        // Matches Java: 18 diagnostics (variable tracing + relaxed log level heuristic)
+        // Matches bsl-language-server: 18 diagnostics (variable tracing + relaxed log level heuristic)
         assert_eq!(diags.len(), 18, "Expected 18 diagnostics, got {}", diags.len());
     }
 
@@ -286,7 +285,7 @@ mod tests {
     #[test]
     fn test_variable_with_detail_error() {
         // Variable tracing: ТекстОшибки = ПодробноеПредставлениеОшибки(...) in except block
-        // resolves to true → no diagnostic (matches Java)
+        // resolves to true → no diagnostic
         let code = r#"
 Процедура Тест()
     Попытка
@@ -330,7 +329,7 @@ EndProcedure
     #[test]
     fn test_error_processing_module() {
         // ОбработкаОшибок.ПодробноеПредставлениеОшибки contains the substring → detected.
-        // УровеньЖР is not EventLogLevel enum → assume OK (matches Java).
+        // УровеньЖР is not EventLogLevel enum → assume OK.
         let code = r#"
 Процедура Тест()
     Попытка

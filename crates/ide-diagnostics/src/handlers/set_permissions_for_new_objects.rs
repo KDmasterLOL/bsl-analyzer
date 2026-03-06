@@ -33,7 +33,6 @@
 //! ## Reference
 //!
 //! Ported from:
-//! - SetPermissionsForNewObjectsDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -142,7 +141,7 @@ fn create_diagnostic(
     let file_text = ctx.file_text();
     let file_len = file_text.len();
 
-    // Use range [0, min(9, file_len)) to match Java behavior
+    // Use range [0, min(9, file_len)) to match bsl-language-server behavior
     let end_offset = std::cmp::min(9, file_len);
     let range = TextRange::new(0.into(), (end_offset as u32).into());
 

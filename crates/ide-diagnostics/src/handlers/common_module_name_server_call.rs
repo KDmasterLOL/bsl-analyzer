@@ -2,7 +2,6 @@
 //!
 //! ServerCall CommonModules must contain "ServerCall" or "ВызовСервера" in their name.
 //!
-//! Ported from: CommonModuleNameServerCallDiagnostic.java
 
 use crate::define_common_module_name_check;
 use crate::metadata::*;

@@ -276,7 +276,7 @@ pub enum Commands {
 ### Идентичные коды диагностик
 
 ```rust
-// Используем те же коды что и Java версия
+// Используем те же коды что и bsl-language-server
 pub enum DiagnosticCode {
     CanonicalSpellingKeywords,      // Те же названия
     ConsecutiveEmptyLines,

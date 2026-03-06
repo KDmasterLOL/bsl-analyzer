@@ -3,7 +3,6 @@
 //! Detects assignment to ЭтотОбъект/ThisObject property which is read-only.
 //! Applies only to CommonModule and FormModule.
 //!
-//! Ported from: ThisObjectAssignDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

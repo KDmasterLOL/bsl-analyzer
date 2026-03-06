@@ -41,7 +41,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - TimeoutsInExternalResourcesDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 
 use cfg_types::{ExprId, IdConversion};
 

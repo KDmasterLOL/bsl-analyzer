@@ -29,7 +29,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - JoinWithSubQueryDiagnostic.java (bsl-language-server)
 
 use crate::define_metadata;
 use crate::metadata::*;

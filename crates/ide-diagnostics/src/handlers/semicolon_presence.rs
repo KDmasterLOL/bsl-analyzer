@@ -2,7 +2,6 @@
 //!
 //! Detects statements without trailing semicolon.
 //!
-//! **Source (Java):** bsl-language-server/SemicolonPresenceDiagnostic.java
 //!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
@@ -70,11 +69,9 @@ mod tests {
 
         assert_eq!(diags.len(), 2, "Expected 2 diagnostics");
 
-        // Java: hasRange(3, 6, 3, 7) - line 4 (0-indexed=3), cols 6-7
         // "А = 0" - last token is "0" at position 6-7
         assert_diagnostic_range(code, diags[0], 3, 6, 7);
 
-        // Java: hasRange(4, 0, 4, 9) - line 5 (0-indexed=4), cols 0-9
         // "КонецЕсли" is 9 characters
         assert_diagnostic_range(code, diags[1], 4, 0, 9);
     }

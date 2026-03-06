@@ -20,7 +20,6 @@
 //!
 //! ## Reference
 //!
-//! Ported from ProtectedModuleDiagnostic.java (bsl-language-server)
 
 use bsl_metadata::traits::{MdObject, Module};
 use ide_db::TextRange;

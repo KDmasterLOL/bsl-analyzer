@@ -1,6 +1,4 @@
 //! CommonModule metadata object
-//!
-//! Ported from <https://github.com/1c-syntax/mdclasses/blob/develop/src/main/java/com/github/_1c_syntax/bsl/mdo/CommonModule.java>
 
 use crate::enums::{ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant};
 use crate::traits::{MdObject, Module};
@@ -9,8 +7,6 @@ use std::any::Any;
 use uuid::Uuid;
 
 /// Common module metadata object
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdo.CommonModule`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommonModule {
     /// Unique identifier
@@ -161,7 +157,7 @@ impl Module for CommonModule {
     }
 }
 
-/// Builder for CommonModule (following Java builder pattern)
+/// Builder for CommonModule
 #[derive(Debug, Default)]
 pub struct CommonModuleBuilder {
     uuid: Option<Uuid>,

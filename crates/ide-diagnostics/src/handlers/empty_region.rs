@@ -38,8 +38,6 @@
 //! The diagnostic is emitted in `hir-def/body/lower/preproc.rs` during region processing.
 //!
 //! Ported from:
-//! - EmptyRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - empty_region.rs (bsl-language-server-rust) - Algorithm reference
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -92,7 +90,7 @@ mod tests {
         let empty_region_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
 
-        assert_eq!(empty_region_diags.len(), 3, "Should match Java: 3 diagnostics");
+        assert_eq!(empty_region_diags.len(), 3, "Should find 3 diagnostics");
 
         assert_diagnostic_range_multiline(code, empty_region_diags[0], 0, 0, 2, 13);
         assert!(empty_region_diags[0].message.contains("Тест"));

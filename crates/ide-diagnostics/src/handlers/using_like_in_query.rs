@@ -89,7 +89,7 @@ mod tests {
         let mut sorted_diagnostics = diagnostics.clone();
         sorted_diagnostics.sort_by_key(|d| d.range.start());
 
-        // Verify all 21 diagnostic positions match Java test expectations
+        // Verify all 21 diagnostic positions match bsl-language-server test expectations
         // Note: Some positions differ by 1 char due to quote correction differences
         assert_diagnostic_range(code, &sorted_diagnostics[0], 4, 8, 40);
         assert_diagnostic_range(code, &sorted_diagnostics[1], 5, 8, 39);

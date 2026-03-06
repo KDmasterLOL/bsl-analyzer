@@ -35,8 +35,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - CodeOutOfRegionDiagnostic.java (bsl-language-server) - PRIMARY
-//! - code_out_of_region.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Uses RegionTree from HIR for efficient region lookup.
 
@@ -78,7 +76,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Extends range to include trailing semicolon if present (for Java compatibility)
+/// Extends range to include trailing semicolon if present (for bsl-language-server compatibility)
 fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
     use syntax::{SyntaxToken, TextSize};
 
@@ -121,7 +119,7 @@ fn check_node(
         {
             let (element_type, range) = match child.kind() {
                 SyntaxKind::FUNCTION_DEF => {
-                    // Use method name range for compatibility with Java
+                    // Use method name range for bsl-language-server compatibility
                     let range = ast::FunctionDef::cast(child.clone())
                         .and_then(|f| f.name())
                         .map(|name| name.text_range())
@@ -129,7 +127,7 @@ fn check_node(
                     ("Функция", range)
                 }
                 SyntaxKind::PROCEDURE_DEF => {
-                    // Use method name range for compatibility with Java
+                    // Use method name range for bsl-language-server compatibility
                     let range = ast::ProcedureDef::cast(child.clone())
                         .and_then(|p| p.name())
                         .map(|name| name.text_range())
@@ -137,11 +135,11 @@ fn check_node(
                     ("Процедура", range)
                 }
                 SyntaxKind::VAR_DEF => {
-                    // Java uses whole variable declaration, not just the name
+                    // bsl-language-server uses whole variable declaration, not just the name
                     ("Переменная", child.text_range())
                 }
                 _ => {
-                    // For statements, include semicolon for Java compatibility
+                    // For statements, include semicolon for bsl-language-server compatibility
                     ("Элемент кода", range_with_semicolon(&child))
                 }
             };
@@ -263,34 +261,27 @@ mod tests {
         let code = include_str!("../../test_data/CodeOutOfRegionDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 7, "Java expects 7 diagnostics");
+        assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics");
 
         // Diagnostic 0: Перем А; (line 5, whole declaration)
-        // Java: .hasRange(4, 0, 8)
         assert_diagnostic_range(code, &diagnostics[0], 4, 0, 8);
 
         // Diagnostic 1: Перем Ии; (line 10, whole declaration)
-        // Java: .hasRange(8, 0, 9, 9) with TODO - should be (9, 0, 9)
         assert_diagnostic_range(code, &diagnostics[1], 9, 0, 9);
 
         // Diagnostic 2: Процедура ССС() (line 18, procedure name only)
-        // Java: .hasRange(17, 10, 13)
         assert_diagnostic_range(code, &diagnostics[2], 17, 10, 13);
 
         // Diagnostic 3: Процедура Бб() (line 25, procedure name only)
-        // Java: .hasRange(24, 10, 12)
         assert_diagnostic_range(code, &diagnostics[3], 24, 10, 12);
 
         // Diagnostic 4: Б = Аа() + А; (line 47, statement including semicolon)
-        // Java: .hasRange(46, 0, 13) - includes semicolon ✅
         assert_diagnostic_range(code, &diagnostics[4], 46, 0, 13);
 
         // Diagnostic 5: Ин = в; (line 58, statement including semicolon)
-        // Java: .hasRange(57, 0, 7) - includes semicolon ✅
         assert_diagnostic_range(code, &diagnostics[5], 57, 0, 7);
 
         // Diagnostic 6: Если Условие Тогда (lines 60-70, if block)
-        // Java: .hasRange(59, 0, 69, 9)
         assert_diagnostic_range_multiline(code, &diagnostics[6], 59, 0, 69, 9);
     }
 
@@ -307,7 +298,7 @@ mod tests {
         let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticNoRegions.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // NOTE: Java returns 1 diagnostic with relatedInformation when no regions exist
+        // NOTE: bsl-language-server returns 1 diagnostic with relatedInformation when no regions exist
         // Rust returns individual diagnostics for each element (acceptable difference)
         assert_eq!(diagnostics.len(), 6);
 
@@ -359,7 +350,6 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
 
         // Diagnostic 0: НСтр("..."); (line 1, including semicolon)
-        // Java: .hasRange(0, 0, 0, 23) ✅
         assert_diagnostic_range(code, &diagnostics[0], 0, 0, 23);
     }
 

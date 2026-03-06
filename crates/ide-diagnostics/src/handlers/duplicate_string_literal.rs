@@ -46,8 +46,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - DuplicateStringLiteralDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - duplicate_string_literal.rs (bsl-language-server-rust) - Rust reference (tree-sitter)
 //!
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
@@ -311,7 +309,7 @@ mod tests {
         let code = include_str!("../../test_data/DuplicateStringLiteralDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 2, "Should match Java: 2 diagnostics (default config)");
+        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics (default config)");
 
         // Метод1: "Строка2" at line 2 (0-indexed: line 1), col 8-17
         // Note: Col 17 is the position AFTER the closing quote (half-open range)

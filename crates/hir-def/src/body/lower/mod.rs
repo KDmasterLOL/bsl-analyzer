@@ -406,7 +406,7 @@ fn is_client_only_method(method_node: &SyntaxNode) -> bool {
 ///
 /// Platform 8.3.12 added bitwise operation methods to global context.
 /// User-defined methods with these names will conflict.
-/// List matches GlobalContextMethodCollision8312Diagnostic.java.
+/// List matches bsl-language-server.
 fn is_global_context_collision_8312(name: &str) -> bool {
     const COLLISION_METHODS: &[&str] = &[
         // Russian variants
@@ -602,8 +602,8 @@ fn emit_method_scoped_diagnostics(
     }
 
     // Emit MethodSize candidate using line-based calculation
-    // Algorithm matches Java: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
-    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match Java's subCodeBlock
+    // Algorithm: subCodeBlock.getStop().getLine() - subCodeBlock.getStart().getLine()
+    // Rowan PROCEDURE_DEF spans from declaration to end keyword, so subtract 4 to match bsl-language-server's subCodeBlock
     if let Some(ref line_index) = ctx.line_index {
         let start_line = line_index.line_col(method_range.start()).line as usize;
         let end_line = line_index.line_col(method_range.end()).line as usize;
@@ -647,7 +647,7 @@ fn emit_method_scoped_diagnostics(
 
 /// Compare two literals for equality (case-insensitive for strings by default).
 ///
-/// Matches Java behavior: strings are compared case-insensitively unless configured otherwise.
+/// Strings are compared case-insensitively unless configured otherwise.
 /// TODO: add caseSensitiveForString parameter when needed.
 fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
     use crate::hir::Literal;

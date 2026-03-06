@@ -44,8 +44,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - DeletingCollectionItemDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - deleting_collection_item.rs (bsl-language-server-rust) - Rust reference (tree-sitter)
 //!
 //! Adapted to use Rowan SyntaxNode instead of tree-sitter.
 
@@ -197,9 +195,9 @@ EndProcedure
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
 
-        assert_eq!(diags.len(), 8, "Should match Java: 8 diagnostics");
+        assert_eq!(diags.len(), 8, "Should find 8 diagnostics");
 
-        // Verify positions match Java implementation
+        // Verify positions match bsl-language-server implementation
         assert_diagnostic_range(code, diags[0], 17, 8, 47);
         assert_diagnostic_range(code, diags[1], 23, 4, 21);
         assert_diagnostic_range(code, diags[2], 28, 4, 25);

@@ -30,7 +30,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - NestedFunctionInParametersDiagnostic.java (bsl-language-server)
 //!
 //! **HIR-based implementation** using semantic analysis instead of AST traversal.
 //!
@@ -406,7 +405,7 @@ fn check_call_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching Java behavior)
+    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -472,7 +471,7 @@ fn check_method_call_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching Java behavior)
+    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -530,7 +529,7 @@ fn check_new_expr(
         return;
     };
 
-    // ALWAYS skip single-line calls (matching Java behavior)
+    // ALWAYS skip single-line calls (matching bsl-language-server behavior)
     let start_line = line_index.line_col(range.start()).line;
     let end_line = line_index.line_col(range.end()).line;
     if start_line == end_line {
@@ -684,8 +683,8 @@ mod tests {
 
     #[test]
     fn test_diagnostic_with_allow_oneliner_false() {
-        // Single-line calls are ALWAYS skipped (matching Java behavior)
-        // Java: "однострочники пропускаем сразу" - line 116-118
+        // Single-line calls are ALWAYS skipped (matching bsl-language-server behavior)
+        // bsl-language-server: "однострочники пропускаем сразу" - line 116-118
         // allowOneliner only affects whether multiline params are required
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
         let mut config = DiagnosticsConfig::default();
@@ -741,10 +740,10 @@ mod tests {
         let diagnostics = check_ast_diagnostic(code, check);
 
         // With default config (allowOneliner=true), should find 3 diagnostics
-        // Matching Java test: lines 1, 3, 51 (0-indexed)
+        // Matching reference test: lines 1, 3, 51 (0-indexed)
         assert_eq!(diagnostics.len(), 3, "Should find exactly 3 diagnostics with default config");
 
-        // Verify exact positions matching Java implementation
+        // Verify exact positions matching reference implementation
         // Line 1 (0-indexed), columns 22-30: Вставить
         assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30);
         // Line 3 (0-indexed), columns 11-19: Картинка
@@ -763,15 +762,11 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 12 diagnostics with allowOneliner=false
-        // Now fully matching Java behavior (100%)
-        assert_eq!(
-            diagnostics.len(),
-            12,
-            "Should find 12 diagnostics with allowOneliner=false (matching Java)"
-        );
+        // Expected 12 diagnostics with allowOneliner=false
+        // Now fully matching bsl-language-server behavior (100%)
+        assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics with allowOneliner=false ");
 
-        // Verify positions match Java implementation (100% match)
+        // Verify positions match bsl-language-server implementation (100% match)
         assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30); // Вставить
         assert_diagnostic_range(code, &diagnostics[1], 3, 11, 19); // Картинка
         assert_diagnostic_range(code, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
@@ -799,12 +794,12 @@ mod tests {
         );
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 13 diagnostics with custom allowed methods + allowOneliner=false
-        // Now fully matching Java behavior (100%)
+        // Expected 13 diagnostics with custom allowed methods + allowOneliner=false
+        // Now fully matching bsl-language-server behavior (100%)
         assert_eq!(
             diagnostics.len(),
             13,
-            "Should find 13 diagnostics with custom allowed methods (matching Java)"
+            "Should find 13 diagnostics with custom allowed methods "
         );
     }
 }

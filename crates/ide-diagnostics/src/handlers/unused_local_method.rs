@@ -19,7 +19,6 @@
 //! - **checkObjectModule** (boolean, default: false) - check ObjectModule type
 //!
 //! ## Implementation
-//! Ported from: UnusedLocalMethodDiagnostic.java (bsl-language-server)
 
 use crate::define_metadata;
 use crate::metadata::*;

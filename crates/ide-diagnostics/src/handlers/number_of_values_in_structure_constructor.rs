@@ -205,11 +205,11 @@ Result = New Structure("Goods, Property, Count, Cost", Goods, Property, 5, 10);
         assert_eq!(
             diagnostics.len(),
             4,
-            "Should find exactly 4 diagnostics (matching Java implementation)"
+            "Should find exactly 4 diagnostics (matching reference implementation)"
         );
 
-        // Verify exact positions matching bsl-language-server (Java) implementation
-        // Java uses 0-indexed lines
+        // Verify exact positions matching bsl-language-server (bsl-language-server) implementation
+        // bsl-language-server uses 0-indexed lines
         assert_diagnostic_range(code, &diagnostics[0], 18, 12, 119);
         assert_diagnostic_range(code, &diagnostics[1], 23, 28, 89);
         assert_diagnostic_range(code, &diagnostics[2], 65, 9, 78);

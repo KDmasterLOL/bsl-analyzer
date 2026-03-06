@@ -1,12 +1,8 @@
 //! Enums for BSL metadata
-//!
-//! Ported from <https://github.com/1c-syntax/mdclasses>
 
 use serde::{Deserialize, Serialize};
 
 /// Return value reuse mode for common modules
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdo.support.ReturnValueReuse`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ReturnValueReuse {
     /// Do not reuse return values (default)
@@ -154,8 +150,6 @@ impl FormType {
 /// Code series mode for Catalogs, ChartOfCharacteristicTypes, ChartOfAccounts
 ///
 /// Determines how code uniqueness is enforced across the object hierarchy.
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdo.support.CodeSeries`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CodeSeries {
     /// Codes are unique across the entire catalog/chart

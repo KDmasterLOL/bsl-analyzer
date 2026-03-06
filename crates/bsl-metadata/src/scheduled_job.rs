@@ -18,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// ScheduledJob metadata object
-///
-/// Java equivalent: `com.github._1c_syntax.bsl.mdo.ScheduledJob`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledJob {
     /// UUID

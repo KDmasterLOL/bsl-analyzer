@@ -43,7 +43,6 @@
 //!
 //! ## Implementation
 //! Ported from:
-//! - DeprecatedAttributes8312Diagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //!
 //! Migrated from token-based to HIR-based approach.
 
@@ -394,7 +393,11 @@ EndProcedure
             .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
             .collect();
 
-        assert_eq!(diags.len(), 45, "Expected 45 diagnostics to match Java implementation");
+        assert_eq!(
+            diags.len(),
+            45,
+            "Expected 45 diagnostics to match bsl-language-server implementation"
+        );
 
         // Проверяем несколько ключевых позиций для уверенности в правильности детекции
 

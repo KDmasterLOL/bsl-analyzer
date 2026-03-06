@@ -1,7 +1,7 @@
 //! Helper functions for CommonModule diagnostics
 //!
-//! Ported from Java AbstractCommonModuleNameDiagnostic helper methods
-//! Source: bsl-language-server/.../diagnostics/AbstractCommonModuleNameDiagnostic.java
+//! Ported from bsl-language-server AbstractCommonModuleNameDiagnostic helper methods
+//! Source: bsl-language-server/.../diagnostics/bsl-language-server
 
 use bsl_metadata::traits::{MdObject, Module};
 use bsl_metadata::CommonModule;

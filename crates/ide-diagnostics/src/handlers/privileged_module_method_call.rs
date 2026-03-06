@@ -20,7 +20,6 @@
 //!
 //! ## Reference
 //!
-//! Ported from PrivilegedModuleMethodCallDiagnostic.java (bsl-language-server)
 
 use bsl_metadata::traits::MdObject;
 

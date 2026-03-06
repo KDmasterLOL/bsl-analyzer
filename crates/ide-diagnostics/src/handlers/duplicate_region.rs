@@ -57,8 +57,6 @@
 //! 5. AST approach is optimal: single parse query, minimal dependencies, direct access to needed data
 //!
 //! Ported from:
-//! - DuplicateRegionDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
-//! - duplicate_region.rs (bsl-language-server-rust) - Rust reference (tree-sitter)
 //!
 //! Adapted to use Rowan SyntaxNode and PreRegionDir AST helper.
 
@@ -190,7 +188,7 @@ mod tests {
         let code = include_str!("../../test_data/DuplicateRegionDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 3, "Should match Java: 3 diagnostics (lines 12, 16, 21)");
+        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics (lines 12, 16, 21)");
 
         // Line 12 (1-indexed) = line 11 (0-indexed): #Область СлужебныйПрограммныйИнтерфейс
         assert_diagnostic_range_multiline(code, &diagnostics[0], 11, 0, 11, 38);

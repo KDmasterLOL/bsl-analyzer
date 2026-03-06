@@ -13,7 +13,6 @@
 //!
 //! ## Reference
 //! - 1C Standard: https://its.1c.ru/db/v8std#content:770:hdoc
-//! - Java: ExecuteExternalCodeInCommonModuleDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

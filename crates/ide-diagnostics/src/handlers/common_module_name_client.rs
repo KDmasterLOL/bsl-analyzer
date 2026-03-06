@@ -2,7 +2,6 @@
 //!
 //! Client (non-global) CommonModules must contain "Client" or "Клиент" in their name.
 //!
-//! Ported from: CommonModuleNameClientDiagnostic.java
 
 use crate::define_common_module_name_check;
 use crate::metadata::*;

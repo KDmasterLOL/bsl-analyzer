@@ -113,12 +113,12 @@ impl Diagnostic {
 /// Matches bsl-language-server severity levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    Blocker,     // Highest severity (Java: BLOCKER)
-    Critical,    // Critical issues (Java: CRITICAL)
-    Major,       // Significant issues (Java: MAJOR)
+    Blocker,     // Highest severity
+    Critical,    // Critical issues
+    Major,       // Significant issues
     Error,       // General errors
-    Warning,     // Minor issues (Java: MINOR)
-    Information, // Informational (Java: INFO)
+    Warning,     // Minor issues
+    Information, // Informational
     Hint,        // Lowest severity
 }
 

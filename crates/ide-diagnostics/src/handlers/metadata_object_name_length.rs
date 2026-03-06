@@ -2,7 +2,6 @@
 //!
 //! Checks that metadata object names don't exceed maximum allowed length.
 //!
-//! Ported from: MetadataObjectNameLengthDiagnostic.java
 
 use crate::define_metadata;
 use crate::metadata::*;

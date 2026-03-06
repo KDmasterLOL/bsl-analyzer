@@ -6,8 +6,8 @@
 //!
 //! # References
 //! Ported from:
-//! - Regions.java (bsl-language-server) - standard regions mapping
-//! - Keywords.java (bsl-language-server) - bilingual region names
+//! - Regions (bsl-language-server) - standard regions mapping
+//! - Keywords (bsl-language-server) - bilingual region names
 
 use bsl_metadata::ModuleType;
 

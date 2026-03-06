@@ -2,7 +2,6 @@
 //!
 //! Global CommonModules must contain "Global" or "Глобальный" in their name.
 //!
-//! Ported from: CommonModuleNameGlobalDiagnostic.java
 
 use crate::define_common_module_name_check;
 use crate::metadata::*;

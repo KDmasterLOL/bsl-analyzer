@@ -28,7 +28,7 @@
 //! ```
 //!
 //! ## Source
-//! bsl-language-server/UsingCancelParameterDiagnostic.java
+//! bsl-language-server/bsl-language-server
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -155,7 +155,7 @@ mod tests {
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsingCancelParameter).collect();
 
-        assert_eq!(diags.len(), 6, "Expected 6 diagnostics (matching Java)");
+        assert_eq!(diags.len(), 6, "Expected 6 diagnostics ");
 
         assert_diagnostic_range(code, diags[0], 7, 8, 21);
         assert_diagnostic_range(code, diags[1], 14, 4, 27);

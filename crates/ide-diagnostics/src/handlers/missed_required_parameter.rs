@@ -38,7 +38,6 @@
 //!
 //! ## Reference
 //! Ported from:
-//! - MissedRequiredParameterDiagnostic.java (bsl-language-server) - COMPATIBILITY TARGET
 //! - Adapted to use Rowan SyntaxNode and SymbolTree
 //!
 //! ## HIR-based implementation

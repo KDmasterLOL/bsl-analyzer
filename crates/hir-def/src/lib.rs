@@ -903,7 +903,7 @@ pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -
         }
     }
 
-    // Deduplicate module variables (matching Java behavior)
+    // Deduplicate module variables (matching bsl-language-server behavior)
     {
         let mut seen_names: FxHashSet<String> = FxHashSet::default();
         result.module_vars.retain(|var| {

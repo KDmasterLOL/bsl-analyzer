@@ -29,19 +29,19 @@ Rust Language Server от команды rust-lang. Используем как 
 
 ---
 
-### 2. bsl-language-server (Java)
+### 2. bsl-language-server
 
 **Путь:** `~/src/lsp/bsl-language-server/`
 **Роль:** Compatibility reference (user-facing API only)
 
-Java Language Server для BSL. Обеспечиваем 100% совместимость **только по API**:
+Language Server для BSL. Обеспечиваем 100% совместимость **только по API**:
 
 - 181 диагностика (коды, сообщения, severity, параметры)
 - Конфигурация (.bsl-analyzer.json)
 - LSP capabilities
 - Формат отчётов (JSON, SARIF, Generic Issue)
 
-**⚠️ Архитектура НЕ берется из Java:**
+**⚠️ Архитектура берется из rust-analyzer, НЕ из bsl-language-server:**
 - ❌ Не копируем ReferenceIndex (устарел, slow)
 - ❌ Не копируем AST-based диагностики (N проходов)
 - ✅ Используем rust-analyzer patterns: CallGraph, text-search + semantic resolution, HIR-based
@@ -50,8 +50,8 @@ Java Language Server для BSL. Обеспечиваем 100% совмести�
 
 - `src/test/resources/diagnostics/` - тестовые данные (копировать verbatim)
 - `docs/diagnostics/` - документация (для совместимости сообщений)
-- `src/main/java/.../diagnostics/metadata/` - метаданные (@DiagnosticMetadata)
-- `src/main/java/.../configuration/` - формат конфигурации
+- `diagnostics/metadata/` - метаданные (@DiagnosticMetadata)
+- `configuration/` - формат конфигурации
 
 **Что брать:**
 
@@ -67,7 +67,7 @@ Java Language Server для BSL. Обеспечиваем 100% совмести�
 
 ---
 
-### 3. bsl-parser (Java/ANTLR4)
+### 3. bsl-parser (ANTLR4)
 
 **Путь:** `~/src/lsp/bsl-parser/`
 **Роль:** Грамматика языка
@@ -247,7 +247,7 @@ time ./target/release/bsl-analyzer analyze --source-dir ~/src/doc3 --reporters c
 
 ### Метаданные
 
-1. **bsl-language-server** - mdclasses интеграция (Java референс)
+1. **bsl-language-server** - mdclasses интеграция (референс)
 2. **salsa** - для кеширования загрузки метаданных
 
 ### LSP
@@ -262,8 +262,8 @@ time ./target/release/bsl-analyzer analyze --source-dir ~/src/doc3 --reporters c
 | Проект              | Язык       | Диагностик | LOC   | Роль в проекте                            |
 | ------------------- | ---------- | ---------- | ----- | ----------------------------------------- |
 | rust-analyzer       | Rust       | 54         | 1.5M+ | **Primary reference** (architecture)      |
-| bsl-language-server | Java       | 181        | 50K+  | Compatibility (API/config/tests only)     |
-| bsl-parser          | Java/ANTLR | -          | 15K+  | BSL/SDBL grammar reference                |
+| bsl-language-server | BSL/LSP    | 181        | 50K+  | Compatibility (API/config/tests only)     |
+| bsl-parser          | ANTLR      | -          | 15K+  | BSL/SDBL grammar reference                |
 | tree-sitter-bsl     | JS/C       | -          | 2K+   | Alternative BSL grammar (без SDBL)        |
 | salsa               | Rust       | -          | 50K+  | Incremental computation framework         |
 | **bsl-analyzer**    | **Rust**   | **171**    | 60K+  | **Advanced diagnostics architecture** 🚀  |

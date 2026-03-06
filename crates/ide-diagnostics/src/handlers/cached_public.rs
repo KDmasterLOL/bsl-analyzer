@@ -37,8 +37,6 @@
 //! ## Implementation
 //!
 //! Ported from:
-//! - CachedPublicDiagnostic.java (bsl-language-server) - PRIMARY
-//! - cached_public.rs (bsl-language-server-rust) - REFERENCE
 //!
 //! Tier 3 diagnostic: Requires metadata (CommonModule, ReturnValueReuse).
 //! Uses HIR RegionTree and ItemTree for clean, cached access to regions and methods.
@@ -151,7 +149,7 @@ fn is_public_region(region_name: &str) -> bool {
 
 /// Check code with specific ReturnValueReuse (test-only helper).
 ///
-/// This function mimics Java's spy pattern - it skips HIR metadata loading
+/// This function mimics bsl-language-server's spy pattern - it skips HIR metadata loading
 /// and uses provided reuse value directly, allowing tests to verify caching behavior.
 #[cfg(test)]
 fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Diagnostic> {

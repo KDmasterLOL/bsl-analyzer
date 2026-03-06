@@ -2,7 +2,6 @@
 //!
 //! Detects hard-coded date literals in BSL code.
 //!
-//! **Source:** bsl-language-server/MagicDateDiagnostic.java
 //!
 //! ## Why?
 //!
@@ -105,7 +104,7 @@ fn extract_date_text(token: &SyntaxToken) -> Option<String> {
 
     // For STRING tokens (double quotes): strict validation (must be all digits)
     // For DATE tokens (single quotes): lenient validation (can have non-digits like '0001-01why not?02')
-    // This matches Java's MagicDateDiagnostic behavior
+    // This's MagicDateDiagnostic behavior
 
     if token.kind() == SyntaxKind::STRING {
         // String literals require strict format validation
@@ -174,9 +173,9 @@ fn is_valid_date(date_str: &str) -> bool {
 }
 
 /// Check if date is in authorized list
-/// Strips non-digit characters before checking (Java behavior)
+/// Strips non-digit characters before checking (bsl-language-server behavior)
 fn is_authorized(date_str: &str, config: &Config) -> bool {
-    // Strip all non-digit characters (like Java's NON_NUMBER_PATTERN.replaceAll(""))
+    // Strip all non-digit characters (NON_NUMBER_PATTERN)
     let digits_only: String = date_str.chars().filter(|c| c.is_ascii_digit()).collect();
 
     config.authorized_dates.contains(&digits_only)
@@ -344,7 +343,7 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
     };
 
     // For STRING tokens, validate format strictly
-    // For DATE tokens, accept any format (Java behavior)
+    // For DATE tokens, accept any format (bsl-language-server behavior)
     if token.kind() == SyntaxKind::STRING && !is_valid_date(&date_str) {
         return;
     }
@@ -416,13 +415,13 @@ mod tests {
         let code = include_str!("../../test_data/MagicDateDiagnostic.bsl");
         let diagnostics = check_ast_diagnostic(code, check);
 
-        // NOTE: We detect 16 diagnostics instead of Java's 17 because we skip one edge case:
+        // NOTE: We detect 16 diagnostics instead of 17 in bsl-language-server because we skip one edge case:
         // Line 23: '0001-01why not?02' - our lexer produces ERROR tokens for malformed dates
         // This is an extremely rare case (user confirmed never seen in 15 years), so acceptable
         assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics (skipping line 23 edge case)");
 
-        // Verify exact positions (from Java test, 0-indexed)
-        // NOTE: Skipping Java's line 23 diagnostic (edge case with malformed date)
+        // Verify exact positions (from reference test, 0-indexed)
+        // NOTE: Skipping line 23 diagnostic (edge case with malformed date)
         assert_diagnostic_range(code, &diagnostics[0], 11, 12, 22);
         assert_diagnostic_range(code, &diagnostics[1], 12, 12, 28);
         assert_diagnostic_range(code, &diagnostics[2], 13, 7, 17);
@@ -455,13 +454,13 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
 
-        // Java expects 9 diagnostics, but we expect 8 because we skip line 23 edge case
-        // Java: 17 total - 8 authorized = 9
+        // Expected 9 diagnostics, but we expect 8 because we skip line 23 edge case
+        // bsl-language-server: 17 total - 8 authorized = 9
         // Rust: 16 total - 8 authorized = 8
         assert_eq!(
             diagnostics.len(),
             8,
-            "With extended authorized dates, expect 8 diagnostics (9 in Java minus line 23)"
+            "With extended authorized dates, expect 8 diagnostics (9 in bsl-language-server minus line 23)"
         );
     }
 

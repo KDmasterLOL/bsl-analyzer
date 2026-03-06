@@ -403,7 +403,7 @@ fn test_debug_semicolon_tokens() {
 
 #[test]
 fn test_union_with_semicolon_separator() {
-    // Test pattern from Java test: SELECT with UNION, semicolon, comment, SELECT with UNION
+    // Test pattern from reference test: SELECT with UNION, semicolon, comment, SELECT with UNION
     let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка
 ИЗ
@@ -442,7 +442,7 @@ fn test_union_with_semicolon_separator() {
 
 #[test]
 fn test_exact_java_query_structure() {
-    // Exact query from Java test (first string, 857 chars)
+    // Exact query from reference test (first string, 857 chars)
     let query = r#"ВЫБРАТЬ
 	Валюты.Ссылка,
 	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
@@ -478,7 +478,7 @@ fn test_exact_java_query_structure() {
 	Справочник.Валюты КАК Валюты"#;
 
     let parse = parse_sdbl(query);
-    assert!(!parse.has_errors(), "Should parse exact Java query structure");
+    assert!(!parse.has_errors(), "Should parse without errors");
 
     use syntax::ast::{AstNode, SdblQueryPackage};
     let root = parse.syntax_node();
