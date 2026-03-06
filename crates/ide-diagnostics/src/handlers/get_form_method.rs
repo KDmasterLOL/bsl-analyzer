@@ -206,7 +206,24 @@ EndProcedure
     #[test]
     fn test_from_java_fixture() {
         // Source: bsl-language-server/src/test/resources/diagnostics/GetFormMethodDiagnostic.bsl
-        let code = include_str!("../../test_data/GetFormMethodDiagnostic.bsl");
+        let code = r#"Процедура Тест()
+    Док=Документы.ЗаявкаНаОперацию.СоздатьДокумент();
+    Форма=Док.ПолучитьФорму("ФормаДокумента"); // Срабатывание здесь
+КонецПроцедуры
+
+Процедура Тест2()
+    ФормаРедактора = ПолучитьФорму("Обработка.УниверсальныйРедактор.Форма"); // срабатывание здесь
+КонецПроцедуры
+
+Procedure Test()
+    Doc = Documents.PlanOperation.CreateDocument();
+    Form = Doc.GetForm("DocumentForm"); // срабатывание здесь
+EndProcedure
+
+Procedure Test2()
+    Form = GetForm("Document.PlanOperation.Form"); // срабатывание здесь
+EndProcedure
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let get_form_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::GetFormMethod).collect();

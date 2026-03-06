@@ -85,11 +85,34 @@ mod tests {
 
     #[test]
     fn test_fixture() {
-        let fixture_content =
-            include_str!("../../test_data/UnaryPlusInConcatenationDiagnostic.bsl");
-        let code = format!("Процедура Тест()\n{}\nКонецПроцедуры", fixture_content);
+        let code = r#"Процедура Тест()
 
-        let diagnostics = check_hir_diagnostic(&code);
+// Проверка не сработает
+Хорошо = "Строка1" + "Строка2";
+
+// Проверка сработает
+Плохо = "Строка1" + + "Строка2";
+
+// Проверка сработает
+Плохо = "Строка0" + ("Строка1" + + "Строка2");
+
+// Проверка не сработает
+ОченьХорошо = Хорошо + Плохо;
+
+// Проверка не сработает
+Допустимо = Хорошо + + 5;
+
+// Проверка не сработает
+ТожеДопустимо = "Хорошо" + + 5;
+
+// Проверка не сработает
+ВообщеМинус = 5 + - 5;
+
+// Проверка сработает
+ОченьПлохо = Плохо + + Допустимо;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::UnaryPlusInConcatenation)
@@ -102,8 +125,8 @@ mod tests {
             diags.len()
         );
 
-        assert_diagnostic_range(&code, diags[0], 6, 20, 21);
-        assert_diagnostic_range(&code, diags[1], 9, 33, 34);
-        assert_diagnostic_range(&code, diags[2], 24, 21, 22);
+        assert_diagnostic_range(code, diags[0], 6, 20, 21);
+        assert_diagnostic_range(code, diags[1], 9, 33, 34);
+        assert_diagnostic_range(code, diags[2], 24, 21, 22);
     }
 }

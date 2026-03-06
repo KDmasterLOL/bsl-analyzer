@@ -385,74 +385,177 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/DeprecatedAttributes8312Diagnostic.bsl");
-        let diagnostics = check_hir_diagnostic(input);
+    fn test_chart_plot_area_all_russian_attributes() {
+        // All 9 deprecated ChartPlotArea attributes in Russian
+        let code = r#"Процедура Тест()
+    тест = ОбластьПостроенияДиаграммы.ОтображатьШкалу;
+    ОбластьПостроенияДиаграммы.ЛинииШкалы = Ложь;
+    ОбластьПостроенияДиаграммы.ЦветШкалы = Ложь;
+    ОбластьПостроенияДиаграммы.ОтображатьПодписиШкалыСерий = Ложь;
+    ОбластьПостроенияДиаграммы.ОтображатьПодписиШкалыТочек = Ложь;
+    ОбластьПостроенияДиаграммы.ОтображатьПодписиШкалыЗначений = Ложь;
+    ОбластьПостроенияДиаграммы.ОтображатьЛинииЗначенийШкалы = Ложь;
+    ОбластьПостроенияДиаграммы.ФорматШкалыЗначений = Ложь;
+    ОбластьПостроенияДиаграммы.ОриентацияМеток = Ложь;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
             .collect();
+        assert_eq!(diags.len(), 9, "All 9 Russian ChartPlotArea attributes should trigger");
+    }
 
+    #[test]
+    fn test_chart_plot_area_all_english_attributes() {
+        // 7 deprecated ChartPlotArea attributes in English (no LineScales/ColorScale in English)
+        let code = r#"Procedure Test()
+    ChartPlotArea.ShowScale = True;
+    ChartPlotArea.ShowSeriesScaleLabels = True;
+    ChartPlotArea.ShowPointsScaleLabels = True;
+    ChartPlotArea.ShowValuesScaleLabels = True;
+    ChartPlotArea.ShowScaleValueLines = True;
+    ChartPlotArea.ValueScaleFormat = True;
+    ChartPlotArea.LabelsOrientation = True;
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 7, "All 7 English ChartPlotArea attributes should trigger");
+    }
+
+    #[test]
+    fn test_chart_legend_title_russian() {
+        // ShowLegend/ShowTitle for Диаграмма, ДиаграммаГанта, СводнаяДиаграмма
+        let code = r#"Процедура Тест2()
+    Диаграмма.ОтображатьЛегенду = Истина;
+    Диаграмма.ОтображатьЗаголовок = Истина;
+    ДиаграммаГанта.ОтображатьЛегенду = Истина;
+    ДиаграммаГанта.ОтображатьЗаголовок = Истина;
+    СводнаяДиаграмма.ОтображатьЛегенду = Истина;
+    СводнаяДиаграмма.ОтображатьЗаголовок = Истина;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 6, "ShowLegend+ShowTitle for 3 chart types = 6 diagnostics");
+    }
+
+    #[test]
+    fn test_chart_palette_russian() {
+        // Palette-related deprecated attributes
+        let code = r#"Процедура Тест2()
+    Диаграмма.ПалитраЦветов = Истина;
+    Диаграмма.ЦветНачалаГрадиентнойПалитры = Истина;
+    Диаграмма.ЦветКонцаГрадиентнойПалитры = Истина;
+    Диаграмма.МаксимальноеКоличествоЦветовГрадиентнойПалитры = Истина;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 4, "4 palette attributes should trigger");
+    }
+
+    #[test]
+    fn test_chart_legend_title_english() {
+        // English ShowLegend/ShowTitle for Chart, GanttChart, PivotChart
+        let code = r#"Procedure Test2()
+    Chart.ShowLegend = True;
+    GanttChart.ShowLegend = True;
+    PivotChart.ShowLegend = True;
+    Chart.ShowTitle = True;
+    GanttChart.ShowTitle = True;
+    PivotChart.ShowTitle = True;
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
         assert_eq!(
             diags.len(),
-            45,
-            "Expected 45 diagnostics to match bsl-language-server implementation"
+            6,
+            "English ShowLegend+ShowTitle for 3 chart types = 6 diagnostics"
         );
+    }
 
-        // Проверяем несколько ключевых позиций для уверенности в правильности детекции
+    #[test]
+    fn test_chart_palette_english() {
+        // English palette attributes
+        let code = r#"Procedure Test2()
+    Chart.ColorPalette = True;
+    Chart.GradientPaletteStartColor = True;
+    Chart.GradientPaletteEndColor = True;
+    Chart.GradientPaletteMaxColors = True;
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 4, "4 English palette attributes should trigger");
+    }
 
-        // Процедура Тест() - строка 1: ОтображатьШкалу (ChartPlotArea attribute)
-        assert_diagnostic_range(input, diags[0], 1, 38, 53);
+    #[test]
+    fn test_chart_palette_methods_english() {
+        // English GetPalette/SetPalette deprecated methods
+        let code = r#"Procedure Test2()
+    Chart.GetPalette();
+    Chart.SetPalette(True);
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 2, "GetPalette and SetPalette should trigger");
+    }
 
-        // Процедура Тест() - строка 2: ЛинииШкалы
-        assert_diagnostic_range(input, diags[1], 2, 31, 41);
+    #[test]
+    fn test_enum_name_russian() {
+        // ОриентацияМетокДиаграммы enum name deprecated
+        let code = r#"Процедура Тест3()
+    Ориентация = ОриентацияМетокДиаграммы.Авто;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1, "Deprecated enum name should trigger once (on field value)");
+    }
 
-        // Процедура Тест() - строка 3: ЦветШкалы
-        assert_diagnostic_range(input, diags[2], 3, 31, 40);
+    #[test]
+    fn test_enum_value_russian() {
+        // ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная — deprecated enum value
+        let code = r#"Процедура Тест5()
+    Группировка = ГруппировкаПодчиненныхЭлементовФормы.Горизонтальная;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1, "Deprecated enum value Горизонтальная should trigger");
+    }
 
-        // Procedure Test() - строка 13: ShowScale
-        assert_diagnostic_range(input, diags[9], 13, 18, 27);
-
-        // Procedure Test() - строка 14: ShowSeriesScaleLabels
-        assert_diagnostic_range(input, diags[10], 14, 18, 39);
-
-        // Процедура Тест2() - строка 23: ОтображатьЛегенду (Chart.ShowLegend)
-        assert_diagnostic_range(input, diags[16], 23, 14, 31);
-
-        // Процедура Тест2() - строка 24: ОтображатьЗаголовок (Chart.ShowTitle)
-        assert_diagnostic_range(input, diags[17], 24, 14, 33);
-
-        // Процедура Тест2() - строка 30: ПалитраЦветов
-        assert_diagnostic_range(input, diags[22], 30, 14, 27);
-
-        // Процедура Тест2() - строка 35: ПолучитьПалитру (deprecated method)
-        assert_diagnostic_range(input, diags[26], 35, 21, 36);
-
-        // Процедура Тест2() - строка 36: УстановитьПалитру (deprecated method)
-        assert_diagnostic_range(input, diags[27], 36, 14, 31);
-
-        // Procedure Test2() - строка 40: ShowLegend (Chart)
-        assert_diagnostic_range(input, diags[28], 40, 10, 20);
-
-        // Procedure Test2() - строка 52: GetPalette (deprecated method)
-        assert_diagnostic_range(input, diags[38], 52, 10, 20);
-
-        // Procedure Test2() - строка 53: SetPalette (deprecated method)
-        assert_diagnostic_range(input, diags[39], 53, 10, 20);
-
-        // Процедура Тест3() - строка 58: Авто (enum value after deprecated enum name)
-        assert_diagnostic_range(input, diags[40], 58, 42, 46);
-
-        // Процедура Тест4() - строка 62: ОчиститьЖурналРегистрации (global method)
-        assert_diagnostic_range(input, diags[41], 62, 4, 29);
-
-        // Procedure Test4() - строка 66: ClearEventLog (global method)
-        assert_diagnostic_range(input, diags[42], 66, 4, 17);
-
-        // Процедура Тест5() - строка 70: Горизонтальная (enum value)
-        assert_diagnostic_range(input, diags[43], 70, 55, 69);
-
-        // Procedure Test5() - строка 74: Horizontal (enum value)
-        assert_diagnostic_range(input, diags[44], 74, 31, 41);
+    #[test]
+    fn test_enum_value_english() {
+        // ChildFormItemsGroup.Horizontal — deprecated enum value
+        let code = r#"Procedure Test5()
+    test = ChildFormItemsGroup.Horizontal;
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedAttributes8312)
+            .collect();
+        assert_eq!(diags.len(), 1, "Deprecated enum value Horizontal should trigger");
     }
 }

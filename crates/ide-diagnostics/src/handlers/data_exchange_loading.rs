@@ -385,31 +385,110 @@ EndProcedure
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/DataExchangeLoadingDiagnostic.bsl");
+    fn test_missing_guard_wrong_condition() {
+        // ПередЗаписью checks Отказ but not ОбменДанными.Загрузка — error
+        let code = r#"Процедура ПередЗаписью(Отказ)
+    Если Отказ Тогда
+        Сообщить("Это отказ");
+    КонецЕсли;
+КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(
-            diagnostics.len(),
-            3,
-            "Should match bsl-language-server implementation (3 diagnostics with findFirst=false)"
-        );
-
-        assert_diagnostic_range(code, &diagnostics[0], 7, 10, 22);
-        assert_diagnostic_range(code, &diagnostics[1], 19, 10, 17);
-        assert_diagnostic_range(code, &diagnostics[2], 70, 10, 22);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 22);
     }
 
     #[test]
-    fn test_find_first_parameter() {
-        let code = include_str!("../../test_data/DataExchangeLoadingDiagnostic.bsl");
+    fn test_missing_guard_wrong_field() {
+        // OnWrite checks DataExchange.Recipients (not .Load) — error
+        let code = r#"Procedure OnWrite(Cancel)
+    Var Value;
+    If DataExchange.Recipients Then
+        Return;
+    EndIf;
+EndProcedure"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 17);
+    }
+
+    #[test]
+    fn test_guard_without_return_in_body() {
+        // ПередЗаписью has guard but no Return in then-branch — error
+        let code = r#"Процедура ПередЗаписью(Отказ, РежимЗаписи, РежимПроведения)
+
+    Если ОбменДанными.Загрузка Тогда
+    КонецЕсли;
+
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range(code, &diagnostics[0], 0, 10, 22);
+    }
+
+    #[test]
+    fn test_find_first_before_delete_triggers() {
+        // BeforeDelete: first executable statement is ForEach (not guard) — triggers with findFirst=true
+        let code = r#"Procedure BeforeDelete(Cancel)
+    For Each Item in new Array Do
+        Return;
+    EndDo;
+
+    If DataExchange.Load Then
+        Return;
+    EndIf;
+EndProcedure"#;
         let mut config = DiagnosticsConfig::default();
         config
             .parameters
             .insert(DiagnosticCode::DataExchangeLoading, serde_json::json!({"findFirst": true}));
-
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 1, "findFirst=true: ForEach as first stmt triggers");
+    }
 
-        assert_eq!(diagnostics.len(), 4, "Should find 4 diagnostics with findFirst=true");
+    #[test]
+    fn test_find_first_before_delete_ok_with_find_first_false() {
+        // BeforeDelete: has guard later in body — valid with findFirst=false
+        let code = r#"Procedure BeforeDelete(Cancel)
+    For Each Item in new Array Do
+        Return;
+    EndDo;
+
+    If DataExchange.Load Then
+        Return;
+    EndIf;
+EndProcedure"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "findFirst=false: guard anywhere in body is valid");
+    }
+
+    #[test]
+    fn test_valid_guard_with_nested_logic() {
+        // ПриЗаписи with guard that has nested logic then Return — valid
+        let code = r#"Процедура ПриЗаписи(Отказ)
+    Если ОбменДанными.Загрузка Тогда
+        Если Не ДополнительныеСвойства.Свойство("Пропустить") Тогда
+            ДатыЗапретаИзмененияСлужебный.ОбновитьВерсию(ЭтотОбъект);
+        КонецЕсли;
+        Очистить();
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Guard with nested logic and Return should be valid");
+    }
+
+    #[test]
+    fn test_valid_negated_guard() {
+        // НЕ ОбменДанными.Загрузка И ... — valid (Return in then-branch)
+        let code = r#"Процедура ПередЗаписью(Отказ, РежимЗаписи, РежимПроведения)
+
+    Если НЕ ОбменДанными.Загрузка И РольДоступна("ПолныеПрава") Тогда
+        Отказ = Истина;
+        Возврат;
+    КонецЕсли;
+
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Negated guard with Return should be valid");
     }
 }

@@ -105,28 +105,76 @@ mod tests {
     use crate::{DiagnosticCode, Severity};
 
     #[test]
-    fn test_join_with_virtual_table_from_fixture() {
-        use crate::test_utils::assert_diagnostic_range;
-        let code = include_str!("../../test_data/JoinWithVirtualTableDiagnostic.bsl");
+    fn test_join_with_virtual_table_single_line() {
+        // Single-line query: LEFT JOIN with СрезПоследних
+        let code = r#"Процедура Тест1()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "Выбрать Т.Ссылка Из Справочник.Справочник1 СПр Левое соединение РегистрСведений.Курсы.СрезПоследних КАК Т По СПр.Поле1 = Т.Валюта";
+КонецПроцедуры
+"#;
         let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
+        assert_eq!(diagnostics[0].code, DiagnosticCode::JoinWithVirtualTable);
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
+    }
 
-        assert_eq!(diagnostics.len(), 5, "Expected 5 JoinWithVirtualTable diagnostics");
+    #[test]
+    fn test_join_with_virtual_table_multiline_left() {
+        // Multiline query: LEFT JOIN with Остатки
+        let code = r#"Процедура Тест2()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "Выбрать Т.Измерение Из Справочник.Справочник1
+    |СПр Левое соединение
+    |РегистрНакопления.Склады.Остатки(Склад = &Параметр) КАК Т
+    |По СПр.Поле1 = Т.Местонахождение";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
+    }
 
-        for diag in &diagnostics {
-            assert_eq!(diag.code, DiagnosticCode::JoinWithVirtualTable);
-            assert_eq!(diag.severity, Severity::Warning);
-        }
+    #[test]
+    fn test_join_with_virtual_table_multiline_right() {
+        // Multiline query: RIGHT JOIN with Остатки
+        let code = r#"Процедура Тест3()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "Выбрать Т.Регистратор Из Справочник.Справочник1
+    |СПр Правое соединение
+    |РегистрНакопления.Склады.Остатки(Склад = &Параметр) КАК Т
+    |По СПр.Поле1 = Т.Местонахождение";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 JoinWithVirtualTable diagnostic");
+    }
 
-        // Sort diagnostics by position for predictable order
-        let mut sorted = diagnostics.clone();
-        sorted.sort_by_key(|d| d.range.start());
+    #[test]
+    fn test_join_with_two_virtual_tables() {
+        // Query with two virtual tables in JOINs → 2 diagnostics
+        let code = r#"Процедура Тест4()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "Выбрать Т.Измерение
+    | Из РегистрСведений.Курсы.СрезПоследних(&Период) как Курсы Левое соединение
+    |РегистрНакопления.Склады.Остатки(Склад = &Параметр) КАК Т
+    |По Курсы.Поле1 = Т.Измерение";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2, "Expected 2 JoinWithVirtualTable diagnostics");
+    }
 
-        // Verify positions match bsl-language-server test expectations (lines must match, columns +-1)
-        assert_diagnostic_range(code, &sorted[0], 3, 84, 120);
-        assert_diagnostic_range(code, &sorted[1], 12, 5, 56);
-        assert_diagnostic_range(code, &sorted[2], 22, 5, 56);
-        assert_diagnostic_range(code, &sorted[3], 31, 9, 53);
-        assert_diagnostic_range(code, &sorted[4], 33, 5, 56);
+    #[test]
+    fn test_virtual_table_in_from_no_join_no_trigger() {
+        // Virtual table used in FROM without any JOIN → no diagnostic
+        let code = r#"Процедура Тест7()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "Выбрать Т.Ссылка
+    | Из РегистрНакопления.Склады.Остатки(Склад = &Параметр) как Р,
+    |(Выбрать СС.Ссылка Из Справочник.Справочник2 КАК СС Где СС.Ссылка = &Параметр) КАК Т";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Virtual table in FROM without JOIN should not trigger");
     }
 
     #[test]

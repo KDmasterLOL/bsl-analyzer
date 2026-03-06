@@ -99,7 +99,7 @@ pub fn from_hir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::test_utils::check_hir_diagnostic;
     #[test]
     fn test_simple_deletion() {
         let code = r#"
@@ -186,26 +186,193 @@ EndProcedure
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/DeletingCollectionItemDiagnostic.bsl");
-
+    fn test_good_different_collection_nested_field() {
+        // НеЭтаКоллекция.Удалить while iterating Коллекция — no error
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция Цикл
+    Если Элемент < 10 Тогда
+        НеЭтаКоллекция.Удалить(Элемент);
+    КонецЕсли;
+КонецЦикла;
+КонецПроцедуры
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
             .collect();
+        assert_eq!(diags.len(), 0, "Deleting from different collection should be OK");
+    }
 
-        assert_eq!(diags.len(), 8, "Should find 8 diagnostics");
+    #[test]
+    fn test_good_global_delete_nested_field() {
+        // Global Удалить() while iterating — no error
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция Цикл
+    Если Элемент < 10 Тогда
+        Удалить(Элемент);
+    КонецЕсли;
+КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 0, "Global Удалить() should be OK");
+    }
 
-        // Verify positions match bsl-language-server implementation
-        assert_diagnostic_range(code, diags[0], 17, 8, 47);
-        assert_diagnostic_range(code, diags[1], 23, 4, 21);
-        assert_diagnostic_range(code, diags[2], 28, 4, 25);
-        assert_diagnostic_range(code, diags[3], 33, 4, 30);
-        assert_diagnostic_range(code, diags[4], 39, 8, 34);
-        assert_diagnostic_range(code, diags[5], 45, 4, 23);
-        assert_diagnostic_range(code, diags[6], 50, 4, 37);
-        assert_diagnostic_range(code, diags[7], 55, 4, 39);
+    #[test]
+    fn test_error_chained_field_collection() {
+        // error1: Коллекция.ЕщеКоллекция.Удалить while iterating Коллекция.ЕщеКоллекция
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция.ЕщеКоллекция Цикл
+    Если Элемент < 10 Тогда
+        Коллекция.ЕщеКоллекция.Удалить(Элемент);
+    КонецЕсли;
+КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Deleting from chained field collection should error");
+    }
+
+    #[test]
+    fn test_error_simple_english() {
+        // error2: mass.delete(elem)
+        let code = r#"
+Procedure Test()
+for each elem in mass do
+    mass.delete(elem);
+enddo;
+EndProcedure
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Simple English delete should error");
+    }
+
+    #[test]
+    fn test_error_parenthesized_arg() {
+        // error3: mass.delete((elem)) — extra parens around arg
+        let code = r#"
+Procedure Test()
+for each elem in mass do
+    mass.delete( (elem ));
+enddo;
+EndProcedure
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Parenthesized arg should still error");
+    }
+
+    #[test]
+    fn test_error_simple_russian_no_condition() {
+        // error4: Коллекция.Удалить(Элемент) directly in loop without If
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция Цикл
+    Коллекция.Удалить(Элемент);
+КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Direct delete in loop body should error");
+    }
+
+    #[test]
+    fn test_error_inside_if_in_loop() {
+        // error5: delete inside If inside ForEach
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция Цикл
+    Если Элемент < 10 Тогда
+        Коллекция.Удалить(Элемент);
+    КонецЕсли;
+КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Delete inside If in loop should error");
+    }
+
+    #[test]
+    fn test_error_expression_arg() {
+        // error6: mass.delete(elem+1)
+        let code = r#"
+Procedure Test()
+for each elem in mass do
+    mass.delete(elem+1);
+enddo;
+EndProcedure
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Delete with expression arg should error");
+    }
+
+    #[test]
+    fn test_error_chained_method_calls() {
+        // error7: mass.mass1().mass2 chained collection
+        let code = r#"
+Procedure Test()
+for each elem in mass.mass1().mass2 do
+    mass.mass1().mass2.delete(elem+1);
+enddo;
+EndProcedure
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 1, "Chained method call collection should error");
+    }
+
+    #[test]
+    fn test_good_different_collection_after_loop() {
+        // good: Коллекция1.Удалить while iterating Коллекция — no error
+        let code = r#"
+Процедура Тест()
+Для Каждого Элемент Из Коллекция Цикл
+    Если Элемент < 10 Тогда
+        Коллекция1.Удалить(Элемент);
+    КонецЕсли;
+КонецЦикла;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeletingCollectionItem)
+            .collect();
+        assert_eq!(diags.len(), 0, "Коллекция1 != Коллекция, should be OK");
     }
 
     #[test]

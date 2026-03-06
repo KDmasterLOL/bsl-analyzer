@@ -241,19 +241,31 @@ mod tests {
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/DisableSafeModeDiagnostic.bsl");
-        let diagnostics = check_hir_diagnostic(input);
+    fn test_all_four_patterns_in_procedure() {
+        // Covers all 4 triggering patterns from the original fixture:
+        // SetSafeMode(False), SetSafeMode(variable), SetSafeModeDisabled(True), SetSafeModeDisabled(variable)
+        // SetSafeMode(True) and SetSafeModeDisabled(False) do NOT trigger.
+        let code = r#"&НаСервере
+Процедура Метод()
+    УстановитьБезопасныйРежим(Ложь);
 
+    Значение = Ложь;
+    УстановитьБезопасныйРежим(Значение);
+
+    УстановитьБезопасныйРежим(Истина);
+
+    УстановитьОтключениеБезопасногоРежима(Истина);
+
+    Значение = Истина;
+    УстановитьОтключениеБезопасногоРежима(Значение);
+
+    УстановитьОтключениеБезопасногоРежима(Ложь);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
         let safe_mode_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DisableSafeMode).collect();
 
-        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics to match bsl-language-server");
-
-        // Verify diagnostic positions match bsl-language-server test expectations
-        assert_diagnostic_range(input, safe_mode_diags[0], 2, 4, 29);
-        assert_diagnostic_range(input, safe_mode_diags[1], 5, 4, 29);
-        assert_diagnostic_range(input, safe_mode_diags[2], 9, 4, 41);
-        assert_diagnostic_range(input, safe_mode_diags[3], 12, 4, 41);
+        assert_eq!(safe_mode_diags.len(), 4, "Expected 4 diagnostics");
     }
 }

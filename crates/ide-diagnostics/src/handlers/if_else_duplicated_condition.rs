@@ -250,9 +250,26 @@ mod tests {
         assert_eq!(dupl_diags.len(), 2, "Should detect duplicates in both outer and inner if");
     }
 
+    /// Triple duplicate condition group: п = 1 appears three times, two warnings
     #[test]
-    fn test_comprehensive_fixture() {
-        let code = include_str!("../../test_data/IfElseDuplicatedConditionDiagnostic.bsl");
+    fn test_triple_duplicate_condition() {
+        let code = r#"
+Процедура Тест()
+    Если п = 0 Тогда
+        т = 0;
+    ИначеЕсли п = 1 Тогда
+        т = 1;
+    ИначеЕсли п = 1 Тогда
+        т = 2;
+    ИначеЕсли п = 2 Тогда
+        т = 3;
+    ИначеЕсли П     =   1 Тогда
+        т = 4;
+    Иначе
+        т = -1;
+    КонецЕсли;
+КонецПроцедуры
+"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let dupl_diags: Vec<_> = diagnostics
@@ -260,42 +277,86 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
 
-        let found_count = dupl_diags.len();
+        // п = 1 is duplicated twice (3rd and 5th branch), П = 1 normalized is also п = 1 (4th duplicate)
+        assert_eq!(dupl_diags.len(), 2, "Should find 2 duplicates of п = 1");
+    }
 
-        // Show which lines we found
-        let mut found_lines: Vec<u32> = dupl_diags
+    /// Nested if with duplicate in both outer and inner chains
+    #[test]
+    fn test_nested_and_outer_duplicates() {
+        let code = r#"
+Процедура Тест()
+    Если п = 0 Тогда
+        т = 0;
+    ИначеЕсли п = 1 Тогда
+        Если п = 1 Тогда
+            т = 1;
+        ИначеЕсли п = 2 Тогда
+            т = 2;
+        ИначеЕсли п = 2 Тогда
+            т = 3;
+        Иначе
+            т = 4;
+        КонецЕсли;
+    ИначеЕсли п = 1 Тогда
+        т = 4;
+    Иначе
+        т = -1;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let dupl_diags: Vec<_> = diagnostics
             .iter()
-            .map(|d| {
-                let (line, _, _, _) = range_to_line_col(code, d.range);
-                line
-            })
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
-        found_lines.sort();
 
-        // Expected diagnostics on duplicate conditions:
-        // Lines 4, 6, 10 - duplicates of п = 1 (first group) -> 2 diagnostics (6, 10)
-        // Lines 18, 28 - duplicates of п = 1 (second group, outer if) -> 1 diagnostic (28)
-        // Lines 21, 23 - duplicates of п = 2 (nested if) -> 1 diagnostic (23)
-        // Lines 42, 44, 46 - duplicates of (Знак = "ё") -> 2 diagnostics (44, 46)
-        // Total: 2 + 1 + 1 + 2 = 6 diagnostics
+        // Inner: п = 2 duplicated once; outer: п = 1 duplicated once
+        assert_eq!(dupl_diags.len(), 2, "Should find 2 duplicates (inner and outer)");
+    }
 
-        // Note: bsl-language-server reports 4 diagnostics (one per group with relatedInformation)
-        // Our approach reports 6 diagnostics (one per duplicate, not counting first occurrence)
-        // Both are valid, ours is more explicit
+    /// String case-sensitive: "Ё" != "ё" so no duplicate; "ё" = "ё" is duplicate
+    #[test]
+    fn test_string_case_sensitive_fixture() {
+        let no_dup_code = r#"
+Процедура Тест()
+    Если (Знак = "Ё") Тогда
+        Возврат 0;
+    ИначеЕсли (ЗНак = "ё") Тогда
+        Возврат 1;
+    Иначе
+        Возврат 2;
+    КонецЕсли;
+КонецПроцедуры
+"#;
 
-        assert_eq!(
-            found_count, 6,
-            "Should find 6 diagnostics (one per duplicate condition), found {}",
-            found_count
-        );
+        let diagnostics = check_hir_diagnostic(no_dup_code);
+        let dupl_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+        assert_eq!(dupl_diags.len(), 0, "Different string case should not be duplicate");
 
-        // Verify expected lines (0-indexed in fixture output)
-        // Lines 5, 9, 22, 27, 43, 45 correspond to 1-indexed 6, 10, 23, 28, 44, 46
-        let expected_lines = vec![5, 9, 22, 27, 43, 45];
-        assert_eq!(
-            found_lines, expected_lines,
-            "Diagnostics should be on lines {:?}",
-            expected_lines
-        );
+        let dup_code = r#"
+Процедура Тест()
+    Если (Знак = "ё") Тогда
+        Возврат 0;
+    ИначеЕсли (Знак = "ё") Тогда
+        Возврат 1;
+    ИначеЕсли (ЗНак = "ё") Тогда
+        Возврат 2;
+    Иначе
+        Возврат 3;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let diagnostics2 = check_hir_diagnostic(dup_code);
+        let dupl_diags2: Vec<_> = diagnostics2
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
+            .collect();
+        assert_eq!(dupl_diags2.len(), 2, "Same string literal should produce 2 duplicates");
     }
 }

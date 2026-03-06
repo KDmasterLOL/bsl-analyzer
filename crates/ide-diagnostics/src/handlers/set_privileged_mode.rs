@@ -39,7 +39,15 @@ mod tests {
     use crate::test_utils::*;
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../../test_data/SetPrivilegedModeDiagnostic.bsl");
+        let code = r#"&НаСервере
+Процедура Метод()
+    УстановитьПривилегированныйРежим(Истина); // есть замечание
+    Значение = Истина;
+    УстановитьПривилегированныйРежим(Значение); // есть замечание
+
+    УстановитьПривилегированныйРежим(Ложь); // нет замечания
+КонецПроцедуры
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::SetPrivilegedMode).collect();

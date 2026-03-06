@@ -305,69 +305,41 @@ mod tests {
     use crate::test_utils::*;
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/DuplicateStringLiteralDiagnostic.bsl");
+    fn test_duplicate_in_method() {
+        // "Строка2" appears 4 times in one method → 1 diagnostic at first occurrence
+        let code = r#"Процедура Метод1()
+    Ц = "Строка2";
+    Если Ц = "Строка2" Тогда
+        Ф = ВРег("Строка2") + НРег("Строка3");
+    Иначе
+        Ф = НРег("Строка2");
+    КонецЕсли;
+КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 2, "Should find 2 diagnostics (default config)");
-
-        // Метод1: "Строка2" at line 2 (0-indexed: line 1), col 8-17
-        // Note: Col 17 is the position AFTER the closing quote (half-open range)
+        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for 4 occurrences of Строка2");
         assert_diagnostic_range(code, &diagnostics[0], 1, 8, 17);
-
-        // Метод2: "Строка22" at line 11 (0-indexed: line 10), col 9-19
-        // Note: Col 19 is the position AFTER the closing quote (half-open range)
-        assert_diagnostic_range(code, &diagnostics[1], 10, 9, 19);
-
-        assert!(
-            diagnostics[0].message.contains("Строка2"),
-            "Message should contain original string"
-        );
-        assert!(
-            diagnostics[1].message.contains("Строка22"),
-            "Message should contain original string"
-        );
+        assert!(diagnostics[0].message.contains("Строка2"));
     }
 
     #[test]
-    fn test_debug_positions() {
-        let code = r#"Процедура Метод1()
-    Ц = "Строка2";
+    fn test_duplicate_case_insensitive_in_method() {
+        // "Строка22"/"строка22"/"СтрОкА22" are 3 occurrences (case-insensitive) → 1 diagnostic
+        let code = r#"Процедура Метод2()
+    Ц2 = "Строка22";
+    Если Ц2 = "Строка22" Тогда
+        Ф2 = Метод7("строка22");
+    Иначе
+        Ф2 = ("Строка3" + "Строка4" + "СтрОкА22");
+    КонецЕсли;
 КонецПроцедуры"#;
-
-        use ide_db::base_db::{RootQueryDb, SourceDatabase};
-        use ide_db::RootDatabaseImpl;
-        use test_fixture::Fixture;
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().unwrap();
-
-        let mut db = RootDatabaseImpl::new();
-        for (fid, file) in &fixture.files {
-            db.set_file_text(*fid, &file.content);
-        }
-
-        let parse = db.parse(file_id);
-        let root = parse.syntax_node();
-
-        // Find first string LITERAL
-        let literal = root
-            .descendants()
-            .find(|n| {
-                n.kind() == SyntaxKind::LITERAL
-                    && n.children_with_tokens().any(|elem| {
-                        elem.as_token().map(|t| t.kind() == SyntaxKind::STRING).unwrap_or(false)
-                    })
-            })
-            .unwrap();
-
-        // Get STRING token range - verify it exists
-        let _string_range = literal
-            .children_with_tokens()
-            .find_map(|elem| {
-                elem.as_token().filter(|t| t.kind() == SyntaxKind::STRING).map(|t| t.text_range())
-            })
-            .unwrap();
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Should find 1 diagnostic for case-insensitive duplicates"
+        );
+        assert_diagnostic_range(code, &diagnostics[0], 1, 9, 19);
+        assert!(diagnostics[0].message.contains("Строка22"));
     }
 
     #[test]

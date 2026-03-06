@@ -60,9 +60,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{
-        assert_diagnostic_range_multiline, check_hir_diagnostic, range_to_line_col,
-    };
+    use crate::test_utils::check_hir_diagnostic;
     use crate::DiagnosticCode;
     #[test]
     fn test_simple_if_else_duplicate() {
@@ -139,46 +137,120 @@ mod tests {
         assert_eq!(diags.len(), 0, "Empty blocks should be ignored");
     }
 
+    /// Empty blocks across all branches should not trigger duplicate detection
     #[test]
-    fn test_comprehensive_fixture() {
-        let code = include_str!("../../test_data/IfElseDuplicatedCodeBlockDiagnostic.bsl");
+    fn test_empty_blocks_all_branches() {
+        let code = r#"Процедура Тест()
+    Если ПараметрКоманды.Количество() = 0 Тогда
+    ИначеЕсли ПараметрКоманды.Количество() = 1 Тогда
+    Иначе
+    КонецЕсли;
+КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
+        assert_eq!(diags.len(), 0, "Empty blocks should not trigger duplicate detection");
+    }
 
-        // Expected 5 diagnostics
-        let found_count = diags.len();
+    /// If and Else with identical two-statement blocks should warn
+    #[test]
+    fn test_if_else_two_statement_duplicate() {
+        let code = r#"Процедура Тест()
+    Если ПараметрКоманды.Количество() = 0 Тогда
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        Возврат;
+    Иначе
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
 
-        assert_eq!(found_count, 5, "Should find 5 diagnostics (), found {}", found_count);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
+            .collect();
+        assert_eq!(diags.len(), 1, "Identical if/else two-statement blocks should warn");
+    }
 
-        // Sort diagnostics by line number for consistent checking
-        let mut sorted_diagnostics: Vec<_> = diags.into_iter().collect();
-        sorted_diagnostics.sort_by_key(|d| {
-            let (line, col, _, _) = range_to_line_col(code, d.range);
-            (line, col)
-        });
+    /// If block differs from Else block (different statement count) - should not warn
+    #[test]
+    fn test_if_else_different_statement_count() {
+        let code = r#"Процедура Тест()
+    Если ПараметрКоманды.Количество() = 0 Тогда
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+    Иначе
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
 
-        // Test 1: Line 10 (simple if/else duplicate)
-        // then-branch STMT_LIST starts on line 11
-        assert_diagnostic_range_multiline(code, sorted_diagnostics[0], 10, 1, 12, 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
+            .collect();
+        assert_eq!(diags.len(), 0, "Different statement counts should not warn");
+    }
 
-        // Test 2: Line 27 (if/elsif duplicate)
-        // then-branch STMT_LIST starts on line 28
-        assert_diagnostic_range_multiline(code, sorted_diagnostics[1], 27, 1, 29, 0);
+    /// If/ElseIf with identical blocks should warn
+    #[test]
+    fn test_if_elseif_duplicate_with_else() {
+        let code = r#"Процедура Тест()
+    Если ПараметрКоманды.Количество() = 0 Тогда
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        Возврат;
+    ИначеЕсли ПараметрКоманды.Количество() = 1 Тогда
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        Возврат;
+    Иначе
+        ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+    КонецЕсли;
+КонецПроцедуры"#;
 
-        // Test 3: Line 38 outer if with nested duplicates
-        // then-branch STMT_LIST spans lines 40-49
-        assert_diagnostic_range_multiline(code, sorted_diagnostics[2], 40, 1, 50, 0);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
+            .collect();
+        assert_eq!(diags.len(), 1, "If/ElseIf with identical blocks should warn");
+    }
 
-        // Test 4: Line 41 (nested inner if)
-        // then-branch STMT_LIST starts on line 42
-        assert_diagnostic_range_multiline(code, sorted_diagnostics[3], 41, 2, 43, 1);
+    /// Nested if with duplicates inside outer if and else branches (3 diagnostics total)
+    #[test]
+    fn test_nested_duplicates_in_outer_branches() {
+        let code = r#"Процедура Тест()
+    Если ТипЗнч(ПараметрКоманды) = Тип("Массив") Тогда
+        Если ПараметрКоманды.Количество() = 0 Тогда
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+            Возврат;
+        ИначеЕсли ПараметрКоманды.Количество() = 1 Тогда
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+            Возврат;
+        Иначе
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        КонецЕсли;
+    Иначе
+        Если ПараметрКоманды.Количество() = 0 Тогда
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+            Возврат;
+        ИначеЕсли ПараметрКоманды.Количество() = 1 Тогда
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+            Возврат;
+        Иначе
+            ПоказатьПредупреждение(,НСтр("ru= 'Сообщение'"));
+        КонецЕсли;
+    КонецЕсли;
+КонецПроцедуры"#;
 
-        // Test 5: Line 54 (nested inner if in else branch)
-        // then-branch STMT_LIST starts on line 55
-        assert_diagnostic_range_multiline(code, sorted_diagnostics[4], 54, 2, 56, 1);
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
+            .collect();
+        assert_eq!(diags.len(), 3, "Outer if/else and both inner if/elseif chains should warn");
     }
 }

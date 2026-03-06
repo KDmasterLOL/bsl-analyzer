@@ -76,11 +76,25 @@ mod tests {
 
     #[test]
     fn test_function_out_parameter() {
-        let code = include_str!("../../test_data/FunctionOutParameterDiagnostic.bsl");
+        let code = r#"Процедура А(А, Знач Б)
+    А = 1;
+КонецПроцедуры
+
+Функция Б(А, Знач Б)
+    а = 1;
+
+    Если А = 1 Тогда
+    КонецЕсли;
+
+    Б = 2;
+
+КонецФункции
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::FunctionOutParameter).collect();
 
+        // Only function Б modifies parameter А (by-reference); procedure А is allowed
         assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
 
         assert_diagnostic_range(code, func_diags[0], 5, 4, 5);

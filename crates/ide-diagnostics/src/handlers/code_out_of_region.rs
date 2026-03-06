@@ -258,7 +258,77 @@ mod tests {
     };
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnostic.bsl");
+        // Mirror of CodeOutOfRegionDiagnostic.bsl: mixed regions/no-regions with #Если blocks
+        let code = "//////////////////////////////////////////////\n\
+// Название модуля\n\
+//////////////////////////////////////////////\n\
+#Если Сервер тогда\n\
+Перем А;                // <- Ошибка\n\
+#Область Переменные\n\
+Перем Б;\n\
+Перем Дд;\n\
+#КонецОбласти\n\
+Перем Ии;               // <- Ошибка\n\
+\n\
+#Область Методы\n\
+Функция Аа() Экспорт\n\
+    Возврат 7;\n\
+КонецФункции\n\
+#КонецОбласти\n\
+#Иначе\n\
+Процедура ССС()          // <- Ошибка\n\
+    #Область Методы21\n\
+    Сообщаить(4245);\n\
+    #КонецОбласти\n\
+КонецПроцедуры\n\
+#КонецЕсли\n\
+\n\
+Процедура Бб()          // <- Ошибка\n\
+    #Область Методы2\n\
+    Сообщаить(42);\n\
+    #КонецОбласти\n\
+КонецПроцедуры\n\
+\n\
+///////////////////////////////////////////\n\
+// инициализация\n\
+///////////////////////////////////////////\n\
+\n\
+#Если Сервер Тогда\n\
+#Область Методы3\n\
+Функция Пример3\n\
+ Сообщить(42);\n\
+КонецФункции\n\
+#КонецОбласти\n\
+#КонецЕсли\n\
+\n\
+#Область Иниц\n\
+А = 78;\n\
+#КонецОбласти\n\
+\n\
+Б = Аа() + А;           // <- Ошибка\n\
+\n\
+#Область Иниц\n\
+Если Условие Тогда\n\
+    Ии = 79;\n\
+КонецЕсли;\n\
+#КонецОбласти\n\
+\n\
+#Область в\n\
+    Ин = 5;\n\
+#КонецОбласти\n\
+Ин = в;                         // <- Ошибка\n\
+\n\
+Если Условие Тогда              // <- Ошибка\n\
+#Если Сервер Тогда\n\
+Сообщить(\"Так нельзя жить\");\n\
+#ИначеЕсли Клиент Тогда\n\
+Сообщить(\"И так нельзя жить\");\n\
+#Иначе\n\
+#Область Областишка\n\
+Сообщить(\"Так тоже нелзя, хоть и хочется\");\n\
+#КонецОбласти\n\
+#КонецЕсли\n\
+КонецЕсли";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 7, "Expected 7 diagnostics");
@@ -287,15 +357,37 @@ mod tests {
 
     #[test]
     fn test_empty_file() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticEmptyFile.bsl");
+        // Mirror of CodeOutOfRegionDiagnosticEmptyFile.bsl: single empty line
+        let code = "\n";
         let diagnostics = check_ast_diagnostic(code, check);
-
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_no_regions() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticNoRegions.bsl");
+        // Mirror of CodeOutOfRegionDiagnosticNoRegions.bsl: no regions at all
+        let code = "//////////////////////////////////////////////\n\
+// Название модуля\n\
+//////////////////////////////////////////////\n\
+\n\
+Перем А;\n\
+Перем Б;\n\
+\n\
+Функция Аа() Экспорт\n\
+    Возврат 7;\n\
+КонецФункции\n\
+\n\
+Процедура Бб()\n\
+    Сообщаить(42);\n\
+КонецПроцедуры\n\
+\n\
+///////////////////////////////////////////\n\
+// инициализация\n\
+///////////////////////////////////////////\n\
+\n\
+А = 78;\n\
+\n\
+Б = Аа() + А;";
         let diagnostics = check_ast_diagnostic(code, check);
 
         // NOTE: bsl-language-server returns 1 diagnostic with relatedInformation when no regions exist
@@ -323,15 +415,23 @@ mod tests {
 
     #[test]
     fn test_standard_preproc() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticStandartPreproc.bsl");
+        // Mirror of CodeOutOfRegionDiagnosticStandartPreproc.bsl:
+        // raise inside #Иначе is not significant — 0 diagnostics
+        let code = "#Если Сервер Или ТолстыйКлиентОбычноеПриложение Или ВнешнееСоединение Тогда\n\
+#Область СлужебныйПрограммныйИнтерфейс\n\
+#КонецОбласти\n\
+#Иначе\n\
+  ВызватьИсключение НСтр(\"ru = 'Недопустимый вызов объекта на клиенте.'\");\n\
+#КонецЕсли";
         let diagnostics = check_ast_diagnostic(code, check);
-
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_execute() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticExecute.bsl");
+        // Mirror of CodeOutOfRegionDiagnosticExecute.bsl:
+        // Procedure named "Выполнить" outside region — 1 diagnostic (procedure name range)
+        let code = "\nПроцедура Выполнить()\n\nКонецПроцедуры\n";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1);
@@ -344,7 +444,9 @@ mod tests {
 
     #[test]
     fn test_code_block() {
-        let code = include_str!("../../test_data/CodeOutOfRegionDiagnosticCodeBlock.bsl");
+        // Mirror of CodeOutOfRegionDiagnosticCodeBlock.bsl:
+        // Single call statement НСтр("..."); at top level outside any region
+        let code = "НСтр(\"ru = 'Сегодня'\");";
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 1);

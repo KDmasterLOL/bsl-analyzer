@@ -177,7 +177,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        let code = include_str!("../../test_data/OrdinaryAppSupportDiagnostic.bsl");
+        let code = r#"Процедура ПриОпределенииПараметровСеанса()
+
+КонецПроцедуры
+"#;
         let (diagnostics, file_content) = check_with_config(code, fixtures_dir, true, true);
 
         // Designer fixture has both flags set to false (default),
@@ -200,7 +203,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        let code = include_str!("../../test_data/OrdinaryAppSupportDiagnostic.bsl");
+        let code = r#"Процедура ПриОпределенииПараметровСеанса()
+
+КонецПроцедуры
+"#;
         let (diagnostics, _) = check_with_config(code, fixtures_dir, true, false);
 
         assert_eq!(diagnostics.len(), 0, "Disabled config should produce no diagnostics");
@@ -211,7 +217,10 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        let code = include_str!("../../test_data/OrdinaryAppSupportDiagnostic.bsl");
+        let code = r#"Процедура ПриОпределенииПараметровСеанса()
+
+КонецПроцедуры
+"#;
         let (diagnostics, _) = check_with_config(code, fixtures_dir, false, true);
 
         assert_eq!(diagnostics.len(), 0, "Non-SessionModule should produce no diagnostics");

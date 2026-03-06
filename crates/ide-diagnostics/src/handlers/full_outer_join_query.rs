@@ -120,24 +120,46 @@ mod tests {
     use crate::test_utils::check_sdbl_diagnostic;
     use crate::DiagnosticCode;
     #[test]
-    fn test_full_outer_join_query_from_fixture() {
-        let code = include_str!("../../test_data/FullOuterJoinQueryDiagnostic.bsl");
-        let diagnostics = check_sdbl_diagnostic(code, check);
-
-        // Should detect exactly 1 FULL OUTER JOIN in the fixture
-        assert_eq!(diagnostics.len(), 1, "Expected 1 FULL OUTER JOIN");
-
-        // Verify it's the correct diagnostic type
+    fn test_fixture_full_outer_join_detected_left_join_not() {
+        // Fixture Тест1: has ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ -> 1 diagnostic
+        // Fixture Тест2: has only LEFT JOINs -> 0 diagnostics
+        let code_test1 = r#"Процедура Тест1()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+                   |    Товары.Номенклатура КАК Номенклатура,
+                   |    ЕСТЬNULL(ПланПродаж.Сумма, 0) КАК СуммаПлан,
+                   |    ЕСТЬNULL(ФактическиеПродажи.Сумма, 0) КАК СуммаФакт
+                   |ИЗ
+                   |    Товары КАК Товары
+                   |        ЛЕВОЕ СОЕДИНЕНИЕ ПланПродаж КАК ПланПродаж
+                   |            ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ ФактическиеПродажи КАК ФактическиеПродажи
+                   |            ПО ПланПродаж.Номенклатура = ФактическиеПродажи.Номенклатура
+                   |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code_test1, check);
+        assert_eq!(diagnostics.len(), 1, "ПОЛНОЕ ВНЕШНЕЕ СОЕДИНЕНИЕ should trigger");
         assert_eq!(diagnostics[0].code, DiagnosticCode::FullOuterJoinQuery);
         assert!(diagnostics[0].message.contains("FULL OUTER JOIN"));
-
-        // Verify the diagnostic is in the query string (lines 4-13)
-        // The FULL OUTER JOIN is on line 11 in the file
-        let range_text = &code[diagnostics[0].range];
+        let range_text = &code_test1[diagnostics[0].range];
         assert!(
             range_text.contains("ПОЛНОЕ") || range_text.contains("FULL"),
-            "Diagnostic should highlight the FULL JOIN keywords"
+            "Diagnostic should highlight FULL JOIN keywords, got: '{}'",
+            range_text
         );
+
+        let code_test2 = r#"Процедура Тест2()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+                   |    Товары.Номенклатура КАК Номенклатура
+                   |ИЗ
+                   |    Товары КАК Товары
+                   |        ЛЕВОЕ СОЕДИНЕНИЕ ПланПродаж КАК ПланПродаж
+                   |            ЛЕВОЕ СОЕДИНЕНИЕ ФактическиеПродажи КАК ФактическиеПродажи
+                   |            ПО ПланПродаж.Номенклатура = ФактическиеПродажи.Номенклатура
+                   |        ПО Товары.Номенклатура = ПланПродаж.Номенклатура";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code_test2, check);
+        assert_eq!(diagnostics.len(), 0, "LEFT JOINs only should not trigger");
     }
 
     #[test]

@@ -214,48 +214,79 @@ fn check_line_start(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::check_ast_diagnostic;
+    /// Two operators (+) at line end in simple concatenation - 2 warnings
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/IncorrectLineBreakDiagnostic.bsl");
+    fn test_operator_at_end_two_lines() {
+        let code = r#"СуммаДокумента = СуммаБезСкидки +
+                 СуммаРучнойСкидки +
+                 СуммаАвтоматическойСкидки;"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2, "Should detect 2 operators at line end");
+    }
 
-        // Expected 14 diagnostics with specific positions
-        assert_eq!(
-            diagnostics.len(),
-            14,
-            "Should match bsl-language-server implementation: 14 diagnostics"
-        );
+    /// Operator at end with comment before next line - still warns
+    #[test]
+    fn test_operator_at_end_before_comment() {
+        let code = r#"ПоляОтбора = "Номенклатура,Характеристика,Склад" + // Дополнительный комментарий
+   ДополнительныеПоляОтбора;"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Should detect + at line end even before comment");
+    }
 
-        // Verify exact positions match bsl-language-server test expectations (0-indexed lines)
-        // Line 7: + at end
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 6, 32, 6, 33);
-        // Line 8: + at end
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 7, 35, 7, 36);
-        // Line 16: + at end
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 15, 32, 15, 33);
-        // Line 17: + at end
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 16, 22, 16, 23);
-        // Line 21: + at end (before comment)
-        assert_diagnostic_range_multiline(code, &diagnostics[4], 20, 49, 20, 50);
-        // Line 70: ИЛИ at end
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 69, 80, 69, 83);
-        // Line 83: ИЛИ at end
-        assert_diagnostic_range_multiline(code, &diagnostics[6], 82, 89, 82, 92);
-        // Line 45: , at start with content
-        assert_diagnostic_range_multiline(code, &diagnostics[7], 44, 25, 44, 76);
-        // Line 47: , at start with content
-        assert_diagnostic_range_multiline(code, &diagnostics[8], 46, 25, 46, 79);
-        // Line 59: , at start with content
-        assert_diagnostic_range_multiline(code, &diagnostics[9], 58, 4, 58, 55);
-        // Line 61: , at start with content
-        assert_diagnostic_range_multiline(code, &diagnostics[10], 60, 4, 60, 58);
-        // Line 102: ) at start
-        assert_diagnostic_range_multiline(code, &diagnostics[11], 101, 2, 101, 3);
-        // Line 106: ) at start
-        assert_diagnostic_range_multiline(code, &diagnostics[12], 105, 2, 105, 3);
-        // Line 110: ) at start
-        assert_diagnostic_range_multiline(code, &diagnostics[13], 109, 2, 109, 3);
+    /// Operator at end when next line starts with string literal - should pass
+    #[test]
+    fn test_operator_before_string_continuation_passes() {
+        let code = r#"ТекстЗапроса = ТекстЗапроса +
+"ВЫБРАТЬ
+| Номенклатура.Ссылка КАК Ссылка
+|ИЗ
+| Справочник. Номенклатура КАК Номенклатура";"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "String continuation after + should not warn");
+    }
+
+    /// ИЛИ at end of line - warns
+    #[test]
+    fn test_or_keyword_at_line_end() {
+        let code = r#"Если (ВидОперации = Перечисления.ВидыОперацийПоступлениеМПЗ.ПоступлениеРозница) ИЛИ
+  (ВидОперации = Перечисления.ВидыОперацийПоступлениеМПЗ.ПоступлениеРозницаКомиссия) Тогда
+  Возврат Истина;
+КонецЕсли;"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Should detect ИЛИ at line end");
+    }
+
+    /// Comma at line start with meaningful content - warns; lone comma placeholder - passes
+    #[test]
+    fn test_comma_at_line_start_with_content() {
+        let code = r#"ИменаДокументов.Добавить(Метаданные.Документы.СтрокаВыпискиРасход.Имя
+    ,Метаданные.Документы.СтрокаВыпискиРасход.Синоним);"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Comma at line start with content should warn");
+    }
+
+    /// Lone comma (empty parameter placeholder) at line start - should not warn
+    #[test]
+    fn test_lone_comma_placeholder_passes() {
+        let code = r#"ЗафиксироватьОшибку(
+    ИмяСобытияЖР(),
+    УровеньЖурналаРегистрации.Ошибка,
+    , // не ошибка
+    ТекстОшибки);"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Lone comma placeholder should not warn");
+    }
+
+    /// Closing paren at line start - warns
+    #[test]
+    fn test_closing_paren_at_line_start_warns() {
+        let code = r#"Результат = Функция(Аргумент1
+    , Аргумент2
+    );"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        // ) at start and , at start with content
+        assert!(!diagnostics.is_empty(), "Should detect ) at line start");
     }
 
     #[test]

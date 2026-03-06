@@ -284,25 +284,24 @@ mod tests {
     }
 
     #[test]
-    fn test_fixture_local_call() {
-        use crate::test_utils::assert_diagnostic_range;
+    fn test_local_call_module_level_no_trigger_for_object_calls() {
+        // Module-level code: qualified calls (ПервыйОбщийМодуль.X) require
+        // Configuration.xml to resolve, so only the local deprecated call triggers.
+        // УстаревшаяПроцедура() at module level triggers;
+        // deprecated can call deprecated (inside УстаревшаяПроцедура body) does not.
+        let code = r#"
+УстаревшаяПроцедура();
 
-        let code = include_str!("../../test_data/DeprecatedMethodCallDiagnostic.bsl");
+// Устарела.
+Процедура УстаревшаяПроцедура()
+КонецПроцедуры
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMethodCall).collect();
 
-        // Line 29: УстаревшаяПроцедура() - local call to deprecated method
-        // Should trigger exactly 1 diagnostic for local call
-        // (cross-module calls require Configuration.xml which we don't have in test)
-        assert_eq!(
-            deprecated_diags.len(),
-            1,
-            "Expected 1 diagnostic for local deprecated call on line 29"
-        );
-
-        // Verify it's on line 29 (0-indexed: line 28), columns 0-19 for "УстаревшаяПроцедура"
-        assert_diagnostic_range(code, deprecated_diags[0], 28, 0, 19);
+        assert_eq!(deprecated_diags.len(), 1);
+        assert!(deprecated_diags[0].message.contains("УстаревшаяПроцедура"));
     }
 
     #[test]

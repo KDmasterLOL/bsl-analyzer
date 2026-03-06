@@ -106,7 +106,17 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig, Severity};
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/NumberOfOptionalParamsDiagnostic.bsl");
+        let code = r#"Процедура МимоРаз()
+
+КонецПроцедуры
+
+Функция МимоТри(Раз, Два, Три, Четыре, Пять = 5, Шесть = 6, Семь = 7)
+    Возврат;
+КонецФункции
+
+Процедура СработкаПоКоличествуНеобязательных(Раз = 1, Два, Три, Четыре = 4, Пять = 5, Шесть = 6, Семь)
+
+КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let diagnostics: Vec<_> = diagnostics
             .iter()
@@ -125,7 +135,17 @@ mod tests {
 
     #[test]
     fn test_custom_threshold() {
-        let code = include_str!("../../test_data/NumberOfOptionalParamsDiagnostic.bsl");
+        let code = r#"Процедура МимоРаз()
+
+КонецПроцедуры
+
+Функция МимоТри(Раз, Два, Три, Четыре, Пять = 5, Шесть = 6, Семь = 7)
+    Возврат;
+КонецФункции
+
+Процедура СработкаПоКоличествуНеобязательных(Раз = 1, Два, Три, Четыре = 4, Пять = 5, Шесть = 6, Семь)
+
+КонецПроцедуры"#;
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::NumberOfOptionalParams,

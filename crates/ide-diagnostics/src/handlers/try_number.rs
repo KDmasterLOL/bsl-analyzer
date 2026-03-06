@@ -70,7 +70,30 @@ mod tests {
     use crate::DiagnosticCode;
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/TryNumberDiagnostic.bsl");
+        let code = r#"Попытка
+
+Исключение
+    А = Число(Б);
+КонецПопытки
+
+
+Попытка
+А = ЧислО(Б);
+Б = NumbeR(4);
+
+    Попытка
+    В = Number(4);
+
+    Исключение
+
+    КонецПопытки
+Исключение
+
+КонецПопытки
+
+F = Number();
+А = Число(Б);
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let diagnostics: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::TryNumber).collect();

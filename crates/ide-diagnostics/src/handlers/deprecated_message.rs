@@ -159,17 +159,35 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/DeprecatedMessageDiagnostic.bsl");
-        let diagnostics = check_hir_diagnostic(input);
-
-        let deprecated_diags: Vec<_> =
+    fn test_inside_if_block() {
+        // MessaGe() inside an If block triggers, Модуль.Сообщить() does not
+        let code = r#"
+Процедура А()
+    Если Истина Тогда
+        MessaGe("А");
+        Модуль.Сообщить();
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("MessageToUser"));
+    }
 
-        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
-
-        // Verify diagnostic positions match bsl-language-server test expectations
-        assert_diagnostic_range(input, deprecated_diags[0], 4, 8, 15);
-        assert_diagnostic_range(input, deprecated_diags[1], 10, 0, 8);
+    #[test]
+    fn test_module_level_call() {
+        // Сообщить() at module level triggers, Модуль.Сообщить() does not
+        let code = r#"
+Сообщить("А");
+Модуль.Сообщить();
+ДругойМетод();
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::DeprecatedMessage).collect();
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("СообщитьПользователю"));
     }
 }

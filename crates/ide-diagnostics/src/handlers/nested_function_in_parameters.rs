@@ -734,10 +734,96 @@ mod tests {
         assert_eq!(diagnostics.len(), 0);
     }
 
+    const FIXTURE: &str = r#"Процедура Тест() // Все комментарии про allowOneliner=false
+    СтруктураВложений.Вставить(                     // <-- Ошибка, т.к. есть вложенный конструктов и метод
+     ПрисоединенныйФайл.Наименование,
+     Новый Картинка(ПолучитьИзВременногоХранилища(  // <-- 2 ошибки, т.к. есть вложенный метод м в конструкторе и в методе
+      ПрисоединенныеФайлы.ПолучитьДанныеФайла(ПрисоединенныйФайл.Ссылка).СсылкаНаДвоичныеДанныеФайла)));
+
+    Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));  // <-- не ошибка, все в одной строке
+
+    Сообщить(СуммаСтрокой("77"),                            // <-- ошибка для Сообщить, т.к есть вложенный метод в параметрах
+        СуммаСтрокой(СуммаНДС(Перечисление.ВтораяСумма)));  // <-- не ошибка для СуммаСтрокой, т.к. в одной строке
+    А = Новый Массив;
+    Сообщить();
+    Объект.Метод().Метод2(Объект2.Метод2()); // <-- не ошибка, все в одной строке
+    Объект.Метод(Объект2.Метод2()).Метод21( // <-- ошибка для Метод21, т.к. есть вложенный метод
+        Объект2.Метод22());
+
+    Структура = Новый Структура("Параметр1, Параметр2", Новый Массив(), Новый СписокЗначений()); // <-- не ошибка, все в одной строке
+    Структура = Новый Структура("Параметр1, Параметр2",                             // <-- ошибка, есть вложенный конструктор с инициализацией
+                Новый Структура(), Новый Структура("Параметр3", Новый Массив()));   // <-- ошибок нет
+
+    Структура = Новый Структура("Параметр1, Параметр2",                             // <-- ошибок нет, т.к. конструктор без инициализации
+                Новый Структура, Новый Массив);
+
+КонецПроцедуры
+
+&НаКлиенте
+Процедура ПолучателиВыбор(Элемент, ВыбраннаяСтрока, Поле, СтандартнаяОбработка)
+
+	Если Поле <> Элементы.ПолучателиСостояниеСообщенияSMS Тогда
+		Возврат;
+	КонецЕсли;
+
+	Отбор = Новый Структура;
+	Отбор.Вставить("МассоваяРассылка", Объект.Ссылка);
+	Отбор.Вставить("КакСвязаться", Элемент.ТекущиеДанные.КакСвязаться);
+
+	КлючЗаписи = Новый(
+	Тип("РегистрСведенийКлючЗаписи.ОчередьРассылок"),
+	ОбщегоНазначенияКлиентСервер.ЗначениеВМассиве(Отбор));
+
+	ПараметрыФормыЗаписи = Новый Структура;
+	ПараметрыФормыЗаписи.Вставить("Ключ", КлючЗаписи);
+
+	ОткрытьФорму("РегистрСведений.ОчередьРассылок.ФормаЗаписи", ПараметрыФормыЗаписи);
+
+КонецПроцедуры
+Процедура Тест2()
+    СсылкаНаОбъект = РегистрыСведений.СоответствиеСсылокИдентификаторам.ПолучитьСсылкуНаОбъект(
+        Новый УникальныйИдентификатор(ИдентификаторОбъекта)
+	);
+
+    СсылкаНаОбъект = РегистрыСведений.СоответствиеСсылокИдентификаторам.ПолучитьСсылкуНаОбъект(
+    	    Новый УникальныйИдентификатор(ИдентификаторОбъекта,
+    	    Истина)
+    );
+
+    ЗаписьЖурналаРегистрации(
+        НСтр("ru = 'WMS.InDeliverySetEndReceiving'", ОбщегоНазначения.КодОсновногоЯзыка()),
+        УровеньЖурналаРегистрации.Ошибка,
+        ,
+        ,
+        ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())
+    );
+КонецПроцедуры
+
+Процедура Тест3()
+    Значение = Метод(ПредопределенноеЗначение("Справочник.Контрагенты.ПустаяСсылка"), // нет ошибки
+        ПредопределенноеЗначение("Справочник.Организации.ПустаяСсылка"));
+
+    Значение2 = Метод(ПредопределенноеЗначение("Справочник.Контрагенты.ПустаяСсылка"),
+            ДругаяФункция("Справочник.Организации.ПустаяСсылка"));                    // ошибка
+
+    Значение = Метод(ПредопределенноеЗначение("Справочник.Контрагенты.ПустаяСсылка"), // Нет ошибки
+            NStr("ru = 'Сообщение'"));
+
+    PerformCalculations.RecalculateAccruals(                                          // Нет ошибки
+        PredefinedValue("ChartOfCalculationTypes.MainAccruals.Salary"),
+        PredefinedValue("ChartOfCalculationTypes.MainAccruals.Bonus"));
+
+    PerformCalculations.RecalculateAccruals(Метод2(Параметр),                         // ошибка
+        PredefinedValue("ChartOfCalculationTypes.MainAccruals.Salary"));
+
+    Метод2(PredefinedValue(                                                           // Нет ошибки
+        NStr("ru = 'ChartOfCalculationTypes.MainAccruals.Salary'"));
+КонецПроцедуры
+"#;
+
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/NestedFunctionInParametersDiagnostic.bsl");
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_ast_diagnostic(FIXTURE, check);
 
         // With default config (allowOneliner=true), should find 3 diagnostics
         // Matching reference test: lines 1, 3, 51 (0-indexed)
@@ -745,45 +831,43 @@ mod tests {
 
         // Verify exact positions matching reference implementation
         // Line 1 (0-indexed), columns 22-30: Вставить
-        assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30);
+        assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30);
         // Line 3 (0-indexed), columns 11-19: Картинка
-        assert_diagnostic_range(code, &diagnostics[1], 3, 11, 19);
+        assert_diagnostic_range(FIXTURE, &diagnostics[1], 3, 11, 19);
         // Line 51 (0-indexed), columns 72-94: ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(code, &diagnostics[2], 51, 72, 94);
+        assert_diagnostic_range(FIXTURE, &diagnostics[2], 51, 72, 94);
     }
 
     #[test]
     fn test_comprehensive_allow_oneliner_false() {
-        let code = include_str!("../../test_data/NestedFunctionInParametersDiagnostic.bsl");
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::NestedFunctionInParameters,
             serde_json::json!({"allowOneliner": false}),
         );
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
         // Expected 12 diagnostics with allowOneliner=false
         // Now fully matching bsl-language-server behavior (100%)
         assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics with allowOneliner=false ");
 
         // Verify positions match bsl-language-server implementation (100% match)
-        assert_diagnostic_range(code, &diagnostics[0], 1, 22, 30); // Вставить
-        assert_diagnostic_range(code, &diagnostics[1], 3, 11, 19); // Картинка
-        assert_diagnostic_range(code, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
-        assert_diagnostic_range(code, &diagnostics[3], 8, 4, 12); // Сообщить
-        assert_diagnostic_range(code, &diagnostics[4], 13, 35, 42); // Метод21
-        assert_diagnostic_range(code, &diagnostics[5], 17, 22, 31); // Структура
-        assert_diagnostic_range(code, &diagnostics[6], 36, 14, 19); // Новый (without type name)
-        assert_diagnostic_range(code, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(code, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
-        assert_diagnostic_range(code, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
-        assert_diagnostic_range(code, &diagnostics[10], 69, 16, 21); // Метод
-        assert_diagnostic_range(code, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
+        assert_diagnostic_range(FIXTURE, &diagnostics[0], 1, 22, 30); // Вставить
+        assert_diagnostic_range(FIXTURE, &diagnostics[1], 3, 11, 19); // Картинка
+        assert_diagnostic_range(FIXTURE, &diagnostics[2], 3, 20, 49); // ПолучитьИзВременногоХранилища
+        assert_diagnostic_range(FIXTURE, &diagnostics[3], 8, 4, 12); // Сообщить
+        assert_diagnostic_range(FIXTURE, &diagnostics[4], 13, 35, 42); // Метод21
+        assert_diagnostic_range(FIXTURE, &diagnostics[5], 17, 22, 31); // Структура
+        assert_diagnostic_range(FIXTURE, &diagnostics[6], 36, 14, 19); // Новый (without type name)
+        assert_diagnostic_range(FIXTURE, &diagnostics[7], 47, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(FIXTURE, &diagnostics[8], 51, 72, 94); // ПолучитьСсылкуНаОбъект
+        assert_diagnostic_range(FIXTURE, &diagnostics[9], 56, 4, 28); // ЗаписьЖурналаРегистрации
+        assert_diagnostic_range(FIXTURE, &diagnostics[10], 69, 16, 21); // Метод
+        assert_diagnostic_range(FIXTURE, &diagnostics[11], 79, 24, 43); // RecalculateAccruals
     }
 
     #[test]
     fn test_comprehensive_custom_allowed_methods() {
-        let code = include_str!("../../test_data/NestedFunctionInParametersDiagnostic.bsl");
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::NestedFunctionInParameters,
@@ -792,7 +876,7 @@ mod tests {
                 "allowOneliner": false
             }),
         );
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
 
         // Expected 13 diagnostics with custom allowed methods + allowOneliner=false
         // Now fully matching bsl-language-server behavior (100%)

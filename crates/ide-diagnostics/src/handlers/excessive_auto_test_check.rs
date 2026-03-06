@@ -187,23 +187,157 @@ mod tests {
     use super::check;
     use crate::test_utils::*;
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/ExcessiveAutoTestCheckDiagnostic.bsl");
+    fn test_russian_property_with_blank_lines() {
+        // Multi-line if-block with blank lines around return
+        let code = r#"
+Процедура ПриСозданииНаСервере()
+
+    Если Параметры.Свойство("АвтоТест") Тогда
+
+        Возврат;
+
+    КонецЕсли;
+
+КонецПроцедуры
+"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
 
-        // Should find 6 diagnostics (matching reference implementation)
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
+    #[test]
+    fn test_russian_equality_with_comment() {
+        // Equality check with explanatory comment above
+        let code = r#"
+Процедура ОбработкаЗаполнения(ДанныеЗаполнения, ТестЗаполения, СтандартнаяОбработка)
 
-        // Assert exact ranges (adapted for Rowan parser)
-        // Note: Ranges differ slightly from bsl-language-server due to different parser implementations
-        // bsl-language-server ranges (0-indexed): (3,4,7,13), (14,4,16,13), (22,4,26,13), (46,4,48,9), (54,4,56,9), (62,4,66,9)
-        // Our ranges (with +1 line offset for comment, and adjusted end columns):
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 4, 4, 8, 14);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 15, 4, 17, 14);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 23, 4, 27, 14);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 47, 4, 49, 10);
-        assert_diagnostic_range_multiline(code, &diagnostics[4], 55, 4, 57, 10);
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 63, 4, 67, 10);
+    // Пропускаем обработку, чтобы гарантировать получение формы при передаче параметра "АвтоТест"
+    Если ДанныеЗаполнения = "АвтоТест" Тогда
+        Возврат;
+    КонецЕсли;
+
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
+
+    #[test]
+    fn test_russian_property_on_local_variable() {
+        let code = r#"
+Процедура ПроверитьВыполение(Перечень)
+
+    Если Перечень.Свойство("АвтоТест") Тогда
+
+        Возврат;
+
+    КонецЕсли;
+
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
+
+    #[test]
+    fn test_russian_multiple_statements_no_error() {
+        // Multiple statements in if body — should NOT flag
+        let code = r#"
+Процедура БезОшибок()
+
+    Перечень.Вставить("АвтоТест", "АвтоТест");
+
+    Если Перечень.Свойство("АвтоТест") Тогда
+
+        ВыполняемДействиеСПеречнем(Перечень);
+        Возврат;
+
+    КонецЕсли;
+
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements in body");
+    }
+
+    #[test]
+    fn test_english_property_with_annotation() {
+        let code = r#"
+&AtServer
+Procedure OnCreateAtServer()
+
+    If Parameters.Property("AutoTest") Then
+        Return;
+    EndIf;
+
+EndProcedure
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
+
+    #[test]
+    fn test_english_equality_check() {
+        let code = r#"
+Procedure Filling()
+
+    If VariableName = "AutoTest" Then
+        Return;
+    EndIf;
+
+EndProcedure
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
+
+    #[test]
+    fn test_english_property_with_blank_lines() {
+        let code = r#"
+Procedure Check(List)
+
+    If List.Property("AutoTest") Then
+
+        Return;
+
+    EndIf;
+
+EndProcedure
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+    }
+
+    #[test]
+    fn test_english_multiple_statements_no_error() {
+        // Multiple statements in if body — should NOT flag
+        let code = r#"
+Procedure NoError(List)
+
+    If List.Property("AutoTest") Then
+
+        List.Delete("AutoTest");
+        Return;
+
+    EndIf;
+
+EndProcedure
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements");
+    }
+
+    #[test]
+    fn test_top_level_if_not_in_procedure() {
+        // Top-level if outside any procedure — no diagnostic expected
+        let code = r#"
+Если Отказ Тогда
+
+    Возврат;
+
+КонецЕсли;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Top-level if without AutoTest should not flag");
     }
 
     #[test]

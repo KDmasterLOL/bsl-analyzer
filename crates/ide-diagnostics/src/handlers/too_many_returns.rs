@@ -81,9 +81,37 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
 
+    const FIXTURE: &str = r#"Процедура ТриВозврата()
+    Если Условие Тогда
+        Возврат;
+    ИначеЕсли Условие2 Тогда
+        ВызовМетода();
+        Возврат;
+    Иначе
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+
+Функция ПятьВозвратов()
+    Если Условие Тогда
+        Возврат 1;
+    ИначеЕсли Условие2 Тогда
+        ВызовМетода();
+        Возврат 2;
+    Иначе
+        Для Ит = 0 По 7 Цикл
+            Если Ит = 10 Тогда
+                Возврат 3;
+            КонецЕсли;
+        КонецЦикла;
+        Возврат 4;
+    КонецЕсли;
+    Возврат 5;
+КонецФункции"#;
+
     #[test]
     fn test_too_many_returns_default() {
-        let code = include_str!("../../test_data/TooManyReturnsDiagnostic.bsl");
+        let code = FIXTURE;
         let diagnostics = check_hir_diagnostic(code);
 
         let diags: Vec<_> =
@@ -96,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_three_returns_ok() {
-        let code = include_str!("../../test_data/TooManyReturnsDiagnostic.bsl");
+        let code = FIXTURE;
         let diagnostics = check_hir_diagnostic(code);
 
         let three_returns_diags: Vec<_> = diagnostics
@@ -115,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_five_returns() {
-        let code = include_str!("../../test_data/TooManyReturnsDiagnostic.bsl");
+        let code = FIXTURE;
         let diagnostics = check_hir_diagnostic(code);
 
         let five_returns_diags: Vec<_> = diagnostics

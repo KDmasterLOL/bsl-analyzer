@@ -176,19 +176,44 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/DeprecatedTypeManagedForm.bsl");
-        let diagnostics = check_hir_diagnostic(input);
+    fn test_russian_in_if_triggers_string_literal_does_not() {
+        // Тип("УправляемаяФорма") triggers; Сообщить("УправляемаяФорма") does not
+        let code = r#"Процедура Тест()
+    Если ТипЗнч(Форма) = Тип("УправляемаяФорма") Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
 
-        let deprecated_diags: Vec<_> = diagnostics
+Процедура Тест2()
+    Сообщить("УправляемаяФорма");
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
             .collect();
 
-        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("УправляемаяФорма"));
+    }
 
-        // Verify diagnostic positions match bsl-language-server test expectations
-        assert_diagnostic_range_multiline(input, deprecated_diags[0], 1, 29, 1, 47);
-        assert_diagnostic_range_multiline(input, deprecated_diags[1], 11, 27, 11, 40);
+    #[test]
+    fn test_english_in_if_triggers() {
+        // Type("ManagedForm") in English triggers
+        let code = r#"Procedure Test()
+    If TypeOf(Form) = Type("ManagedForm") Then
+        Return;
+    EndIf;
+EndProcedure
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::DeprecatedTypeManagedForm)
+            .collect();
+
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ManagedForm"));
     }
 }

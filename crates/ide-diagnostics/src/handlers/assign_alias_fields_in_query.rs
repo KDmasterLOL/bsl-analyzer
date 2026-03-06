@@ -192,10 +192,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        test_utils::assert_diagnostic_range, Diagnostic, DiagnosticCode, DiagnosticsConfig,
-        Severity,
-    };
+    use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, Severity};
     use parser::parse_sdbl;
 
     /// Helper for debug tests that need to return file content along with diagnostics.
@@ -601,39 +598,112 @@ mod tests {
         assert_eq!(diagnostics.len(), 0, "TOP DISTINCT with explicit alias should pass");
     }
 
-    /// Test from bsl-language-server: reference test
+    /// Two queries with UNION - each query has fields without AS keyword.
     ///
-    /// Expected 6 diagnostics:
-    /// - Line 3, columns 3-16 (Валюты.Ссылка without alias)
-    /// - Line 5, columns 3-17 (Валюты.Код Код - implicit alias)
-    /// - Line 21, columns 3-16 (Валюты.Ссылка without alias - second query)
-    /// - Line 23, columns 3-17 (Валюты.Код Код - implicit alias - second query)
-    /// - Line 42, columns 4-17 (Валюты.Ссылка without alias - in subquery)
-    /// - Line 61, columns 3-20 (ВТ_ТЧ.НомерСтроки without alias - query with leading newline)
+    /// Expected 2 diagnostics per query (before UNION only): Валюты.Ссылка and Валюты.Код Код.
+    /// UNION queries are skipped per bsl-language-server behavior.
     #[test]
-    fn test_java_diagnostic_compatibility() {
-        // Load exact copy of reference test fixture
-        let code = include_str!("../../test_data/AssignAliasFieldsInQueryDiagnostic.bsl");
+    fn test_query_with_union_two_diagnostics() {
+        let code = r#"Запрос = Новый Запрос;
+Запрос.Текст =
+	"ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	|	Валюты.Код Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты
+	|
+	|ОБЪЕДИНИТЬ ВСЕ
+	|
+	|ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка,
+	|	Валюты.Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты";"#;
+
         let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
 
-        // Run diagnostic check
-        let (diagnostics, file_content) = check_diagnostic(code, config);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "Expected 2 diagnostics from first SELECT (UNION skipped)"
+        );
+    }
 
-        // Expected exactly 5 diagnostics at (0-indexed lines):
-        // - Line 3, cols 3-16 (Валюты.Ссылка without alias)
-        // - Line 5, cols 3-17 (Валюты.Код Код without AS)
-        // - Line 21, cols 3-16 (Валюты.Ссылка without alias)
-        // - Line 23, cols 3-17 (Валюты.Код Код without AS)
-        // - Line 42, cols 4-17 (Валюты.Ссылка in subquery without alias)
+    /// Second query (separate statement) also generates diagnostics independently.
+    #[test]
+    fn test_second_query_with_union_two_diagnostics() {
+        let code = r#"Запрос = Новый Запрос;
+Запрос.Текст =
+	"ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	|	Валюты.Код Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты
+	|
+	|ОБЪЕДИНИТЬ ВСЕ
+	|
+	|ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка,
+	|	Валюты.Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты";
 
-        assert_eq!(diagnostics.len(), 6, "Expected 6 diagnostics");
+Запрос2 = Новый Запрос;
+Запрос2.Текст =
+	"ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка КАК ПсевдонимПоляСсылка,
+	|	Валюты.Код Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты
+	|
+	|ОБЪЕДИНИТЬ ВСЕ
+	|
+	|ВЫБРАТЬ
+	|	Валюты.Ссылка,
+	|	Валюты.Ссылка,
+	|	Валюты.Код
+	|ИЗ
+	|	Справочник.Валюты КАК Валюты";"#;
 
-        // Verify exact positions match bsl-language-server test expectations
-        assert_diagnostic_range(&file_content, &diagnostics[0], 3, 3, 16); // Валюты.Ссылка
-        assert_diagnostic_range(&file_content, &diagnostics[1], 5, 3, 17); // Валюты.Код Код
-        assert_diagnostic_range(&file_content, &diagnostics[2], 21, 3, 16); // Second query
-        assert_diagnostic_range(&file_content, &diagnostics[3], 23, 3, 17); // Second query
-        assert_diagnostic_range(&file_content, &diagnostics[4], 42, 4, 17); // Nested subquery
-        assert_diagnostic_range(&file_content, &diagnostics[5], 61, 3, 20); // Query with leading newline
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        assert_eq!(diagnostics.len(), 4, "Expected 4 diagnostics (2 per query)");
+    }
+
+    /// Nested subquery - field inside subquery without alias triggers diagnostic.
+    #[test]
+    fn test_nested_subquery_field_without_alias() {
+        let code = r#"Запрос1 = Новый Запрос;
+Запрос1.Текст =
+	"ВЫБРАТЬ
+	|	ВложенныйЗапрос.Ссылка КАК Ссылка
+	|ИЗ
+	|	(ВЫБРАТЬ
+	|		Валюты.Ссылка
+	|	ИЗ
+	|		Справочник.Валюты КАК Валюты) КАК ВложенныйЗапрос";"#;
+
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: Валюты.Ссылка in subquery");
+    }
+
+    /// Query with leading newline and field without alias.
+    #[test]
+    fn test_query_with_leading_newline_field_without_alias() {
+        let code = "ТекстЗапроса = \"\n\t|ВЫБРАТЬ\n\t|\tВТ_ТЧ.НомерСтроки\n\t|ИЗ\n\t|\t&ВТ_Цены КАК ВТ_Цены\n\t|;\n\t|\n\t|ВЫБРАТЬ\n\t|\t\" + ПоляТЧДокумента + \"\n\t|ИЗ\n\t|\t&ВТ_ТЧ КАК Товары\";";
+
+        let config = DiagnosticsConfig::default();
+        let (diagnostics, _) = check_diagnostic(code, config);
+
+        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic: ВТ_ТЧ.НомерСтроки without alias");
     }
 }

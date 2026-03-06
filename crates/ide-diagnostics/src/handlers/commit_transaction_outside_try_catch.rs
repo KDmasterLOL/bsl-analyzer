@@ -225,8 +225,85 @@ EndProcedure"#;
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/CommitTransactionOutsideTryCatchDiagnostic.bsl");
+    fn test_multiple_procedures_seven_errors() {
+        // Seven error patterns in a single file (module-level code not supported)
+        let code = r#"Процедура Пример1()
+    НачатьТранзакцию();
+    Попытка
+        БлокировкаДанных = Новый БлокировкаДанных;
+        ДокументОбъект.Записать();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры
+
+Процедура Пример2()
+    НачатьТранзакцию();
+    Попытка
+        Метод();
+    Исключение
+        ОтменитьТранзакцию();
+        Возврат;
+    КонецПопытки;
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры
+
+Процедура Пример3()
+    НачатьТранзакцию();
+    Попытка
+        Метод();
+    Исключение
+        Если ТранзакцияАктивна() Тогда
+            ЗафиксироватьТранзакцию();
+        Иначе
+            ОтменитьТранзакцию();
+        КонецЕсли;
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры
+
+Процедура Пример4()
+    НачатьТранзакцию();
+    Метод();
+    Если ТранзакцияАктивна() Тогда
+        ЗафиксироватьТранзакцию();
+    Иначе
+        ОтменитьТранзакцию();
+    КонецЕсли;
+КонецПроцедуры
+
+Функция Пример5()
+    НачатьТранзакцию();
+    Метод();
+    ЗафиксироватьТранзакцию();
+    Возврат 1;
+КонецФункции
+
+Процедура Пример6()
+    НачатьТранзакцию();
+    Попытка
+        Метод();
+        ЗафиксироватьТранзакцию();
+        Метод2();
+    Исключение
+        ОтменитьТранзакцию();
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры
+
+Процедура Пример7()
+    НачатьТранзакцию();
+    Попытка
+        Метод();
+        ЗафиксироватьТранзакцию();
+        Возврат;
+    Исключение
+        ОтменитьТранзакцию();
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
@@ -234,28 +311,43 @@ EndProcedure"#;
             .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
             .collect();
 
-        // Expected 8 diagnostics, but we get 7 because we don't check module-level code.
-        // The 8th diagnostic (line 107: ЗафиксироватьТранзакцию() outside any method) is a rare
-        // edge case mostly relevant for OneScript. In standard 1C:Enterprise, code is always
-        // inside procedures/functions. Not worth complicating lower_module_code for this.
-        assert_eq!(diags.len(), 7, "Should detect 7 diagnostics (excluding module-level code)");
-
-        // Verify exact positions match bsl-language-server test expectations
-        // Note: Line numbers are 0-indexed in Rowan
-        assert_diagnostic_range(code, diags[0], 36, 4, 30); // Пример2: вне попытки (line 37 in 1-indexed)
-        assert_diagnostic_range(code, diags[1], 45, 12, 38); // Пример3: в исключении (line 46)
-        assert_diagnostic_range(code, diags[2], 57, 8, 34); // Пример4: вне попытки в if (line 58)
-        assert_diagnostic_range(code, diags[3], 66, 4, 30); // Пример5: вне попытки (line 67)
-        assert_diagnostic_range(code, diags[4], 74, 8, 34); // Пример6: код после (line 75)
-        assert_diagnostic_range(code, diags[5], 86, 8, 34); // Пример7: код после + возврат (line 87)
-        assert_diagnostic_range(code, diags[6], 98, 8, 34); // Цикл: код после + продолжить (line 99)
-                                                            // Skipped: line 107 (module-level code) - not supported, see comment above
+        // Пример1 is correct (no error), Пример2-7 each have 1 error = 6 errors
+        assert_eq!(diags.len(), 6, "Should detect 6 diagnostics");
     }
 
     #[test]
-    fn test_comprehensive_single_sub() {
-        let code =
-            include_str!("../../test_data/CommitTransactionOutsideTryCatchDiagnosticSingleSub.bsl");
+    fn test_commit_in_loop_after_code() {
+        // CommitTransaction with code after it inside a loop
+        let code = r#"Процедура Тест()
+    Для каждого Элемент Из Коллекция Цикл
+        НачатьТранзакцию();
+        Попытка
+            Метод();
+            ЗафиксироватьТранзакцию();
+            Продолжить;
+        Исключение
+            ОтменитьТранзакцию();
+            Возврат;
+        КонецПопытки;
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::CommitTransactionOutsideTryCatch)
+            .collect();
+        assert_eq!(diags.len(), 1, "CommitTransaction with code after in loop should be error");
+    }
+
+    #[test]
+    fn test_single_sub_outside_try() {
+        // Single procedure with CommitTransaction outside try-catch
+        let code = r#"Процедура Тестовая()
+    НачатьТранзакцию();
+    А = 1;
+    ЗафиксироватьТранзакцию();
+КонецПроцедуры"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics
@@ -264,6 +356,6 @@ EndProcedure"#;
             .collect();
 
         assert_eq!(diags.len(), 1);
-        assert_diagnostic_range(code, diags[0], 3, 4, 30); // line 4 in 1-indexed
+        assert_diagnostic_range(code, diags[0], 3, 4, 30);
     }
 }

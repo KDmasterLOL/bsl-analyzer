@@ -39,7 +39,25 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../../test_data/TernaryOperatorUsageDiagnostic.bsl");
+        let code = r#"
+ПериодПо = ?(Шапка.ЭтоУвольнение
+           , Шапка.Дата
+           , ?(Шапка.ЭтоАванс
+             , Дата(Год(Шапка.ПериодРегистрации)
+                   , Месяц(Шапка.ПериодРегистрации)
+                   , 15
+                   )
+             , КонецМесяца(Шапка.ПериодРегистрации)
+             )
+            );
+
+Статус = ?(ПолучитьСкидку() > МаксимальныйПроцент, "Особый клиент", "Обычный клиент");
+
+Если ?(ПолучитьСкидку() > МаксимальныйПроцент, Истина, Ложь) Тогда
+    Возврат Истина;
+Иначе
+    Возврат Ложь;
+КонецЕсли;"#;
         let diagnostics =
             check_hir_diagnostic_with_config(code, config_with_ternary_enabled(), |ctx| {
                 crate::diagnostics(ctx)

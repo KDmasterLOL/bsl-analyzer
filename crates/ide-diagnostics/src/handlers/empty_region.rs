@@ -83,23 +83,33 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/EmptyRegionDiagnostic.bsl");
+    fn test_comment_only_region_is_empty() {
+        let code = r#"#Область Тест
+// комментарий
+#КонецОбласти"#;
         let diagnostics = check_hir_diagnostic(code);
-
-        let empty_region_diags: Vec<_> =
+        let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        assert_eq!(diags.len(), 1);
+        assert_diagnostic_range_multiline(code, diags[0], 0, 0, 2, 13);
+        assert!(diags[0].message.contains("Тест"));
+    }
 
-        assert_eq!(empty_region_diags.len(), 3, "Should find 3 diagnostics");
+    #[test]
+    fn test_outer_region_with_only_inner_empty_region() {
+        // Both outer and inner are reported when outer contains only an empty inner region
+        let code = r#"#Область ВнешняяОбласть
+// комментарий
+#Область ВнутренняяОбласть
 
-        assert_diagnostic_range_multiline(code, empty_region_diags[0], 0, 0, 2, 13);
-        assert!(empty_region_diags[0].message.contains("Тест"));
-
-        assert_diagnostic_range_multiline(code, empty_region_diags[1], 10, 0, 15, 13);
-        assert!(empty_region_diags[1].message.contains("ВнешняяОбласть"));
-
-        assert_diagnostic_range_multiline(code, empty_region_diags[2], 12, 0, 14, 13);
-        assert!(empty_region_diags[2].message.contains("ВнутренняяОбласть"));
+#КонецОбласти
+#КонецОбласти"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyRegion).collect();
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().any(|d| d.message.contains("ВнешняяОбласть")));
+        assert!(diags.iter().any(|d| d.message.contains("ВнутренняяОбласть")));
     }
 
     #[test]

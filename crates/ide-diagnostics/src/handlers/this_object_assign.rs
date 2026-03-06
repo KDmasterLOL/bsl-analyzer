@@ -92,7 +92,12 @@ EndProcedure"#;
 
     #[test]
     fn test_fixture() {
-        let code = include_str!("../../test_data/ThisObjectAssignDiagnostic.bsl");
+        let code = r#"Процедура ПриСозданииНаСервере()
+    ЭтотОбъект = РеквизитФормыВЗначение("Объект");
+КонецПроцедуры
+
+ЭтотОбъект.Реквизит1 = А;
+"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let this_object_diags: Vec<_> =

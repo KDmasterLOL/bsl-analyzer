@@ -588,7 +588,50 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/LatinAndCyrillicSymbolInWordDiagnostic.bsl");
+        // Inline fixture: covers all 8 identifier categories with known mixed-script identifiers.
+        // Line numbers (0-based) must match position assertions below.
+        // Uses concat! to preserve exact per-line indentation without Rust's \n\ stripping.
+        let code = concat!(
+            "Перем Namе;                 // <- ошибка\n",
+            "\n",
+            "Процедура ВИмениEnglish()   // <- Не ошибка (начинается на кириллице, заканчивается на латинице)\n",
+            "    Перем а;\n",
+            "    Перем ии, вв;\n",
+            "    перем ССС, ccc, сcс;    // <- ошибка в последнем имени\n",
+            "    Переменная = 1;\n",
+            "КонецПроцедуры\n",
+            "\n",
+            "Функция InNameРусский()     // <- Не ошибка (начинается на латинице, заканчивается на кириллице)\n",
+            "    Перем тьфу;\n",
+            "    Перем name;\n",
+            "    перем Аg;               // <- ошибка\n",
+            "    перем _Аg09;            // <- ошибка\n",
+            "    Переменная = \"engру\";   // <- ошибки нет\n",
+            "    ComОбъект2 = _Аg09;     // <- Не ошибка (начинается на латинице, заканчивается на кириллице)\n",
+            "    _3C_omRRRО_5__бъект = 1;// <- ошибка\n",
+            "КонецФункции\n",
+            "\n",
+            "&Аnotation                  // <- ошибка\n",
+            "Функция __t1est()           // <- ошибки нет\n",
+            "КонецФункции\n",
+            "\n",
+            "&Аннотация(Парaметр = 1)    // <- ошибка в параметре\n",
+            "Функция _тест12()           // <- ошибки нет\n",
+            "КонецФункции\n",
+            "\n",
+            "#Область Regiоn             // <- ошибка\n",
+            "#КонецОбласти\n",
+            "\n",
+            "Процедура Тест12(ПараметрY, Знач ParamЫ) // <- ошибка в именах параметров\n",
+            "    Перейти ~Lаbell;        // <- ошибка\n",
+            "КонецПроцедуры\n",
+            "\n",
+            "Процедура Tутошибка()       // <- ошибка в имени метода\n",
+            "    Перем ПеременнаяA;      // <- ошибка, т.к. должно быть минимум 2 в конце\n",
+            "    Перем ПеременнаяAМ;     // <- ошибка\n",
+            "    Перем XПириенс;         // <- ошибка, т.к. должно быть минимум 2 в начале\n",
+            "КонецПроцедуры",
+        );
         let diagnostics = check_ast_diagnostic(code, check);
 
         // Expected 15 diagnostics

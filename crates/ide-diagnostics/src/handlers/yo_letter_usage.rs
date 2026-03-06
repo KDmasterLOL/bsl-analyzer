@@ -76,7 +76,14 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/YoLetterUsageDiagnostic.bsl");
+        let code = r#"Перем ёжики; // Здесь должна сработать диагностика
+
+Процедура ЁлкиИголки(Ёлки) // Здесь должна сработать диагностика
+    Иголки = Ёлки * 1000; // Здесь должна сработать диагностика
+    ТекстСообщения = "У 1000 Ёлок %1 иголок, а ёжики здесь вообще не при чем";
+    Сообщить(СтрШаблон(ТекстСообщения, Ёлки)); // Здесь должна сработать диагностика
+КонецПроцедуры
+"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 5, "Expected 5 diagnostics");

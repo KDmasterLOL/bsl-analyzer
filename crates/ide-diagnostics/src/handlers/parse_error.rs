@@ -46,7 +46,22 @@ mod tests {
     use crate::test_utils::*;
     #[test]
     fn test_parse_error_basic() {
-        let code = include_str!("../../test_data/ParseErrorDiagnostic.bsl");
+        let code = r#"
+Процедура а()
+
+КонецПроцедуры
+
+Процедура в()
+
+    Для Каждого Элемент Из Коллекция Цикл
+        Если НЕ Тогда
+
+        КонецЕсли;
+    КонецЦикла;
+
+КонецПроцедуры
+
+"#;
         let diagnostics = check_ast_diagnostic(code, super::check);
 
         let parse_errors: Vec<_> =
@@ -112,7 +127,10 @@ HHH
 
     #[test]
     fn test_parse_error_eof_fixture() {
-        let code = include_str!("../../test_data/ParseErrorDiagnosticEOF.bsl");
+        let code = r#"Процедура ОтключитьСканерШтрихкодов() Экспорт
+
+КонецПроцедуры
+HHH"#;
         let diagnostics = check_ast_diagnostic(code, super::check);
         let parse_errors: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();

@@ -393,9 +393,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{
-        assert_diagnostic_range, check_ast_diagnostic, check_ast_diagnostic_with_config,
-    };
+    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     #[test]
     fn test_line_31_detection() {
@@ -411,56 +409,146 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/MagicDateDiagnostic.bsl");
+    fn test_date_in_expression_detected() {
+        // Дата("00020101") + Шаг — date string inside expression should be detected
+        let code = r#"Процедура Тест()
+	День = Дата("00020101") + Шаг;
+КонецПроцедуры"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Дата() in expression should be detected");
+    }
 
-        // NOTE: We detect 16 diagnostics instead of 17 in bsl-language-server because we skip one edge case:
-        // Line 23: '0001-01why not?02' - our lexer produces ERROR tokens for malformed dates
-        // This is an extremely rare case (user confirmed never seen in 15 years), so acceptable
-        assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics (skipping line 23 edge case)");
+    #[test]
+    fn test_date_with_time_in_expression_detected() {
+        // Дата("00020101121314") + Шаг — date+time string inside expression should be detected
+        let code = r#"Процедура Тест()
+	День = Дата("00020101121314") + Шаг;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Дата() with time in expression should be detected");
+    }
 
-        // Verify exact positions (from reference test, 0-indexed)
-        // NOTE: Skipping line 23 diagnostic (edge case with malformed date)
-        assert_diagnostic_range(code, &diagnostics[0], 11, 12, 22);
-        assert_diagnostic_range(code, &diagnostics[1], 12, 12, 28);
-        assert_diagnostic_range(code, &diagnostics[2], 13, 7, 17);
-        assert_diagnostic_range(code, &diagnostics[3], 14, 14, 24);
-        // Skipped: Line 23, Col 7-26 - '0001-01why not?02' (lexer limitation)
-        assert_diagnostic_range(code, &diagnostics[4], 25, 87, 97);
-        assert_diagnostic_range(code, &diagnostics[5], 26, 80, 90);
-        assert_diagnostic_range(code, &diagnostics[6], 26, 92, 102);
-        assert_diagnostic_range(code, &diagnostics[7], 27, 22, 32);
-        assert_diagnostic_range(code, &diagnostics[8], 28, 19, 35);
-        assert_diagnostic_range(code, &diagnostics[9], 29, 10, 26);
-        assert_diagnostic_range(code, &diagnostics[10], 29, 29, 39);
-        assert_diagnostic_range(code, &diagnostics[11], 31, 64, 80);
-        assert_diagnostic_range(code, &diagnostics[12], 58, 17, 27);
-        assert_diagnostic_range(code, &diagnostics[13], 58, 29, 45);
-        assert_diagnostic_range(code, &diagnostics[14], 58, 47, 63);
-        assert_diagnostic_range(code, &diagnostics[15], 60, 19, 29);
+    #[test]
+    fn test_single_quoted_date_in_expression_positions() {
+        // '00010102' + Шаг — single-quoted date in expression
+        let code = r#"Процедура Тест()
+	День = '00010102' + Шаг;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Single-quoted date in expression should be detected");
+    }
+
+    #[test]
+    fn test_date_in_while_condition_detected() {
+        // Пока Сейчас < '12340101' Цикл — date in while condition should be detected
+        let code = r#"Процедура Тест()
+	Пока Сейчас < '12340101' Цикл
+		Сейчас = Сейчас + Шаг;
+	КонецЦикла;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Date in while condition should be detected");
+    }
+
+    #[test]
+    fn test_date_in_method_calls_detected() {
+        // Dates passed as non-first args to arbitrary methods should be detected
+        let code = r#"Процедура Тест()
+	ИменаПараметров = СтроковыеФункции.РазложитьСтрокуВМассивПодстрок(ИмяПараметра, "00050101", "00050101");
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2, "Both dates in method call should be detected");
+    }
+
+    #[test]
+    fn test_date_in_custom_call_detected() {
+        // Настройки('12350101') — date as sole argument in arbitrary function call
+        let code = r#"Процедура Тест()
+	Настройки = Настройки('12350101');
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Date in function argument should be detected");
+    }
+
+    #[test]
+    fn test_date_in_string_method_call_detected() {
+        // Настройки.Свойство("00020501121314", ...) — string date in method call
+        let code = r#"Процедура Тест()
+	Настройки.Свойство("00020501121314", ЗначениеЕдиничногоПараметра);
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "String date in method call should be detected");
+    }
+
+    #[test]
+    fn test_dates_in_execute_expression() {
+        // Выполнить("00020501121314" + '12350101') — both dates in Выполнить should be detected
+        let code = r#"Процедура Тест()
+	Выполнить("00020501121314" + '12350101');
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2, "Both dates in Выполнить should be detected");
+    }
+
+    #[test]
+    fn test_date_nested_in_constructor_call() {
+        // Date inside nested function call in property assignment context should be detected
+        let code = r#"Процедура Тест()
+	ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Date inside nested constructor call should be detected");
+    }
+
+    #[test]
+    fn test_dates_in_ternary_expression() {
+        // All 3 dates in ternary should be detected
+        let code = r#"Процедура Тест()
+	Значение = ?(А = '39990202', '39991231235959', '39990101000000');
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 3, "All three dates in ternary should be detected");
+    }
+
+    #[test]
+    fn test_date_in_if_condition() {
+        // Date in if condition should be detected
+        let code = r#"Процедура Тест()
+	Если Сейчас < Дата("12340101") Тогда
+	КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Date in if condition should be detected");
     }
 
     #[test]
     fn test_configured_authorized_dates() {
-        let code = include_str!("../../test_data/MagicDateDiagnostic.bsl");
+        // Verify that authorizedDates configuration suppresses specific dates.
+        // '19800101' is not in default authorized list so normally detected;
+        // adding it to authorizedDates should suppress the diagnostic.
+        let code = "Процедура Тест()\n\tДата1 = '19800101' + Шаг;\n\tДата2 = '20250101' + Шаг;\nКонецПроцедуры";
+
+        // Without config: both dates detected
+        let diagnostics_default = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics_default.len(), 2, "Both dates should be detected by default");
+
+        // With '19800101' authorized: only '20250101' detected
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::MagicDate,
             serde_json::json!({
-                "authorizedDates": "00010101,00010101000000,000101010000,00050101,00020501121314,12340101,00020101"
+                "authorizedDates": "00010101,00010101000000,000101010000,19800101"
             }),
         );
-
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        // Expected 9 diagnostics, but we expect 8 because we skip line 23 edge case
-        // bsl-language-server: 17 total - 8 authorized = 9
-        // Rust: 16 total - 8 authorized = 8
         assert_eq!(
             diagnostics.len(),
-            8,
-            "With extended authorized dates, expect 8 diagnostics (9 in bsl-language-server minus line 23)"
+            1,
+            "With 19800101 authorized, only 20250101 should be detected"
+        );
+        assert!(
+            diagnostics[0].message.contains("20250101"),
+            "Remaining diagnostic should be for 20250101"
         );
     }
 

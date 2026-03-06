@@ -127,25 +127,26 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/ExportVariablesDiagnostic.bsl");
+    fn test_multiple_exported_and_private_vars() {
+        // Two exported vars, one private, one inside procedure (not exported)
+        let code = "Перем Перем1 Экспорт;\nПерем Перем2;\nПерем Перем53 Экспорт;\n\nПроцедура МетодСодержащийПеременную()\n    Перем ПеременнаяМодуля, ПеременнаяЭкспорт;\nКонецПроцедуры";
         let diagnostics = check_hir_diagnostic(code);
         let export_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
-
-        // Should find 2 exported variables (Перем1 and Перем53)
         assert_eq!(export_diags.len(), 2, "Expected 2 exported variables");
-
-        // Diagnostic 0: Перем1 - HIR range is just the variable name
-        // Line 0: "Перем Перем1 Экспорт;"
-        //               ^^^^^^
-        //               6-12
+        // Line 0: "Перем Перем1 Экспорт;" — name span cols 6-12
         assert_diagnostic_range(code, export_diags[0], 0, 6, 12);
-
-        // Diagnostic 1: Перем53 - HIR range is just the variable name
-        // Line 2: "Перем Перем53 Экспорт;"
-        //               ^^^^^^^
-        //               6-13
+        // Line 2: "Перем Перем53 Экспорт;" — name span cols 6-13
         assert_diagnostic_range(code, export_diags[1], 2, 6, 13);
+    }
+
+    #[test]
+    fn test_commented_export_not_detected() {
+        // Commented-out export should not trigger
+        let code = "// Перем Закомментированная Экспорт;";
+        let diagnostics = check_hir_diagnostic(code);
+        let export_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExportVariables).collect();
+        assert_eq!(export_diags.len(), 0, "Commented export should not trigger diagnostic");
     }
 }

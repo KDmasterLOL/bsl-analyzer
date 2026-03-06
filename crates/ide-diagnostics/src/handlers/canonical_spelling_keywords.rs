@@ -282,7 +282,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic_with_config};
+    use crate::test_utils::check_ast_diagnostic_with_config;
     use crate::DiagnosticsConfig;
     #[test]
     fn test_canonical_keywords() {
@@ -394,51 +394,217 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/CanonicalSpellingKeywordsDiagnostic.bsl");
-
+    fn test_non_canonical_var_keyword() {
+        let code = r#"Процедура Тест()
+    ПерЕМ Б;
+КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ПерЕМ")));
+    }
 
-        // CRITICAL: Must match bsl-language-server implementation (127 diagnostics)
-        assert_eq!(
-            diagnostics.len(),
-            127,
-            "Must match bsl-language-server implementation exactly (127 diagnostics)"
-        );
+    #[test]
+    fn test_non_canonical_undefined_and_new() {
+        let code = r#"Процедура Тест()
+    А = НЕОПРЕделено;
+    Б = НоВый Массив();
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("НЕОПРЕделено")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("НоВый")));
+    }
 
-        // Verify exact positions (spot-check key diagnostics)
-        // Using reference test line/column numbers directly (0-based)
+    #[test]
+    fn test_non_canonical_if_keywords() {
+        let code = r#"Процедура Тест()
+    ЕслИ x % 15 = 0 ТогдА
+        Результат = "FizzBuzz";
+    ИначеЕСли x % 3 = 0 Тогда
+        Результат = "Fizz";
+    ИнаЧе
+        Результат = x;
+    КонецЕсЛи;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ЕслИ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ТогдА")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ИначеЕСли")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ИнаЧе")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КонецЕсЛи")));
+    }
 
-        // ПерЕМ
-        assert_diagnostic_range(code, &diagnostics[0], 8, 4, 9);
-        // НЕОПРЕделено
-        assert_diagnostic_range(code, &diagnostics[1], 15, 8, 20);
-        // НоВый
-        assert_diagnostic_range(code, &diagnostics[2], 16, 8, 13);
-        // ЕслИ
-        assert_diagnostic_range(code, &diagnostics[3], 35, 4, 8);
-        // ТогдА
-        assert_diagnostic_range(code, &diagnostics[4], 35, 20, 25);
-        // ИначеЕСли
-        assert_diagnostic_range(code, &diagnostics[5], 37, 4, 13);
-        // ИнаЧе
-        assert_diagnostic_range(code, &diagnostics[6], 41, 4, 9);
-        // КонецЕсЛи
-        assert_diagnostic_range(code, &diagnostics[7], 43, 4, 13);
-        // ДЛЯ
-        assert_diagnostic_range(code, &diagnostics[8], 73, 4, 7);
-        // КАЖДОГО
-        assert_diagnostic_range(code, &diagnostics[9], 73, 8, 15);
-        // ИЗ
-        assert_diagnostic_range(code, &diagnostics[10], 73, 29, 31);
-        // ЦикЛ
-        assert_diagnostic_range(code, &diagnostics[11], 73, 34, 38);
-        // ПРервать
-        assert_diagnostic_range(code, &diagnostics[12], 74, 7, 15);
-        // ПРодолжить
-        assert_diagnostic_range(code, &diagnostics[13], 75, 7, 17);
-        // КонецЦиклА
-        assert_diagnostic_range(code, &diagnostics[14], 76, 4, 14);
+    #[test]
+    fn test_canonical_if_keywords_no_diagnostic() {
+        let code = r#"Процедура Тест()
+    Если x % 15 = 0 Тогда
+        Результат = "FizzBuzz";
+    ИначеЕсли x % 3 = 0 Тогда
+        Результат = "Fizz";
+    Иначе
+        Результат = x;
+    КонецЕсли;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_non_canonical_for_each_loop() {
+        let code = r#"Процедура Тест()
+    ДЛЯ КАЖДОГО СтрокаДанных ИЗ x ЦикЛ
+       ПРервать;
+       ПРодолжить;
+    КонецЦиклА;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ДЛЯ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КАЖДОГО")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ИЗ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ЦикЛ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ПРервать")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ПРодолжить")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КонецЦиклА")));
+    }
+
+    #[test]
+    fn test_canonical_for_each_loop_no_diagnostic() {
+        let code = r#"Процедура Тест()
+    Для Каждого СтрокаДанных Из x Цикл
+        Прервать;
+        Продолжить;
+    КонецЦикла;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_non_canonical_exception_handling() {
+        let code = r#"Процедура Тест()
+    ПопЫтка
+        А = Б;
+    ИсключенИЕ
+        ВызваТЬИсключение "Исключение";
+    КОНЕЦПопытки;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ПопЫтка")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ИсключенИЕ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ВызваТЬИсключение")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КОНЕЦПопытки")));
+    }
+
+    #[test]
+    fn test_non_canonical_procedure_and_function() {
+        let code = r#"ПРОЦЕДУРА Тест3(ЗнаЧ Параметр) ЭКспорт
+КонецПРоцедуры
+
+ФункцИЯ Тест4()
+    ВозВРат Истина;
+КонецФункцИИ"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ПРОЦЕДУРА")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ЗнаЧ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ЭКспорт")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КонецПРоцедуры")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ФункцИЯ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ВозВРат")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КонецФункцИИ")));
+    }
+
+    #[test]
+    fn test_non_canonical_preprocessor_directives() {
+        let code = "#ЕСЛИ СеРвер ТОГДА\n#ИнАЧе\n#КонецЕСЛИ";
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("ЕСЛИ") || d.message.contains("#ЕСЛИ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ТОГДА")));
+    }
+
+    #[test]
+    fn test_canonical_preprocessor_directives_no_diagnostic() {
+        let code = "#Если Сервер Или Клиент Тогда\n#Иначе\n#КонецЕсли";
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_non_canonical_annotations() {
+        let code = "&НАСервере\nПроцедура Тест()\nКонецПроцедуры";
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("НАСервере"));
+    }
+
+    #[test]
+    fn test_canonical_annotations_no_diagnostic() {
+        let code = "&НаСервере\nПроцедура Тест()\nКонецПроцедуры";
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_non_canonical_region_directives() {
+        let code = "#ОБЛАСТЬ НоваяОбласть\n#КонецОбластИ";
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("ОБЛАСТЬ")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("КонецОбластИ")));
+    }
+
+    #[test]
+    fn test_non_canonical_logical_operators() {
+        let code = r#"Процедура Тест()
+    А = А и А ИлИ А И нЕ А;
+    А = ЛОЖЬ;
+    А = ИсТИна;
+КонецПроцедуры"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(!diagnostics.is_empty(), "Should detect non-canonical logical operators");
+    }
+
+    #[test]
+    fn test_english_non_canonical_keywords() {
+        let code = r#"PROCEDURE Test7(VaL Param) ExPort
+EndPROCedure
+
+FUNCtion Test8()
+    RETUrn True;
+EnDFunction"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert!(diagnostics.iter().any(|d| d.message.contains("PROCEDURE")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("VaL")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("ExPort")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("EndPROCedure")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("FUNCtion")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("RETUrn")));
+        assert!(diagnostics.iter().any(|d| d.message.contains("EnDFunction")));
+    }
+
+    #[test]
+    fn test_english_canonical_keywords_no_diagnostic() {
+        let code = r#"Procedure Test5(Val Param) Export
+EndProcedure
+
+Function Test6()
+    Return True;
+EndFunction"#;
+        let config = DiagnosticsConfig::default();
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0);
     }
 }

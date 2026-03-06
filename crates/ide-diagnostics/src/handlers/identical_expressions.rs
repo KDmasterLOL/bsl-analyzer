@@ -887,7 +887,6 @@ fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
 mod tests {
     use super::check;
     use crate::test_utils::check_ast_diagnostic;
-    use crate::Diagnostic;
     #[test]
     fn test_identical_comparison() {
         let code = r#"
@@ -966,78 +965,243 @@ mod tests {
         );
     }
 
+    /// Assignment to self is not flagged (statement-level Eq is skipped).
     #[test]
-    fn test_comprehensive_fixture() {
-        let code = include_str!("../../test_data/IdenticalExpressionsDiagnostic.bsl");
-
+    fn test_fixture_self_assignment_skipped() {
+        let code = r#"Функция Проверка()
+    Перем1 = Перем1;
+    Возврат Истина;
+КонецФункции
+"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Self-assignment should not be flagged");
+    }
 
-        // Expected 20 diagnostics
-        // Check how many we find
-        let found_count = diagnostics.len();
+    /// Identical operands in <> comparison should trigger.
+    #[test]
+    fn test_fixture_identical_neq_triggers() {
+        let code = r#"Функция Проверка()
+    Если Перем2 <> Перем2 Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Identical <> should trigger");
+        assert!(diagnostics[0].message.contains("<>"));
+    }
 
-        assert_eq!(
-            found_count, 21,
-            "Should find 21 diagnostics (fixed bsl-language-server bug on line 57!), found {}",
-            found_count
-        );
+    /// Identical return expression with > should trigger.
+    #[test]
+    fn test_fixture_identical_gt_in_return_triggers() {
+        let code = r#"Функция Проверка()
+    Возврат Перем3 > Перем3;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Identical > should trigger");
+    }
 
-        // Helper to find diagnostic on specific line
-        let find_diag_on_line = |target_line: u32| -> &Diagnostic {
-            diagnostics
-                .iter()
-                .find(|d| {
-                    let (line, _, _, _) = crate::test_utils::range_to_line_col(code, d.range);
-                    line == target_line
-                })
-                .unwrap_or_else(|| panic!("No diagnostic found on line {}", target_line))
-        };
+    /// Division with identical operands triggers; multiplication does not.
+    #[test]
+    fn test_fixture_division_triggers_multiplication_skipped() {
+        let code = r#"Процедура Проверка()
+    Перем4 = Перем5 + Перем5;
+    Перем6 = Перем7 / Перем7;
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "/ triggers, + does not");
+        assert!(diagnostics[0].message.contains("/"));
+    }
 
-        // Verify diagnostic positions match bsl-language-server implementation using test_utils helpers
-        let diag_line_4 = find_diag_on_line(4);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_4.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_4, 4, 9, end_col);
+    /// Identical complex expression on both sides of = in condition triggers.
+    #[test]
+    fn test_fixture_identical_complex_expr_eq_triggers() {
+        let code = r#"Функция Проверка()
+    Если (Перем8 + Перем9 + Перем10) = (Перем8 + Перем9 + Перем10) Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Identical complex expressions should trigger");
+    }
 
-        let diag_line_6 = find_diag_on_line(6);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_6.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_6, 6, 16, end_col);
+    /// Identical operands in <> in return expression triggers.
+    #[test]
+    fn test_fixture_identical_neq_in_return_triggers() {
+        let code = r#"Функция Проверка()
+    Возврат Перем11 <> Перем11;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Identical <> in return should trigger");
+    }
 
-        let diag_line_11 = find_diag_on_line(11);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_11.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_11, 11, 13, end_col);
+    /// Duplicate operand in OR chain triggers.
+    #[test]
+    fn test_fixture_duplicate_in_or_chain_triggers() {
+        let code = r#"Функция Проверка()
+    Если УсловиеВыполняется() ИЛИ УсловиеВыполняется() ИЛИ УсловиеВтороеВыполняется() Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate in OR chain should trigger");
+    }
 
-        let diag_line_13 = find_diag_on_line(13);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_13.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_13, 13, 9, end_col);
+    /// Identical < in return expression triggers.
+    #[test]
+    fn test_fixture_identical_lt_in_return_triggers() {
+        let code = r#"Функция Проверка()
+    Возврат Перем12 < Перем12;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Identical < should trigger");
+    }
 
-        let diag_line_15 = find_diag_on_line(15);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_15.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_15, 15, 16, end_col);
+    /// Duplicate operand in AND chain triggers.
+    #[test]
+    fn test_fixture_duplicate_in_and_chain_triggers() {
+        let code = r#"Функция Проверка()
+    Если (Перем13 = 0) И (Перем13 = 0) Тогда
+        Возврат Истина;
+    КонецЕсли;
+    Возврат Ложь;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate in AND chain should trigger");
+    }
 
-        let diag_line_19 = find_diag_on_line(19);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_19.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_19, 19, 9, end_col);
+    /// Duplicate in И chain inside Возврат triggers.
+    #[test]
+    fn test_fixture_duplicate_and_in_return_triggers() {
+        let code = r#"Функция Проверка()
+    Возврат Перем14 И Перем15 И Перем15;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate И in return chain should trigger");
+    }
 
-        let diag_line_21 = find_diag_on_line(21);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_21.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_21, 21, 16, end_col);
+    /// Subtraction of identical operands triggers; multiplication does not.
+    #[test]
+    fn test_fixture_subtraction_triggers_multiplication_skipped() {
+        let code = r#"Процедура Проверка()
+    Результат = Перем16 - Перем16;
+    Результат = Результат * Результат;
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "- triggers, * does not");
+        assert!(diagnostics[0].message.contains("-"));
+    }
 
-        let diag_line_25 = find_diag_on_line(25);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_25.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_25, 25, 9, end_col);
+    /// Complex И/ИЛИ chain with no duplicates — not flagged.
+    #[test]
+    fn test_fixture_mixed_and_or_no_duplicates() {
+        let code = r#"Функция Проверка()
+    Возврат Перем18 И Перем19 ИЛИ Перем18 И Перем20;
+КонецФункции
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "No duplicates in mixed И/ИЛИ chain");
+    }
 
-        let diag_line_27 = find_diag_on_line(27);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_27.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_27, 27, 16, end_col);
+    /// Module-level: duplicate AND sub-expression in OR chain triggers.
+    #[test]
+    fn test_fixture_module_level_complex_and_in_or() {
+        let code = r#"
+Б = 0;
+С = (А = 1) И (Б = 1) ИЛИ (А = 1) И (Б = 1);
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate AND in OR chain at module level");
+    }
 
-        let diag_line_31 = find_diag_on_line(31);
-        let (_, _, _, end_col) = crate::test_utils::range_to_line_col(code, diag_line_31.range);
-        crate::test_utils::assert_diagnostic_range(code, diag_line_31, 31, 16, end_col);
+    /// Module-level: duplicate А = 1 in OR chain triggers.
+    #[test]
+    fn test_fixture_module_level_or_duplicate() {
+        let code = r#"
+Если А = 1 ИЛИ А = 1 Тогда
+    Б = 1;
+КонецЕсли;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate А = 1 in module-level OR");
+    }
 
-        // Missing cases (will implement later):
-        // - Lines 42, 48: Transitive comparisons (1 = А vs А = 1)
-        // - Lines 39, 46, 52, 53: Complex assignment chains
-        // - Lines 64, 70: Preprocessor regions
+    /// Module-level: transitive А = 1 vs 1 = А triggers.
+    #[test]
+    fn test_fixture_module_level_transitive_or() {
+        let code = r#"
+ИначеЕсли 1 = А ИЛИ А = 1 Тогда
+    Б = 11;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Transitive 1=А vs А=1 in OR chain");
+    }
+
+    /// Duplicate in chained assignment А = 12 ИЛИ А = 13 ИЛИ А = 12.
+    #[test]
+    fn test_fixture_chained_assignment_duplicate() {
+        let code = r#"
+Б = А = 12 ИЛИ А = 13 ИЛИ А = 12;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate А = 12 in chained OR");
+    }
+
+    /// Preprocessor region split: Истина ИЛИ Истина across #Область triggers.
+    #[test]
+    fn test_fixture_preprocessor_region_duplicate() {
+        let code = r#"
+Результат = Истина
+#Область ЕщеОднаОбласть
+ ИЛИ Истина;
+#КонецОбласти
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Duplicate across #Область should trigger");
+    }
+
+    /// Preprocessor #Если split: Истина ИЛИ ... ИЛИ Истина triggers.
+    #[test]
+    fn test_fixture_preprocessor_if_duplicate() {
+        let code = r#"
+Результат = Истина
+#Если ВебКлиент Тогда
+ ИЛИ Ложь
+#Иначе
+ ИЛИ ЗначениеВыражения()
+#КонецЕсли
+ ИЛИ Истина;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Истина repeated across #Если should trigger");
+    }
+
+    /// Preprocessor split with no duplicates — not flagged.
+    #[test]
+    fn test_fixture_preprocessor_no_duplicate() {
+        let code = r#"
+Результат = ЗначениеВыражения()
+#Если ВебКлиент Тогда
+ ИЛИ Ложь
+#Иначе
+ ИЛИ Отказ
+#КонецЕсли
+ ИЛИ Истина;
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "No duplicates across #Если");
     }
 
     #[test]

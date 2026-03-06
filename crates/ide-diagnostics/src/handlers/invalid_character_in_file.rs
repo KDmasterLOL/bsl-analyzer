@@ -142,7 +142,40 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/InvalidCharacterInFileDiagnostic.bsl");
+        // Inline fixture with illegal Unicode characters preserved exactly.
+        // Uses explicit Unicode escapes to keep source readable while preserving byte-exact content.
+        let code = concat!(
+            "// минусы с ошибками\n",
+            "СреднееТире = \"\u{2013}\";\n",  // line 1: en dash –
+            "ЦифровоеТире = \"\u{2012}\";\n", // line 2: figure dash ‒
+            "ДлинноеТире = \"\u{2014}\";\n",  // line 3: em dash —
+            "ГоризонтальнаяЛиния = \"\u{2015}\";\n", // line 4: horizontal bar ―
+            "НеправильныйМинус = \"\u{2212}\";\n", // line 5: minus sign −
+            "// Мягкий перенос в комментарии \u{00AD}\n", // line 6: soft hyphen in comment
+            "\n",
+            "// минус без ошибки\n",
+            "ПравильныйДефисМинус = \"-\";\n",
+            "\n",
+            "// ошибочные неразрывные пробелы\n",
+            "// В этом комментарии только\u{00A0}НПП\n", // line 12: NBSP in comment (32 chars)
+            "\n",
+            "Строка = \"А\" + \"\u{00A0}\" + \"И\";\n", // line 14: NBSP in string
+            "\n",
+            "//в строке ниже неразрывный пробел\n",
+            "\u{00A0}\n", // line 17: standalone NBSP
+            "// минусы с ошибками\n",
+            "//СреднееТире = \"\n",
+            "\u{2013};\n", // line 20: standalone –
+            "//ЦифровоеТире = \"\n",
+            "\u{2012};\n", // line 22: standalone ‒
+            "//ДлинноеТире = \"\n",
+            "\u{2014};\n", // line 24: standalone —
+            "//ГоризонтальнаяЛиния = \"\n",
+            "\u{2015};\n", // line 26: standalone ―
+            "//НеправильныйМинус = \"\n",
+            "\u{2212};\n", // line 28: standalone −
+            "//конец файла\n",
+        );
         let diagnostics = check_ast_diagnostic(code, check);
 
         // Expected 14 diagnostics

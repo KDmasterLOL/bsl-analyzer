@@ -54,41 +54,93 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::test_utils::*;
+    use crate::DiagnosticCode;
 
     #[test]
-    fn test_empty_code_block() {
-        let code = include_str!("../../test_data/EmptyCodeBlockDiagnostic.bsl");
+    fn test_empty_else_block() {
+        let code = r#"Процедура А()
+    Якорь = 0;
+    Если Истина Тогда
+        А = 0;
+    Иначе
+        // только комментарий - пустой блок
+    КонецЕсли;
+КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
-
-        let empty_block_diags: Vec<_> =
+        let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        assert_eq!(diags.len(), 1);
+        assert_diagnostic_range_multiline(code, diags[0], 4, 4, 4, 9);
+    }
 
-        // Expected 6 diagnostics at specific positions
-        // HIR lowering now matches bsl-language-server behavior (excludes try/except blocks)
-        assert_eq!(
-            empty_block_diags.len(),
-            6,
-            "Expected 6 diagnostics to match bsl-language-server"
-        );
+    #[test]
+    fn test_empty_while_loop() {
+        let code = r#"Процедура А()
+    Пока Истина Цикл
+        // только комментарий - пустой цикл
+    КонецЦикла;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        assert_eq!(diags.len(), 1);
+        assert_diagnostic_range_multiline(code, diags[0], 1, 4, 1, 20);
+    }
 
-        // Line 6 (0-indexed line 5), cols 1-6 (Иначе)
-        assert_diagnostic_range_multiline(code, empty_block_diags[0], 5, 1, 5, 6);
+    #[test]
+    fn test_empty_if_block() {
+        let code = r#"Процедура А()
+    Если Истина Тогда
 
-        // Line 18 (0-indexed line 17), cols 2-18 (Пока Истина Цикл)
-        assert_diagnostic_range_multiline(code, empty_block_diags[1], 17, 2, 17, 18);
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        assert_eq!(diags.len(), 1);
+        assert_diagnostic_range_multiline(code, diags[0], 1, 4, 1, 21);
+    }
 
-        // Line 25 (0-indexed line 24), cols 4-21 (Если Истина Тогда)
-        assert_diagnostic_range_multiline(code, empty_block_diags[2], 24, 4, 24, 21);
+    #[test]
+    fn test_empty_elseif_and_else() {
+        let code = r#"а = 5;
+Если а = 0 Тогда
+ИначеЕсли А = 1 Тогда
+    Иначе
+КонецЕсли;"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        // Empty if, empty elseif, empty else = 3 diagnostics
+        assert_eq!(diags.len(), 3);
+    }
 
-        // Line 36 (0-indexed line 35), cols 0-16 (Если а = 0 Тогда)
-        assert_diagnostic_range_multiline(code, empty_block_diags[3], 35, 0, 35, 16);
+    #[test]
+    fn test_no_diagnostic_for_empty_try_except() {
+        // Empty except blocks are NOT reported by EmptyCodeBlock (separate diagnostic)
+        let code = r#"Процедура А()
+    Попытка
+        А = 0;
+    Исключение
+        // комментарий
+    КонецПопытки;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        assert_eq!(diags.len(), 0, "Empty except blocks not reported by EmptyCodeBlock");
+    }
 
-        // Line 38 (0-indexed line 37), cols 0-21 (ИначеЕсли А = 1 Тогда)
-        assert_diagnostic_range_multiline(code, empty_block_diags[4], 37, 0, 37, 21);
-
-        // Line 39 (0-indexed line 38), cols 4-9 (Иначе)
-        assert_diagnostic_range_multiline(code, empty_block_diags[5], 38, 4, 38, 9);
+    #[test]
+    fn test_no_diagnostic_for_empty_procedure_body() {
+        // Empty procedure bodies are NOT reported by EmptyCodeBlock (separate diagnostic)
+        let code = r#"Функция В()
+    // только комментарий
+КонецФункции"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::EmptyCodeBlock).collect();
+        assert_eq!(diags.len(), 0, "Empty function body not reported by EmptyCodeBlock");
     }
 }

@@ -55,7 +55,22 @@ mod tests {
     use crate::DiagnosticCode;
     #[test]
     fn test_java_fixture() {
-        let code = include_str!("../../test_data/OSUsersMethodDiagnostic.bsl");
+        let code = r#"Функция Тест1()
+Сообщить("Здесь не должно сработать");
+КонецФункции
+
+Функция Тест2()
+Пользователи = ПользователиОС(); // сработает здесь
+КонецФункции
+
+Функция Тест3()
+Users = OSUsers(); // сработает здесь
+КонецФункции
+
+Функция Тест4()
+Users = osUsers(); // сработает здесь
+КонецФункции
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::OSUsersMethod).collect();

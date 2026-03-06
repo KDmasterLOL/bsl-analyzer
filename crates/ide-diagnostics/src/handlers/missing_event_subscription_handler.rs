@@ -448,7 +448,7 @@ mod tests {
         let fixtures_dir =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
 
-        let code = include_str!("../../test_data/MissingEventSubscriptionHandlerDiagnostic.bsl");
+        let code = "Функция Маркер()\nКонецФункции\n";
         let (diagnostics, file_content) = check_diagnostic(code, fixtures_dir);
 
         // Should find 6 diagnostics

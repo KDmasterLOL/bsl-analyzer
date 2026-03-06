@@ -111,7 +111,18 @@ mod tests {
 
     #[test]
     fn test_from_java_fixture() {
-        let code = include_str!("../test_data/CompilationDirectiveNeedLessDiagnostic.bsl");
+        let code = r#"Процедура А()
+КонецПроцедуры
+
+&НаСервере
+&НаСервере
+Процедура Б()
+КонецПроцедуры
+
+&НаСервере
+Процедура В()
+КонецПроцедуры
+"#;
         let diagnostics =
             check_metadata_diagnostic(object_module_metadata(), code, |_, ctx| super::check(ctx));
 

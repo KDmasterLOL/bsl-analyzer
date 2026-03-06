@@ -183,33 +183,53 @@ fn report_duplicates(
 mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/DuplicateRegionDiagnostic.bsl");
+    fn test_duplicate_internal_regions() {
+        // СлужебныйПрограммныйИнтерфейс and Internal map to same canonical "Internal"
+        let code = r#"#Область СлужебныйПрограммныйИнтерфейс
+// код
+#КонецОбласти
+
+#Region Internal
+// код
+#EndRegion"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 38);
+        assert!(diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"));
+    }
 
-        assert_eq!(diagnostics.len(), 3, "Should find 3 diagnostics (lines 12, 16, 21)");
+    #[test]
+    fn test_duplicate_private_regions() {
+        // СлужебныеПроцедурыИФункции and Private map to same canonical "Private"
+        let code = r#"#Область СлужебныеПроцедурыИФункции
+// код
+#КонецОбласти
 
-        // Line 12 (1-indexed) = line 11 (0-indexed): #Область СлужебныйПрограммныйИнтерфейс
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 11, 0, 11, 38);
-        assert!(
-            diagnostics[0].message.contains("СлужебныйПрограммныйИнтерфейс"),
-            "Message should contain original region name"
-        );
+#Region Private
+// код
+#EndRegion"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 35);
+        assert!(diagnostics[0].message.contains("СлужебныеПроцедурыИФункции"));
+    }
 
-        // Line 16 (1-indexed) = line 15 (0-indexed): #Область СлужебныеПроцедурыИФункции
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 15, 0, 15, 35);
-        assert!(
-            diagnostics[1].message.contains("СлужебныеПроцедурыИФункции"),
-            "Message should contain original region name"
-        );
+    #[test]
+    fn test_duplicate_event_handlers_regions() {
+        // EventHandlers and ОбработчикиСобытий map to same canonical "EventHandlers"
+        let code = r#"#Region EventHandlers
+// код
+#EndRegion
 
-        // Line 21 (1-indexed) = line 20 (0-indexed): #Region EventHandlers
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 20, 0, 20, 21);
-        assert!(
-            diagnostics[2].message.contains("EventHandlers"),
-            "Message should contain original region name"
-        );
+#Область ОбработчикиСобытий
+// код
+#КонецОбласти"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 0, 21);
+        assert!(diagnostics[0].message.contains("EventHandlers"));
     }
 
     #[test]

@@ -183,17 +183,141 @@ mod tests {
     use crate::test_utils::check_sdbl_diagnostic;
 
     #[test]
-    fn test_fields_from_joins_without_is_null() {
-        let code = include_str!("../../test_data/FieldsFromJoinsWithoutIsNullDiagnostic.bsl");
+    fn test_left_join_unprotected_field() {
+        // Test1: single LEFT JOIN, unprotected field in SELECT
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Сотрудники.Ссылка
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники
+    |ПО Склады.Кладовщик = Сотрудники.Ссылка
+    |";
+КонецПроцедуры"#;
         let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Unprotected field from LEFT JOIN");
+    }
 
-        // Per-field diagnostic mode: one diagnostic per unprotected field reference.
-        // bsl-language-server emitted 9 diagnostics (one per JOIN), but we now emit
-        // one per field for better UX - highlighting the exact field that needs protection.
-        // Test8 (FULL JOIN) has 3 unprotected fields: lines 99, 100, 101.
+    #[test]
+    fn test_left_join_with_isnull_protected() {
+        // Test3: ISNULL-protected field should NOT trigger, bare field SHOULD
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Сотрудники3.Ссылка,
+    |ЕСТЬNULL(Сотрудники3.Ссылка, 0)
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники3
+    |ПО Склады.Кладовщик = Сотрудники3.Ссылка
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Only bare field triggers, ISNULL-wrapped is safe");
+    }
 
-        // Per-field implementation: one diagnostic per unprotected field reference.
-        assert_eq!(diagnostics.len(), 11, "Expected 11 diagnostics (one per unprotected field)");
+    #[test]
+    fn test_left_join_where_clause_unprotected() {
+        // Test4: unprotected field in WHERE clause triggers
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Склады.Ссылка
+    |ИЗ Справочник.Склады КАК Склады
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники4
+    |ПО Склады.Кладовщик = Сотрудники4.Ссылка
+    |ГДЕ Сотрудники4.Флаг
+    |И ЕСТЬNULL(Сотрудники4.Флаг, Истина)
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Unprotected field in WHERE triggers");
+    }
+
+    #[test]
+    fn test_right_join_unprotected_field() {
+        // Test5: RIGHT JOIN, unprotected field in SELECT
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Склады5.Ссылка,
+    |ЕСТЬNULL(Склады5.Ссылка, 0)
+    |ИЗ Справочник.Склады КАК Склады5
+    |ПРАВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники5
+    |ПО Склады5.Кладовщик = Сотрудники5.Ссылка
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Unprotected field from RIGHT JOIN");
+    }
+
+    #[test]
+    fn test_inner_join_no_diagnostic() {
+        // Test6: INNER JOIN - never triggers
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Склады6.Ссылка
+    |ИЗ Справочник.Склады КАК Склады6
+    |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники6
+    |ПО Склады6.Кладовщик = Сотрудники6.Ссылка
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "INNER JOIN should never trigger");
+    }
+
+    #[test]
+    fn test_full_join_multiple_unprotected_fields() {
+        // Test8: FULL JOIN, 3 unprotected fields -> 3 diagnostics
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Сотрудники8.Ссылка,
+    |Склады8.Ссылка,
+    |Сотрудники8.Организация,
+    |ЕСТЬNULL(Сотрудники8.Ссылка, 0),
+    |ЕСТЬNULL(Склады8.Ссылка, 0)
+    |ИЗ Справочник.Склады КАК Склады8
+    |ПОЛНОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники8
+    |ПО Склады8.Кладовщик = Сотрудники8.Ссылка
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 3, "3 unprotected fields from FULL JOIN");
+    }
+
+    #[test]
+    fn test_left_join_is_not_null_in_where_exempts() {
+        // Test9/Test10: IS NOT NULL in WHERE exempts all field usage
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Сотрудники9.Ссылка
+    |ИЗ Справочник.Склады КАК Склады9
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники9
+    |ПО Склады9.Кладовщик = Сотрудники9.Ссылка
+    |ГДЕ (Сотрудники9.Реквизит ЕСТЬ НЕ NULL)
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "IS NOT NULL in WHERE exempts field");
+    }
+
+    #[test]
+    fn test_is_null_in_where_does_not_exempt_select() {
+        // Test13: IS NULL in WHERE does not exempt SELECT fields
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст =
+    "ВЫБРАТЬ Сотрудники13.Ссылка
+    |ИЗ Справочник.Склады КАК Склады13
+    |ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Сотрудники КАК Сотрудники13
+    |ПО Склады13.Кладовщик = Сотрудники13.Реквизит
+    |ГДЕ Сотрудники13.Реквизит ЕСТЬ NULL
+    |";
+КонецПроцедуры"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "IS NULL in WHERE does not protect SELECT field");
     }
 
     #[test]

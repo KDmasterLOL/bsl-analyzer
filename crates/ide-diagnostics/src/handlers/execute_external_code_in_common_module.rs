@@ -152,7 +152,20 @@ mod tests {
 
     #[test]
     fn test_detect_execute_statement() {
-        let code = include_str!("../test_data/ExecuteExternalCodeInCommonModuleDiagnostic.bsl");
+        let code = r#"
+Процедура ВыполнитьПроизвольныйКод(Строка)
+    Выполнить(Строка);
+КонецПроцедуры
+
+Функция РассчитатьЧтоТоИзСтроки(Строка)
+    Возврат Вычислить(Строка);
+КонецФункции
+
+Функция БезОшибок(Строка)
+    Возврат ВычислитьЧтоТо(Строка);
+КонецФункции
+
+"#;
         let diagnostics = check_violations_directly(code);
 
         assert_eq!(diagnostics.len(), 2, "Expected 2 violations: Execute and Eval");

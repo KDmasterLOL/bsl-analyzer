@@ -221,8 +221,72 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
 
     #[test]
     fn test_comprehensive() {
-        let code =
-            include_str!("../../test_data/NestedConstructorsInStructureDeclarationDiagnostic.bsl");
+        // Full fixture: RU + EN variants, nested constructors with/without params
+        let code = r#"
+    // RU
+
+    // Pass
+    Результат = Новый Структура("МВТ, ТекстЗапроса, Параметры",
+                                 Новый МенеджерВременныхТаблиц,
+                                 ТекстЗапроса,
+                                 Новый Структура);
+
+    // Warn
+    Результат = Новый Структура("ДанныеНоменклатуры, Количество",
+                                 Новый Структура("Код, Наименование"),
+                                 10);
+
+    Результат = Новый Структура("ЗаполнитьПризнакХарактеристикиИспользуются,                    // Warn
+                                |ЗаполнитьПризнакТипНоменклатуры,
+                                |ПустаяСтруктура,
+                                |ЗаполнитьПризнакВариантОформленияПродажи,
+                                |МВТ",
+                                Новый Структура("Номенклатура", "ХарактеристикиИспользуются"),  // Warn
+                                Новый Структура("Номенклатура", "ТипНоменклатуры"),             // Warn
+                                Новый Структура,                                                // Pass
+                                Новый Структура("Номенклатура", "ВариантОформленияПродажи"),    // Warn
+                                Новый МенеджерВременныхТаблиц);                                 // Pass
+
+    Результат = Новый Структура("Параметры",                                                        // Warn
+                                Новый Структура("ФиксированнаяСтруктура",                           // Warn
+                                                Новый ФиксированнаяСтруктура(Новый Струкутура)));   // Pass
+
+    // EN
+
+    // Pass
+    Result = New Structure("TTM, Query, Params",
+                            New TempTablesManager,
+                            Query,
+                            New Structure);
+
+    // Warn
+    Result = New Structure("GoodsData, Count",
+                            New Structure("Code, Name"),
+                            10);
+
+    Result = New Structure("FillCharacter,                          // Warn
+                            |FillType,
+                            |EmptyStructure,
+                            |FillDealType,
+                            |TTM",
+                            New Structure("Goods", "Character"),    // Warn
+                            New Structure("Goods", "Type"),         // Warn
+                            New Structure,                          // Pass
+                            New Structure("Goods", "DealType"),     // Warn
+                            New TempTablesManager);                 // Pass
+
+    Result = New Structure("Params",                                                // Warn
+                            New Structure("FixedStructure",                         // Warn
+                                            New FixedStructure(New Structure)));    // Pass
+
+    Result = New Structure("Params",                                              // Pass
+                            FillStructure(New FixedStructure(New Structure)));    // Pass
+
+    Result = New Structure("field1, field2, field3", New Array(), New Array(), New Array()); // Pass
+
+    // FP
+    А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
+    А = Новый ФиксированнаяСтруктура(Новый Структура("Источник, Данные"));"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(
@@ -231,7 +295,7 @@ Result = New Structure("field1, field2, field3", New Array(), New Array(), New A
             "Should find exactly 8 diagnostics (matching reference implementation)"
         );
 
-        // Verify exact positions matching bsl-language-server (bsl-language-server) implementation
+        // Verify exact positions matching bsl-language-server implementation
         // bsl-language-server uses 0-indexed lines
         assert_diagnostic_range_multiline(code, &diagnostics[0], 10, 16, 12, 36);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 14, 16, 23, 62);

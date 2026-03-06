@@ -310,9 +310,19 @@ mod tests {
         assert_eq!(diagnostics.len(), 0);
     }
 
+    /// Inline version of BadWordsDiagnostic.bsl fixture - with comments enabled.
+    ///
+    /// Pattern "лотус|шмотус", findInComments=true:
+    /// - Line 0, cols 42-47: лотус (in comment)
+    /// - Line 0, cols 48-54: шмотус (in comment)
+    /// - Line 4, cols 4-9: Лотус (SDBL query identifier)
+    /// - Line 6, cols 24-29: Лотус (in ДиспетчерЛотус)
+    /// - Line 6, cols 34-39: Лотус (alias)
+    /// - Line 8, cols 4-10: Шмотус (in УзелШмотуса)
     #[test]
     fn test_bad_words_with_comments() {
-        let code = include_str!("../../test_data/BadWordsDiagnostic.bsl");
+        // Inline equivalent of BadWordsDiagnostic.bsl
+        let code = "// при наличии в списке запрещенных слов \"лотус/шмотус\" // тут должно сработать дважды\n\nЗапрос = Новый Запрос;\nЗапрос.Текст = \"ВЫБРАТЬ ПЕРВЫЕ 1\n|   Лотус.Ссылка КАК Узел                               //тут должно сработать\n|ИЗ\n|   ПланОбмена.ДиспетчерЛотус КАК Лотус\";               //тут должно сработать дважды\n\nУзелШмотуса = Запрос.Выполнить().Выгрузить()[0].Ссылка;  //тут должно сработать\n";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -354,9 +364,14 @@ mod tests {
         assert!(diagnostics[5].message.contains("Шмотус"));
     }
 
+    /// Inline version of BadWordsDiagnostic.bsl fixture - with comments disabled.
+    ///
+    /// Pattern "лотус|шмотус", findInComments=false:
+    /// Skips line 0 (comment line), finds 4 remaining matches.
     #[test]
     fn test_bad_words_without_comments() {
-        let code = include_str!("../../test_data/BadWordsDiagnostic.bsl");
+        // Inline equivalent of BadWordsDiagnostic.bsl
+        let code = "// при наличии в списке запрещенных слов \"лотус/шмотус\" // тут должно сработать дважды\n\nЗапрос = Новый Запрос;\nЗапрос.Текст = \"ВЫБРАТЬ ПЕРВЫЕ 1\n|   Лотус.Ссылка КАК Узел                               //тут должно сработать\n|ИЗ\n|   ПланОбмена.ДиспетчерЛотус КАК Лотус\";               //тут должно сработать дважды\n\nУзелШмотуса = Запрос.Выполнить().Выгрузить()[0].Ссылка;  //тут должно сработать\n";
 
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(

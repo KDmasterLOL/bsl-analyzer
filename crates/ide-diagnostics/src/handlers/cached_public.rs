@@ -312,10 +312,35 @@ mod tests {
 
     // ========== Tests for check_with_reuse (ReturnValueReuse variants) ==========
 
+    /// DuringRequest cached module with two public regions (ПрограммныйИнтерфейс and public),
+    /// one non-public region (СлужебныйПрограммныйИнтерфейс). Expects 2 diagnostics.
     #[test]
     fn test_during_request_finds_public_regions() {
-        // DuringRequest = cached, should find public regions with methods
-        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        // Inline equivalent of CachedPublicDiagnostic.bsl
+        let code = r#"#Область ПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область СлужебныйПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область public
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+"#;
         let (db, file_id, config) = create_test_ctx(code);
         let ctx = DiagnosticsContext {
             db: db.as_ref(),
@@ -342,10 +367,33 @@ mod tests {
         assert_eq!(second_line, 16, "Second diagnostic at line 16");
     }
 
+    /// DuringSession is also a cached mode - same 2 diagnostics expected.
     #[test]
     fn test_during_session_finds_public_regions() {
-        // DuringSession = also cached
-        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        let code = r#"#Область ПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область СлужебныйПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область public
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+"#;
         let (db, file_id, config) = create_test_ctx(code);
         let ctx = DiagnosticsContext {
             db: db.as_ref(),
@@ -362,10 +410,33 @@ mod tests {
         assert_eq!(diagnostics.len(), 2, "DuringSession is also cached");
     }
 
+    /// DontUse means no caching - diagnostic should be skipped entirely.
     #[test]
     fn test_dont_use_skips_check() {
-        // DontUse = not cached, should skip
-        let code = include_str!("../../test_data/CachedPublicDiagnostic.bsl");
+        let code = r#"#Область ПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область СлужебныйПрограммныйИнтерфейс
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+
+#Область public
+
+Процедура Метод1()
+
+КонецПроцедуры
+
+#КонецОбласти
+"#;
         let (db, file_id, config) = create_test_ctx(code);
         let ctx = DiagnosticsContext {
             db: db.as_ref(),

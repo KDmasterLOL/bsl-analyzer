@@ -55,7 +55,30 @@ mod tests {
     use crate::test_utils::*;
     #[test]
     fn test_one_statement_per_line() {
-        let code = include_str!("../../test_data/OneStatementPerLineDiagnostic.bsl");
+        let code = r#"А = 0;;
+Если Истина Тогда
+
+  А = 0;А = 1; // Диагностика должна сработать здесь
+КонецЕсли
+
+#Область ИмяОбласти
+
+Если Истина Тогда Сообщить(А=1); F=0; КонецЕсли;
+
+#КонецОбласти
+
+А=1; А=2; А=3;
+
+Процедура А()
+ УспешноПодключено = ПодключитьВнешнююКомпоненту(
+		#Если Клиент Тогда
+			"C:\Projects\ETPAddin\Bin\Debug-Win32\AddInNative\AddInNative.dll",
+		#Иначе
+			"C:\Projects\ETPAddin\Bin\Debug-x64\AddInNative\AddInNative.dll",
+		#КонецЕсли
+			"ETP",
+			ТипВнешнейКомпоненты.Native);
+КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
 
         let diags: Vec<_> =
@@ -88,7 +111,12 @@ mod tests {
 
     #[test]
     fn test_one_statement_per_line_end_file() {
-        let code = include_str!("../../test_data/OneStatementPerLineDiagnosticEndFile.bsl");
+        let code = r#"А = 0;;
+Ф=1; У=2; Е=3;
+
+Асинх Процедура а()
+    Существует = Ждать ФайлНаДиске.СуществуетАсинх();
+КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
 
         let diags: Vec<_> =

@@ -114,7 +114,25 @@ mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_ast_diagnostic};
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/UnknownPreprocessorSymbolDiagnostic.bsl");
+        let code = r#"#Если Нечто Тогда
+
+#КонецЕсли
+
+#Если _ Тогда
+
+#КонецЕсли
+
+#Если Сервер Тогда
+
+#КонецЕсли
+
+Если Нечто Тогда
+
+КонецЕсли;
+
+#Если НЕ МобильныйАвтономныйСервер Тогда
+
+#КонецЕсли"#;
         let diagnostics = check_ast_diagnostic(code, check);
 
         assert_eq!(diagnostics.len(), 2, "Should find exactly 2 unknown symbols");

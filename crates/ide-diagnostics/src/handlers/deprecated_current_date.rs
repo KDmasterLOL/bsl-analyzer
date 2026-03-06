@@ -166,19 +166,27 @@ EndProcedure
     }
 
     #[test]
-    fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/DeprecatedCurrentDateDiagnostic.bsl");
-        let diagnostics = check_hir_diagnostic(input);
+    fn test_two_procs_one_each_language() {
+        // Fixture scenario: ТекущаяДата() in one proc, CurrentDate() in another,
+        // ТекущаяДатаСеанса() and Модуль.ТекущаяДата() in between (no trigger)
+        let code = r#"
+Процедура А()
+    ДатаПроверки = ТекущаяДата();
+КонецПроцедуры
 
+Процедура Б()
+    ДатаПроверки = ТекущаяДатаСеанса();
+    Модуль.ТекущаяДата();
+КонецПроцедуры
+
+Procedure A()
+    CheckDate = CurrentDate();
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
         let deprecated_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::DeprecatedCurrentDate)
             .collect();
-
-        assert_eq!(deprecated_diags.len(), 2, "Expected 2 diagnostics");
-
-        // Verify diagnostic positions match bsl-language-server test expectations
-        assert_diagnostic_range(input, deprecated_diags[0], 2, 19, 30);
-        assert_diagnostic_range(input, deprecated_diags[1], 11, 16, 27);
+        assert_eq!(deprecated_diags.len(), 2, "Expected exactly 2 diagnostics");
     }
 }

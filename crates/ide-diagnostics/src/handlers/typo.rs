@@ -489,6 +489,19 @@ mod tests {
     use crate::test_utils::check_hir_diagnostic_with_config;
     use crate::{DiagnosticCode, DiagnosticsConfig};
 
+    const FIXTURE: &str = r#"Функция Тест()
+    Сообщить("Атмена"); // Срабатывание здесь
+    Возврат;
+КонецФункции
+
+Функция ВаринатыОплаты() // срабатывание здесь
+    ТипЗнч(Ссылка);      // нет срабатывания
+    Возврат;
+    Сообщить("ыть");      // срабатывание здесь
+    ДеньНедели = Формат(ДатаКолонки, "ДФ=ддд"); // Нет срабатывания. Форматная строка
+    ЗапроситьДанныеОКВЭДФССВТранзакции = Истина; // Нет срабатывания. Аббревиатура
+КонецФункции"#;
+
     /// Helper to create config with Typo explicitly enabled (since it's disabled by default).
     fn config_with_typo_enabled() -> DiagnosticsConfig {
         let mut config = DiagnosticsConfig::default();
@@ -498,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_typo_basic() {
-        let code = include_str!("../test_data/TypoDiagnostic.bsl");
+        let code = FIXTURE;
 
         let config = config_with_typo_enabled();
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
@@ -509,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_typo_with_min_word_length() {
-        let code = include_str!("../test_data/TypoDiagnostic.bsl");
+        let code = FIXTURE;
 
         let mut config = config_with_typo_enabled();
         config.parameters.insert(
@@ -530,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_typo_with_user_words_to_ignore() {
-        let code = include_str!("../test_data/TypoDiagnostic.bsl");
+        let code = FIXTURE;
 
         let mut config = config_with_typo_enabled();
         config.parameters.insert(
@@ -549,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_typo_case_insensitive() {
-        let code = include_str!("../test_data/TypoDiagnostic.bsl");
+        let code = FIXTURE;
 
         let mut config = config_with_typo_enabled();
         config.parameters.insert(

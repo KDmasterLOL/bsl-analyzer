@@ -74,19 +74,49 @@ mod tests {
 
     #[test]
     fn test_function_name_starts_with_get() {
-        let code = include_str!("../../test_data/FunctionNameStartsWithGetDiagnostic.bsl");
+        let code = r#"// Source comment
+Функция ПолучитьИмяПоКоду()
+
+КонецФункции
+
+Функция НеПолучитьИмяПоКоду()
+
+КонецФункции
+
+Функция ИмяПоКоду()
+
+КонецФункции
+
+Процедура ПолучитьИмяПоКоду()
+
+КонецПроцедуры
+
+Function GetNameByCode()
+
+EndFunction
+
+Function NotGetNameByCode()
+
+EndFunction
+
+Function NameByCode()
+
+EndFunction
+
+Procedure GetNameByCode()
+
+EndProcedure
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::FunctionNameStartsWithGet)
             .collect();
 
-        // Expected 1 diagnostic at line 0 (1-based line 1), cols 8-25
-        // The diagnostic should be on "ПолучитьИмяПоКоду" (the function name)
+        // Only the first function "ПолучитьИмяПоКоду" should trigger
         assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic");
 
-        // Line 1 (0-indexed line 1, after source comment), cols 8-25
-        // "Функция ПолучитьИмяПоКоду()" - the name starts at col 8
+        // Line 1 (0-indexed), cols 8-25
         assert_diagnostic_range(code, func_diags[0], 1, 8, 25);
         assert!(func_diags[0].message.contains("ПолучитьИмяПоКоду"));
     }

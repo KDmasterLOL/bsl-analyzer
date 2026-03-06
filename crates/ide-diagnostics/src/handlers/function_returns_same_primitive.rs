@@ -82,42 +82,138 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
+    /// All branches always return True — should trigger.
     #[test]
-    fn test_fixture() {
-        let code = include_str!("../../test_data/FunctionReturnsSamePrimitiveDiagnostic.bsl");
+    fn test_fixture_all_branches_return_true() {
+        let code = r#"Функция ПроверитьСтроку(Знач СтрокаТаблицы)
+    Если ЭтоХорошаяСтрока(СтрокаТаблицы) Тогда
+        ДелаемЧтоТо();
+        Возврат Истина;
+    ИначеЕсли ЭтоТожеНеплохаяСтрока(СтрокаТаблицы) Тогда
+        ДелаемДругоеЧтоТо();
+        Возврат Истина;
+     Иначе
+        Возврат Истина;
+    КонецЕсли;
+КонецФункции
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let func_diags: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
             .collect();
-
-        // With default parameters (skipAttachable=true, caseSensitiveForString=false)
-        // Expected 5 diagnostics at:
-        // - Line 0 (ПроверитьСтроку), cols 8-23
-        // - Line 25 (Метод1), cols 8-14
-        // - Line 35 (СтавкаНДС), cols 8-17
-        // - Line 62 (КакаяТоКоманда), cols 8-22
-        // - Line 82 (ПроверкаРегистраДляСтрок), cols 8-32
-
-        assert_eq!(func_diags.len(), 5, "Expected 5 diagnostics with default config");
-
-        // reference test uses 0-based line numbers
-        // Our fixture is identical to bsl-language-server (no extra comments at start)
-
-        // ПроверитьСтроку - line 0
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for ПроверитьСтроку");
         assert_diagnostic_range(code, func_diags[0], 0, 8, 23);
+    }
 
-        // Метод1 - line 25
-        assert_diagnostic_range(code, func_diags[1], 25, 8, 14);
+    /// Same string in all branches — should trigger.
+    #[test]
+    fn test_fixture_all_branches_return_same_string() {
+        let code = r#"Функция Метод1()
+    Значение = "Фича";
+    Если Фича = "Дирижабль" Тогда
+        Возврат "Фича";
+    ИначеЕсли Фича = "Ага" Тогда
+        Возврат "Фича";
+    КонецЕсли;
+    Возврат "Фича";
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
+            .collect();
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for Метод1");
+        assert_diagnostic_range(code, func_diags[0], 0, 8, 14);
+    }
 
-        // СтавкаНДС - line 35
-        assert_diagnostic_range(code, func_diags[2], 35, 8, 17);
+    /// Same number in all branches — should trigger.
+    #[test]
+    fn test_fixture_all_branches_return_same_number() {
+        let code = r#"Функция СтавкаНДС(Ставка)
+    Значение = 20;
+    Если Ставка = "Ставка18" Тогда
+        Возврат 20;
+    КонецЕсли;
+    Возврат 20;
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
+            .collect();
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for СтавкаНДС");
+        assert_diagnostic_range(code, func_diags[0], 0, 8, 17);
+    }
 
-        // КакаяТоКоманда - line 62
-        assert_diagnostic_range(code, func_diags[3], 62, 8, 22);
+    /// Attachable method with same Null — skipped by default.
+    #[test]
+    fn test_fixture_attachable_prefix_skipped() {
+        let code = r#"Функция Подключаемый_КакаяТоКоманда(Команда)
 
-        // ПроверкаРегистраДляСтрок - line 82
-        assert_diagnostic_range(code, func_diags[4], 82, 8, 32);
+    Если ЗначениеЗаполнено(ТекущаяДата) Тогда
+        Возврат Null;
+    КонецЕсли;
+
+    Возврат NULL;
+
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
+            .collect();
+        assert_eq!(func_diags.len(), 0, "Attachable methods should be skipped");
+    }
+
+    /// Non-attachable function returning same Null — should trigger.
+    #[test]
+    fn test_fixture_non_attachable_null_triggers() {
+        let code = r#"Функция КакаяТоКоманда(Команда)
+
+    Если ЗначениеЗаполнено(ТекущаяДата) Тогда
+        Возврат Null;
+    КонецЕсли;
+
+    Возврат NULL;
+
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
+            .collect();
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for КакаяТоКоманда");
+        assert_diagnostic_range(code, func_diags[0], 0, 8, 22);
+    }
+
+    /// Case-insensitive string comparison: "Значение", "значение", "ЗНАЧЕНИЕ" treated as same.
+    #[test]
+    fn test_fixture_case_insensitive_string_same() {
+        let code = r#"Функция ПроверкаРегистраДляСтрок()
+
+    Тип = 1;
+    Если Тип = 1 Тогда
+        Возврат "Значение";
+    ИначеЕсли Тип = 2 Тогда
+        Возврат "значение";
+    Иначе
+        Возврат "ЗНАЧЕНИЕ";
+    КонецЕсли;
+
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let func_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionReturnsSamePrimitive)
+            .collect();
+        assert_eq!(func_diags.len(), 1, "Expected 1 diagnostic for ПроверкаРегистраДляСтрок");
+        assert_diagnostic_range(code, func_diags[0], 0, 8, 32);
     }
 
     #[test]

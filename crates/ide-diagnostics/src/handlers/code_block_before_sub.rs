@@ -223,12 +223,26 @@ mod tests {
     use super::check;
     use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/CodeBlockBeforeSubDiagnostic.bsl");
+    fn test_code_inside_region_before_sub() {
+        // Code block inside a region before procedures — should trigger
+        // The .bsl fixture: region "КодДоМетодов" contains Метод() + Сообщить() calls before Процедура Метод()
+        let code = r#"Перем П;
+
+#Область КодДоМетодов
+Метод();
+Сообщить("4");
+#КонецОбласти
+
+Процедура Метод()
+// Метод
+КонецПроцедуры
+
+#Область Инициализация
+П = 12;
+#КонецОбласти"#;
         let diagnostics = check_ast_diagnostic(code, check);
-
-        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostics");
-
+        assert_eq!(diagnostics.len(), 1, "Should find 1 diagnostic for code in region before sub");
+        // The diagnostic spans the entire region (starts at first executable code inside)
         assert_diagnostic_range_multiline(code, &diagnostics[0], 3, 0, 5, 13);
     }
 

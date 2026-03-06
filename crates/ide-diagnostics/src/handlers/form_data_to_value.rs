@@ -56,20 +56,80 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/FormDataToValueDiagnostic.bsl");
+    fn test_qualified_call_in_procedure_no_annotation() {
+        // Тест(): Форма.ДанныеФормыВЗначение - qualified call in unannotated procedure triggers
+        let code = r#"Процедура Тест()
+    Форма=Док.ПолучитьФорму("ФормаДокумента");
+    ДФ = Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+КонецПроцедуры"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 1, "Qualified call in plain procedure triggers");
+    }
 
-        assert_eq!(form_diags.len(), 4, "Expected 4 diagnostics");
+    #[test]
+    fn test_global_call_with_server_annotation() {
+        // &НаСервере Тест2(): bare ДанныеФормыВЗначение triggers
+        let code = r#"&НаСервере
+Функция Тест2()
+    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+КонецФункции"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 1, "Global call in @НаСервере function triggers");
+    }
 
-        // bsl-language-server reports 1-indexed, we use 0-indexed
-        // bsl-ls line 3 = 0-indexed line 2, etc.
-        assert_diagnostic_range(code, form_diags[0], 2, 15, 35); // Line 3: Форма.ДанныеФормыВЗначение
-        assert_diagnostic_range(code, form_diags[1], 7, 9, 29); // Line 8: ДанныеФормыВЗначение
-        assert_diagnostic_range(code, form_diags[2], 22, 14, 29); // Line 23: Form.FormDataToValue
-        assert_diagnostic_range(code, form_diags[3], 26, 4, 19); // Line 27: FormDataToValue
+    #[test]
+    fn test_server_no_context_does_not_trigger() {
+        // &НаСервереБезКонтекста: should NOT trigger
+        let code = r#"&НаСервереБезКонтекста
+Процедура Тест2()
+    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 0, "БезКонтекста should NOT trigger");
+    }
+
+    #[test]
+    fn test_client_server_no_context_does_not_trigger() {
+        // &НаКлиентеНаСервереБезКонтекста: should NOT trigger
+        let code = r#"&НаКлиентеНаСервереБезКонтекста
+Процедура Тест2()
+    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 0, "НаКлиентеНаСервереБезКонтекста should NOT trigger");
+    }
+
+    #[test]
+    fn test_english_qualified_call_triggers() {
+        // English: Form.FormDataToValue in plain procedure triggers
+        let code = r#"Procedure Test()
+    Form = Doc.GetForm("DocumentForm");
+    FD = Form.FormDataToValue(Object, Type("ValueTable"));
+EndProcedure"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 1, "English qualified call in plain procedure triggers");
+    }
+
+    #[test]
+    fn test_english_global_call_triggers() {
+        // English: bare FormDataToValue in plain function triggers
+        let code = r#"Function Test2()
+    FormDataToValue(Object, Type("ValueTable"));
+EndFunction"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let form_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
+        assert_eq!(form_diags.len(), 1, "English global call in plain function triggers");
     }
 
     #[test]

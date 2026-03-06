@@ -156,8 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/CommandModuleExportMethodsDiagnostic.bsl");
+    fn test_exported_procedure_and_function_detected() {
+        // Exported procedure on line 0 (name at col 10-15) and exported function on line 6 (name at col 8-13)
+        let code = "Процедура Тест1() Экспорт\nКонецПроцедуры\n\nПроцедура Тест2()\nКонецПроцедуры\n\nФункция Тест3() Экспорт\nКонецФункции\n\nФункция Тест4()\nКонецФункции";
         let diagnostics = check_as_command_module(code);
 
         assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics");

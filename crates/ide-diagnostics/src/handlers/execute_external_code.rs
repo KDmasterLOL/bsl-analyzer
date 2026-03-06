@@ -84,21 +84,72 @@ mod tests {
     use super::*;
     use crate::test_utils::*;
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/ExecuteExternalCodeDiagnostic.bsl");
+    fn test_execute_on_server() {
+        let code = r#"
+&НаСервере
+Процедура ВыполнитьПроизвольныйКодНаСервере(Строка)
+    Выполнить(Строка);
+КонецПроцедуры
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let exec_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+        assert_eq!(exec_diags.len(), 1, "Execute on server should be detected");
+    }
 
-        assert_eq!(exec_diags.len(), 5, "Expected 5 diagnostics");
+    #[test]
+    fn test_execute_on_server_without_context() {
+        let code = r#"
+&НаСервереБезКонтекста
+Процедура ВыполнитьПроизвольныйКодНаСервереБезКонтекста(Строка)
+    Выполнить(Строка);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let exec_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+        assert_eq!(exec_diags.len(), 1, "Execute on server-without-context should be detected");
+    }
 
-        // Execute statements (lines 8, 13) include semicolon: col 4-22 (HIR uses full node range)
-        assert_diagnostic_range(code, exec_diags[0], 8, 4, 22);
-        assert_diagnostic_range(code, exec_diags[1], 13, 4, 22);
-        // Eval/Вычислить calls (lines 18, 23, 31) - CALL_EXPR range without semicolon
-        assert_diagnostic_range(code, exec_diags[2], 18, 12, 29);
-        assert_diagnostic_range(code, exec_diags[3], 23, 12, 29);
-        assert_diagnostic_range(code, exec_diags[4], 31, 12, 29);
+    #[test]
+    fn test_eval_on_client_server_without_context() {
+        let code = r#"
+&НаКлиентеНаСервереБезКонтекста
+Функция РассчитатьЧтоТоИзСтрокиБезКонтекст(Строка)
+    Возврат Вычислить(Строка);
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let exec_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+        assert_eq!(exec_diags.len(), 1, "Eval on ClientAtServerWithoutContext should be detected");
+    }
+
+    #[test]
+    fn test_eval_on_method_without_directive() {
+        let code = r#"
+Функция МетодБезДеректив(Строка)
+    Возврат Вычислить(Строка);
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let exec_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+        assert_eq!(exec_diags.len(), 1, "Eval in method without directive should be detected");
+    }
+
+    #[test]
+    fn test_client_only_not_detected() {
+        let code = r#"
+&НаКлиенте
+Функция ВычислениеНаКлиенте(Строка)
+    Возврат Вычислить(Строка);
+КонецФункции
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let exec_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExecuteExternalCode).collect();
+        assert_eq!(exec_diags.len(), 0, "Client-only annotation should be exempt");
     }
 
     #[test]

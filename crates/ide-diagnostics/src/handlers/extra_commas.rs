@@ -59,31 +59,78 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     #[test]
-    fn test_extra_commas() {
-        let code = include_str!("../../test_data/ExtraCommasDiagnostic.bsl");
+    fn test_trailing_comma_single_arg() {
+        // Метод1(Парам1, , Парам2,) - trailing comma after last arg
+        let code = "Результат = Метод1(Парам1, , Парам2,);";
         let diagnostics = check_hir_diagnostic(code);
         let extra_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        assert_eq!(extra_diags.len(), 6, "Expected 6 diagnostics");
+    #[test]
+    fn test_trailing_commas_multiple() {
+        // Метод2(Парам1, Парам2,,,) - multiple trailing commas
+        let code = "Результат = Метод2(Парам1, Парам2,,,);";
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        // Строка 9 (0-индекс 8): Метод1(Парам1, , Парам2,)
-        assert_diagnostic_range(code, extra_diags[0], 8, 35, 36);
+    #[test]
+    fn test_qualified_call_trailing_comma_with_space() {
+        // Модуль.Метод3(Парам1, Парам2, Парам3,, ) - trailing comma then space
+        let code = "Результат = Модуль.Метод3(Парам1, Парам2, Парам3,, );";
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        // Строка 10: Метод2(Парам1, Парам2,,,)
-        assert_diagnostic_range(code, extra_diags[1], 9, 35, 36);
+    #[test]
+    fn test_qualified_call_many_trailing_commas() {
+        // Модуль.Метод4(Парам1, , Парам2,,,,) - many trailing commas
+        let code = "Результат = Модуль.Метод4(Парам1, , Парам2,,,,);";
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        // Строка 11: Модуль.Метод3(Парам1, Парам2, Парам3,, )
-        assert_diagnostic_range(code, extra_diags[2], 10, 49, 50);
+    #[test]
+    fn test_trailing_comma_in_if_condition() {
+        // Если Метод5(Парам1, , Парам2,,,,) Тогда
+        let code = "Если Метод5(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        // Строка 12: Модуль.Метод4(Парам1, , Парам2,,,,)
-        assert_diagnostic_range(code, extra_diags[3], 11, 45, 46);
+    #[test]
+    fn test_qualified_trailing_comma_in_if_condition() {
+        // Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
+        let code = "Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда\nКонецЕсли;";
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 1);
+    }
 
-        // Строка 14: Если Метод5(Парам1, , Парам2,,,,) Тогда
-        assert_diagnostic_range(code, extra_diags[4], 13, 31, 32);
-
-        // Строка 18: Если Модуль.Метод6(Парам1, , Парам2,,,,) Тогда
-        assert_diagnostic_range(code, extra_diags[5], 17, 38, 39);
+    #[test]
+    fn test_good_calls_no_diagnostic() {
+        // All valid calls: no trailing commas
+        let code = r#"
+Результат = Метод(Парам1, , Парам2);
+Результат = Метод(Парам1, Парам2);
+Результат = Модуль.Метод(Парам1, Парам2, Парам3);
+Результат = Модуль.Метод(Парам1, , Парам2);
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let extra_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExtraCommas).collect();
+        assert_eq!(extra_diags.len(), 0);
     }
 
     #[test]

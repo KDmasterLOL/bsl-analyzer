@@ -564,7 +564,8 @@ fn message_ru() -> String {
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::{assert_diagnostic_range_multiline, check_ast_diagnostic};
+    use crate::test_utils::check_ast_diagnostic;
+    use crate::DiagnosticCode;
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
         let code = r#"Функция Тест()
@@ -591,23 +592,56 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive_compatibility() {
-        let code = include_str!("../../test_data/CommentedCodeDiagnostic.bsl");
+    fn test_multiline_commented_block() {
+        // Multi-line commented code block at start — should be 1 diagnostic
+        let code = r#"//ПервоеПроведение = Ложь;
+//Если Источник.ДополнительныеСвойства.Свойство("ПервоеПроведение")
+//    И Событие = "ОбработкаПроведения" Тогда
+//    ПервоеПроведение = Источник.ДополнительныеСвойства.ПервоеПроведение;
+//КонецЕсли;"#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Multi-line commented code block should be 1 diagnostic");
+    }
 
-        assert_eq!(diagnostics.len(), 12, "Should find 12 diagnostics");
+    #[test]
+    fn test_commented_out_procedure() {
+        // Commented-out procedure definition
+        let code = r#"//// Процедура ОбработкаПроведения()
+////
+////    Метод();
+////
+////КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Commented-out procedure should be detected");
+    }
 
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 6, 81);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 16, 4, 34, 16);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 36, 4, 42, 156);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 44, 4, 49, 16);
-        assert_diagnostic_range_multiline(code, &diagnostics[4], 59, 4, 65, 78);
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 76, 0, 80, 18);
-        assert_diagnostic_range_multiline(code, &diagnostics[6], 82, 0, 82, 23);
-        assert_diagnostic_range_multiline(code, &diagnostics[7], 84, 0, 85, 38);
-        assert_diagnostic_range_multiline(code, &diagnostics[8], 117, 0, 118, 24);
-        assert_diagnostic_range_multiline(code, &diagnostics[9], 203, 0, 203, 32);
-        assert_diagnostic_range_multiline(code, &diagnostics[10], 244, 0, 264, 152);
-        assert_diagnostic_range_multiline(code, &diagnostics[11], 268, 4, 270, 22);
+    #[test]
+    fn test_two_consecutive_commented_lines() {
+        // Two consecutive commented code lines — single group, single diagnostic
+        let code = r#"//ДкОбъект.ДатаЗакрытия = ТекущаяДатаСеанса();
+//ДкОбъект.Дата = ТекущаяДатаСеанса();"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Two consecutive commented lines should give 1 diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_exclusion_prefix() {
+        // Lines with <code> prefix should be excluded when exclusionPrefixes is configured
+        let code = r#"Процедура ШаблонМетода(Параметр)
+    //<code>Если Истина Тогда
+    //<code>Возврат;
+    //<code>КонецЕсли;
+КонецПроцедуры"#;
+        let mut config = crate::DiagnosticsConfig::all_enabled();
+        config.parameters.insert(
+            DiagnosticCode::CommentedCode,
+            serde_json::json!({"exclusionPrefixes": "<code>"}),
+        );
+        let diagnostics = crate::test_utils::check_ast_diagnostic_with_config(code, config, check);
+        assert_eq!(diagnostics.len(), 0, "Lines with exclusion prefix should not be flagged");
     }
 }

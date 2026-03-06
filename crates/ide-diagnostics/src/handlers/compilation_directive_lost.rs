@@ -188,7 +188,18 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        let code = include_str!("../../test_data/CompilationDirectiveLostDiagnostic.bsl");
+        let code = r#"
+&НаСервере
+Процедура А()
+Конецпроцедуры
+
+&НаКлиенте
+Функция Б()
+КонецФункции
+
+Функция СОшибкой() // Тут
+КонецФункции
+"#;
         let diagnostics = check_as_form_module(code);
 
         assert_eq!(diagnostics.len(), 1, "Should find exactly 1 diagnostic");

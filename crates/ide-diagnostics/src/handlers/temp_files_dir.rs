@@ -113,7 +113,17 @@ EndProcedure
 
     #[test]
     fn test_from_java_fixture() {
-        let input = include_str!("../../test_data/TempFilesDirDiagnostic.bsl");
+        let input = r#"Функция Тест()
+    Каталог = КаталогВременныхФайлов();  // Срабатывание здесь
+    ИмяФайла = Строка(Новый УникальныйИдентификатор) + ".xml";
+    ИмяПромежуточногоФайла = Каталог + ИмяФайла;
+    Данные.Записать(ИмяПромежуточногоФайла);
+КонецФункции
+
+Function Test()
+    Catalog = TempFilesDir(); // Срабатывание здесь
+    FileName = Str(New UUID);
+EndFunction"#;
         let diagnostics = check_hir_diagnostic(input);
 
         let diags: Vec<_> =

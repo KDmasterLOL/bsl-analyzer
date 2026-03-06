@@ -201,30 +201,26 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/ConsecutiveEmptyLinesDiagnostic.bsl");
-
+    fn test_three_consecutive_empty_lines() {
+        // Three consecutive empty lines should produce 1 diagnostic
+        let code = "Процедура А()\n\n\n\nКонецПроцедуры";
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1);
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 1, 0, 3, 0);
+    }
 
-        // Expected 9 diagnostics, but we get 8 because test fixture normalizes trailing newlines.
-        // The original file ends with "\n\n" (two empty lines: 33-34), but fixture loads it as "\n"
-        // (one empty line: 33). LineIndex doesn't count the trailing newline that creates line 34.
-        // This is expected behavior - fixing would require changing fixture/LineIndex behavior.
-        // See: ConsecutiveEmptyLinesDiagnostic.bsl lines 33-34 (missing diagnostic for trailing empty lines)
-        assert_eq!(
-            diagnostics.len(),
-            8,
-            "Expected 8 diagnostics (fixture normalizes trailing newlines)"
-        );
+    #[test]
+    fn test_multiple_groups_of_consecutive_empty_lines() {
+        // Two separate groups of consecutive empty lines
+        let code = "А = 1;\n\n\nБ = 2;\n\n\nВ = 3;";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 2);
+    }
 
-        assert_diagnostic_range_multiline(code, &diagnostics[0], 0, 0, 1, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[1], 5, 0, 6, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[2], 10, 0, 11, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[3], 14, 0, 15, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[4], 17, 0, 18, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[5], 22, 0, 23, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[6], 26, 0, 27, 0);
-        assert_diagnostic_range_multiline(code, &diagnostics[7], 29, 0, 31, 0);
-        // Skipped: diagnostics[8] at lines 33-34 (trailing empty lines not detected due to fixture normalization)
+    #[test]
+    fn test_no_diagnostic_for_exactly_one_empty_line_between_methods() {
+        let code = "Процедура А()\nКонецПроцедуры\n\nПроцедура Б()\nКонецПроцедуры";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
     }
 }

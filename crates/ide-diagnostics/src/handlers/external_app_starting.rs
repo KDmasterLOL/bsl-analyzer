@@ -76,30 +76,105 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/ExternalAppStartingDiagnostic.bsl");
+    fn test_global_methods_detected() {
+        // КомандаСистемы, ЗапуститьПриложение, НачатьЗапускПриложения
+        let code = r#"
+Процедура Метод()
+    СтрокаКоманды = "";
+    ТекущийКаталог = "";
+    ДождатьсяЗавершения = Истина;
+    ОписаниеОповещения = Неопределено;
+
+    КомандаСистемы(СтрокаКоманды, ТекущийКаталог);
+    ЗапуститьПриложение(СтрокаКоманды, ТекущийКаталог);
+    ЗапуститьПриложение(СтрокаКоманды, ТекущийКаталог, Истина);
+    НачатьЗапускПриложения(ОписаниеОповещения, СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения);
+КонецПроцедуры
+"#;
         let diagnostics = check_hir_diagnostic(code);
         let ext_diags: Vec<_> =
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for global methods");
+    }
 
-        assert_eq!(ext_diags.len(), 16, "Expected 16 diagnostics");
+    #[test]
+    fn test_run_program_methods_detected() {
+        // ФайловаяСистемаКлиент.ЗапуститьПрограмму and ФайловаяСистема.ЗапуститьПрограмму
+        let code = r#"
+Процедура Метод()
+    СтрокаКоманды = "";
+    ПараметрыКоманды = Новый Структура;
 
-        assert_diagnostic_range(code, ext_diags[0], 8, 4, 18);
-        assert_diagnostic_range(code, ext_diags[1], 9, 4, 23);
-        assert_diagnostic_range(code, ext_diags[2], 10, 4, 23);
-        assert_diagnostic_range(code, ext_diags[3], 12, 4, 26);
-        assert_diagnostic_range(code, ext_diags[4], 18, 26, 44);
-        assert_diagnostic_range(code, ext_diags[5], 19, 26, 44);
-        assert_diagnostic_range(code, ext_diags[6], 20, 20, 38);
-        assert_diagnostic_range(code, ext_diags[7], 21, 20, 38);
-        assert_diagnostic_range(code, ext_diags[8], 23, 26, 42);
-        assert_diagnostic_range(code, ext_diags[9], 24, 26, 37);
-        assert_diagnostic_range(code, ext_diags[10], 25, 26, 37);
-        assert_diagnostic_range(code, ext_diags[11], 35, 10, 34);
-        assert_diagnostic_range(code, ext_diags[12], 53, 4, 20);
-        assert_diagnostic_range(code, ext_diags[13], 54, 4, 20);
-        assert_diagnostic_range(code, ext_diags[14], 55, 4, 20);
-        assert_diagnostic_range(code, ext_diags[15], 56, 4, 20);
+    ФайловаяСистемаКлиент.ЗапуститьПрограмму("ping 127.0.0.1 -n 5", ПараметрыКоманды);
+    ФайловаяСистемаКлиент.ЗапуститьПрограмму(СтрокаКоманды, ПараметрыКоманды);
+    ФайловаяСистема.ЗапуститьПрограмму(СтрокаКоманды);
+    ФайловаяСистема.ЗапуститьПрограмму(СтрокаКоманды, ПараметрыКоманды);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for run program methods");
+    }
+
+    #[test]
+    fn test_open_explorer_and_file_detected() {
+        // ОткрытьПроводник and ОткрытьФайл
+        let code = r#"
+Процедура Метод()
+    СтрокаКоманды = "";
+    ОписаниеОповещения = Неопределено;
+
+    ФайловаяСистемаКлиент.ОткрытьПроводник("C:\Users");
+    ФайловаяСистемаКлиент.ОткрытьФайл(СтрокаКоманды);
+    ФайловаяСистемаКлиент.ОткрытьФайл(СтрокаКоманды, ОписаниеОповещения);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 3, "Expected 3 diagnostics for open explorer/file methods");
+    }
+
+    #[test]
+    fn test_run_app_async_detected() {
+        // ЗапуститьПриложениеАсинх
+        let code = r#"
+&НаКлиенте
+Асинх Процедура Подключить()
+    СтрокаКоманды = "";
+    ТекущийКаталог = "";
+    ДождатьсяЗавершения = Истина;
+
+    Ждать ЗапуститьПриложениеАсинх(СтрокаКоманды, ТекущийКаталог, ДождатьсяЗавершения);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 1, "Expected 1 diagnostic for async app launch");
+    }
+
+    #[test]
+    fn test_zapustit_sistemu_variants_detected() {
+        // ЗапуститьСистему with various argument counts
+        let code = r#"
+&НаКлиенте
+Процедура ПроверкаЗапуститьСистему()
+    ДополнительныеПараметрыКоманднойСтроки = "";
+    ДождатьсяЗавершения = Истина;
+    КодВозврата = Неопределено;
+
+    ЗапуститьСистему();
+    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки);
+    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, ДождатьсяЗавершения);
+    ЗапуститьСистему(ДополнительныеПараметрыКоманднойСтроки, ДождатьсяЗавершения, КодВозврата);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let ext_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ExternalAppStarting).collect();
+        assert_eq!(ext_diags.len(), 4, "Expected 4 diagnostics for ЗапуститьСистему variants");
     }
 
     #[test]

@@ -142,8 +142,40 @@ EndProcedure"#;
 
     #[test]
     fn test_comprehensive() {
-        let code =
-            include_str!("../../test_data/WrongUseOfRollbackTransactionMethodDiagnostic.bsl");
+        let code = r#"Функция Тест()
+    НачатьТранзакцию();
+    Попытка
+        ЗафиксироватьТранзакцию();
+    Исключение
+        Сообщить("Сообщение");
+        Сообщить("Сообщение");
+        ОтменитьТранзакцию();  // Срабатывание здесь
+    КонецПопытки;
+
+    НачатьТранзакцию();
+    ОтменитьТранзакцию();  // Срабатывание здесь
+    Возврат;
+КонецФункции
+
+Function Test()
+
+BeginTransaction();
+Attempt
+    DataLock = New DataLock;
+    DataLockElement = DataLock.Add("Document.ReceiptNote");
+    DataLockElement.SetValue("Reference", ReferenceForProcessing);
+
+    DocumentObject.Record();
+
+    CommitTransaction();
+Exception
+    DocumentObject.Record();
+    DocumentObject.Record();
+    RollbackTransaction();  // Срабатывание здесь
+
+    Return;
+EndFunction
+"#;
 
         let diagnostics = check_hir_diagnostic(code);
         let diags: Vec<_> = diagnostics

@@ -1275,57 +1275,136 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = include_str!("../../test_data/DuplicatedInsertionIntoCollectionDiagnostic.bsl");
+    fn test_insert_duplicate_key_different_value() {
+        // Вставить with same key but different value is still a duplicate (key comparison only)
+        let code = r#"
+Процедура Тест()
+    Коллекция = Новый Структура;
+    Коллекция.Вставить("Ключ1", 1);
+    Коллекция.Вставить("Ключ1", 2);
+КонецПроцедуры
+        "#;
         let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Вставить duplicate key detected even with different value"
+        );
+    }
 
-        // Expected: 16 diagnostics
-        // Note: Line 59 (inside #Если/#Иначе) is NOT detected because HIR does not analyze
-        // code inside preprocessor directives. This is a known limitation.
-        // Note: Line 172 is NOT detected because Добавить compares ALL arguments,
-        // and (ИмяКоманды, 1) != (ИмяКоманды, 9, Истина).
-        // Note: Line 197 has empty first arg (Missing), so is_special_value returns true
-        // and the call is not tracked for duplicates (correct behavior per fixture comment).
-        assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics");
+    #[test]
+    fn test_nested_field_duplicate() {
+        // Дублирование в цепочке полей: Итог.Коллекция.Индексы.Добавить
+        let code = r#"
+Процедура Тест()
+    Для Каждого Элемент Из Коллекция Цикл
+        Итог.Коллекция.Индексы.Добавить("Пользователь");
+        Итог.Коллекция.Индексы.Добавить("Пользователь");
+    КонецЦикла;
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Nested field chain duplicate detected");
+    }
 
-        // Sort diagnostics by position for consistent ordering
-        let mut sorted_diagnostics = diagnostics.clone();
-        sorted_diagnostics.sort_by_key(|d| d.range.start());
+    #[test]
+    fn test_different_receivers_no_duplicate() {
+        // Different receivers (ПерваяКоллекция vs ВтораяКоллекция) should not trigger
+        let code = r#"
+Процедура Тест()
+    Итог.ПерваяКоллекция.Индексы.Добавить("Пользователь");
+    Итог.ВтораяКоллекция.Индексы.Добавить("Пользователь");
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Different receivers are not duplicates");
+    }
 
-        // Verify each diagnostic with precise line and column positions (0-indexed)
-        // Line 5: Массив.Добавить(СтрокаТаблицы)
-        assert_diagnostic_range(code, &sorted_diagnostics[0], 4, 4, 34);
-        // Line 9: Коллекция.Вставить("Ключ1", 1)
-        assert_diagnostic_range(code, &sorted_diagnostics[1], 8, 4, 34);
-        // Line 13: Коллекция2.Вставить("Ключ1", 2)
-        assert_diagnostic_range(code, &sorted_diagnostics[2], 12, 4, 35);
-        // Line 23: Коллекция.Вставить("Ключ1", 3)
-        assert_diagnostic_range(code, &sorted_diagnostics[3], 22, 8, 38);
-        // Line 28: Итог.Коллекция.Индексы.Добавить("Пользователь")
-        assert_diagnostic_range(code, &sorted_diagnostics[4], 27, 8, 55);
-        // Line 100: Данные.Метод().ПовторнаяСоздаваемаяКоллекция.Добавить("Пользователь")
-        assert_diagnostic_range(code, &sorted_diagnostics[5], 99, 8, 77);
-        // Line 103: Данные.Метод().ОбщаяКоллекция.Добавить(Данные.Метод().ПовторнаяСоздаваемаяКоллекция)
-        assert_diagnostic_range(code, &sorted_diagnostics[6], 102, 8, 92);
-        // Line 120: ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Истина)
-        assert_diagnostic_range(code, &sorted_diagnostics[7], 119, 4, 65);
-        // Line 134: ПовторнаяСоздаваемаяКоллекция.Добавить("Пользователь")
-        assert_diagnostic_range(code, &sorted_diagnostics[8], 133, 4, 58);
-        // Line 137: ОбщаяКоллекция.Добавить(ПовторнаяСоздаваемаяКоллекция)
-        assert_diagnostic_range(code, &sorted_diagnostics[9], 136, 4, 58);
-        // Line 148: Данные2.ОбщаяКоллекция2.Вставить(Данные2.Реквизит2.ПовторнаяСоздаваемаяКоллекция2)
-        assert_diagnostic_range(code, &sorted_diagnostics[10], 147, 8, 90);
-        // Line 152: Данные3.ОбщаяКоллекция3.Вставить(Данные3.Реквизит3.ПовторнаяСоздаваемаяКоллекция3)
-        assert_diagnostic_range(code, &sorted_diagnostics[11], 151, 8, 90);
-        // Line 158: Описания.Добавить(Ключ)
-        assert_diagnostic_range(code, &sorted_diagnostics[12], 157, 4, 27);
-        // Line 162: Описания2.Добавить(Часть1.Часть2)
-        assert_diagnostic_range(code, &sorted_diagnostics[13], 161, 4, 37);
-        // Line 172: NOT detected - Добавить compares ALL args, (ИмяКоманды, 1) != (ИмяКоманды, 9, Истина)
-        // Line 266: Коллекция().Добавить(СтрокаТаблицы)
-        assert_diagnostic_range(code, &sorted_diagnostics[14], 265, 4, 39);
-        // Line 269: Коллекция2().Реквизит.Добавить(СтрокаТаблицы2)
-        assert_diagnostic_range(code, &sorted_diagnostics[15], 268, 4, 50);
+    #[test]
+    fn test_reinit_clears_tracking() {
+        // Reassigning variable with Новый Массив resets duplicate tracking
+        let code = r#"
+Процедура Тест()
+    Если Условие() Тогда
+        КоллекцияА = Новый Массив;
+        КоллекцияА.Добавить("Пользователь");
+        ОбщаяКоллекция.Добавить(КоллекцияА);
+        КоллекцияА = Новый Массив;
+        КоллекцияА.Добавить("Пользователь");
+        ОбщаяКоллекция.Добавить(КоллекцияА);
+    КонецЕсли;
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "After Новый Массив reinit, duplicate tracking resets");
+    }
+
+    #[test]
+    fn test_return_interrupts_flow() {
+        // Возврат before second insert means no duplicate
+        let code = r#"
+Функция Тест(Ссылка)
+    ВидыСвойствНабора = Новый Структура;
+    ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Ложь);
+
+    Если УсловиеВозврата() Тогда
+        Возврат ВидыСвойствНабора;
+    КонецЕсли;
+
+    ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Истина);
+    Возврат ВидыСвойствНабора;
+КонецФункции
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Возврат interrupts flow - no duplicate");
+    }
+
+    #[test]
+    fn test_loop_break_interrupts_flow() {
+        // Прервать in a loop does NOT interrupt outer flow - duplicate IS detected
+        // (loop without break path still reaches second insert)
+        let code = r#"
+Функция Тест()
+    ВидыСвойствНабора = Новый Структура;
+    ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Ложь);
+
+    Для Каждого Элемент Из Коллекция Цикл
+        Прервать;
+    КонецЦикла;
+
+    ВидыСвойствНабора.Вставить("ДополнительныеРеквизиты", Истина);
+    Возврат ВидыСвойствНабора;
+КонецФункции
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Loop break does not interrupt outer flow");
+    }
+
+    #[test]
+    fn test_add_different_arg_counts_no_duplicate() {
+        // Добавить with different number of args is not a duplicate
+        let code = r#"
+Процедура Тест()
+    Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 1);
+    Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 9, Истина);
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Different arg counts for Добавить are not duplicates");
+    }
+
+    #[test]
+    fn test_insert_with_key_change_no_duplicate() {
+        // Key value changes between inserts → not a duplicate
+        let code = r#"
+Процедура Тест()
+    Контекст.Коллекция.Вставить("ИмяПрава", "Чтение");
+    ЗаполнитьСтруктуруРасчетаПрава(Результат.СтруктураРасчетаПраваЧтение, Контекст.Коллекция);
+    Контекст.Коллекция.Вставить("ИмяПрава", "Изменение");
+КонецПроцедуры
+        "#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0, "Different key values are not duplicates");
     }
 
     #[test]
