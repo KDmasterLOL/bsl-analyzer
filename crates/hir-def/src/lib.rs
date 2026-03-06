@@ -66,15 +66,14 @@ pub use name::Name;
 pub use path::{PathResolution, QualifiedName};
 pub use region_tree::{RegionData, RegionIdx, RegionTree};
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
-pub use ty::infer::{InferenceContext, InferenceResult};
 pub use ty::{FunctionSignature, Ty};
 pub use workspace::{CommonModuleInfo, WorkspaceSymbols};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 // Re-export all Salsa query functions from the queries module
 pub use queries::{
-    conditional_tree_query, file_dependencies_query, file_external_refs_query, infer_types_query,
-    item_tree_query, module_bodies_query, module_data_query, module_index_query, region_tree_query,
+    conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
+    module_bodies_query, module_data_query, module_index_query, region_tree_query,
     symbol_tree_query, workspace_index_query, workspace_symbols_query,
 };
 
@@ -202,20 +201,6 @@ pub trait DefDatabase: base_db::RootQueryDb {
     /// # Implementation
     /// Should delegate to [`symbol_tree_query`].
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree>;
-
-    /// Infer types for a module.
-    ///
-    /// Performs type inference for all expressions, variables, and methods in a module.
-    /// Results are cached and only re-computed when the module's ItemTree changes.
-    ///
-    /// # Performance
-    /// - **LRU cache:** 256 files (type inference is moderately expensive)
-    /// - **Depends on:** [`item_tree`](Self::item_tree)
-    /// - **Typical time:** ~10-20ms for 1000-line module
-    ///
-    /// # Implementation
-    /// Should delegate to [`infer_types_query`].
-    fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult>;
 
     /// Get all method bodies for a module with their diagnostics.
     ///

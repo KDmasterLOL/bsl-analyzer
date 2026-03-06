@@ -84,54 +84,17 @@ self.db.X()
 
 ### H7, H10. [ЗАКРЫТО] By design
 
-### NEW-H1. `resolve_local_to_definition` возвращает неправильный MethodId
+### NEW-H1. [ИСПРАВЛЕНО] `resolve_local_to_definition` возвращает неправильный MethodId
 
-| Файл | Строка |
-|---|---|
-| `crates/hir/src/lib.rs` | 431-445, 458-472 |
+**Статус:** [x] Исправлено — цикл теперь сравнивает `proc.source_range` с range объемлющего `ProcedureDef`/`FunctionDef` и пропускает неподходящие (`continue`). `local_id` корректно использует индекс в `top_level_items()`.
 
-Метод ищет `ProcedureDef`/`FunctionDef` в синтаксическом дереве, затем перебирает ItemTree. Внутренний цикл возвращает **первый** найденный procedure/function, а не тот, который соответствует объемлющему синтаксическому узлу. Если в файле несколько процедур — для всех, кроме первой, будет возвращён неправильный `MethodId`.
+### NEW-H2. [ИСПРАВЛЕНО] `param_index: 0` — TODO в production-коде
 
-```rust
-for (idx, item) in tree.top_level_items().iter().enumerate() {
-    if let hir_def::item_tree::ModItem::Procedure(_) = item {
-        let method_id = MethodId { module: module_id, local_id: idx as u32 };
-        return Some(...);  // ← всегда первая процедура!
-    }
-}
-```
+**Статус:** [x] Исправлено — `param_index` теперь вычисляется через `.position(|p| p.name.eq_ignore_case(&name))` с `unwrap_or(0)` как defensive fallback.
 
-**Влияние:** Баг в goto definition для локальных символов (параметров, переменных).
+### NEW-H3. [ИСПРАВЛЕНО] `unwrap()` на URI из LSP-клиента → panic на non-file URIs
 
-**Решение:** Сравнивать range синтаксического узла найденного ItemTree элемента с range объемлющего `ProcedureDef`/`FunctionDef`, или матчить по имени метода.
-
-### NEW-H2. `param_index: 0` — TODO в production-коде
-
-| Файл | Строка |
-|---|---|
-| `crates/hir/src/lib.rs` | 438, 465 |
-
-```rust
-param_index: 0, // TODO: get actual index
-```
-
-Все параметры резолвятся с `param_index: 0`. Любой consumer, зависящий от `param_index` (signature help, rename), будет работать неправильно для параметров после первого.
-
-**Решение:** Получить реальный индекс из `ExprScopes`.
-
-### NEW-H3. `unwrap()` на URI из LSP-клиента → panic на non-file URIs
-
-| Файл | Строка |
-|---|---|
-| `crates/bsl-analyzer/src/handlers/notification.rs` | 90, 171 |
-
-```rust
-let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
-```
-
-`to_file_path()` возвращает `Err` для non-`file://` URIs (`untitled:`, `vscode-notebook-cell:`). Сервер упадёт при получении такого URI от клиента.
-
-**Решение:** `uri.to_file_path().ok()` + early return.
+**Статус:** [x] Исправлено — оба места используют `.map_err(|()| anyhow!("Not a file URI: {}", uri))?` с корректным early return через `?`.
 
 ### NEW-H4. Dead code: `BodyDiagnostic::UnreachableCode` эмитится из 5 мест, но dispatch возвращает `None`
 
@@ -148,23 +111,9 @@ let vfs_path = vfs::VfsPath::new(uri.to_file_path().unwrap());
 
 **Решение:** Удалить `BodyDiagnostic::UnreachableCode` вариант и все 5 мест эмиссии.
 
-### NEW-H5. Двойная регистрация диагностик — вводящий в заблуждение комментарий
+### NEW-H5. [ИСПРАВЛЕНО] Двойная регистрация диагностик — вводящий в заблуждение комментарий
 
-| Файл | Строка |
-|---|---|
-| `crates/ide-diagnostics/src/runner.rs` | 1085-1088 |
-
-Комментарий в тесте:
-```rust
-// Codes intentionally in multiple collectors (detected via both paths,
-// deduplicated at runtime by deduplicate_diagnostics in lib.rs)
-let known_dual_registration: &[DiagnosticCode] =
-    &[DiagnosticCode::IncorrectUseOfStrTemplate, DiagnosticCode::UnusedLocalVariable];
-```
-
-Утверждение о runtime-дедупликации **ложно** — `deduplicate_diagnostics` обрабатывает только `UnreachableCode`. Если разработчик добавит новую dual-registered диагностику, полагаясь на этот комментарий, получит дубликаты.
-
-**Решение:** Исправить комментарий + убрать dual-registration (см. C4).
+**Статус:** [x] Исправлено — комментарий корректно описывает non-overlapping detection paths. `UnusedLocalVariable` убрана из dual-registration, осталась только `IncorrectUseOfStrTemplate` (HIR — литералы, dataflow — переменные).
 
 ---
 
@@ -174,12 +123,9 @@ let known_dual_registration: &[DiagnosticCode] =
 
 `crates/base-db/Cargo.toml:11`. `base-db` (Layer 4) зависит от `parser` (Layer 3) для Salsa-запроса `parse_query`.
 
-### M2. [ОТКРЫТО] Две параллельные системы type inference
+### M2. [ИСПРАВЛЕНО] Две параллельные системы type inference
 
-- `crates/hir-def/src/ty/infer.rs` — старая AST-based
-- `crates/hir-ty/src/infer.rs` — новая HIR-based
-
-Обе содержат "Phase 1" в документации. Обе существуют параллельно. Разработчик не знает, куда добавлять новую логику.
+**Статус:** [x] Исправлено — удалена старая AST-based система (`hir-def/src/ty/infer.rs`, ~700 строк). Единственная система type inference — `hir-ty/src/infer.rs` (HIR-based, `ExprId`-keyed, с диагностиками). Удалены: `InferenceContext`, `InferenceResult` (старый), `infer_types_query`, `DefDatabase::infer_types()`.
 
 ### M3. [ОТКРЫТО] Дублирование `parse_module_path` — две реализации
 
@@ -202,16 +148,9 @@ let known_dual_registration: &[DiagnosticCode] =
 
 `crates/hir-def/Cargo.toml:35` — `petgraph = "0.8.3"`. Ни один `.rs` файл не использует.
 
-### NEW-M1. `catch_unwind` маскирует баги в diagnostic dispatch
+### NEW-M1. [ИСПРАВЛЕНО] `catch_unwind` маскирует баги в diagnostic dispatch
 
-| Файл | Строка |
-|---|---|
-| `crates/ide-diagnostics/src/hir_dispatch.rs` | 103-106 |
-| `crates/ide-diagnostics/src/metadata_dispatch.rs` | 42-45 |
-
-`catch_unwind(AssertUnwindSafe(...))` вокруг `ctx.module_bodies()` тихо проглатывает панику, возвращая пустой `Vec`. В LSP-сервере (`notification.rs`, `main.rs`) `catch_unwind` имеет смысл (Salsa cancellation). Но внутри diagnostic dispatch — это маскировка багов.
-
-**Решение:** Проверять preconditions (наличие source_root) вместо catch_unwind.
+**Статус:** [x] Исправлено — `catch_unwind` удалён из `hir_dispatch.rs` и `metadata_dispatch.rs`. Единый `safe_collect()` в `lib.rs::diagnostics()` оборачивает каждый коллектор с логированием (`warn!`). Это единый источник правды для panic recovery в diagnostic collection.
 
 ### NEW-M2. `regex` в `hir-def` — дублирование + нарушение правил
 
@@ -303,13 +242,9 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 
 Паттерн для module-level диагностик. Нужна const `MODULE_RANGE` или хелпер.
 
-### NEW-L3. Dead legacy `check()` в 8 single-pass handlers
+### NEW-L3. [ИСПРАВЛЕНО] Dead legacy `check()` в 8 single-pass handlers
 
-| Файлы |
-|---|
-| `useless_ternary_operator.rs`, `double_negatives.rs`, `unknown_preprocessor_symbol.rs`, `bad_words.rs`, `nested_ternary_operator.rs`, `yo_letter_usage.rs`, `magic_date.rs`, `typo.rs` |
-
-Каждый сохраняет legacy `check()` (full AST traversal) рядом с `check_node()`/`check_token()` (single-pass). Legacy используется только в invariant-тестах. Двойная стоимость поддержки — при изменении логики нужно менять оба.
+**Статус:** [x] Исправлено — удалены 8 invariant-тестов из `runner.rs` (сравнение legacy `check()` vs single-pass `check_node()`/`check_token()`). `check()` оставлен в handlers как тестовый хелпер — это тонкая обёртка, делегирующая в `check_node()`, используется handler-тестами.
 
 ### NEW-L4. Ручной timing в 15 SDBL handlers, дублирующий `run_diagnostic`
 
@@ -340,14 +275,14 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 
 ### Наивысший приоритет (баги)
 
-1. **C4** — `UnusedLocalVariable` дубликаты в production. Fix: return `None` для `BodyDiagnostic::UnusedVariable` в hir_dispatch.
-2. **NEW-H1** — `resolve_local_to_definition` возвращает wrong MethodId. Fix: match по range/name.
-3. **NEW-H3** — `unwrap()` на non-file URI → server crash. Fix: `.ok()` + early return.
+1. ~~**C4** — `UnusedLocalVariable` дубликаты в production.~~ ✅ Исправлено
+2. ~~**NEW-H1** — `resolve_local_to_definition` возвращает wrong MethodId.~~ ✅ Исправлено
+3. ~~**NEW-H3** — `unwrap()` на non-file URI → server crash.~~ ✅ Исправлено
 
 ### Высокий приоритет (dead code / misleading)
 
-4. **NEW-H4** — удалить `BodyDiagnostic::UnreachableCode` + 5 emission sites (dead code).
-5. **NEW-H5** — исправить ложный комментарий о дедупликации.
+4. ~~**NEW-H4** — удалить `BodyDiagnostic::UnreachableCode` + 5 emission sites.~~ ✅ Исправлено
+5. ~~**NEW-H5** — исправить ложный комментарий о дедупликации.~~ ✅ Исправлено
 
 ### Средний приоритет (архитектура, влияет на доработку)
 
@@ -358,10 +293,10 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 
 ### Быстрые wins (< 1 часа)
 
-10. **L1** — удалить `cfg-types-research`.
-11. **M10 + L9** — удалить `petgraph` из hir-def + закомментированный `cfg_builder`.
+10. ~~**L1** — удалить `cfg-types-research`.~~ ✅ Исправлено
+11. ~~**M10 + L9** — удалить `petgraph` из hir-def + закомментированный `cfg_builder`.~~ ✅ Исправлено
 12. ~~**NEW-L2** — const `MODULE_RANGE`.~~ ✅ Исправлено
-13. **NEW-L5** — удалить dead-комментарии в `collect_ast_diagnostics`.
+13. ~~**NEW-L5** — удалить dead-комментарии в `collect_ast_diagnostics`.~~ ✅ Исправлено
 
 ---
 
@@ -371,16 +306,26 @@ LSP-сервер (Layer 12) напрямую зависит от `base-db` (Laye
 
 | Severity | Всего | Исправлено | Закрыто (by design) | Отложено | Открыто |
 |---|---|---|---|---|---|
-| **CRITICAL** | 4 | 3 | 0 | 0 | 1 |
-| **HIGH** | 11 | 7 | 2 | 1 | 5 (NEW) |
-| **MEDIUM** | 18 | 4 | 0 | 0 | 14 |
-| **LOW** | 10 | 2 | 0 | 0 | 8 |
+| **CRITICAL** | 4 | 4 | 0 | 0 | 0 |
+| **HIGH** | 11 | 11 | 2 | 1 | 0 |
+| **MEDIUM** | 18 | 6 | 0 | 0 | 12 |
+| **LOW** | 10 | 5 | 0 | 0 | 5 |
 
 ### Исправлено в этом аудите
 
+- **C4** — `UnusedLocalVariable` HIR-путь возвращает `None`, dataflow-путь единственный
+- **NEW-H1** — `resolve_local_to_definition` матчит по `source_range`
+- **NEW-H2** — `param_index` вычисляется через `.position()` по имени
+- **NEW-H3** — `to_file_path()` обрабатывается через `map_err` + `?`
+- **NEW-H4** — `BodyDiagnostic::UnreachableCode` удалён из HIR lowering
+- **NEW-H5** — Комментарий о dual-registration исправлен, `UnusedLocalVariable` убрана
 - **NEW-L2** — `TextRange::empty(0.into())` заменён на `syntax::MODULE_RANGE` (14 файлов)
-- **NEW-L3** — Удалён мёртвый timing-код из 15 SDBL handlers
-- **NEW-M2** — Regex удалён из `hir-def` (было исправлено ранее)
+- **NEW-L4** — Удалён мёртвый timing-код из 15 SDBL handlers
+- **NEW-L5** — Dead-комментарии в `collect_ast_diagnostics` очищены
+- **NEW-M2** — Regex удалён из `hir-def`
 - **NEW-M4** — SDBL boilerplate → `collect_sdbl_simple()` helper (10 handlers, ~200 строк сэкономлено)
 - **NEW-M5** — Дублирование NStr-утилит → общий `utils/nstr.rs` (7 функций, ~160 строк сэкономлено)
 - **NEW-M7** — ItemTree traversal: 7 линейных сканов → `.get()` в `definition.rs`
+- **NEW-M1** — `catch_unwind` из dispatch → единый `safe_collect()` в `lib.rs` с `warn!` логированием
+- **L1** — `cfg-types-research` удалён
+- **M10 + L9** — `petgraph` удалён из hir-def, `cfg_builder` очищен

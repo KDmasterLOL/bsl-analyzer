@@ -4,7 +4,6 @@
 //! Full type inference is planned for later iterations (12+).
 
 pub mod doc_types;
-pub mod infer;
 
 use syntax::ast::{self, AstNode};
 use syntax::SyntaxKind;

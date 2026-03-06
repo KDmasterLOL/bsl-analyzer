@@ -31,18 +31,13 @@ pub(crate) const METADATA_DIAGNOSTICS: &[DiagnosticCode] = &[
 /// instead of loading Configuration for each file. These are part of module_bodies()
 /// and are cached by Salsa for performance.
 ///
-/// Returns empty vec for test contexts where source_root is not set.
 pub fn collect_metadata_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(METADATA_DIAGNOSTICS) {
         return Vec::new();
     }
 
-    let module_bodies =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
-            Ok(bodies) => bodies,
-            Err(_) => return Vec::new(),
-        };
+    let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
 

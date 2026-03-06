@@ -91,18 +91,13 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
 /// This function retrieves diagnostics collected during HIR lowering
 /// and dispatches them to the appropriate handler's `from_hir()` function.
 ///
-/// Returns empty vec for test contexts where source_root is not set.
 pub fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Early exit: skip expensive module_bodies() call if no HIR diagnostics are enabled
     if !ctx.config.any_enabled(HIR_DIAGNOSTICS) {
         return Vec::new();
     }
 
-    let module_bodies =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.module_bodies())) {
-            Ok(bodies) => bodies,
-            Err(_) => return Vec::new(),
-        };
+    let module_bodies = ctx.module_bodies();
 
     let mut diagnostics = Vec::new();
 

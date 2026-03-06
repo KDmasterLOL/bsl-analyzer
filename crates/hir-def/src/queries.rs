@@ -30,8 +30,8 @@ use base_db::FileIdInput;
 use vfs::FileId;
 
 use crate::{
-    body::ExternalRef, module_index::ModuleIndex, ty::infer::InferenceResult, DefDatabase,
-    ModuleBodies, ModuleData, ModuleId, WorkspaceSymbols,
+    body::ExternalRef, module_index::ModuleIndex, DefDatabase, ModuleBodies, ModuleData, ModuleId,
+    WorkspaceSymbols,
 };
 
 // Re-export query functions from individual modules
@@ -115,34 +115,6 @@ pub fn module_bodies_query<'db>(
     // implementation in ide-db where VFS access is available for loading Configuration.
     // This keeps hir-def independent of VFS.
     Arc::new(result)
-}
-
-/// Salsa tracked query for type inference.
-///
-/// Performs type inference for all expressions, variables, and methods in a module.
-///
-/// ## Performance
-/// - LRU: 256 files (type inference is moderately expensive)
-/// - Depends on: ItemTree (via FileIdInput)
-/// - Invalidation: Automatic when signatures change
-///
-/// ## Usage
-/// ```ignore
-/// // In DefDatabase implementation:
-/// fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
-///     let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-///     hir_def::infer_types_query(self, file_id_input)
-/// }
-/// ```
-#[salsa::tracked(lru = 256)]
-pub fn infer_types_query<'db>(
-    db: &'db dyn DefDatabase,
-    file_id_input: FileIdInput<'db>,
-) -> Arc<InferenceResult> {
-    let _span = tracing::info_span!("infer_types", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let module_id = ModuleId::new(file_id);
-    Arc::new(crate::ty::infer::InferenceContext::infer_module(db, module_id))
 }
 
 /// Build workspace-wide symbol index for CommonModules.

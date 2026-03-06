@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use base_db::{FileIdInput, Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
 use hir_def::{
-    ConditionalTree, DefDatabase, InferenceResult, ItemTree, ModuleBodies, ModuleData, ModuleId,
-    RegionTree, SymbolTree,
+    ConditionalTree, DefDatabase, ItemTree, ModuleBodies, ModuleData, ModuleId, RegionTree,
+    SymbolTree,
 };
 use vfs::FileId;
 
@@ -502,12 +502,6 @@ impl DefDatabase for RootDatabaseImpl {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         hir_def::symbol_tree_query(self, file_id_input)
-    }
-
-    fn infer_types(&self, module_id: ModuleId) -> Arc<InferenceResult> {
-        // Call Salsa tracked query with FileIdInput
-        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::infer_types_query(self, file_id_input)
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {

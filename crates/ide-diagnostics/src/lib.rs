@@ -90,35 +90,50 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
     // 1. Line-based diagnostics (text/formatting checks)
-    result.extend(collect_line_diagnostics(ctx));
+    result.extend(safe_collect("line", || collect_line_diagnostics(ctx)));
 
     // 2. Tier 1: Syntax diagnostics
-    result.extend(collect_syntax_diagnostics(ctx));
+    result.extend(safe_collect("syntax", || collect_syntax_diagnostics(ctx)));
 
     // 3. Tier 2: Semantic diagnostics (ItemTree + ModuleBodies + AST)
-    result.extend(collect_item_tree_diagnostics(ctx));
-    result.extend(collect_module_bodies_diagnostics(ctx));
-    result.extend(collect_ast_diagnostics(ctx));
+    result.extend(safe_collect("item_tree", || collect_item_tree_diagnostics(ctx)));
+    result.extend(safe_collect("module_bodies", || collect_module_bodies_diagnostics(ctx)));
+    result.extend(safe_collect("ast", || collect_ast_diagnostics(ctx)));
 
     // 4. Configuration-based diagnostics (SessionModule only)
-    result.extend(collect_configuration_diagnostics(ctx));
+    result.extend(safe_collect("configuration", || collect_configuration_diagnostics(ctx)));
 
     // 5. SDBL HIR diagnostics (collected during SDBL lowering)
-    result.extend(collect_sdbl_hir_diagnostics(ctx));
+    result.extend(safe_collect("sdbl_hir", || collect_sdbl_hir_diagnostics(ctx)));
 
     // 6. HIR-based diagnostics (collected during AST→HIR lowering)
-    result.extend(collect_hir_diagnostics(ctx));
+    result.extend(safe_collect("hir", || collect_hir_diagnostics(ctx)));
 
     // 7. Dataflow-based diagnostics (using CFG + liveness analysis)
-    result.extend(collect_dataflow_diagnostics(ctx));
+    result.extend(safe_collect("dataflow", || collect_dataflow_diagnostics(ctx)));
 
     // 8. Metadata-based diagnostics (using module_metadata from HIR)
-    result.extend(collect_metadata_diagnostics(ctx));
+    result.extend(safe_collect("metadata", || collect_metadata_diagnostics(ctx)));
 
     // 9. Deduplicate diagnostics with overlapping ranges for the same code
     deduplicate_diagnostics(&mut result);
 
     result
+}
+
+/// Run a diagnostic collector with panic protection.
+///
+/// If a collector panics (e.g. Salsa cancellation), logs a warning and returns
+/// empty vec. Other collectors continue to produce partial results.
+/// This is the single source of truth for panic recovery in diagnostic collection.
+fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(diags) => diags,
+        Err(e) => {
+            tracing::warn!("Panic in collector '{name}': {e:?}");
+            Vec::new()
+        }
+    }
 }
 
 /// Remove duplicate diagnostics with the same code and overlapping/contained ranges.
