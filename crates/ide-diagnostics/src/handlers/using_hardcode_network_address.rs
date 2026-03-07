@@ -33,11 +33,6 @@ static PATTERN_NETWORK_ADDRESS: Lazy<Regex> = Lazy::new(|| {
     ).unwrap()
 });
 
-static PATTERN_URL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(ftp|http|https)://[^ \x22].*").unwrap());
-
-static PATTERN_ALPHABET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)[A-Za-zА-Яа-яЁё]").unwrap());
-
 #[derive(Debug, Clone)]
 struct Config {
     search_words_exclusion: Regex,
@@ -74,7 +69,21 @@ impl Config {
 }
 
 fn is_url(content: &str) -> bool {
-    PATTERN_URL.is_match(content)
+    let bytes = content.as_bytes();
+    let after_scheme = if bytes.len() > 8 && bytes[..8].eq_ignore_ascii_case(b"https://") {
+        Some(8)
+    } else if bytes.len() > 7 && bytes[..7].eq_ignore_ascii_case(b"http://") {
+        Some(7)
+    } else if bytes.len() > 6 && bytes[..6].eq_ignore_ascii_case(b"ftp://") {
+        Some(6)
+    } else {
+        None
+    };
+    after_scheme.is_some_and(|pos| bytes.get(pos).is_some_and(|&b| b != b' ' && b != b'"'))
+}
+
+fn contains_letter(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_alphabetic() || matches!(c, 'А'..='Я' | 'а'..='я' | 'Ё' | 'ё'))
 }
 
 fn count_char(s: &str, c: char) -> usize {
@@ -235,7 +244,7 @@ fn check_body(
         let first_value = matched.as_str();
         let count_dots = count_char(first_value, '.');
         let count_dots_all = count_char(content, '.');
-        let find_alphabet = PATTERN_ALPHABET.is_match(first_value);
+        let find_alphabet = contains_letter(first_value);
 
         if count_dots > 0 && (count_dots_all > DOTS_IN_IPV4 || find_alphabet) {
             continue;

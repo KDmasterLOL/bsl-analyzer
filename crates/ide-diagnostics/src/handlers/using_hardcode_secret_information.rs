@@ -2,7 +2,6 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Literal, Stmt};
-use once_cell::sync::Lazy;
 use regex::Regex;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -20,8 +19,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 const DEFAULT_SEARCH_WORDS: &str = "Пароль|Password";
-
-static PATTERN_ALL_ASTERISKS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\*+$").unwrap());
 
 fn is_structure_or_map(type_name: &Option<hir::Name>) -> bool {
     let Some(name) = type_name else {
@@ -45,10 +42,7 @@ fn is_insert_method(method_name: &hir::Name) -> bool {
 }
 
 fn is_not_empty_string(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    !PATTERN_ALL_ASTERISKS.is_match(s)
+    !s.is_empty() && !s.bytes().all(|b| b == b'*')
 }
 
 fn get_string_literal(body: &Body, expr_idx: ExprIdx) -> Option<&str> {

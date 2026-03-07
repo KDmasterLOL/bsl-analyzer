@@ -95,10 +95,9 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 2. Tier 1: Syntax diagnostics
     result.extend(safe_collect("syntax", || collect_syntax_diagnostics(ctx)));
 
-    // 3. Tier 2: Semantic diagnostics (ItemTree + ModuleBodies + AST)
+    // 3. Tier 2: Semantic diagnostics (ItemTree + ModuleBodies)
     result.extend(safe_collect("item_tree", || collect_item_tree_diagnostics(ctx)));
     result.extend(safe_collect("module_bodies", || collect_module_bodies_diagnostics(ctx)));
-    result.extend(safe_collect("ast", || handlers::using_hardcode_path::check(ctx)));
 
     // 4. Configuration-based diagnostics (SessionModule only)
     result.extend(safe_collect("configuration", || collect_configuration_diagnostics(ctx)));

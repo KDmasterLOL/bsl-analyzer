@@ -1,9 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use once_cell::sync::Lazy;
 use regex::Regex;
-use syntax::SyntaxKind;
+use syntax::{SyntaxKind, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,9 +20,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_SEARCH_WORDS_STD_PATHS_UNIX: &str =
     r"bin|boot|dev|etc|home|lib|lost\+found|misc|mnt|media|opt|proc|root|run|sbin|tmp|usr|var";
-
-static PATTERN_URL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(ftp|http|https)://[^ ].*").unwrap());
 
 fn is_hardcode_path(content: &str) -> bool {
     let bytes = content.as_bytes();
@@ -83,57 +79,75 @@ fn extract_string_content(text: &str) -> Option<String> {
 }
 
 fn is_url(content: &str) -> bool {
-    PATTERN_URL.is_match(content)
+    let bytes = content.as_bytes();
+    let after_scheme = if bytes.len() > 8 && bytes[..8].eq_ignore_ascii_case(b"https://") {
+        Some(8)
+    } else if bytes.len() > 7 && bytes[..7].eq_ignore_ascii_case(b"http://") {
+        Some(7)
+    } else if bytes.len() > 6 && bytes[..6].eq_ignore_ascii_case(b"ftp://") {
+        Some(6)
+    } else {
+        None
+    };
+    after_scheme.is_some_and(|pos| bytes.get(pos).is_some_and(|&b| b != b' '))
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// Single-pass token handler for UsingHardcodePath diagnostic.
+#[inline]
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     let code = DiagnosticCode::UsingHardcodePath;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let config = Config::from_context(ctx);
+    if token.kind() != SyntaxKind::STRING {
+        return;
+    }
+
+    let text = token.text();
+    if text.len() <= 4 {
+        return;
+    }
+
+    let Some(content) = extract_string_content(text) else {
+        return;
+    };
+
+    if is_url(&content) {
+        return;
+    }
+
+    if !is_hardcode_path(&content) {
+        return;
+    }
+
+    if content.starts_with('/') {
+        let config = Config::from_context(ctx);
+        if !config.search_words_std_paths_unix.is_match(&content) {
+            return;
+        }
+    }
+
+    acc.push(Diagnostic {
+        code,
+        message: "Используется хранение в коде пути к файлу".to_string(),
+        severity: ctx.severity(code),
+        range: token.text_range(),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
+}
+
+/// Legacy check function (delegates to single-pass).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
-
     let mut diagnostics = Vec::new();
 
     for element in root.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
-            if token.kind() != SyntaxKind::STRING {
-                continue;
-            }
-
-            let text = token.text();
-            if text.len() <= 4 {
-                continue;
-            }
-
-            let Some(content) = extract_string_content(text) else {
-                continue;
-            };
-
-            if is_url(&content) {
-                continue;
-            }
-
-            if !is_hardcode_path(&content) {
-                continue;
-            }
-
-            if content.starts_with('/') && !config.search_words_std_paths_unix.is_match(&content) {
-                continue;
-            }
-
-            diagnostics.push(Diagnostic {
-                code,
-                message: "Используется хранение в коде пути к файлу".to_string(),
-                severity: ctx.severity(code),
-                range: token.text_range(),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
+            check_token(&token, &mut diagnostics, ctx);
         }
     }
 

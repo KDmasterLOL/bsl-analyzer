@@ -11,7 +11,6 @@
 //! | **ItemTree** | `collect_item_tree_diagnostics` | ItemTree + Metadata | Salsa |
 //! | **ModuleBodies** | `collect_module_bodies_diagnostics` | HIR bodies | Salsa |
 //! | **Configuration** | `collect_configuration_diagnostics` | Configuration XML | Salsa |
-//! | **AST traversal** | `using_hardcode_path::check` | `parse().descendants()` | None |
 //! | **Single-pass AST** | `collect_syntax_single_pass` | One traversal | None |
 //! | **Line/Text** | `collect_line_diagnostics` | Raw text | None |
 //! | **SDBL** | `collect_sdbl_hir_diagnostics` | SDBL HIR | Salsa |
@@ -71,6 +70,7 @@ pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::NestedTernaryOperator,
     DiagnosticCode::YoLetterUsage,
     DiagnosticCode::MagicDate,
+    DiagnosticCode::UsingHardcodePath,
 ];
 
 /// Diagnostics in collect_syntax_diagnostics (excluding single-pass)
@@ -701,7 +701,6 @@ mod tests {
             ("SYNTAX_DIAGNOSTICS", SYNTAX_DIAGNOSTICS),
             ("ITEM_TREE_DIAGNOSTICS", ITEM_TREE_DIAGNOSTICS),
             ("MODULE_BODIES_DIAGNOSTICS", MODULE_BODIES_DIAGNOSTICS),
-            ("AST_DIAGNOSTICS", &[DiagnosticCode::UsingHardcodePath]),
             ("CONFIGURATION_DIAGNOSTICS", CONFIGURATION_DIAGNOSTICS),
             ("SDBL_HIR_DIAGNOSTICS", SDBL_HIR_DIAGNOSTICS),
             ("DATAFLOW_DIAGNOSTICS", DATAFLOW_DIAGNOSTICS),

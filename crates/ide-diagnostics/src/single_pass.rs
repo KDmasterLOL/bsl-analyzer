@@ -83,4 +83,6 @@ fn check_token_handlers(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Di
     // Migrated handlers (Phase 2):
     handlers::yo_letter_usage::check_token(token, acc, ctx);
     handlers::magic_date::check_token(token, acc, ctx);
+    // Migrated handlers (Phase 5 — from standalone AST traversal):
+    handlers::using_hardcode_path::check_token(token, acc, ctx);
 }

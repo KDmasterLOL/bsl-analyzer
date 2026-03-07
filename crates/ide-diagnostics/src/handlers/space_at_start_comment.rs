@@ -16,8 +16,6 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use line_index::TextSize;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use syntax::{NodeOrToken, SyntaxKind};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -37,18 +35,35 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 // Default comment annotations
 const DEFAULT_COMMENTS_ANNOTATION: &str = "//@,//(c),//©";
 
-// Good comment patterns
-// GOOD_COMMENT_PATTERN_STRICT: "(?:(?:\\/\\/[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
-// - First alternative: exactly // followed by space/tab and text
-// - Second alternative: 2+ slashes followed by space/tab (separators like ////////)
-static GOOD_COMMENT_PATTERN_STRICT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^//[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
+/// Check if comment matches the "good comment" pattern.
+///
+/// Strict mode: exactly 2 slashes + space/tab + text, or 2+ slashes as separator.
+/// Non-strict mode: 2+ slashes + space/tab + text, or 2+ slashes as separator.
+fn matches_good_comment_pattern(text: &str, use_strict: bool) -> bool {
+    let slash_count = text.bytes().take_while(|&b| b == b'/').count();
+    if slash_count < 2 {
+        return false;
+    }
+    let rest = &text[slash_count..];
 
-// GOOD_COMMENT_PATTERN: "(?:(?:\\/{2,}[ \\t].*)|(?:\\/{2,}[ \\t]*))$"
-// - First alternative: 2+ slashes followed by space/tab and text
-// - Second alternative: 2+ slashes followed by space/tab (separators)
-static GOOD_COMMENT_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^/{2,}[ \t].*$|^/{2,}[ \t]*$").expect("valid regex"));
+    // Both modes: 2+ slashes followed by only spaces/tabs (separator lines like /////)
+    if rest.bytes().all(|b| b == b' ' || b == b'\t') {
+        return true;
+    }
+
+    // Text after slashes: must start with space/tab
+    if !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return false;
+    }
+
+    // Strict: exactly 2 slashes for text comments
+    // Non-strict: 2+ slashes for text comments
+    if use_strict {
+        slash_count == 2
+    } else {
+        true
+    }
+}
 
 /// Parse comma-separated annotation patterns
 fn parse_comments_annotation(config: &str) -> Vec<String> {
@@ -70,11 +85,8 @@ fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String])
         return true;
     }
 
-    // Check if comment matches good pattern
-    let good_pattern =
-        if use_strict { &GOOD_COMMENT_PATTERN_STRICT } else { &GOOD_COMMENT_PATTERN };
-
-    if good_pattern.is_match(comment_text) {
+    // Check if comment matches good pattern (space/tab after slashes, or separator line)
+    if matches_good_comment_pattern(comment_text, use_strict) {
         return true;
     }
 
