@@ -10,7 +10,7 @@ version = "0.1.33"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
-repository = "https://github.com/bsl-analyzer/bsl-analyzer"
+repository = "https://github.com/itrous/bsl-analyzer"
 rust-version = "1.91"
 
 [workspace.dependencies]

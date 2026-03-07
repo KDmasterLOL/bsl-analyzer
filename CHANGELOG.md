@@ -52,4 +52,4 @@ Releases will follow the `YYYY.MM.DD` format as defined in [VERSIONING.md](docs/
 
 ---
 
-[Unreleased]: https://gitlab.runsystems.ru/proit/bsl-analyzer/
+[Unreleased]: https://github.com/itrous/bsl-analyzer

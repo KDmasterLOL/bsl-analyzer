@@ -2,38 +2,39 @@
 
 High-performance Language Server for BSL (1C:Enterprise) written in Rust.
 
-## Goals
+## Features
 
-- **4x faster analysis** compared to bsl-language-server (Java)
-- **4x lower memory usage** compared to bsl-language-server
-- **100% compatibility** with bsl-language-server diagnostics and configuration
-- Drop-in replacement for SonarQube integration
+- **180+ diagnostics** for BSL code quality analysis
+- **High performance** — 11s analysis of 121 MB / 6,540 files, 1.4 GB RAM
+- **LSP support** — full Language Server Protocol integration
+- **SonarQube integration** — SARIF reports, streaming mode for large projects
+- **Compatibility** with `.bsl-language-server.json` configuration format
+- **Cross-platform** — Linux, Windows, macOS (Apple Silicon)
 
 ## Project Status
 
-**Phase: Research & Planning**
+**Phase: Active Development (Alpha)**
 
-See [docs/planning/ROADMAP.md](docs/planning/ROADMAP.md) for detailed development plan.
+180 of 181 diagnostics implemented. See [docs/planning/ROADMAP.md](docs/planning/ROADMAP.md) for details.
 
 ## Installation
 
 ### Linux
 
 ```bash
-curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest)/bsl-launcher-linux-amd64 -o ~/.local/bin/bsl-analyzer && chmod +x ~/.local/bin/bsl-analyzer
+curl -fsSL https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-linux-amd64 -o ~/.local/bin/bsl-analyzer && chmod +x ~/.local/bin/bsl-analyzer
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-$v = Invoke-RestMethod https://dev.runsystems.ru/releases/bsl-analyzer/latest
-Invoke-WebRequest "https://dev.runsystems.ru/releases/bsl-analyzer/$v/bsl-launcher-windows-amd64.exe" -OutFile bsl-analyzer.exe
+Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-windows-amd64.exe" -OutFile bsl-analyzer.exe
 ```
 
 ### macOS (Apple Silicon)
 
 ```bash
-curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/$(curl -fsSL https://dev.runsystems.ru/releases/bsl-analyzer/latest)/bsl-launcher-darwin-arm64 -o /usr/local/bin/bsl-analyzer && chmod +x /usr/local/bin/bsl-analyzer
+curl -fsSL https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-darwin-arm64 -o /usr/local/bin/bsl-analyzer && chmod +x /usr/local/bin/bsl-analyzer
 ```
 
 ### Version Pinning (CI/CD)
@@ -121,7 +122,7 @@ Uses `.bsl-analyzer.json` configuration format (also supports `.bsl-language-ser
 
 ```bash
 # Clone repository
-git clone http://gitlab.runsystems.ru/proit/bsl-analyzer.git
+git clone https://github.com/itrous/bsl-analyzer.git
 cd bsl-analyzer
 
 # Install pre-commit hooks (автоматический fmt и clippy)
@@ -143,16 +144,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ### Helper Scripts
 
 - **`./scripts/setup-hooks.sh`** — установка git pre-commit hooks
-- **`./scripts/ci-status.sh`** — проверка статуса GitLab CI
-
-**Проверка CI:**
-```bash
-# Последний pipeline
-./scripts/ci-status.sh
-
-# Конкретный pipeline
-./scripts/ci-status.sh 564
-```
+- **`./scripts/ci-status.sh`** — проверка статуса CI
 
 ### Contributing
 
@@ -203,7 +195,7 @@ bsl-analyzer/
 - **clippy** — линтинг
 - **EditorConfig** — консистентные настройки редактора
 - **Pre-commit hooks** — автоматические проверки перед коммитом
-- **GitLab CI** — автоматическая проверка на каждый push
+- **CI** — автоматическая проверка на каждый push
 
 ## License
 

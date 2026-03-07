@@ -9,6 +9,10 @@ target/
 .vscode/
 *.iml
 
+# Claude Code / OMC
+.omc/
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

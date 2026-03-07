@@ -13,7 +13,7 @@
 
 **Клонирование:**
 ```bash
-git clone http://gitlab.runsystems.ru/proit/bsl-analyzer.git
+git clone https://github.com/itrous/bsl-analyzer.git
 cd bsl-analyzer
 ```
 
@@ -149,8 +149,8 @@ test: add snapshot tests for expression parsing
 
 ## Вопросы и помощь
 
-- **Issues:** https://gitlab.runsystems.ru/proit/bsl-analyzer/-/issues
-- **Merge Requests:** https://gitlab.runsystems.ru/proit/bsl-analyzer/-/merge_requests
+- **Issues:** https://github.com/itrous/bsl-analyzer/issues
+- **Pull Requests:** https://github.com/itrous/bsl-analyzer/pulls
 
 ## Лицензия
 
