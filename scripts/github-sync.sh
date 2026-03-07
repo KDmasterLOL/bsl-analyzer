@@ -14,7 +14,7 @@ set -euo pipefail
 
 # --- Конфигурация ---
 GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
-GITHUB_BRANCH="main"
+GITHUB_BRANCH="develop"
 
 # Файлы и директории, исключаемые из GitHub-зеркала
 EXCLUDE_PATTERNS=(
