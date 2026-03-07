@@ -375,10 +375,10 @@ fn is_statement_expr(expr_id: ExprId, body: &Body, _source_map: &BodySourceMap) 
     for stmt_id in body.body_stmts() {
         let stmt = body.stmt(stmt_id);
         match stmt {
-            hir_def::Stmt::Expr(expr) if ExprId::from_idx(*expr) == expr_id => {
+            hir::Stmt::Expr(expr) if ExprId::from_idx(*expr) == expr_id => {
                 return true;
             }
-            hir_def::Stmt::Assign { value, .. } if ExprId::from_idx(*value) == expr_id => {
+            hir::Stmt::Assign { value, .. } if ExprId::from_idx(*value) == expr_id => {
                 return true;
             }
             _ => {}

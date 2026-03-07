@@ -14,7 +14,6 @@ use vfs::FileId;
 
 // Re-export commonly used types
 pub use base_db;
-pub use hir_def;
 pub use syntax::TextRange;
 pub use vfs;
 

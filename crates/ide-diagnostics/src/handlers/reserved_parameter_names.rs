@@ -69,7 +69,7 @@ fn get_reserved_words(ctx: &DiagnosticsContext) -> FxHashSet<String> {
 }
 
 fn check_params(
-    params: &[hir_def::item_tree::Param],
+    params: &[hir::Param],
     reserved_words: &FxHashSet<String>,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,

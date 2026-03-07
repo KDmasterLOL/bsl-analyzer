@@ -113,8 +113,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Check a single body (method or module-level code) for empty except blocks.
 fn check_body_for_empty_except(
-    body: &hir_def::Body,
-    source_map: &hir_def::body::BodySourceMap,
+    body: &hir::Body,
+    source_map: &hir::BodySourceMap,
     comment_as_code: bool,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
@@ -129,8 +129,8 @@ fn check_body_for_empty_except(
 /// Recursively check statement and nested statements for Try blocks.
 fn check_stmt_recursive(
     stmt_id: StmtId,
-    body: &hir_def::Body,
-    source_map: &hir_def::body::BodySourceMap,
+    body: &hir::Body,
+    source_map: &hir::BodySourceMap,
     comment_as_code: bool,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,

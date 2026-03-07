@@ -66,7 +66,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
                     match item {
-                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        hir::ModItem::Procedure(proc_idx) => {
                             let proc = tree.procedure(*proc_idx);
                             let range = proc.source_range;
                             let name = proc.name.as_str().to_string();
@@ -77,7 +77,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
                                 kind: SymbolKind::Procedure,
                             });
                         }
-                        hir_def::item_tree::ModItem::Function(func_idx) => {
+                        hir::ModItem::Function(func_idx) => {
                             let func = tree.function(*func_idx);
                             let range = func.source_range;
                             let name = func.name.as_str().to_string();
@@ -100,7 +100,7 @@ fn definition_to_navigation_target<DB: RootDatabase>(
 
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == var_id.local_id as usize {
-                    if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
+                    if let hir::ModItem::Variable(var_idx) = item {
                         let var = tree.variable(*var_idx);
                         let range = var.source_range;
                         let name = var.name.as_str().to_string();
@@ -123,12 +123,8 @@ fn definition_to_navigation_target<DB: RootDatabase>(
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
                     let range = match item {
-                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                            tree.procedure(*proc_idx).source_range
-                        }
-                        hir_def::item_tree::ModItem::Function(func_idx) => {
-                            tree.function(*func_idx).source_range
-                        }
+                        hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
+                        hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
                         _ => continue,
                     };
 
@@ -151,12 +147,8 @@ fn definition_to_navigation_target<DB: RootDatabase>(
             for (idx, item) in tree.top_level_items().iter().enumerate() {
                 if idx == method_id.local_id as usize {
                     let range = match item {
-                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                            tree.procedure(*proc_idx).source_range
-                        }
-                        hir_def::item_tree::ModItem::Function(func_idx) => {
-                            tree.function(*func_idx).source_range
-                        }
+                        hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
+                        hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
                         _ => continue,
                     };
 

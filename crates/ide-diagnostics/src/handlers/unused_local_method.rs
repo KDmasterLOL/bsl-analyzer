@@ -128,18 +128,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn collect_method_calls(body: &hir_def::Body, called_methods: &mut FxHashSet<String>) {
+fn collect_method_calls(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
     use cfg_types::IdConversion;
 
     for (_expr_id, expr) in body.exprs_iter() {
         match expr {
-            hir_def::hir::Expr::Call { callee, .. } => {
+            hir::Expr::Call { callee, .. } => {
                 let callee_opaque = cfg_types::ExprId::from_idx(*callee);
-                if let hir_def::hir::Expr::Path(name) = body.expr(callee_opaque) {
+                if let hir::Expr::Path(name) = body.expr(callee_opaque) {
                     called_methods.insert(name.as_str().to_lowercase());
                 }
             }
-            hir_def::hir::Expr::MethodCall { method, .. } => {
+            hir::Expr::MethodCall { method, .. } => {
                 called_methods.insert(method.as_str().to_lowercase());
             }
             _ => {}
@@ -149,10 +149,10 @@ fn collect_method_calls(body: &hir_def::Body, called_methods: &mut FxHashSet<Str
 
 #[allow(clippy::too_many_arguments)]
 fn check_method_unused(
-    name: &hir_def::Name,
+    name: &hir::Name,
     name_range: TextRange,
     is_export: bool,
-    annotations: &[hir_def::item_tree::Annotation],
+    annotations: &[hir::Annotation],
     attachable_prefixes: &[String],
     called_methods: &FxHashSet<String>,
     code: DiagnosticCode,
@@ -190,7 +190,7 @@ fn check_method_unused(
     })
 }
 
-fn has_extension_annotation(annotations: &[hir_def::item_tree::Annotation]) -> bool {
+fn has_extension_annotation(annotations: &[hir::Annotation]) -> bool {
     annotations.iter().any(|ann| {
         matches!(
             ann.kind,

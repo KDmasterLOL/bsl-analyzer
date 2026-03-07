@@ -24,7 +24,7 @@ const DEFAULT_SEARCH_WORDS: &str = "Пароль|Password";
 
 static PATTERN_ALL_ASTERISKS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\*+$").unwrap());
 
-fn is_structure_or_map(type_name: &Option<hir_def::Name>) -> bool {
+fn is_structure_or_map(type_name: &Option<hir::Name>) -> bool {
     let Some(name) = type_name else {
         return false;
     };
@@ -32,7 +32,7 @@ fn is_structure_or_map(type_name: &Option<hir_def::Name>) -> bool {
     matches!(text.as_str(), "структура" | "structure" | "соответствие" | "map")
 }
 
-fn is_connection(type_name: &Option<hir_def::Name>) -> bool {
+fn is_connection(type_name: &Option<hir::Name>) -> bool {
     let Some(name) = type_name else {
         return false;
     };
@@ -40,7 +40,7 @@ fn is_connection(type_name: &Option<hir_def::Name>) -> bool {
     matches!(text.as_str(), "httpсоединение" | "httpconnection" | "ftpсоединение" | "ftpconnection")
 }
 
-fn is_insert_method(method_name: &hir_def::Name) -> bool {
+fn is_insert_method(method_name: &hir::Name) -> bool {
     let text = method_name.as_str().to_lowercase();
     matches!(text.as_str(), "вставить" | "insert")
 }

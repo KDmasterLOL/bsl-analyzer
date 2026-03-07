@@ -3,7 +3,7 @@
 //! Uses Salsa-cached `ItemTree` and `RegionTree` to build a hierarchical
 //! list of symbols (procedures, functions, variables, regions).
 
-use hir_def::item_tree::ModItem;
+use hir::ModItem;
 use ide_db::SymbolKind;
 use vfs::FileId;
 
@@ -61,8 +61,8 @@ pub(crate) fn document_symbols(
 
     // Build region symbols with nested items
     fn build_region(
-        db_region_tree: &hir_def::RegionTree,
-        region_idx: hir_def::region_tree::RegionIdx,
+        db_region_tree: &hir::RegionTree,
+        region_idx: hir::RegionIdx,
         items: &mut Vec<DocumentSymbol>,
     ) -> DocumentSymbol {
         let region = db_region_tree.region(region_idx);

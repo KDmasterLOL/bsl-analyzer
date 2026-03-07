@@ -120,7 +120,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 message: message_ru(),
                 range: group.range,
                 severity: ctx.severity(code),
-                tags: Vec::new(),
+                tags: ctx.tags(code),
                 fixes: Vec::new(),
             });
         }

@@ -282,8 +282,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files.clone()),
         });
@@ -508,8 +508,8 @@ mod tests {
         let global_context = GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader,
         };
@@ -521,8 +521,8 @@ mod tests {
         let provider_global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: shared_state.file_set().clone(),
             file_reader: FileReader::empty(), // Provider uses SharedState's reader via cache
         });
@@ -732,16 +732,16 @@ mod tests {
 
         // Verify SymbolTrees have the methods
         assert!(
-            tree_0.find_method(&ide_db::hir_def::Name::new("Метод0")).is_some(),
+            tree_0.find_method(&hir::Name::new("Метод0")).is_some(),
             "SymbolTree 0 should have Метод0"
         );
         assert!(
-            tree_1.find_method(&ide_db::hir_def::Name::new("Метод1")).is_some(),
+            tree_1.find_method(&hir::Name::new("Метод1")).is_some(),
             "SymbolTree 1 should have Метод1"
         );
 
         // Provider should return the same SymbolTree instances (from SharedState)
-        let module_0 = ide_db::hir_def::ModuleId::new(file_0);
+        let module_0 = hir::ModuleId::new(file_0);
         let provider_tree_0 = provider_check.symbol_tree(module_0);
         assert!(
             Arc::ptr_eq(&tree_0, &provider_tree_0),

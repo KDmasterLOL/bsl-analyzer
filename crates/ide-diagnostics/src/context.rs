@@ -158,8 +158,8 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get lowered HIR bodies for current module.
-    pub fn module_bodies(&self) -> Arc<hir_def::ModuleBodies> {
-        let module_id = hir_def::ModuleId::new(self.file_id);
+    pub fn module_bodies(&self) -> Arc<hir::ModuleBodies> {
+        let module_id = hir::ModuleId::new(self.file_id);
         if let Some(provider) = self.provider {
             return provider.module_bodies(module_id);
         }
@@ -167,8 +167,8 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get module metadata for current file.
-    pub fn module_metadata(&self) -> Arc<hir_def::ModuleMetadata> {
-        let module_id = hir_def::ModuleId::new(self.file_id);
+    pub fn module_metadata(&self) -> Arc<hir::ModuleMetadata> {
+        let module_id = hir::ModuleId::new(self.file_id);
         if let Some(provider) = self.provider {
             return provider.module_metadata(module_id);
         }
@@ -176,15 +176,15 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get symbol tree for current module.
-    pub fn symbol_tree(&self) -> Arc<hir_def::SymbolTree> {
-        let module_id = hir_def::ModuleId::new(self.file_id);
+    pub fn symbol_tree(&self) -> Arc<hir::SymbolTree> {
+        let module_id = hir::ModuleId::new(self.file_id);
         self.symbol_tree_for(module_id)
     }
 
     /// Get symbol tree for specific module.
     ///
     /// Use this when you need SymbolTree for a module other than the current file.
-    pub fn symbol_tree_for(&self, module_id: hir_def::ModuleId) -> Arc<hir_def::SymbolTree> {
+    pub fn symbol_tree_for(&self, module_id: hir::ModuleId) -> Arc<hir::SymbolTree> {
         if let Some(provider) = self.provider {
             return provider.symbol_tree(module_id);
         }
@@ -192,7 +192,7 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get item tree for current file.
-    pub fn item_tree(&self) -> Arc<hir_def::ItemTree> {
+    pub fn item_tree(&self) -> Arc<hir::ItemTree> {
         if let Some(provider) = self.provider {
             return provider.item_tree(self.file_id);
         }
@@ -234,7 +234,7 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get module index for cross-module resolution.
-    pub fn module_index(&self) -> Arc<hir_def::ModuleIndex> {
+    pub fn module_index(&self) -> Arc<hir::ModuleIndex> {
         let source_root_id = self.source_root_id();
         if let Some(provider) = self.provider {
             return provider.module_index(source_root_id);
@@ -270,7 +270,7 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get region tree for current file.
-    pub fn region_tree(&self) -> Arc<hir_def::RegionTree> {
+    pub fn region_tree(&self) -> Arc<hir::RegionTree> {
         if let Some(provider) = self.provider {
             return provider.region_tree(self.file_id);
         }
@@ -294,7 +294,7 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get all SDBL queries (parsed AST) in current file.
-    pub fn all_sdbl_in_file(&self) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+    pub fn all_sdbl_in_file(&self) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
         if let Some(provider) = self.provider {
             return provider.all_sdbl_in_file(self.file_id);
         }
@@ -302,8 +302,8 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get module data for current file.
-    pub fn module_data(&self) -> Arc<hir_def::ModuleData> {
-        let module_id = hir_def::ModuleId::new(self.file_id);
+    pub fn module_data(&self) -> Arc<hir::ModuleData> {
+        let module_id = hir::ModuleId::new(self.file_id);
         if let Some(provider) = self.provider {
             return provider.module_data(module_id);
         }
@@ -314,10 +314,7 @@ impl<'a> DiagnosticsContext<'a> {
     ///
     /// Extracts and parses leading comments (lines starting with //)
     /// before a procedure or function definition.
-    pub fn method_docs(
-        &self,
-        method_id: hir_def::MethodId,
-    ) -> Option<Arc<hir_def::docs::MethodDocs>> {
+    pub fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         if let Some(provider) = self.provider {
             return provider.method_docs(method_id);
         }
@@ -329,7 +326,7 @@ impl<'a> DiagnosticsContext<'a> {
     /// Returns `None` if analysis doesn't converge.
     pub fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
         if let Some(provider) = self.provider {
             return provider.reaching_definitions(method_id);
@@ -369,30 +366,31 @@ impl<'a> DiagnosticsContext<'a> {
     /// 4. Find method and check export flag
     pub fn resolve_qualified_path(
         &self,
-        module_name: &hir_def::Name,
-        method_name: &hir_def::Name,
-    ) -> hir_def::PathResolution {
+        module_name: &hir::Name,
+        method_name: &hir::Name,
+    ) -> hir::PathResolution {
         let module_index = self.module_index();
 
         let target_file_id = match module_index.resolve_common_module(module_name) {
             Some(id) => id,
             None => {
-                return hir_def::PathResolution::Unresolved(hir_def::QualifiedName::from_segments(
-                    [module_name.clone(), method_name.clone()],
-                ));
+                return hir::PathResolution::Unresolved(hir::QualifiedName::from_segments([
+                    module_name.clone(),
+                    method_name.clone(),
+                ]));
             }
         };
 
-        let target_module_id = hir_def::ModuleId::new(target_file_id);
+        let target_module_id = hir::ModuleId::new(target_file_id);
         let symbol_tree = self.symbol_tree_for(target_module_id);
 
         if let Some(method_symbol) = symbol_tree.find_method(method_name) {
             if method_symbol.is_export {
-                return hir_def::PathResolution::Method(method_symbol.id);
+                return hir::PathResolution::Method(method_symbol.id);
             }
         }
 
-        hir_def::PathResolution::Unresolved(hir_def::QualifiedName::from_segments([
+        hir::PathResolution::Unresolved(hir::QualifiedName::from_segments([
             module_name.clone(),
             method_name.clone(),
         ]))

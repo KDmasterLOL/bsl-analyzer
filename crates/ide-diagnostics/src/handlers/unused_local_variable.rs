@@ -152,7 +152,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Check module-level code for unused variables
     // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
     if ctx.provider.is_none() {
-        let module_id = hir_def::ModuleId::new(ctx.file_id);
+        let module_id = hir::ModuleId::new(ctx.file_id);
         diagnostics.extend(check_module_level_code(
             ctx.db,
             module_id,
@@ -176,8 +176,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[allow(clippy::too_many_arguments)] // object_attr_names needed to filter ObjectModule attributes
 fn check_method_with_module_liveness(
     local_id: u32,
-    body: &hir_def::Body,
-    module_bodies: &hir_def::ModuleBodies,
+    body: &hir::Body,
+    module_bodies: &hir::ModuleBodies,
     module_liveness: &dataflow::liveness::ModuleLiveness,
     module_cfgs: &cfg::ModuleCfgs,
     code: DiagnosticCode,
@@ -243,7 +243,7 @@ fn check_method_with_module_liveness(
     // Check each declared variable
     // 1. Check VarDecl bindings
     for stmt_id in body.body_stmts() {
-        if let hir_def::hir::Stmt::VarDecl { bindings } = body.stmt(stmt_id) {
+        if let hir::Stmt::VarDecl { bindings } = body.stmt(stmt_id) {
             for &binding_id in bindings.iter() {
                 let binding_id_opaque = BindingId::from_idx(binding_id);
                 let binding = body.binding(binding_id_opaque);
@@ -276,7 +276,7 @@ fn check_method_with_module_liveness(
 
     // 2. Check For loop variables
     for stmt_id in body.body_stmts() {
-        if let hir_def::hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
+        if let hir::Stmt::For { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
@@ -298,7 +298,7 @@ fn check_method_with_module_liveness(
 
     // 3. Check ForEach loop variables
     for stmt_id in body.body_stmts() {
-        if let hir_def::hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
+        if let hir::Stmt::ForEach { var, .. } = body.stmt(stmt_id) {
             let var_opaque = BindingId::from_idx(*var);
             let binding = body.binding(var_opaque);
             declared_vars.insert(binding.name.as_str().to_lowercase());
@@ -324,10 +324,10 @@ fn check_method_with_module_liveness(
         rustc_hash::FxHashMap::default();
 
     for stmt_id in body.body_stmts() {
-        if let hir_def::hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
+        if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
             let target_opaque = cfg_types::ExprId::from_idx(*target);
-            if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
+            if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
                 // Skip if already declared, is a parameter, or is an object attribute
@@ -417,10 +417,10 @@ fn check_module_level_code(
         rustc_hash::FxHashMap::default();
 
     for stmt_id in body.body_stmts() {
-        if let hir_def::hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
+        if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
             let target_opaque = cfg_types::ExprId::from_idx(*target);
-            if let hir_def::hir::Expr::Path(name) = body.expr(target_opaque) {
+            if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
                 // Skip object attributes (in ObjectModule, these set object fields)
@@ -461,7 +461,7 @@ fn check_module_level_code(
 /// Detects `Перем` declarations that are not referenced by any method body
 /// or module-level code. Exported variables are skipped.
 fn check_module_var_declarations(
-    module_bodies: &hir_def::ModuleBodies,
+    module_bodies: &hir::ModuleBodies,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
@@ -1098,8 +1098,8 @@ mod tests {
     }
 
     /// Helper to create ObjectModule metadata with given MDO.
-    fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir_def::ModuleMetadata {
-        hir_def::ModuleMetadata {
+    fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir::ModuleMetadata {
+        hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::ObjectModule,
             execution_context: None,
             common_module: None,

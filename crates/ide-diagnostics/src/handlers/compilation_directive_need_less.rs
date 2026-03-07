@@ -105,8 +105,8 @@ mod tests {
         assert_diagnostic_range, check_ast_diagnostic, check_metadata_diagnostic,
     };
 
-    fn object_module_metadata() -> hir_def::ModuleMetadata {
-        hir_def::ModuleMetadata::unknown(bsl_metadata::ModuleType::ObjectModule)
+    fn object_module_metadata() -> hir::ModuleMetadata {
+        hir::ModuleMetadata::unknown(bsl_metadata::ModuleType::ObjectModule)
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
 Процедура ОбработкаКоманды(ПараметрКоманды, ПараметрыВыполненияКоманды)
 КонецПроцедуры
 "#;
-        let metadata = hir_def::ModuleMetadata::unknown(bsl_metadata::ModuleType::CommandModule);
+        let metadata = hir::ModuleMetadata::unknown(bsl_metadata::ModuleType::CommandModule);
         let diagnostics = check_metadata_diagnostic(metadata, code, |_, ctx| super::check(ctx));
         assert!(diagnostics.is_empty(), "CommandModule should not trigger this diagnostic");
     }

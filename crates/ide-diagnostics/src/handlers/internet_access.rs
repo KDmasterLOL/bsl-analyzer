@@ -168,8 +168,8 @@ fn create_diagnostic(
 /// Scans all expressions in the body looking for NEW expressions that match
 /// internet access patterns.
 fn check_body_for_internet_access(
-    body: &hir_def::Body,
-    source_map: &hir_def::body::BodySourceMap,
+    body: &hir::Body,
+    source_map: &hir::BodySourceMap,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,

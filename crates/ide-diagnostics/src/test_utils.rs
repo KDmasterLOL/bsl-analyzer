@@ -4,7 +4,7 @@
 //! including position calculation and assertion helpers.
 
 use crate::Diagnostic;
-use hir_def::DefDatabase;
+use hir::DefDatabase;
 use ide_db::TextRange;
 
 /// Convert TextRange (byte offsets) to (line, column) positions.
@@ -312,7 +312,7 @@ where
 /// AnalysisProvider that returns custom metadata for testing metadata-based diagnostics.
 struct MetadataTestProvider {
     db: ide_db::RootDatabaseImpl,
-    metadata: std::sync::Arc<hir_def::ModuleMetadata>,
+    metadata: std::sync::Arc<hir::ModuleMetadata>,
 }
 
 impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
@@ -323,14 +323,14 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn workspace_symbols(
         &self,
         source_root_id: ide_db::base_db::SourceRootId,
-    ) -> std::sync::Arc<hir_def::WorkspaceSymbols> {
+    ) -> std::sync::Arc<hir::WorkspaceSymbols> {
         self.db.workspace_symbols(source_root_id)
     }
 
     fn module_index(
         &self,
         source_root_id: ide_db::base_db::SourceRootId,
-    ) -> std::sync::Arc<hir_def::ModuleIndex> {
+    ) -> std::sync::Arc<hir::ModuleIndex> {
         self.db.module_index(source_root_id)
     }
 
@@ -345,30 +345,27 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         input.text(&self.db).to_string()
     }
 
-    fn item_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir_def::ItemTree> {
-        use hir_def::DefDatabase;
+    fn item_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::ItemTree> {
+        use hir::DefDatabase;
         self.db.item_tree(file_id)
     }
 
-    fn symbol_tree(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::SymbolTree> {
-        use hir_def::DefDatabase;
+    fn symbol_tree(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::SymbolTree> {
+        use hir::DefDatabase;
         self.db.symbol_tree(module_id)
     }
 
-    fn region_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir_def::RegionTree> {
-        use hir_def::DefDatabase;
+    fn region_tree(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::RegionTree> {
+        use hir::DefDatabase;
         self.db.region_tree(file_id)
     }
 
-    fn module_bodies(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::ModuleBodies> {
-        use hir_def::DefDatabase;
+    fn module_bodies(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleBodies> {
+        use hir::DefDatabase;
         self.db.module_bodies(module_id)
     }
 
-    fn module_metadata(
-        &self,
-        _module_id: hir_def::ModuleId,
-    ) -> std::sync::Arc<hir_def::ModuleMetadata> {
+    fn module_metadata(&self, _module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleMetadata> {
         std::sync::Arc::clone(&self.metadata)
     }
 
@@ -394,7 +391,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
     fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<std::sync::Arc<dataflow::reaching_defs::ReachingDefsResult>> {
         use ide_db::RootDatabase;
         self.db.reaching_definitions(method_id)
@@ -425,7 +422,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn sdbl_hir_in_file(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<Vec<(hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>> {
+    ) -> std::sync::Arc<Vec<(hir::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>> {
         use ide_db::RootDatabase;
         self.db.sdbl_hir_in_file(file_id)
     }
@@ -433,20 +430,17 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn all_sdbl_in_file(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+    ) -> std::sync::Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
         use ide_db::RootDatabase;
         self.db.all_sdbl_in_file(file_id)
     }
 
-    fn module_data(&self, module_id: hir_def::ModuleId) -> std::sync::Arc<hir_def::ModuleData> {
-        use hir_def::DefDatabase;
+    fn module_data(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleData> {
+        use hir::DefDatabase;
         self.db.module_data(module_id)
     }
 
-    fn method_docs(
-        &self,
-        method_id: hir_def::MethodId,
-    ) -> Option<std::sync::Arc<hir_def::docs::MethodDocs>> {
+    fn method_docs(&self, method_id: hir::MethodId) -> Option<std::sync::Arc<hir::MethodDocs>> {
         self.db.method_docs(method_id)
     }
 
@@ -469,12 +463,12 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
 
 /// Test helper for module-level metadata diagnostics.
 pub fn check_metadata_diagnostic<F>(
-    metadata: hir_def::ModuleMetadata,
+    metadata: hir::ModuleMetadata,
     file_text: &str,
     check_fn: F,
 ) -> Vec<Diagnostic>
 where
-    F: Fn(&hir_def::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
+    F: Fn(&hir::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
     let config = crate::DiagnosticsConfig::all_enabled();
     check_metadata_diagnostic_with_config(metadata, file_text, config, check_fn)
@@ -482,13 +476,13 @@ where
 
 /// Test helper for module-level metadata diagnostics with custom config.
 pub fn check_metadata_diagnostic_with_config<F>(
-    metadata: hir_def::ModuleMetadata,
+    metadata: hir::ModuleMetadata,
     file_text: &str,
     config: crate::DiagnosticsConfig,
     check_fn: F,
 ) -> Vec<Diagnostic>
 where
-    F: Fn(&hir_def::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
+    F: Fn(&hir::ModuleMetadata, &crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
     use std::rc::Rc;
     use std::sync::Arc;
@@ -510,8 +504,8 @@ where
 }
 
 /// Create a `ModuleMetadata` for a CommonModule (without execution context).
-pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir_def::ModuleMetadata {
-    hir_def::ModuleMetadata {
+pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir::ModuleMetadata {
+    hir::ModuleMetadata {
         module_type: bsl_metadata::ModuleType::CommonModule,
         execution_context: None,
         common_module: Some(std::sync::Arc::new(module)),
@@ -526,9 +520,9 @@ pub fn make_common_module_metadata(module: bsl_metadata::CommonModule) -> hir_de
 /// Create a `ModuleMetadata` for a CommonModule with execution context.
 pub fn make_common_module_metadata_with_ctx(
     module: bsl_metadata::CommonModule,
-    ctx: hir_def::ExecutionContext,
-) -> hir_def::ModuleMetadata {
-    hir_def::ModuleMetadata {
+    ctx: hir::ExecutionContext,
+) -> hir::ModuleMetadata {
+    hir::ModuleMetadata {
         module_type: bsl_metadata::ModuleType::CommonModule,
         execution_context: Some(ctx),
         common_module: Some(std::sync::Arc::new(module)),
@@ -543,8 +537,8 @@ pub fn make_common_module_metadata_with_ctx(
 /// Create a `ModuleMetadata` for a non-CommonModule type (for negative tests).
 pub fn make_non_common_module_metadata(
     module_type: bsl_metadata::ModuleType,
-) -> hir_def::ModuleMetadata {
-    hir_def::ModuleMetadata {
+) -> hir::ModuleMetadata {
+    hir::ModuleMetadata {
         module_type,
         execution_context: None,
         common_module: None,

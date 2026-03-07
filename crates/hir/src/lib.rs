@@ -4,22 +4,40 @@
 
 mod definition;
 
-use hir_def::{DefDatabase, QualifiedName};
-
 pub use definition::Definition;
+
+// Re-export core types
+pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
+pub use hir_def::{ExecutionContext, QualifiedName};
 pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
+pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 // Re-export HIR body types for diagnostics
+pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext};
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
-// Re-export types used by diagnostic handlers (H9: facade over hir_def internals)
-pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext};
+// Re-export HIR expression/statement types
 pub use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, UnaryOp};
-pub use hir_def::item_tree::{Annotation, AnnotationKind, ModItem};
-pub use hir_def::region_tree::RegionTree;
+
+// Re-export item tree types
+pub use hir_def::item_tree::{Annotation, AnnotationKind, Function, ModItem, Param, Procedure};
+
+// Re-export tree types
+pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
-pub use hir_def::{BindingId, ExprId, IdConversion, ModuleMetadata, Name, PathResolution, StmtId};
-pub use hir_def::{RedundantAccessKind, SdblExprId};
+pub use hir_def::{ConditionalTree, ItemTree, ModuleIndex, SymbolTree, WorkspaceSymbols};
+
+// Re-export database and resolution
+pub use hir_def::resolver::Resolver;
+pub use hir_def::scope::{ExprScopes, ScopeDef};
+pub use hir_def::DefDatabase;
+
+// Re-export documentation types
+pub use hir_def::docs::{MethodDocs, ParameterDoc};
+
+// Re-export analysis modules
+pub use hir_def::cognitive_complexity;
+pub use hir_def::cyclomatic_complexity;
 
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;

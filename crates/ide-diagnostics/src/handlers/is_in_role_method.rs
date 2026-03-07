@@ -138,8 +138,8 @@ struct IsInRoleChecker<'a> {
     is_in_role_vars: HashSet<String>,
     privileged_mode_vars: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
-    body: &'a hir_def::Body,
-    source_map: &'a hir_def::body::BodySourceMap,
+    body: &'a hir::Body,
+    source_map: &'a hir::BodySourceMap,
     code: DiagnosticCode,
     ctx: &'a DiagnosticsContext<'a>,
 }

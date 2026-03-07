@@ -17,8 +17,9 @@
 //! - **With WorkspaceIndex**: O(C×M) where C=10-100 files → ~3 seconds
 //! - **Speedup**: ~10-30x for large projects
 
+use hir::Name;
 use hir::Semantics;
-use ide_db::{hir_def::Name, RootDatabase};
+use ide_db::RootDatabase;
 use syntax::{SyntaxKind, TextSize};
 use vfs::FileId;
 

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree};
+use hir::{ItemTree, ModuleId, SymbolTree};
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
@@ -363,8 +363,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });
@@ -400,7 +400,7 @@ mod tests {
         let symbol_tree = shared_state.get_symbol_tree(file_id).unwrap();
 
         // Verify SymbolTree has the method
-        let method = symbol_tree.find_method(&ide_db::hir_def::Name::new("Тест"));
+        let method = symbol_tree.find_method(&hir::Name::new("Тест"));
         assert!(method.is_some());
     }
 
@@ -427,7 +427,7 @@ mod tests {
 
         // Check SymbolTree available
         let symbol_tree = shared_state.get_symbol_tree(file_id).unwrap();
-        assert!(symbol_tree.find_method(&ide_db::hir_def::Name::new("Тест")).is_some());
+        assert!(symbol_tree.find_method(&hir::Name::new("Тест")).is_some());
     }
 
     #[test]
@@ -443,8 +443,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });
@@ -481,8 +481,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(ide_db::hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(ide_db::hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files),
         });

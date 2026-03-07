@@ -205,7 +205,7 @@ pub fn from_hir(
 ///
 /// Self-assigns (Param = Param) are NOT considered meaningful uses.
 fn parameter_used_before_stmt(
-    body: &hir_def::Body,
+    body: &hir::Body,
     target_stmt_id: StmtId,
     param_id: BindingId,
 ) -> bool {
@@ -231,7 +231,7 @@ fn parameter_used_before_stmt(
 }
 
 /// Check if statement is a self-assign to the binding (Param = Param).
-fn is_self_assign_to_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
+fn is_self_assign_to_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir::{Expr, Stmt};
 
     let stmt = body.stmt(stmt_id);
@@ -256,7 +256,7 @@ fn is_self_assign_to_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: 
 }
 
 /// Check if a statement uses a specific binding anywhere.
-fn stmt_uses_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
+fn stmt_uses_binding(body: &hir::Body, stmt_id: StmtId, binding_id: BindingId) -> bool {
     use hir::Stmt;
 
     let stmt = body.stmt(stmt_id);
@@ -369,7 +369,7 @@ fn stmt_uses_binding(body: &hir_def::Body, stmt_id: StmtId, binding_id: BindingI
 ///
 /// Returns true if the parameter binding appears anywhere in the value expression.
 fn parameter_used_in_assignment_rhs(
-    body: &hir_def::Body,
+    body: &hir::Body,
     stmt_id: StmtId,
     param_id: BindingId,
 ) -> bool {
@@ -386,7 +386,7 @@ fn parameter_used_in_assignment_rhs(
 }
 
 /// Recursively check if an expression uses a specific binding.
-fn expr_uses_binding(body: &hir_def::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
+fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -> bool {
     use hir::Expr;
 
     let expr = body.expr(expr_id);

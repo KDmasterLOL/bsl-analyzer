@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_cache_parsed_file() {
-        use crate::hir_def::{ItemTree, ModuleId};
+        use hir_def::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(10);
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_try_claim_for_diagnostics() {
-        use crate::hir_def::{ItemTree, ModuleId, SymbolTree};
+        use hir_def::{ItemTree, ModuleId, SymbolTree};
         use syntax::Parse;
 
         let state = create_test_state(10);
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn test_cache_lifecycle() {
-        use crate::hir_def::{ItemTree, ModuleId};
+        use hir_def::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(3);

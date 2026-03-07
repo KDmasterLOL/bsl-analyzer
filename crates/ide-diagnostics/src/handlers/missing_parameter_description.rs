@@ -44,7 +44,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 fn check_method(
     ctx: &DiagnosticsContext,
-    method_id: hir_def::MethodId,
+    method_id: hir::MethodId,
     code: DiagnosticCode,
     is_function: bool,
 ) -> Vec<Diagnostic> {
@@ -111,13 +111,13 @@ fn check_method(
 
 fn check_parameter_descriptions(
     ctx: &DiagnosticsContext,
-    params: &[hir_def::item_tree::Param],
-    param_docs: &[hir_def::docs::ParameterDoc],
+    params: &[hir::Param],
+    param_docs: &[hir::ParameterDoc],
     name_range: TextRange,
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut doc_map: HashMap<String, &hir_def::docs::ParameterDoc> = HashMap::new();
+    let mut doc_map: HashMap<String, &hir::ParameterDoc> = HashMap::new();
     let mut doc_order: Vec<String> = Vec::new();
     let mut duplicate_docs: Vec<&str> = Vec::new();
 

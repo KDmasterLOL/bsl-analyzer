@@ -131,7 +131,7 @@ impl Analysis {
 
     /// Get dependencies of a file (resolved ExternalRefs → FileIds).
     pub fn file_dependencies(&self, file_id: FileId) -> Arc<Vec<FileId>> {
-        use ide_db::hir_def::{DefDatabase, ModuleId};
+        use hir::{DefDatabase, ModuleId};
         let module_id = ModuleId::new(file_id);
         self.db.file_dependencies(module_id)
     }
@@ -253,8 +253,8 @@ pub struct WarmCachesTask {
 impl WarmCachesTask {
     /// Run the cache-warming task. Returns the number of files processed.
     pub fn run(self) -> usize {
+        use hir::{DefDatabase, ModuleId};
         use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
-        use ide_db::hir_def::{DefDatabase, ModuleId};
 
         let config_id = DiagnosticsConfigId::new(&self.db, self.config);
 

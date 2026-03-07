@@ -75,7 +75,7 @@ mod tests {
     fn test_from_metadata_invalid_type() {
         let module = bsl_metadata::CommonModule::builder().name("InvalidModule").build();
 
-        let metadata = ide_db::hir_def::ModuleMetadata {
+        let metadata = hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::CommonModule,
             execution_context: None,
             common_module: Some(std::sync::Arc::new(module)),
@@ -103,9 +103,9 @@ mod tests {
             .client_managed_application(false)
             .build();
 
-        let metadata = ide_db::hir_def::ModuleMetadata {
+        let metadata = hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::CommonModule,
-            execution_context: Some(ide_db::hir_def::ExecutionContext::Server),
+            execution_context: Some(hir::ExecutionContext::Server),
             common_module: Some(std::sync::Arc::new(module)),
             mdo: None,
             register: None,
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_from_metadata_non_common_module() {
-        let metadata = ide_db::hir_def::ModuleMetadata {
+        let metadata = hir::ModuleMetadata {
             module_type: bsl_metadata::ModuleType::ManagerModule,
             execution_context: None,
             common_module: None,

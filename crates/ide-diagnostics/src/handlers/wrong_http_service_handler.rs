@@ -125,7 +125,7 @@ pub fn from_metadata(
     diagnostics
 }
 
-fn get_method_name_range(item_tree: &hir_def::ItemTree, local_id: u32) -> Option<TextRange> {
+fn get_method_name_range(item_tree: &hir::ItemTree, local_id: u32) -> Option<TextRange> {
     let item = item_tree.top_level_items().get(local_id as usize)?;
     match item {
         ModItem::Function(func_idx) => Some(item_tree.function(*func_idx).name_range),

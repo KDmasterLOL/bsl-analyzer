@@ -7,7 +7,7 @@ use bsl_platform::{
     global_function_query, platform_method_query, GlobalFunction, MethodDocs, MethodLookupInput,
     PlatformDataInner, PlatformMethod, TypeNameInput,
 };
-use hir_def::item_tree::{Function, ModItem, Param, Procedure};
+use hir::{Function, ModItem, Param, Procedure};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
@@ -224,11 +224,11 @@ fn build_for_user_method<DB: RootDatabase>(
     method_name: &str,
     active_param: usize,
 ) -> Option<SignatureHelp> {
-    use hir_def::Name;
+    use hir::Name;
 
     let name = Name::new(method_name);
-    let module_id = hir_def::ModuleId::new(file_id);
-    let resolver = hir_def::resolver::Resolver::for_module(module_id);
+    let module_id = hir::ModuleId::new(file_id);
+    let resolver = hir::Resolver::for_module(module_id);
 
     // Try to resolve as a module method
     let method_id = resolver.resolve_module_method(db, &name)?;

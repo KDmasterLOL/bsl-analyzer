@@ -66,7 +66,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn check_method(
-    params: &[hir_def::item_tree::Param],
+    params: &[hir::Param],
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     diagnostics: &mut Vec<Diagnostic>,

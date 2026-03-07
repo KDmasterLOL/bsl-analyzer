@@ -97,7 +97,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn check_method(
     ctx: &DiagnosticsContext,
     method_id: MethodId,
-    item_tree: &hir_def::ItemTree,
+    item_tree: &hir::ItemTree,
     region_tree: &RegionTree,
     check_all_region: bool,
     code: DiagnosticCode,

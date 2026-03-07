@@ -59,7 +59,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn get_method_name(item_tree: &hir_def::ItemTree, local_id: u32) -> Option<String> {
+fn get_method_name(item_tree: &hir::ItemTree, local_id: u32) -> Option<String> {
     let items = item_tree.top_level_items();
     let item = items.get(local_id as usize)?;
     match item {
@@ -71,9 +71,9 @@ fn get_method_name(item_tree: &hir_def::ItemTree, local_id: u32) -> Option<Strin
 
 fn check_method(
     local_id: u32,
-    body: &hir_def::Body,
+    body: &hir::Body,
     method_name: Option<&str>,
-    module_bodies: &hir_def::ModuleBodies,
+    module_bodies: &hir::ModuleBodies,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
@@ -113,7 +113,7 @@ fn check_method(
     diagnostics
 }
 
-fn collect_used_identifiers(body: &hir_def::Body) -> FxHashSet<String> {
+fn collect_used_identifiers(body: &hir::Body) -> FxHashSet<String> {
     let mut used = FxHashSet::default();
 
     for (_, expr) in body.exprs_iter() {
@@ -125,7 +125,7 @@ fn collect_used_identifiers(body: &hir_def::Body) -> FxHashSet<String> {
     used
 }
 
-fn is_empty_body(body: &hir_def::Body) -> bool {
+fn is_empty_body(body: &hir::Body) -> bool {
     body.body_stmts().next().is_none()
 }
 

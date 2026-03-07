@@ -10,7 +10,6 @@ ide-db.workspace = true
 ide-diagnostics.workspace = true
 ide-assists.workspace = true
 hir.workspace = true
-hir-def.workspace = true
 lexer.workspace = true
 parser.workspace = true
 syntax.workspace = true

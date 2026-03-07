@@ -157,8 +157,8 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn check_body_for_timeouts(
-    body: &hir_def::Body,
-    source_map: &hir_def::body::BodySourceMap,
+    body: &hir::Body,
+    source_map: &hir::BodySourceMap,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     config: &Config,
@@ -231,8 +231,8 @@ fn check_body_for_timeouts(
 }
 
 fn has_timeout_in_constructor(
-    body: &hir_def::Body,
-    args: &[hir_def::hir::ExprIdx],
+    body: &hir::Body,
+    args: &[hir::ExprIdx],
     res_type: ResourceType,
 ) -> bool {
     let timeout_pos = res_type.timeout_param_position();
@@ -260,7 +260,7 @@ fn has_timeout_in_constructor(
     }
 }
 
-fn find_timeout_assignments(body: &hir_def::Body) -> FxHashMap<Name, ()> {
+fn find_timeout_assignments(body: &hir::Body) -> FxHashMap<Name, ()> {
     let mut result = FxHashMap::default();
 
     for (_stmt_id, stmt) in body.stmts_iter() {
@@ -282,7 +282,7 @@ fn is_timeout_field(field: &Name) -> bool {
     matches!(field.as_str().to_lowercase().as_str(), "таймаут" | "timeout")
 }
 
-fn extract_simple_path_idx(body: &hir_def::Body, expr_idx: hir_def::hir::ExprIdx) -> Option<Name> {
+fn extract_simple_path_idx(body: &hir::Body, expr_idx: hir::ExprIdx) -> Option<Name> {
     match body.expr_idx(expr_idx) {
         Expr::Path(name) => Some(name.clone()),
         _ => None,

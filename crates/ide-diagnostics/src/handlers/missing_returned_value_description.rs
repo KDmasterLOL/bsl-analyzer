@@ -100,7 +100,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Check a function for missing or invalid return description (HIR-based).
 fn check_function_hir(
     ctx: &DiagnosticsContext,
-    method_id: hir_def::MethodId,
+    method_id: hir::MethodId,
     code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     // Get item tree via ctx (works in both LSP and streaming mode)
@@ -192,7 +192,7 @@ fn check_function_hir(
 /// Check a procedure for invalid return description (HIR-based).
 fn check_procedure_hir(
     ctx: &DiagnosticsContext,
-    method_id: hir_def::MethodId,
+    method_id: hir::MethodId,
     code: DiagnosticCode,
 ) -> Option<Diagnostic> {
     // Get item tree via ctx (works in both LSP and streaming mode)

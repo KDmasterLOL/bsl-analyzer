@@ -55,7 +55,7 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, error, info, warn};
 use vfs::{file_set::FileSet, FileId};
 
-use ide_db::hir_def::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
+use hir::{ItemTree, ModuleId, SymbolTree, WorkspaceSymbols};
 
 // Import from ide-db (infrastructure layer)
 use ide_db::streaming::{FileReader, GlobalContext, SharedState, StreamingProvider};
@@ -339,7 +339,7 @@ impl AnalysisOrchestrator {
                 let path_str = vfs_path.as_path().to_str()?;
                 Some((file_id, path_str))
             });
-            Arc::new(ide_db::hir_def::ModuleIndex::build_from_paths(paths))
+            Arc::new(hir::ModuleIndex::build_from_paths(paths))
         };
         info!(
             common_modules = module_index.common_module_count(),

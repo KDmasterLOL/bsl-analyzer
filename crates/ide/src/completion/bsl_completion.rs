@@ -8,7 +8,8 @@
 
 use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
 use either::Either;
-use ide_db::{hir_def::scope::ExprScopes, RootDatabase, TextRange};
+use hir::{ExprScopes, ScopeDef};
+use ide_db::{RootDatabase, TextRange};
 use syntax::{ast::AstNode, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
@@ -186,10 +187,8 @@ fn complete_local_symbols<DB: RootDatabase>(
         }
 
         let (kind, detail) = match scope_def {
-            ide_db::hir_def::scope::ScopeDef::Parameter => (CompletionItemKind::Field, "Параметр"),
-            ide_db::hir_def::scope::ScopeDef::LocalVariable => {
-                (CompletionItemKind::Field, "Локальная переменная")
-            }
+            ScopeDef::Parameter => (CompletionItemKind::Field, "Параметр"),
+            ScopeDef::LocalVariable => (CompletionItemKind::Field, "Локальная переменная"),
         };
 
         completions.push(CompletionItem {

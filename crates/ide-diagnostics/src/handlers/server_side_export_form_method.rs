@@ -78,7 +78,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 /// Check if method has `&НаКлиенте` annotation.
-fn has_client_annotation(annotations: &[hir_def::item_tree::Annotation]) -> bool {
+fn has_client_annotation(annotations: &[hir::Annotation]) -> bool {
     annotations.iter().any(|a| a.kind == AnnotationKind::AtClient)
 }
 
@@ -96,7 +96,7 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
 
 /// Create diagnostics from metadata (for metadata-dispatch).
 pub fn from_metadata(
-    metadata: &hir_def::ModuleMetadata,
+    metadata: &hir::ModuleMetadata,
     _config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
     // This diagnostic requires ItemTree (not just metadata)

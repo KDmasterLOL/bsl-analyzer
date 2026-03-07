@@ -235,7 +235,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Uses recursive resolution with depth limit to prevent infinite loops.
 fn resolve_expr_to_string(
     expr_id: ExprId,
-    body: &hir_def::Body,
+    body: &hir::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
     stmt_id: StmtId,
 ) -> Option<String> {
@@ -245,7 +245,7 @@ fn resolve_expr_to_string(
 /// Internal implementation with depth tracking for cycle protection.
 fn resolve_expr_to_string_impl(
     expr_id: ExprId,
-    body: &hir_def::Body,
+    body: &hir::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
     stmt_id: StmtId,
     depth: u32,
@@ -295,7 +295,7 @@ fn resolve_expr_to_string_impl(
 /// Handles assignment statements and recursively resolves transitive assignments.
 fn resolve_definition(
     def: &dataflow::reaching_defs::Definition,
-    body: &hir_def::Body,
+    body: &hir::Body,
     reaching_defs: &dataflow::reaching_defs::ReachingDefsResult,
     _current_stmt: StmtId,
     depth: u32,

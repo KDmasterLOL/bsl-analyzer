@@ -24,7 +24,7 @@
 //! | Modifier | Keyword | DISTINCT, TOP, UNION |
 //! | AggregateFunction | Function | SUM, AVG, COUNT, MIN, MAX |
 
-use ide_db::{hir_def, RootDatabase};
+use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
 use crate::syntax_highlighting::{HighlightContext, HlMod, HlRange, HlTag};
@@ -147,13 +147,13 @@ fn convert_sdbl_tokens_to_highlights(
 #[allow(clippy::type_complexity)]
 fn find_sdbl_entry_by_range<'a>(
     sdbl_hir_entries: &'a std::sync::Arc<
-        Vec<(hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>,
+        Vec<(hir::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>)>,
     >,
-    sdbl_queries: &'a std::sync::Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>,
+    sdbl_queries: &'a std::sync::Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>>,
     literal_range: TextRange,
 ) -> Option<(
-    &'a (hir_def::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>),
-    &'a (hir_def::SdblExprId, syntax::SdblQueryInfo),
+    &'a (hir::SdblExprId, std::sync::Arc<sdbl_hir::SdblPackage>),
+    &'a (hir::SdblExprId, syntax::SdblQueryInfo),
 )> {
     for (hir_entry, query_entry) in sdbl_hir_entries.iter().zip(sdbl_queries.iter()) {
         let (_query_sdbl_expr_id, query_info) = query_entry;

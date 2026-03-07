@@ -162,8 +162,8 @@ pub fn from_hir(
 /// - Other diagnostics
 ///
 /// Uses the HIR-based implementation from `hir_def::cognitive_complexity`.
-pub fn calculate_complexity(body: &hir_def::Body) -> u32 {
-    hir_def::cognitive_complexity::calculate_complexity(body)
+pub fn calculate_complexity(body: &hir::Body) -> u32 {
+    hir::cognitive_complexity::calculate_complexity(body)
 }
 
 #[cfg(test)]
@@ -173,7 +173,7 @@ mod tests {
         assert_diagnostic_range, check_hir_diagnostic, check_hir_diagnostic_with_config,
     };
     use crate::{DiagnosticsConfig, Severity};
-    use hir_def::ModuleId;
+    use hir::ModuleId;
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::vfs::{FileSet, VfsPath};
     use ide_db::{RootDatabase, RootDatabaseImpl};

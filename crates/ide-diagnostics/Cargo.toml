@@ -13,7 +13,6 @@ dataflow.workspace = true
 ide-db.workspace = true
 salsa.workspace = true
 hir.workspace = true
-hir-def.workspace = true
 parser.workspace = true
 syntax.workspace = true
 sdbl-hir.workspace = true

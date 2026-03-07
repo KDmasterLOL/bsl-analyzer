@@ -95,7 +95,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn make_diagnostic(
-    name: &hir_def::Name,
+    name: &hir::Name,
     range: TextRange,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,

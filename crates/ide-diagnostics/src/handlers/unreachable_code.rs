@@ -136,7 +136,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// Collect ranges of unreachable vertices from CFG.
 fn collect_unreachable_ranges<F>(
     cfg: &cfg::ControlFlowGraph,
-    source_map: &hir_def::BodySourceMap,
+    source_map: &hir::BodySourceMap,
     entry: cfg::NodeIndex,
     exit: cfg::NodeIndex,
     is_unreachable: F,
@@ -327,7 +327,7 @@ fn can_reach_reachable_backwards(
     false
 }
 
-fn get_vertex_range(vertex: &CfgVertex, source_map: &hir_def::BodySourceMap) -> Option<TextRange> {
+fn get_vertex_range(vertex: &CfgVertex, source_map: &hir::BodySourceMap) -> Option<TextRange> {
     match vertex {
         CfgVertex::BasicBlock(block) => {
             let statements = block.statements();

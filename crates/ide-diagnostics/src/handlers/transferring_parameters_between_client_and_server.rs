@@ -86,7 +86,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
                 for item in item_tree.top_level_items() {
                     match item {
-                        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        hir::ModItem::Procedure(proc_idx) => {
                             let proc = item_tree.procedure(*proc_idx);
                             if proc.name == method.name {
                                 if let Some(param_info) = proc.params.get(param_idx) {
@@ -95,7 +95,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                                 break;
                             }
                         }
-                        hir_def::item_tree::ModItem::Function(func_idx) => {
+                        hir::ModItem::Function(func_idx) => {
                             let func = item_tree.function(*func_idx);
                             if func.name == method.name {
                                 if let Some(param_info) = func.params.get(param_idx) {
@@ -129,7 +129,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn collect_assigned_params(body: &hir_def::Body) -> FxHashSet<String> {
+fn collect_assigned_params(body: &hir::Body) -> FxHashSet<String> {
     let mut assigned = FxHashSet::default();
 
     for (_stmt_id, stmt) in body.stmts_iter() {
@@ -139,28 +139,28 @@ fn collect_assigned_params(body: &hir_def::Body) -> FxHashSet<String> {
     assigned
 }
 
-fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir_def::Body, assigned: &mut FxHashSet<String>) {
+fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir::Body, assigned: &mut FxHashSet<String>) {
     match stmt {
         Stmt::Assign { target, .. } => {
-            let target_id = hir_def::ExprId::from_idx(*target);
+            let target_id = hir::ExprId::from_idx(*target);
             if let Expr::Path(name) = body.expr(target_id) {
                 assigned.insert(name.as_str().to_lowercase());
             }
         }
         Stmt::If(if_stmt) => {
             for &stmt_idx in if_stmt.then_branch.iter() {
-                let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                let stmt_id = hir::StmtId::from_idx(stmt_idx);
                 collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
             }
             for (_, elsif_stmts) in if_stmt.elsif_branches.iter() {
                 for &stmt_idx in elsif_stmts.iter() {
-                    let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                    let stmt_id = hir::StmtId::from_idx(stmt_idx);
                     collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
                 }
             }
             if let Some(ref else_branch) = if_stmt.else_branch {
                 for &stmt_idx in else_branch.iter() {
-                    let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                    let stmt_id = hir::StmtId::from_idx(stmt_idx);
                     collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
                 }
             }
@@ -169,17 +169,17 @@ fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir_def::Body, assigned: &mut 
         | Stmt::For { body: stmts, .. }
         | Stmt::ForEach { body: stmts, .. } => {
             for &stmt_idx in stmts.iter() {
-                let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                let stmt_id = hir::StmtId::from_idx(stmt_idx);
                 collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
             }
         }
         Stmt::Try { body: try_block, except, .. } => {
             for &stmt_idx in try_block.iter() {
-                let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                let stmt_id = hir::StmtId::from_idx(stmt_idx);
                 collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
             }
             for &stmt_idx in except.iter() {
-                let stmt_id = hir_def::StmtId::from_idx(stmt_idx);
+                let stmt_id = hir::StmtId::from_idx(stmt_idx);
                 collect_assigned_from_stmt(body.stmt(stmt_id), body, assigned);
             }
         }
@@ -214,7 +214,7 @@ fn has_client_calls(ctx: &DiagnosticsContext, server_method_name: &Name) -> bool
     false
 }
 
-fn has_call_to(body: &hir_def::Body, target_method_lower: &str) -> bool {
+fn has_call_to(body: &hir::Body, target_method_lower: &str) -> bool {
     for (_expr_id, expr) in body.exprs_iter() {
         if check_expr_for_call(expr, target_method_lower, body) {
             return true;
@@ -224,65 +224,65 @@ fn has_call_to(body: &hir_def::Body, target_method_lower: &str) -> bool {
     false
 }
 
-fn check_expr_for_call(expr: &Expr, target_method_lower: &str, body: &hir_def::Body) -> bool {
+fn check_expr_for_call(expr: &Expr, target_method_lower: &str, body: &hir::Body) -> bool {
     match expr {
         Expr::Call { callee, args } => {
-            let callee_id = hir_def::ExprId::from_idx(*callee);
+            let callee_id = hir::ExprId::from_idx(*callee);
             if let Expr::Path(name) = body.expr(callee_id) {
                 if name.as_str().to_lowercase() == target_method_lower {
                     return true;
                 }
             }
             for &arg_idx in args.iter() {
-                let arg_id = hir_def::ExprId::from_idx(arg_idx);
+                let arg_id = hir::ExprId::from_idx(arg_idx);
                 if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
                     return true;
                 }
             }
         }
         Expr::BinaryOp { lhs, rhs, .. } => {
-            let lhs_id = hir_def::ExprId::from_idx(*lhs);
-            let rhs_id = hir_def::ExprId::from_idx(*rhs);
+            let lhs_id = hir::ExprId::from_idx(*lhs);
+            let rhs_id = hir::ExprId::from_idx(*rhs);
             return check_expr_for_call(body.expr(lhs_id), target_method_lower, body)
                 || check_expr_for_call(body.expr(rhs_id), target_method_lower, body);
         }
         Expr::UnaryOp { expr: inner, .. } | Expr::Await { expr: inner } => {
-            let inner_id = hir_def::ExprId::from_idx(*inner);
+            let inner_id = hir::ExprId::from_idx(*inner);
             return check_expr_for_call(body.expr(inner_id), target_method_lower, body);
         }
         Expr::Ternary { condition, then_expr, else_expr } => {
-            let condition_id = hir_def::ExprId::from_idx(*condition);
-            let then_id = hir_def::ExprId::from_idx(*then_expr);
-            let else_id = hir_def::ExprId::from_idx(*else_expr);
+            let condition_id = hir::ExprId::from_idx(*condition);
+            let then_id = hir::ExprId::from_idx(*then_expr);
+            let else_id = hir::ExprId::from_idx(*else_expr);
             return check_expr_for_call(body.expr(condition_id), target_method_lower, body)
                 || check_expr_for_call(body.expr(then_id), target_method_lower, body)
                 || check_expr_for_call(body.expr(else_id), target_method_lower, body);
         }
         Expr::MethodCall { receiver, args, .. } => {
-            let receiver_id = hir_def::ExprId::from_idx(*receiver);
+            let receiver_id = hir::ExprId::from_idx(*receiver);
             if check_expr_for_call(body.expr(receiver_id), target_method_lower, body) {
                 return true;
             }
             for &arg_idx in args.iter() {
-                let arg_id = hir_def::ExprId::from_idx(arg_idx);
+                let arg_id = hir::ExprId::from_idx(arg_idx);
                 if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
                     return true;
                 }
             }
         }
         Expr::Index { base, index } => {
-            let base_id = hir_def::ExprId::from_idx(*base);
-            let index_id = hir_def::ExprId::from_idx(*index);
+            let base_id = hir::ExprId::from_idx(*base);
+            let index_id = hir::ExprId::from_idx(*index);
             return check_expr_for_call(body.expr(base_id), target_method_lower, body)
                 || check_expr_for_call(body.expr(index_id), target_method_lower, body);
         }
         Expr::Field { base, .. } => {
-            let base_id = hir_def::ExprId::from_idx(*base);
+            let base_id = hir::ExprId::from_idx(*base);
             return check_expr_for_call(body.expr(base_id), target_method_lower, body);
         }
         Expr::New { args, .. } => {
             for &arg_idx in args.iter() {
-                let arg_id = hir_def::ExprId::from_idx(arg_idx);
+                let arg_id = hir::ExprId::from_idx(arg_idx);
                 if check_expr_for_call(body.expr(arg_id), target_method_lower, body) {
                     return true;
                 }
@@ -290,7 +290,7 @@ fn check_expr_for_call(expr: &Expr, target_method_lower: &str, body: &hir_def::B
         }
         Expr::Array(exprs) => {
             for &expr_idx in exprs.iter() {
-                let opaque_id = hir_def::ExprId::from_idx(expr_idx);
+                let opaque_id = hir::ExprId::from_idx(expr_idx);
                 if check_expr_for_call(body.expr(opaque_id), target_method_lower, body) {
                     return true;
                 }
