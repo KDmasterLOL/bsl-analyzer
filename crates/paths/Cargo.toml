@@ -1,0 +1,19 @@
+[package]
+name = "paths"
+version = "0.1.28"
+repository.workspace = true
+description = "Path wrappers for absolute and relative paths."
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+camino.workspace = true
+
+[features]
+serde1 = ["camino/serde1"]

@@ -1,0 +1,20 @@
+//! VFS helper functions for accessing file paths and configuration roots.
+//!
+//! These functions downcast the database to `RootDatabaseImpl` to access
+//! VFS and file system operations that are not part of the trait interface.
+
+use std::path::{Path, PathBuf};
+
+use vfs::FileId;
+
+use crate::{RootDatabase, RootDatabaseImpl};
+
+pub(crate) fn get_file_path(db: &dyn RootDatabase, file_id: FileId) -> Option<PathBuf> {
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.get_file_path(file_id)
+}
+
+pub(crate) fn find_configuration_root(db: &dyn RootDatabase, file_path: &Path) -> Option<PathBuf> {
+    let db_impl = db.as_any().downcast_ref::<RootDatabaseImpl>()?;
+    db_impl.find_configuration_root(file_path)
+}

@@ -1,0 +1,290 @@
+//! Type system for BSL.
+//!
+//! This module provides basic type information for BSL values and expressions.
+//! Full type inference is planned for later iterations (12+).
+
+pub mod doc_types;
+
+use syntax::ast::{self, AstNode};
+use syntax::SyntaxKind;
+
+/// BSL type representation.
+///
+/// Represents the type of a BSL value or expression.
+/// For Iteration 8, we support basic literal types and Unknown for everything else.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum Ty {
+    /// Unknown type (default for complex expressions).
+    #[default]
+    Unknown,
+
+    /// Number (Число).
+    /// BSL doesn't distinguish between integers and floats.
+    Number,
+
+    /// String (Строка).
+    String,
+
+    /// Boolean (Булево).
+    Boolean,
+
+    /// Date (Дата).
+    Date,
+
+    /// Undefined (Неопределено).
+    Undefined,
+
+    /// Null (NULL).
+    Null,
+
+    /// Array (Массив).
+    Array,
+
+    /// Structure (Структура).
+    Structure,
+
+    /// Map (Соответствие).
+    Map,
+
+    /// Type descriptor (returned by ТипЗнч, used in type checks).
+    Type,
+
+    /// ValueTable (ТаблицаЗначений).
+    ValueTable,
+
+    /// ValueList (СписокЗначений).
+    ValueList,
+
+    /// Metadata object reference (Справочники.Товары, etc.).
+    ///
+    /// Represents a reference to a metadata object like Catalog, Document, Register.
+    /// Only populated after type inference with metadata integration (Phase 5).
+    MetadataRef { kind: MetadataKind, name: crate::Name },
+
+    /// Function or procedure type.
+    ///
+    /// In BSL, functions and procedures are first-class values.
+    /// params: parameter types, ret: return type (Undefined for procedures).
+    Function { params: Box<[Ty]>, ret: Box<Ty> },
+}
+
+/// Metadata object kind.
+///
+/// Represents the kind of metadata object (Catalog, Document, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MetadataKind {
+    /// Catalog reference (СправочникСсылка).
+    CatalogRef,
+    /// Document reference (ДокументСсылка).
+    DocumentRef,
+    /// Document object (ДокументОбъект).
+    DocumentObject,
+    /// Catalog object (СправочникОбъект).
+    CatalogObject,
+    /// Information register record manager (РегистрСведенийМенеджерЗаписи).
+    InformationRegisterRecordManager,
+    /// Accumulation register record set (РегистрНакопленияНаборЗаписей).
+    AccumulationRegisterRecordSet,
+}
+
+impl Ty {
+    /// Infer type from a literal AST node.
+    ///
+    /// Returns the type of the literal, or Unknown if inference fails.
+    pub fn from_literal(literal: &ast::Literal) -> Self {
+        // Extract the token from the literal node
+        let token = literal.syntax().children_with_tokens().filter_map(|it| it.into_token()).next();
+
+        if let Some(token) = token {
+            match token.kind() {
+                SyntaxKind::FLOAT | SyntaxKind::DECIMAL => Ty::Number,
+                SyntaxKind::STRING => Ty::String,
+                SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => Ty::Boolean,
+                SyntaxKind::DATE => Ty::Date,
+                SyntaxKind::KW_UNDEFINED => Ty::Undefined,
+                SyntaxKind::KW_NULL => Ty::Null,
+                _ => Ty::Unknown,
+            }
+        } else {
+            Ty::Unknown
+        }
+    }
+
+    /// Infer type from a NewExpr (e.g., "Новый Массив").
+    ///
+    /// Returns the type based on the type name, or Unknown if not recognized.
+    pub fn from_new_expr(new_expr: &ast::NewExpr) -> Self {
+        // Find the type name token (IDENT after Новый/New)
+        if let Some(type_name_token) = new_expr
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+        {
+            Self::from_type_name(type_name_token.text())
+        } else {
+            Ty::Unknown
+        }
+    }
+
+    /// Infer type from a type name (e.g., "Массив", "Структура").
+    ///
+    /// Returns the corresponding type, or Unknown if not recognized.
+    pub fn from_type_name(name: &str) -> Self {
+        let name_lower = name.to_lowercase();
+        match name_lower.as_str() {
+            // Collection types
+            "массив" | "array" => Ty::Array,
+            "структура" | "structure" => Ty::Structure,
+            "соответствие" | "map" => Ty::Map,
+
+            // Primitive types
+            "число" | "number" => Ty::Number,
+            "строка" | "string" => Ty::String,
+            "булево" | "boolean" => Ty::Boolean,
+            "дата" | "date" => Ty::Date,
+
+            // Platform types (NEW in Phase 1)
+            "тип" | "type" => Ty::Type,
+            "таблицазначений" | "valuetable" => Ty::ValueTable,
+            "списокзначений" | "valuelist" => Ty::ValueList,
+
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// Check if this type is Unknown.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Ty::Unknown)
+    }
+
+    /// Check if this type is a function or procedure.
+    pub fn is_function(&self) -> bool {
+        matches!(self, Ty::Function { .. })
+    }
+
+    /// Get a human-readable display name for this type.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Ty::Unknown => "Unknown",
+            Ty::Number => "Number",
+            Ty::String => "String",
+            Ty::Boolean => "Boolean",
+            Ty::Date => "Date",
+            Ty::Undefined => "Undefined",
+            Ty::Null => "Null",
+            Ty::Array => "Array",
+            Ty::Structure => "Structure",
+            Ty::Map => "Map",
+            Ty::Type => "Type",
+            Ty::ValueTable => "ValueTable",
+            Ty::ValueList => "ValueList",
+            Ty::MetadataRef { .. } => "MetadataRef",
+            Ty::Function { .. } => "Function",
+        }
+    }
+}
+
+/// Function or procedure signature.
+///
+/// Contains parameter types and return type. For procedures, the return type is `Undefined`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionSignature {
+    /// Parameter types in declaration order.
+    pub params: Box<[Ty]>,
+
+    /// Return type (`Undefined` for procedures).
+    pub ret: Box<Ty>,
+}
+
+impl FunctionSignature {
+    /// Create a new function signature.
+    pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
+        Self { params: params.into_boxed_slice(), ret: Box::new(ret) }
+    }
+
+    /// Create a procedure signature (returns Undefined).
+    pub fn procedure(params: Vec<Ty>) -> Self {
+        Self::new(params, Ty::Undefined)
+    }
+
+    /// Create a function signature with known return type.
+    pub fn function(params: Vec<Ty>, ret: Ty) -> Self {
+        Self::new(params, ret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_type_name_inference_russian() {
+        assert_eq!(Ty::from_type_name("Массив"), Ty::Array);
+        assert_eq!(Ty::from_type_name("Структура"), Ty::Structure);
+        assert_eq!(Ty::from_type_name("Соответствие"), Ty::Map);
+        assert_eq!(Ty::from_type_name("Число"), Ty::Number);
+        assert_eq!(Ty::from_type_name("Строка"), Ty::String);
+        assert_eq!(Ty::from_type_name("Булево"), Ty::Boolean);
+        assert_eq!(Ty::from_type_name("Дата"), Ty::Date);
+    }
+
+    #[test]
+    fn test_type_name_inference_english() {
+        assert_eq!(Ty::from_type_name("Array"), Ty::Array);
+        assert_eq!(Ty::from_type_name("Structure"), Ty::Structure);
+        assert_eq!(Ty::from_type_name("Map"), Ty::Map);
+        assert_eq!(Ty::from_type_name("Number"), Ty::Number);
+        assert_eq!(Ty::from_type_name("String"), Ty::String);
+        assert_eq!(Ty::from_type_name("Boolean"), Ty::Boolean);
+        assert_eq!(Ty::from_type_name("Date"), Ty::Date);
+    }
+
+    #[test]
+    fn test_type_name_case_insensitive() {
+        assert_eq!(Ty::from_type_name("МАССИВ"), Ty::Array);
+        assert_eq!(Ty::from_type_name("массив"), Ty::Array);
+        assert_eq!(Ty::from_type_name("МаССиВ"), Ty::Array);
+        assert_eq!(Ty::from_type_name("array"), Ty::Array);
+        assert_eq!(Ty::from_type_name("ARRAY"), Ty::Array);
+    }
+
+    #[test]
+    fn test_type_name_unknown() {
+        assert_eq!(Ty::from_type_name("UnknownType"), Ty::Unknown);
+        assert_eq!(Ty::from_type_name("НеизвестныйТип"), Ty::Unknown);
+        assert_eq!(Ty::from_type_name(""), Ty::Unknown);
+    }
+
+    #[test]
+    fn test_display_name() {
+        assert_eq!(Ty::Number.display_name(), "Number");
+        assert_eq!(Ty::String.display_name(), "String");
+        assert_eq!(Ty::Boolean.display_name(), "Boolean");
+        assert_eq!(Ty::Unknown.display_name(), "Unknown");
+        assert_eq!(Ty::Array.display_name(), "Array");
+        assert_eq!(
+            Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.display_name(),
+            "Function"
+        );
+    }
+
+    #[test]
+    fn test_is_unknown() {
+        assert!(Ty::Unknown.is_unknown());
+        assert!(!Ty::Number.is_unknown());
+        assert!(!Ty::String.is_unknown());
+    }
+
+    #[test]
+    fn test_is_function() {
+        assert!(Ty::Function { params: Box::new([]), ret: Box::new(Ty::Undefined) }.is_function());
+        assert!(!Ty::Number.is_function());
+        assert!(!Ty::Unknown.is_function());
+    }
+
+    #[test]
+    fn test_default() {
+        assert_eq!(Ty::default(), Ty::Unknown);
+    }
+}

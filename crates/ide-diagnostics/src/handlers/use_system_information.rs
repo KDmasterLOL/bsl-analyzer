@@ -1,0 +1,118 @@
+//! UseSystemInformation diagnostic.
+//!
+//! Detects instantiation of СистемнаяИнформация / SystemInfo class.
+//!
+//! ## Why?
+//! SystemInformation object provides access to system and configuration data
+//! (computer name, RAM, processor info, etc.) that could be misused for:
+//! - Information disclosure
+//! - Fingerprinting attacks
+//! - Security policy violations
+//!
+//! ## Bad practice
+//! ```bsl
+//! Процедура ПолучитьИнфо()
+//!     СисИнфо = Новый СистемнаяИнформация;
+//! КонецПроцедуры
+//! ```
+//!
+//! ## Configuration
+//! - **Enabled by default:** No
+//! - **Severity:** Critical
+//! - **Type:** SECURITY_HOTSPOT
+
+use crate::define_metadata;
+use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::SecurityHotspot,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: false,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Suspicious],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::UseSystemInformation,
+        "Use of system information",
+        range,
+        ctx,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::*;
+    use crate::DiagnosticCode;
+    #[test]
+    fn test_java_fixture() {
+        let code = r#"Функция ТипТекущейПлатформы() Экспорт
+    СистемнаяИнформация = Новый СистемнаяИнформация; // Range(1, 26, 1, 51)
+    Возврат СистемнаяИнформация.ТипПлатформы;
+КонецФункции
+
+СистемнаяИнформация = Новый СистемнаяИнформация();   // Range(5, 22, 5, 49)
+СистемнаяИнформация = Новый("СистемнаяИнформация");  // Range(6, 22, 6, 50)
+СистемнаяИнформация = Новый SystemInfo;              // Range(7, 22, 7, 38)
+СистемнаяИнформация = Новый("SystemInfo");           // Range(8, 22, 8, 41)
+СистемнаяИнформация = Новый("СистемнаяИнформация2");
+
+ИмяТипа = "СистемнаяИнформация";
+СистемнаяИнформация = Новый(ИмяТипа);
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
+
+        assert_eq!(diags.len(), 5, "Expected 5 diagnostics, got {}", diags.len());
+
+        // Line 2 (0-indexed: 1), cols 26-51: Новый СистемнаяИнформация
+        assert_diagnostic_range(code, diags[0], 1, 26, 51);
+        // Line 6 (0-indexed: 5), cols 22-49: Новый СистемнаяИнформация()
+        assert_diagnostic_range(code, diags[1], 5, 22, 49);
+        // Line 7 (0-indexed: 6), cols 22-50: Новый("СистемнаяИнформация")
+        assert_diagnostic_range(code, diags[2], 6, 22, 50);
+        // Line 8 (0-indexed: 7), cols 22-38: Новый SystemInfo
+        assert_diagnostic_range(code, diags[3], 7, 22, 38);
+        // Line 9 (0-indexed: 8), cols 22-41: Новый("SystemInfo")
+        assert_diagnostic_range(code, diags[4], 8, 22, 41);
+    }
+
+    #[test]
+    fn test_no_false_positives() {
+        let code = r#"
+Процедура Тест()
+    СистемнаяИнформация = Новый("СистемнаяИнформация2");
+    ИмяТипа = "СистемнаяИнформация";
+    СистемнаяИнформация = Новый(ИмяТипа);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
+        assert_eq!(diags.len(), 0, "Should not detect non-matching type names or variables");
+    }
+
+    #[test]
+    fn test_case_insensitive() {
+        let code = r#"
+Процедура Тест()
+    А = Новый СИСТЕМНАЯИНФОРМАЦИЯ;
+    Б = Новый systeminfo;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UseSystemInformation).collect();
+        assert_eq!(diags.len(), 2, "Should detect case-insensitive type names");
+    }
+}

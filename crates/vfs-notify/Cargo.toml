@@ -1,0 +1,25 @@
+[package]
+name = "vfs-notify"
+version = "0.1.28"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "VFS loader with file watching for bsl-analyzer"
+
+[lib]
+doctest = false
+
+[dependencies]
+tracing.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
+crossbeam-channel.workspace = true
+notify.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+
+# Internal crates
+stdx.workspace = true
+vfs.workspace = true
+paths.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "bsl-platform"
+version = "0.1.28"
+edition = "2021"
+authors = ["BSL Analyzer Contributors"]
+description = "1C:Enterprise platform types and methods database"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+smol_str = { workspace = true }
+rustc-hash = { workspace = true }
+once_cell = { workspace = true }
+salsa = { workspace = true }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Automatically enabled by build.rs if 1C platform is found
+platform_docs = []

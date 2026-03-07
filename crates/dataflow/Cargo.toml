@@ -1,0 +1,27 @@
+[package]
+name = "dataflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cfg.workspace = true
+cfg-types.workspace = true
+hir-def.workspace = true
+la-arena.workspace = true
+rustc-hash.workspace = true
+smol_str.workspace = true
+smallvec.workspace = true
+tracing.workspace = true
+petgraph = "0.8.3"
+fixedbitset.workspace = true  # Compact BitSet for liveness analysis
+
+[dev-dependencies]
+expect-test.workspace = true
+parser.workspace = true
+lexer.workspace = true
+syntax.workspace = true
+base-db.workspace = true
+vfs.workspace = true
+ide-db.workspace = true

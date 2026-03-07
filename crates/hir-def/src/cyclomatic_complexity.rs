@@ -1,0 +1,364 @@
+//! Cyclomatic complexity calculation based on HIR.
+//!
+//! McCabe's cyclomatic complexity measures the number of linearly independent paths
+//! through a program's source code.
+//!
+//! ## Algorithm
+//!
+//! Base complexity: 1
+//! Decision points (+1 each):
+//! - IF (+1), ELSIF (+1), ELSE (+1)
+//! - While, For, ForEach loops (+1 each)
+//! - Try-Except (except clause: +1)
+//! - Ternary operator (+1)
+//! - GOTO (+1)
+//! - AND/OR binary operators (+1 each)
+//!
+//! ## Usage
+//!
+//! ```ignore
+//! use hir_def::cyclomatic_complexity::calculate_complexity;
+//!
+//! let complexity = calculate_complexity(&body);
+//! ```
+//!
+//! This can be used for:
+//! - Diagnostics (when complexity exceeds threshold)
+//! - Code lens (showing complexity in editor)
+//! - Metrics collection
+
+use crate::hir::{BinaryOp, Expr, ExprIdx, Stmt, StmtIdx};
+use crate::Body;
+
+/// Calculate McCabe's cyclomatic complexity for a method body.
+///
+/// Returns the total cyclomatic complexity score based on HIR representation.
+/// This is a pure function that can be cached by Salsa when called through a query.
+pub fn calculate_complexity(body: &Body) -> u32 {
+    let mut complexity = 1; // Base complexity
+
+    // Process top-level statements
+    for &stmt_id in body.body_stmts.iter() {
+        count_stmt_complexity(body, stmt_id, &mut complexity);
+    }
+
+    complexity
+}
+
+/// Recursively count complexity for a statement.
+fn count_stmt_complexity(body: &Body, stmt_id: StmtIdx, complexity: &mut u32) {
+    let stmt = body.stmt_idx(stmt_id);
+
+    match stmt {
+        Stmt::If(if_stmt) => {
+            *complexity += 1; // IF
+            count_expr_complexity(body, if_stmt.condition, complexity);
+
+            for &s in if_stmt.then_branch.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+
+            // Each ELSIF +1
+            for (elsif_cond, elsif_body) in if_stmt.elsif_branches.iter() {
+                *complexity += 1;
+                count_expr_complexity(body, *elsif_cond, complexity);
+                for &s in elsif_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+
+            // ELSE +1 (важно! В отличие от cognitive complexity, cyclomatic считает else)
+            if let Some(ref else_body) = if_stmt.else_branch {
+                *complexity += 1;
+                for &s in else_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+        }
+
+        Stmt::While { condition, body: loop_body } => {
+            *complexity += 1;
+            count_expr_complexity(body, *condition, complexity);
+            for &s in loop_body.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+        }
+
+        Stmt::For { from, to, body: loop_body, .. } => {
+            *complexity += 1;
+            count_expr_complexity(body, *from, complexity);
+            count_expr_complexity(body, *to, complexity);
+            for &s in loop_body.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+        }
+
+        Stmt::ForEach { collection, body: loop_body, .. } => {
+            *complexity += 1;
+            count_expr_complexity(body, *collection, complexity);
+            for &s in loop_body.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+        }
+
+        Stmt::Try { body: try_body, except } => {
+            for &s in try_body.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+
+            if !except.is_empty() {
+                *complexity += 1; // Except clause
+                for &s in except.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+        }
+
+        Stmt::Goto(_) => {
+            *complexity += 1;
+        }
+
+        Stmt::Expr(expr_id) => {
+            count_expr_complexity(body, *expr_id, complexity);
+        }
+
+        Stmt::Assign { target, value } => {
+            count_expr_complexity(body, *target, complexity);
+            count_expr_complexity(body, *value, complexity);
+        }
+
+        Stmt::Return { value } | Stmt::Raise { value } => {
+            if let Some(v) = value {
+                count_expr_complexity(body, *v, complexity);
+            }
+        }
+
+        Stmt::Execute { expr } => {
+            count_expr_complexity(body, *expr, complexity);
+        }
+
+        Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+            count_expr_complexity(body, *event, complexity);
+            count_expr_complexity(body, *handler, complexity);
+        }
+
+        // Preprocessor conditional: similar to If for complexity
+        Stmt::PreprocIf(preproc) => {
+            *complexity += 1; // #Если
+
+            for &s in preproc.then_branch.iter() {
+                count_stmt_complexity(body, s, complexity);
+            }
+
+            // Each #ИначеЕсли +1
+            for (_condition_range, _directive_range, elsif_body) in preproc.elsif_branches.iter() {
+                *complexity += 1;
+                for &s in elsif_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+
+            // #Иначе +1
+            if let Some(ref else_body) = preproc.else_branch {
+                *complexity += 1;
+                for &s in else_body.iter() {
+                    count_stmt_complexity(body, s, complexity);
+                }
+            }
+        }
+
+        _ => {}
+    }
+}
+
+/// Count complexity in an expression (for ternary and logical operators).
+fn count_expr_complexity(body: &Body, expr_id: ExprIdx, complexity: &mut u32) {
+    let expr = body.expr_idx(expr_id);
+
+    match expr {
+        Expr::Ternary { condition, then_expr, else_expr } => {
+            *complexity += 1; // Ternary +1
+            count_expr_complexity(body, *condition, complexity);
+            count_expr_complexity(body, *then_expr, complexity);
+            count_expr_complexity(body, *else_expr, complexity);
+        }
+
+        Expr::BinaryOp { lhs, rhs, op } => {
+            if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                *complexity += 1; // AND/OR +1
+            }
+            count_expr_complexity(body, *lhs, complexity);
+            count_expr_complexity(body, *rhs, complexity);
+        }
+
+        Expr::UnaryOp { expr, .. } => {
+            count_expr_complexity(body, *expr, complexity);
+        }
+
+        Expr::Call { callee, args } => {
+            count_expr_complexity(body, *callee, complexity);
+            for &arg in args.iter() {
+                count_expr_complexity(body, arg, complexity);
+            }
+        }
+
+        Expr::MethodCall { receiver, args, .. } => {
+            count_expr_complexity(body, *receiver, complexity);
+            for &arg in args.iter() {
+                count_expr_complexity(body, arg, complexity);
+            }
+        }
+
+        Expr::Index { base, index } => {
+            count_expr_complexity(body, *base, complexity);
+            count_expr_complexity(body, *index, complexity);
+        }
+
+        Expr::Field { base, .. } => {
+            count_expr_complexity(body, *base, complexity);
+        }
+
+        Expr::New { args, .. } => {
+            for &arg in args.iter() {
+                count_expr_complexity(body, arg, complexity);
+            }
+        }
+
+        Expr::Array(elements) => {
+            for &elem in elements.iter() {
+                count_expr_complexity(body, elem, complexity);
+            }
+        }
+
+        Expr::Await { expr } => {
+            count_expr_complexity(body, *expr, complexity);
+        }
+
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::lower_method;
+    use syntax::SyntaxKind;
+
+    fn parse_and_lower(code: &str) -> Body {
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+
+        let method_node = root
+            .descendants()
+            .find(|n| matches!(n.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF))
+            .expect("Should have a method");
+
+        let is_function = method_node.kind() == SyntaxKind::FUNCTION_DEF;
+        let result = lower_method(&method_node, is_function);
+        result.body
+    }
+
+    #[test]
+    fn test_simple_function() {
+        let code = r#"Функция ПростаяФункция(Параметр)
+    Возврат Параметр + 1;
+КонецФункции"#;
+
+        let body = parse_and_lower(code);
+        let complexity = calculate_complexity(&body);
+        assert_eq!(complexity, 1, "Simple function has base complexity 1");
+    }
+
+    #[test]
+    fn test_else_counts() {
+        let code = r#"Функция Тест()
+    Если А Тогда
+        Возврат 1;
+    Иначе
+        Возврат 2;
+    КонецЕсли;
+КонецФункции"#;
+
+        let body = parse_and_lower(code);
+        let complexity = calculate_complexity(&body);
+        // Base: 1, IF: +1, ELSE: +1 = 3
+        assert_eq!(complexity, 3, "IF + ELSE = 3");
+    }
+
+    #[test]
+    fn test_comprehensive() {
+        let code = r#"Функция СерверныйМодульМенеджера(Имя)
+	ОбъектНайден = Ложь;
+
+	ЧастиИмени = СтрРазделить(Имя, ".");
+	Если ЧастиИмени.Количество() = 2 Тогда
+
+		ИмяВида = ВРег(ЧастиИмени[0]);
+		ИмяОбъекта = ЧастиИмени[1];
+
+		Если ИмяВида = ВРег("Константы") Тогда
+			Если Метаданные.Константы.Найти(ИмяОбъекта) <> Неопределено Тогда
+				ОбъектНайден = Истина;
+			КонецЕсли;
+		ИначеЕсли ИмяВида = ВРег("РегистрыСведений") Тогда
+			Если Метаданные.РегистрыСведений.Найти(ИмяОбъекта) <> Неопределено Тогда
+				ОбъектНайден = Истина;
+			КонецЕсли;
+		Иначе
+			ОбъектНайден = Ложь;
+		КонецЕсли;
+	КонецЕсли;
+
+    Для Ит = 0 По 100 Цикл
+        Если Ит % 2 = 0 Тогда
+            Сообщить("Чет");
+        ИначеЕсли Ит % 2 > 0 Тогда
+            Сообщить("Нечет");
+        Иначе
+            Сообщить("Хм...");
+        КонецЕсли;
+    КонецЦикла;
+
+    Для Ит = 101 По 1000 Цикл
+        Если Ит % 3 = 0 Тогда
+            Сообщить("Не остатка");
+        ИначеЕсли Ит % 3 > 0 Тогда
+            Сообщить("Есть остаток");
+        ИначеЕсли Ит % 3 < 0 Тогда
+            Сообщить("Так не бывает");
+        Иначе
+            Сообщить("Хм...");
+        КонецЕсли;
+    КонецЦикла;
+
+	Если Не ОбъектНайден Тогда
+		ВызватьИсключение СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
+			НСтр("ru = 'Объект метаданных ""%1"" не найден,
+			           |либо для него не поддерживается получение модуля менеджера.'"),
+			Имя);
+	КонецЕсли;
+	УстановитьБезопасныйРежим(Истина);
+	Модуль = Вычислить(Имя);
+	F = ?(Условие, ИСТИНА, НЕОПРЕДЕЛЕНО);
+	А = ?(Условие, ИСТИНА, ?(Условие2, ЛОЖЬ, НЕОПРЕДЕЛЕНО));
+	M = ИСТИНА ИЛИ 7;
+	Возврат Модуль;
+КонецФункции"#;
+
+        // Parse to find first method (СерверныйМодульМенеджера)
+        let parse = parser::parse(code);
+        let root = parse.syntax_node();
+
+        let method_node = root
+            .descendants()
+            .find(|n| matches!(n.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF))
+            .expect("Should have a method");
+
+        let is_function = method_node.kind() == SyntaxKind::FUNCTION_DEF;
+        let result = lower_method(&method_node, is_function);
+
+        let complexity = calculate_complexity(&result.body);
+        // Ожидаем 21
+        assert_eq!(complexity, 21, "Expected complexity 21");
+    }
+}

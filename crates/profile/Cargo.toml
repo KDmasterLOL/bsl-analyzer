@@ -1,0 +1,27 @@
+[package]
+name = "profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Enable jemalloc for memory profiling on all platforms.
+# Requires tikv-jemalloc-ctl dependency when enabled.
+jemalloc = ["dep:tikv-jemalloc-ctl"]
+
+[dependencies]
+cfg-if = "1"
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"], optional = true }
+
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
+perf-event = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"

@@ -1,0 +1,11 @@
+[package]
+name = "intern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dashmap.workspace = true
+rustc-hash.workspace = true
+once_cell.workspace = true

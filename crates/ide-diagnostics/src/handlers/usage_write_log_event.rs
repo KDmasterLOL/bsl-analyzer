@@ -1,0 +1,835 @@
+//! UsageWriteLogEvent diagnostic.
+//!
+//! Validates correct usage of WriteLogEvent / ЗаписьЖурналаРегистрации method.
+//!
+//! ## Checks
+//! 1. Method must have at least 5 parameters
+//! 2. Second parameter (log level) must not be empty
+//! 3. Fifth parameter (comment) must not be empty
+//! 4. Inside exception blocks:
+//!    - Log level must be Error (УровеньЖурналаРегистрации.Ошибка / EventLogLevel.Error)
+//!    - Comment must contain DetailErrorDescription(ErrorInfo()) or have Raise statement
+//!
+//! ## Configuration
+//! - **Enabled by default:** Yes
+//! - **Severity:** INFO
+//! - **Type:** CODE_SMELL
+//! - **Tags:** STANDARD, BADPRACTICE
+//! - **Minutes to fix:** 1
+//!
+//! ## Implementation
+//! **AST-based diagnostic** - requires complex context analysis.
+//! Uses `bsl-platform` crate for method name resolution (bilingual, case-insensitive).
+//!
+//! Ported from:
+
+use crate::define_metadata;
+use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::CodeSmell,
+    severity: DiagnosticSeverityLevel::Info,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard, MetadataTag::Badpractice],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+const WRITE_LOG_EVENT_METHOD_PARAMS_COUNT: usize = 5;
+
+/// Creates diagnostic from HIR BodyDiagnostic::UsageWriteLogEvent.
+///
+/// Validates WriteLogEvent calls based on collected flags:
+/// 1. Must have at least 5 parameters
+/// 2. Second parameter (log level) must not be empty
+/// 3. Fifth parameter (comment) must not be empty
+/// 4. Inside exception blocks:
+///    - Log level must be Error
+///    - Comment must contain DetailErrorDescription(ErrorInfo()) or have Raise statement
+#[allow(clippy::too_many_arguments)]
+pub fn from_hir(
+    in_except_block: bool,
+    arg_count: usize,
+    log_level_empty: bool,
+    comment_empty: bool,
+    has_error_log_level: bool,
+    has_detail_error_description: bool,
+    except_has_raise: bool,
+    range: TextRange,
+    ctx: &DiagnosticsContext,
+) -> Option<Diagnostic> {
+    let code = DiagnosticCode::UsageWriteLogEvent;
+
+    if ctx.is_disabled_with_metadata(code) {
+        return None;
+    }
+
+    // Check 1: Wrong param count
+    if arg_count < WRITE_LOG_EVENT_METHOD_PARAMS_COUNT {
+        return Some(Diagnostic {
+            code,
+            message: "Неверное число параметров метода".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 2: Missing log level (2nd param)
+    if log_level_empty {
+        return Some(Diagnostic {
+            code,
+            message: "Не указан 2й параметр с типом \"УровеньЖурналаРегистрации\"".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 3: Missing comment (5th param)
+    if comment_empty {
+        return Some(Diagnostic {
+            code,
+            message: "Не указан 5й параметр \"Комментарий\"".to_string(),
+            severity: ctx.severity(code),
+            range,
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+
+    // Check 4: Inside except block validation
+    if in_except_block {
+        // Must have Error log level
+        if !has_error_log_level {
+            return Some(Diagnostic {
+                code,
+                message: "Нужно указывать уровень \"Ошибка\" при записи в журнал регистрации внутри блока Исключение-КонецПопытки".to_string(),
+                severity: ctx.severity(code),
+                range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
+        }
+
+        // Must have DetailErrorDescription or Raise in block
+        if !has_detail_error_description && !except_has_raise {
+            return Some(Diagnostic {
+                code,
+                message: "В тексте комментария нет вызова \"ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())\"".to_string(),
+                severity: ctx.severity(code),
+                range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::check_hir_diagnostic;
+    use crate::DiagnosticCode;
+
+    fn filter(diagnostics: &[crate::Diagnostic]) -> Vec<&crate::Diagnostic> {
+        diagnostics.iter().filter(|d| d.code == DiagnosticCode::UsageWriteLogEvent).collect()
+    }
+
+    #[test]
+    fn test_wrong_number_params() {
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие");
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("параметров"));
+    }
+
+    #[test]
+    fn test_two_params_wrong_count() {
+        // 2 args: still too few (need 5)
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка);
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("параметров"));
+    }
+
+    #[test]
+    fn test_four_params_wrong_count() {
+        // 4 args: still too few (need 5)
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , );
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("параметров"));
+    }
+
+    #[test]
+    fn test_no_second_parameter() {
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие",
+      ,
+      , , ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("2й параметр"));
+    }
+
+    #[test]
+    fn test_no_comment() {
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , , );
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("5й параметр"));
+    }
+
+    #[test]
+    fn test_wrong_log_level_in_except() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Предупреждение, , ,
+            "Текст");
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("Ошибка"));
+    }
+
+    #[test]
+    fn test_missing_detail_error_in_except() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            ОписаниеОшибки());
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_plain_string_comment_in_except() {
+        // In except: plain string literal as comment (no DetailErrorDescription)
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            "Комментарий 1");
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_concatenation_without_detail_error_in_except() {
+        // In except: variable assigned from concatenation without DetailErrorDescription
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ТекстОшибки = "Описание" + Метод();
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            "Еще текст " + ТекстОшибки + Метод());
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_unassigned_variable_in_except() {
+        // In except: variable used in comment but never assigned in except block
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            "Еще текст " + НетПрисвоения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_variable_assigned_above_try_used_in_except() {
+        // Variable assigned before try block used as comment in except.
+        // The implementation does not flag this: a pre-try assignment is not
+        // considered "in the except block", so no diagnostic is emitted.
+        let code = r#"
+Процедура Тест()
+    ТекстОшибки = "";
+    Попытка
+        А = 10;
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ТекстОшибки);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_correct_usage_outside_except() {
+        let code = r#"
+Процедура Тест()
+    ЗаписьЖурналаРегистрации("Событие",
+        УровеньЖурналаРегистрации.Ошибка, , ,
+        ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_correct_usage_in_except_with_raise() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка, , ,
+            ОписаниеОшибки());
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_correct_usage_in_except_with_detail() {
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_variable_with_detail_error() {
+        // Variable tracing: ТекстОшибки = ПодробноеПредставлениеОшибки(...) in except block
+        // resolves to true → no diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ТекстОшибки = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            ТекстОшибки);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_brief_error_used_directly_as_comment_in_except() {
+        // КраткоеПредставлениеОшибки used directly as comment → diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            КраткоеПредставлениеОшибки(ИнформацияОбОшибке()));
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_variable_traced_to_brief_error_in_except() {
+        // Variable assigned from КраткоеПредставлениеОшибки, then used as comment → diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_two_variables_wrong_one_used_in_except() {
+        // Two vars in except: one from КраткоеПредставлениеОшибки, one from ПодробноеПредставлениеОшибки.
+        // The wrong (brief) one is passed as comment → diagnostic.
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
+        ДругойТекстСообщения = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_brief_error_concatenated_with_description_in_except() {
+        // Variable assigned from КраткоеПредставлениеОшибки + ОписаниеОшибки() (no ПодробноеПредставлениеОшибки) → diagnostic
+        let code = r#"
+Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        КороткийТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();
+        ЗаписьЖурналаРегистрации(
+            "Событие",
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            КороткийТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_variable_param_used_as_comment_outside_except() {
+        // Param named ПодробноеПредставлениеОшибки used outside try block → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ПодробноеПредставлениеОшибки)
+    ЗаписьЖурналаРегистрации("Событие",
+        УровеньЖурналаРегистрации.Ошибка,,,
+        ПодробноеПредставлениеОшибки);
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_normal_write_log_with_variable_comment_outside_except() {
+        // WriteLog outside try block with variable comment → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
+    ТекстЗаписи = ТекстОтвета();
+    ЗаписьЖурналаРегистрации(
+        ИмяСобытия,
+        УровеньЖурналаРегистрации.Ошибка,
+        ,
+        СсылкаНаДанные,
+        ТекстЗаписи);
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_variable_traced_via_string_function_in_except() {
+        // Variable assigned via СтроковыеФункции.ПодставитьПараметрыВСтроку(..., ПодробноеПредставлениеОшибки(...))
+        // then used as comment → no diagnostic (detail error in the call chain)
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
+            "Не удалось: %1",
+            ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+        ЗаписьЖурналаРегистрации(
+            ИмяСобытия,
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_variable_traced_via_concatenation_with_detail_error_in_except() {
+        // Variable assigned from concatenation that includes ПодробноеПредставлениеОшибки → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        ТекстСообщения =
+            "Не удалось установить разделение" + " = "
+                + Формат(Выборка.ОбластьДанных, "ЧГ=0")
+                + Символы.ПС + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации(
+            ИмяСобытия,
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_dynamic_log_level_variable_in_except() {
+        // Dynamic log level from function call (not EventLogLevel enum) → no diagnostic for wrong level
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        ТекстСообщения =
+            "Не удалось" + Символы.ПС + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации(
+            ИмяСобытия,
+            УровеньОшибки(),
+            ,
+            СсылкаНаДанные,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_english_keywords() {
+        let code = r#"
+Procedure Test()
+    WriteLogEvent("Event");
+EndProcedure
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_case_insensitive() {
+        let code = r#"
+Процедура Тест()
+    ЗАПИСЬЖУРНАЛАРЕГИСТРАЦИИ("Событие");
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_error_processing_module() {
+        // ОбработкаОшибок.ПодробноеПредставлениеОшибки contains the substring → detected.
+        // УровеньЖР is not EventLogLevel enum → assume OK.
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖР,
+            , , ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_error_processing_module_brief_used_directly() {
+        // ОбработкаОшибок.КраткоеПредставлениеОшибки used directly as comment → diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()));
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_error_processing_module_variable_traced_to_brief() {
+        // Variable traced to ОбработкаОшибок.КраткоеПредставлениеОшибки → diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_error_processing_module_two_variables_wrong_one_used() {
+        // Two vars: one from ОбработкаОшибок.КраткоеПредставлениеОшибки, one from ОбработкаОшибок.ПодробноеПредставлениеОшибки.
+        // Wrong (brief) one used as comment → diagnostic.
+        let code = r#"
+Процедура Тест()
+    Попытка
+        СоздатьФайлНаДиске();
+    Исключение
+        ТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
+        ДругойТекстСообщения = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие",
+            УровеньЖурналаРегистрации.Ошибка,,,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_error_processing_module_brief_concatenated_with_description() {
+        // ОбработкаОшибок.КраткоеПредставлениеОшибки + ОписаниеОшибки() → diagnostic
+        let code = r#"
+Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        КороткийТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();
+        ЗаписьЖурналаРегистрации(
+            "Событие",
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            КороткийТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("ПодробноеПредставлениеОшибки"));
+    }
+
+    #[test]
+    fn test_error_processing_module_variable_traced_to_detail() {
+        // Variable traced to ОбработкаОшибок.ПодробноеПредставлениеОшибки in except → no diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ТекстОшибки = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
+            ТекстОшибки);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_error_processing_module_variable_log_level_in_except() {
+        // УровеньЖР (variable log level) with ОбработкаОшибок.ПодробноеПредставлениеОшибки → no diagnostic
+        let code = r#"
+Процедура Тест()
+    Попытка
+        Метод();
+    Исключение
+        ЗаписьЖурналаРегистрации("Событие", УровеньЖР,
+            , , ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_error_processing_module_detail_in_string_concat_outside_except() {
+        // ОбработкаОшибок.ПодробноеПредставлениеОшибки in string concatenation outside except → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия)
+    ЗаписьЖурналаРегистрации(ИмяСобытия,
+        УровеньЖурналаРегистрации.Ошибка, , ,
+        "Ошибка: " + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_error_processing_module_string_function_in_except() {
+        // Variable assigned via СтроковыеФункции.ПодставитьПараметрыВСтроку(..., ОбработкаОшибок.ПодробноеПредставлениеОшибки(...))
+        // → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
+            "Не удалось: %1",
+            ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+        ЗаписьЖурналаРегистрации(
+            ИмяСобытия,
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn test_error_processing_module_concatenation_with_detail_in_except() {
+        // Variable from concatenation including ОбработкаОшибок.ПодробноеПредставлениеОшибки → no diagnostic
+        let code = r#"
+Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
+    Попытка
+        Блокировка.Заблокировать();
+    Исключение
+        ТекстСообщения =
+            "Не удалось" + " = " + Формат(Выборка.ОбластьДанных, "ЧГ=0")
+                + Символы.ПС + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+        ЗаписьЖурналаРегистрации(
+            ИмяСобытия,
+            УровеньЖурналаРегистрации.Ошибка,
+            ,
+            СсылкаНаДанные,
+            ТекстСообщения);
+    КонецПопытки;
+КонецПроцедуры
+"#;
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+        assert_eq!(diags.len(), 0);
+    }
+}

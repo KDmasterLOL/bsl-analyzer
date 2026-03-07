@@ -1,0 +1,172 @@
+//! ProcedureReturnsValue diagnostic.
+//!
+//! Detects return statements with values inside procedures.
+//! Only functions can return values, procedures must use `Return;` without value.
+//!
+//! ## Bad practice
+//! ```bsl
+//! Процедура Тест()
+//!     Возврат 42;  // Error: procedure cannot return value
+//! КонецПроцедуры
+//! ```
+//!
+//! ## Good practice
+//! ```bsl
+//! Процедура Тест()
+//!     Возврат;  // OK: procedure without return value
+//! КонецПроцедуры
+//!
+//! Функция Тест()
+//!     Возврат 42;  // OK: function can return value
+//! КонецФункции
+//! ```
+//!
+//! ## Configuration
+//! - **Enabled by default:** Yes
+//! - **Severity:** Blocker
+//! - **Type:** ERROR
+
+use crate::define_metadata;
+use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Blocker,
+    scope: DiagnosticScope::All,
+    modules: &[],
+    minutes_to_fix: 5,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Error],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+};
+
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::ProcedureReturnsValue,
+        "Процедура не должна возвращать значение",
+        range,
+        ctx,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
+    use crate::DiagnosticCode;
+    #[test]
+    fn test_procedure_with_return_value() {
+        let code = r#"Процедура Тест()
+    Возврат 42;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
+            .collect();
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn test_procedure_without_return_value_ok() {
+        let code = r#"Процедура Тест()
+    Возврат;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ProcedureReturnsValue));
+    }
+
+    #[test]
+    fn test_procedure_return_without_semicolon_before_endif() {
+        // BSL allows omitting semicolon before КонецЕсли
+        // This should NOT trigger ProcedureReturnsValue diagnostic
+        let code = r#"Процедура Тест()
+    Если Истина Тогда
+        Возврат
+    КонецЕсли;
+КонецПроцедуры"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
+            .collect();
+        assert_eq!(
+            diags.len(),
+            0,
+            "Return without semicolon before КонецЕсли should not trigger diagnostic"
+        );
+    }
+
+    #[test]
+    fn test_function_with_return_value_ok() {
+        let code = r#"Функция Тест()
+    Возврат 42;
+КонецФункции"#;
+        let diagnostics = check_hir_diagnostic(code);
+        assert!(diagnostics.iter().all(|d| d.code != DiagnosticCode::ProcedureReturnsValue));
+    }
+
+    #[test]
+    fn test_fixture_java_compatibility() {
+        let code = r#"Функция ОдноЗначение()
+    Возврат "Значение";
+КонецФункции
+
+Процедура ПерваяПроцедура()
+
+    Тест = 1;
+    Возврат;
+    Возврат Тест;
+
+КонецПроцедуры
+
+Процедура ПромежуточнаяПроцедура()
+
+    Значение = Истина;
+    Если Значение = Истина Тогда
+        Возврат ОдноЗначение() + " 2";
+    КонецЕсли;
+
+КонецПроцедуры
+
+Процедура ВтораяПроцедура()
+
+    Накопитель = 1;
+    Для Счетчик = 1 По 2 Цикл
+        Накопитель = Накопитель + 1;
+
+        Если Накопитель = 2 Тогда
+            Возврат Накопитель;
+        КонецЕсли;
+    КонецЦикла;
+
+    Возврат;
+
+КонецПроцедуры
+
+Процедура ТретьяПроцедура()
+    Тест = 2;
+    Если Тест = 2 Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::ProcedureReturnsValue)
+            .collect();
+        assert_eq!(diags.len(), 3);
+        // Note: Our RETURN_STMT includes `;`, so end columns match line length
+        // Line 9: `    Возврат Тест;` - cols 4-17
+        assert_diagnostic_range(code, diags[0], 8, 4, 17);
+        // Line 17: `        Возврат ОдноЗначение() + " 2";` - cols 8-38
+        assert_diagnostic_range(code, diags[1], 16, 8, 38);
+        // Line 29: `            Возврат Накопитель;` - cols 12-31
+        assert_diagnostic_range(code, diags[2], 28, 12, 31);
+    }
+}

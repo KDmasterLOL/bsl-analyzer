@@ -1,0 +1,191 @@
+use crate::define_metadata;
+use crate::metadata::*;
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use ide_db::TextRange;
+
+pub const METADATA: DiagnosticMetadata = define_metadata! {
+    diagnostic_type: DiagnosticType::Error,
+    severity: DiagnosticSeverityLevel::Critical,
+    scope: DiagnosticScope::Bsl,
+    modules: &[],
+    minutes_to_fix: 1,
+    activated_by_default: true,
+    compatibility_mode: DiagnosticCompatibilityMode::Undefined,
+    tags: &[MetadataTag::Standard],
+    can_locate_on_project: false,
+    extra_min_for_complexity: 0.0,
+    lsp_severity_override: "",
+    clean_code_attribute: CleanCodeAttribute::Intentional,
+};
+
+pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+    crate::simple_hir_diagnostic(
+        DiagnosticCode::WrongUseOfRollbackTransactionMethod,
+        "Вызов 'ОтменитьТранзакцию'/'RollbackTransaction' должен находиться в блоке обработки исключений первым оператором",
+        range,
+        ctx,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::*;
+    use crate::DiagnosticCode;
+    #[test]
+    fn test_valid_first_in_except() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        ЗаписатьДанные();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+        ВызватьИсключение;
+    КонецПопытки;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 0, "RollbackTransaction first in except should be valid");
+    }
+
+    #[test]
+    fn test_not_first_in_except() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        ЗафиксироватьТранзакцию();
+    Исключение
+        Сообщить("Ошибка");
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 1, "RollbackTransaction not first in except should be error");
+        assert_diagnostic_range(code, diags[0], 6, 8, 29);
+    }
+
+    #[test]
+    fn test_outside_try_catch() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    ОтменитьТранзакцию();
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 1, "RollbackTransaction outside try-catch should be error");
+        assert_diagnostic_range(code, diags[0], 2, 4, 25);
+    }
+
+    #[test]
+    fn test_in_try_body() {
+        let code = r#"Процедура Тест()
+    НачатьТранзакцию();
+    Попытка
+        ОтменитьТранзакцию();
+        ЗафиксироватьТранзакцию();
+    Исключение
+        ОтменитьТранзакцию();
+    КонецПопытки;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 1, "RollbackTransaction in try body should be error");
+        assert_diagnostic_range(code, diags[0], 3, 8, 29);
+    }
+
+    #[test]
+    fn test_qualified_call_ignored() {
+        let code = r#"Процедура Тест()
+    Коннектор.ОтменитьТранзакцию();
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 0, "Qualified call should be ignored");
+    }
+
+    #[test]
+    fn test_english_keyword() {
+        let code = r#"Procedure Test()
+    BeginTransaction();
+    RollbackTransaction();
+EndProcedure"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+        assert_eq!(diags.len(), 1, "English RollbackTransaction should be detected");
+        assert_diagnostic_range(code, diags[0], 2, 4, 26);
+    }
+
+    #[test]
+    fn test_comprehensive() {
+        let code = r#"Функция Тест()
+    НачатьТранзакцию();
+    Попытка
+        ЗафиксироватьТранзакцию();
+    Исключение
+        Сообщить("Сообщение");
+        Сообщить("Сообщение");
+        ОтменитьТранзакцию();  // Срабатывание здесь
+    КонецПопытки;
+
+    НачатьТранзакцию();
+    ОтменитьТранзакцию();  // Срабатывание здесь
+    Возврат;
+КонецФункции
+
+Function Test()
+
+BeginTransaction();
+Attempt
+    DataLock = New DataLock;
+    DataLockElement = DataLock.Add("Document.ReceiptNote");
+    DataLockElement.SetValue("Reference", ReferenceForProcessing);
+
+    DocumentObject.Record();
+
+    CommitTransaction();
+Exception
+    DocumentObject.Record();
+    DocumentObject.Record();
+    RollbackTransaction();  // Срабатывание здесь
+
+    Return;
+EndFunction
+"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::WrongUseOfRollbackTransactionMethod)
+            .collect();
+
+        assert_eq!(diags.len(), 3);
+        assert_diagnostic_range(code, diags[0], 7, 8, 29);
+        assert_diagnostic_range(code, diags[1], 11, 4, 25);
+        assert_diagnostic_range(code, diags[2], 29, 4, 26);
+    }
+}

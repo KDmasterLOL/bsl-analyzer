@@ -1,0 +1,10 @@
+# Build artifacts
+target/
+
+# Temporary extraction data (platform_data.json is committed)
+/data/platform_full.json
+/data/extracted/
+
+# Build script output
+/src/generated.rs
+.platform_cache_timestamp
