@@ -31,7 +31,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
     severity: DiagnosticSeverityLevel::Major,
     scope: DiagnosticScope::All,
-    modules: &[bsl_metadata::ModuleType::CommonModule, bsl_metadata::ModuleType::ObjectModule],
+    modules: &[bsl_metadata::ModuleType::CommonModule, bsl_metadata::ModuleType::ObjectModule, bsl_metadata::ModuleType::HTTPServiceModule],
     minutes_to_fix: 1,
     activated_by_default: true,
     compatibility_mode: DiagnosticCompatibilityMode::Undefined,
@@ -90,6 +90,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
         for handler in form.command_handlers() {
             called_methods.insert(handler.to_lowercase());
+        }
+    }
+
+    // Add HTTP service handlers as "called" methods
+    // These are called by the platform, not by code
+    if let Some(ref http_service) = metadata.http_service {
+        for (_template, method) in http_service.all_methods() {
+            if !method.is_handler_empty() {
+                called_methods.insert(method.handler().to_lowercase());
+            }
         }
     }
 
@@ -553,6 +563,57 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
 
         assert_eq!(unused_diags.len(), 0);
+    }
+
+    #[test]
+    fn test_http_service_handler_not_flagged() {
+        use std::sync::Arc;
+
+        let code = r#"
+Функция createPOST(Запрос)
+    Возврат Запрос;
+КонецФункции
+
+Функция НеИспользуемая()
+    Возврат 1;
+КонецФункции
+"#;
+
+        let method = bsl_metadata::HTTPServiceMethodBuilder::new()
+            .name("POST")
+            .http_method("POST")
+            .handler("createPOST")
+            .build();
+        let template = bsl_metadata::HTTPServiceURLTemplateBuilder::new()
+            .name("create")
+            .template("/client/create")
+            .add_method(method)
+            .build();
+        let http_service =
+            bsl_metadata::HTTPServiceBuilder::new().name("lk").add_url_template(template).build();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::HTTPServiceModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: Some(Arc::new(http_service)),
+            web_service: None,
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+
+        // createPOST — HTTP service handler, should not be flagged
+        // НеИспользуемая — not a handler, should be flagged
+        assert_eq!(unused_diags.len(), 1);
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
     }
 
     #[test]
