@@ -66,9 +66,9 @@ pub fn simple_hir_diagnostic(
 use hir_dispatch::collect_hir_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
-    collect_ast_diagnostics, collect_configuration_diagnostics, collect_dataflow_diagnostics,
-    collect_item_tree_diagnostics, collect_line_diagnostics, collect_module_bodies_diagnostics,
-    collect_sdbl_hir_diagnostics, collect_syntax_diagnostics,
+    collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_item_tree_diagnostics,
+    collect_line_diagnostics, collect_module_bodies_diagnostics, collect_sdbl_hir_diagnostics,
+    collect_syntax_diagnostics,
 };
 
 /// Runs all diagnostics on a file.
@@ -98,7 +98,7 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // 3. Tier 2: Semantic diagnostics (ItemTree + ModuleBodies + AST)
     result.extend(safe_collect("item_tree", || collect_item_tree_diagnostics(ctx)));
     result.extend(safe_collect("module_bodies", || collect_module_bodies_diagnostics(ctx)));
-    result.extend(safe_collect("ast", || collect_ast_diagnostics(ctx)));
+    result.extend(safe_collect("ast", || handlers::using_hardcode_path::check(ctx)));
 
     // 4. Configuration-based diagnostics (SessionModule only)
     result.extend(safe_collect("configuration", || collect_configuration_diagnostics(ctx)));

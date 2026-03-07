@@ -135,10 +135,6 @@ pub fn dispatch_hir_diagnostic(
             handlers::magic_number::from_hir(value, *range, context, ctx)
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
-        BodyDiagnostic::UnusedVariable { name: _, range: _ } => {
-            // Skip HIR-based detection - using dataflow-based detection in unused_local_variable::check()
-            None
-        }
         BodyDiagnostic::MissingReturn { range } => {
             handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)
         }

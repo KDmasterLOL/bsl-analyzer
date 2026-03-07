@@ -11,7 +11,7 @@
 //! | **ItemTree** | `collect_item_tree_diagnostics` | ItemTree + Metadata | Salsa |
 //! | **ModuleBodies** | `collect_module_bodies_diagnostics` | HIR bodies | Salsa |
 //! | **Configuration** | `collect_configuration_diagnostics` | Configuration XML | Salsa |
-//! | **AST traversal** | `collect_ast_diagnostics` | `parse().descendants()` | None |
+//! | **AST traversal** | `using_hardcode_path::check` | `parse().descendants()` | None |
 //! | **Single-pass AST** | `collect_syntax_single_pass` | One traversal | None |
 //! | **Line/Text** | `collect_line_diagnostics` | Raw text | None |
 //! | **SDBL** | `collect_sdbl_hir_diagnostics` | SDBL HIR | Salsa |
@@ -127,9 +127,6 @@ const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::MissingCodeTryCatchEx,
     DiagnosticCode::UsingHardcodeNetworkAddress,
 ];
-
-/// Diagnostics in collect_ast_diagnostics
-const AST_DIAGNOSTICS: &[DiagnosticCode] = &[DiagnosticCode::UsingHardcodePath];
 
 /// Diagnostics in collect_configuration_diagnostics
 const CONFIGURATION_DIAGNOSTICS: &[DiagnosticCode] = &[
@@ -524,30 +521,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 }
 
 // ============================================================================
-// Pure AST-based diagnostics (parse + descendants)
-// ============================================================================
-
-/// Collect diagnostics that traverse raw AST.
-///
-/// These diagnostics use `ctx.parse().syntax_node().descendants()`.
-/// They should be migrated to HIR or single-pass when possible.
-pub fn collect_ast_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if !ctx.config.any_enabled(AST_DIAGNOSTICS) {
-        return Vec::new();
-    }
-
-    let mut diagnostics = Vec::new();
-
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodePath",
-        ctx,
-        handlers::using_hardcode_path::check,
-    ));
-
-    diagnostics
-}
-
-// ============================================================================
 // Configuration-based diagnostics (require Configuration XML, SessionModule only)
 // ============================================================================
 
@@ -728,7 +701,7 @@ mod tests {
             ("SYNTAX_DIAGNOSTICS", SYNTAX_DIAGNOSTICS),
             ("ITEM_TREE_DIAGNOSTICS", ITEM_TREE_DIAGNOSTICS),
             ("MODULE_BODIES_DIAGNOSTICS", MODULE_BODIES_DIAGNOSTICS),
-            ("AST_DIAGNOSTICS", AST_DIAGNOSTICS),
+            ("AST_DIAGNOSTICS", &[DiagnosticCode::UsingHardcodePath]),
             ("CONFIGURATION_DIAGNOSTICS", CONFIGURATION_DIAGNOSTICS),
             ("SDBL_HIR_DIAGNOSTICS", SDBL_HIR_DIAGNOSTICS),
             ("DATAFLOW_DIAGNOSTICS", DATAFLOW_DIAGNOSTICS),

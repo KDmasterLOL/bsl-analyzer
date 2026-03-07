@@ -154,38 +154,14 @@ impl Definition {
     /// Returns `None` for unresolved symbols and some complex types.
     pub fn name(&self, db: &dyn DefDatabase) -> Option<Name> {
         match self {
-            Definition::Method(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize)? {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        Some(tree.procedure(*proc_idx).name.clone())
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        Some(tree.function(*func_idx).name.clone())
-                    }
-                    _ => None,
-                }
-            }
-            Definition::Variable(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize)? {
-                    hir_def::item_tree::ModItem::Variable(var_idx) => {
-                        Some(tree.variable(*var_idx).name.clone())
-                    }
-                    _ => None,
-                }
-            }
+            Definition::Method(id) => crate::get_method_info(id, db).map(|i| i.name),
+            Definition::Variable(id) => crate::get_variable_info(id, db).map(|i| i.name),
             Definition::Parameter { param_name, .. } => Some(param_name.clone()),
             Definition::Local { var_name, .. } => Some(var_name.clone()),
             Definition::BuiltinFunction(name) => Some(name.clone()),
             Definition::BuiltinMethod { method_name, .. } => Some(method_name.clone()),
             Definition::MdoObject { object_name, .. } => Some(object_name.clone()),
-            Definition::Module(id) => {
-                // Module name is typically the file name without extension
-                // For now, return None (can be implemented later if needed)
-                let _ = id;
-                None
-            }
+            Definition::Module(_) => None,
             Definition::VirtualTableField { field_name, .. } => Some(field_name.clone()),
             Definition::MdoCollectionType(_) | Definition::MdoManagerModule { .. } => None,
             Definition::Unresolved => None,
@@ -197,28 +173,10 @@ impl Definition {
     /// Only methods and variables can be exported.
     pub fn is_export(&self, db: &dyn DefDatabase) -> bool {
         match self {
-            Definition::Method(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize) {
-                    Some(hir_def::item_tree::ModItem::Procedure(proc_idx)) => {
-                        tree.procedure(*proc_idx).is_export
-                    }
-                    Some(hir_def::item_tree::ModItem::Function(func_idx)) => {
-                        tree.function(*func_idx).is_export
-                    }
-                    _ => false,
-                }
-            }
+            Definition::Method(id) => crate::get_method_info(id, db).is_some_and(|i| i.is_export),
             Definition::Variable(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize) {
-                    Some(hir_def::item_tree::ModItem::Variable(var_idx)) => {
-                        tree.variable(*var_idx).is_export
-                    }
-                    _ => false,
-                }
+                crate::get_variable_info(id, db).is_some_and(|i| i.is_export)
             }
-            // Other definitions cannot be exported
             _ => false,
         }
     }
@@ -228,32 +186,8 @@ impl Definition {
     /// Returns `None` for builtin functions and unresolved symbols.
     pub fn source_range(&self, db: &dyn DefDatabase) -> Option<TextRange> {
         match self {
-            Definition::Method(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize)? {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        Some(tree.procedure(*proc_idx).source_range)
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        Some(tree.function(*func_idx).source_range)
-                    }
-                    _ => None,
-                }
-            }
-            Definition::Variable(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize)? {
-                    hir_def::item_tree::ModItem::Variable(var_idx) => {
-                        Some(tree.variable(*var_idx).source_range)
-                    }
-                    _ => None,
-                }
-            }
-            // TODO: Implement for parameters and local variables
-            // This requires storing their source ranges in Body/ExprScopes
-            Definition::Parameter { .. } | Definition::Local { .. } => None,
-
-            // Builtins and MDOs don't have source ranges in user code
+            Definition::Method(id) => crate::get_method_info(id, db).map(|i| i.source_range),
+            Definition::Variable(id) => crate::get_variable_info(id, db).map(|i| i.source_range),
             _ => None,
         }
     }
@@ -264,23 +198,7 @@ impl Definition {
     /// not the entire declaration.
     pub fn name_range(&self, db: &dyn DefDatabase) -> Option<TextRange> {
         match self {
-            Definition::Method(id) => {
-                let tree = db.item_tree(id.module.file_id);
-                match tree.top_level_items().get(id.local_id as usize)? {
-                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                        Some(tree.procedure(*proc_idx).name_range)
-                    }
-                    hir_def::item_tree::ModItem::Function(func_idx) => {
-                        Some(tree.function(*func_idx).name_range)
-                    }
-                    _ => None,
-                }
-            }
-            Definition::Variable(_id) => {
-                // Variables don't have separate name_range in ItemTree
-                // Use source_range() instead
-                None
-            }
+            Definition::Method(id) => crate::get_method_info(id, db).map(|i| i.name_range),
             _ => None,
         }
     }
@@ -314,15 +232,9 @@ impl Definition {
     pub fn label(&self, db: &dyn DefDatabase) -> String {
         match self {
             Definition::Method(id) => {
-                let name = self.name(db).unwrap_or_else(Name::missing);
-                let is_func = {
-                    let tree = db.item_tree(id.module.file_id);
-                    tree.top_level_items()
-                        .get(id.local_id as usize)
-                        .map(|item| matches!(item, hir_def::item_tree::ModItem::Function(_)))
-                        .unwrap_or(false)
-                };
-                if is_func {
+                let info = crate::get_method_info(id, db);
+                let name = info.as_ref().map_or_else(Name::missing, |i| i.name.clone());
+                if info.is_some_and(|i| i.is_function) {
                     format!("Функция {}()", name.as_str())
                 } else {
                     format!("Процедура {}()", name.as_str())

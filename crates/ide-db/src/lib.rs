@@ -551,8 +551,8 @@ impl hir::HirDatabase for RootDatabaseImpl {
 impl RootDatabase for RootDatabaseImpl {
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
         // Reuse the same logic as sdbl_hir_in_file_query
-        let file_path = vfs_helpers::get_file_path_for_sdbl(self, file_id)?;
-        let config_root = vfs_helpers::find_configuration_root_for_sdbl(self, &file_path)?;
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
         let config_path_str = config_root.to_string_lossy().to_string();
         let path_input = metadata::ConfigurationPathInput::new(self, config_path_str);
         // Salsa-cached via load_configuration

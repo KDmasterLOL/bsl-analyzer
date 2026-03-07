@@ -66,7 +66,7 @@ pub fn module_metadata_query<'db>(
     let file_id = file_id_input.file_id(db);
 
     // Get file path using VFS access
-    let file_path = match crate::vfs_helpers::get_file_path_for_metadata(db, file_id) {
+    let file_path = match crate::vfs_helpers::get_file_path(db, file_id) {
         Some(path) => path,
         None => {
             tracing::debug!("Could not determine file path for metadata");
@@ -75,7 +75,7 @@ pub fn module_metadata_query<'db>(
     };
 
     // Load configuration (Salsa-cached)
-    let config_root = crate::vfs_helpers::find_configuration_root_for_metadata(db, &file_path);
+    let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path);
     let configuration = config_root.map(|root| {
         let config_path_str = root.to_string_lossy().to_string();
         let path_input = ConfigurationPathInput::new(db, config_path_str);
@@ -184,10 +184,10 @@ pub fn sdbl_hir_in_file_query<'db>(
     }
 
     // Try to load configuration for metadata-based type inference
-    let file_path_opt = crate::vfs_helpers::get_file_path_for_sdbl(db, file_id);
+    let file_path_opt = crate::vfs_helpers::get_file_path(db, file_id);
 
     let configuration = file_path_opt.and_then(|file_path| {
-        let config_root_opt = crate::vfs_helpers::find_configuration_root_for_sdbl(db, &file_path);
+        let config_root_opt = crate::vfs_helpers::find_configuration_root(db, &file_path);
         config_root_opt.map(|config_root| {
             let config_path_str = config_root.to_string_lossy().to_string();
             let path_input = ConfigurationPathInput::new(db, config_path_str);

@@ -673,19 +673,11 @@ impl ModuleBodies {
             });
         }
 
-        // Create set of module variable names for method lowering
-        let module_var_names: FxHashSet<String> =
-            result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
-
         // Lower all methods
         for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
             let method_idx = method_idx as u32;
-            let lower_result = body::lower_method_with_externals(
-                &node,
-                is_function,
-                module_var_names.clone(),
-                line_index.clone(),
-            );
+            let lower_result =
+                body::lower_method_with_externals(&node, is_function, line_index.clone());
 
             let method_id = MethodId { module: module_id, local_id: method_idx };
             for diag in &lower_result.diagnostics {

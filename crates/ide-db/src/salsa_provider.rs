@@ -86,8 +86,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     }
 
     fn file_path(&self, file_id: FileId) -> Option<String> {
-        crate::vfs_helpers::get_file_path_for_metadata(self.db, file_id)
-            .map(|p| p.to_string_lossy().to_string())
+        crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
 
     fn file_source_root_id(&self, file_id: FileId) -> SourceRootId {

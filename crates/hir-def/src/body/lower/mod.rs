@@ -53,13 +53,7 @@ pub(crate) struct LoweringCtx {
     pub(crate) diagnostics: Vec<BodyDiagnostic>,
     /// Whether we're lowering a function (vs procedure).
     /// Used for diagnostics like FunctionShouldHaveReturn.
-    #[allow(dead_code)] // Will be used in Phase 2 for return path analysis
     pub(crate) is_function: bool,
-
-    /// Known external variable names (lowercase) - module variables, etc.
-    /// Reserved for future use by diagnostics.
-    #[allow(dead_code)]
-    pub(crate) known_externals: FxHashSet<String>,
 
     /// Local variables (lowercase name -> (original name, declaration range)).
     /// Used to distinguish local vars from module names in qualified call checks.
@@ -169,20 +163,11 @@ pub(crate) enum QueryVarType {
 impl LoweringCtx {
     /// Create a new lowering context.
     pub(crate) fn new(is_function: bool) -> Self {
-        Self::new_with_externals(is_function, FxHashSet::default())
-    }
-
-    /// Create a new lowering context with known external variable names.
-    pub(crate) fn new_with_externals(
-        is_function: bool,
-        known_externals: FxHashSet<String>,
-    ) -> Self {
         Self {
             body: Body::new(),
             source_map: BodySourceMap::new(),
             diagnostics: Vec::new(),
             is_function,
-            known_externals,
             local_vars: FxHashMap::default(),
             param_names: FxHashSet::default(),
             by_ref_param_names: FxHashSet::default(),
@@ -259,12 +244,6 @@ impl LoweringCtx {
         if returns.len() > MIN_THRESHOLD {
             self.emit(BodyDiagnostic::TooManyReturns { method_name, method_name_range, returns });
         }
-    }
-
-    /// Check if a name is a known external (module variable).
-    #[allow(dead_code)]
-    pub(crate) fn is_known_external(&self, name: &str) -> bool {
-        self.known_externals.contains(&name.to_lowercase())
     }
 
     /// Register a parameter name.
@@ -376,7 +355,7 @@ impl LoweringCtx {
 
 /// Lower a method AST node to HIR.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
-    lower_method_with_externals(method_node, is_function, FxHashSet::default(), None)
+    lower_method_with_externals(method_node, is_function, None)
 }
 
 /// Check if method has ONLY &НаКлиенте annotation.
@@ -665,19 +644,16 @@ fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
     }
 }
 
-/// Lower a method AST node to HIR with known external variable names.
+/// Lower a method AST node to HIR.
 ///
-/// External variable names (like module-level variables) are passed to avoid
-/// registering them as implicit local variables.
 /// When `line_index` is provided, additional diagnostics are emitted:
 /// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
-    known_externals: FxHashSet<String>,
     line_index: Option<Arc<LineIndex>>,
 ) -> LowerResult {
-    let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
+    let mut ctx = LoweringCtx::new(is_function);
 
     if let Some(li) = line_index {
         ctx.set_line_index(li);

@@ -12,20 +12,6 @@
 use crate::{handlers, Diagnostic, DiagnosticsContext};
 use syntax::{SyntaxNode, SyntaxToken};
 
-/// Context passed to single-pass handlers during AST traversal.
-///
-/// This struct holds per-file configuration that handlers need.
-/// It's created once per file and passed to all handlers.
-pub struct SinglePassContext<'a> {
-    pub ctx: &'a DiagnosticsContext<'a>,
-}
-
-impl<'a> SinglePassContext<'a> {
-    pub fn new(ctx: &'a DiagnosticsContext<'a>) -> Self {
-        Self { ctx }
-    }
-}
-
 /// Collect syntax diagnostics using single-pass AST traversal.
 ///
 /// This function performs ONE traversal of the syntax tree and calls all
@@ -49,17 +35,16 @@ pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
-    let sp_ctx = SinglePassContext::new(ctx);
 
     // Single traversal: visit all nodes and tokens
     for node in root.descendants() {
         // Call node-based handlers
-        check_node_handlers(&node, &mut diagnostics, &sp_ctx);
+        check_node_handlers(&node, &mut diagnostics, ctx);
 
         // Call token-based handlers for tokens in this node
         for element in node.children_with_tokens() {
             if let Some(token) = element.into_token() {
-                check_token_handlers(&token, &mut diagnostics, &sp_ctx);
+                check_token_handlers(&token, &mut diagnostics, ctx);
             }
         }
     }
@@ -78,28 +63,24 @@ pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// Each handler checks `ctx.is_disabled_with_metadata()` internally.
 #[inline]
-fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, sp_ctx: &SinglePassContext) {
+fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     // Migrated handlers (Phase 1):
-    handlers::useless_ternary_operator::check_node(node, acc, sp_ctx.ctx);
-    handlers::double_negatives::check_node(node, acc, sp_ctx.ctx);
+    handlers::useless_ternary_operator::check_node(node, acc, ctx);
+    handlers::double_negatives::check_node(node, acc, ctx);
     // Migrated handlers (Phase 2):
-    handlers::unknown_preprocessor_symbol::check_node(node, acc, sp_ctx.ctx);
+    handlers::unknown_preprocessor_symbol::check_node(node, acc, ctx);
     // Migrated handlers (Phase 4 - from collect_text_diagnostics):
-    handlers::bad_words::check_node(node, acc, sp_ctx.ctx);
-    handlers::typo::check_node(node, acc, sp_ctx.ctx);
-    handlers::nested_ternary_operator::check_node(node, acc, sp_ctx.ctx);
+    handlers::bad_words::check_node(node, acc, ctx);
+    handlers::typo::check_node(node, acc, ctx);
+    handlers::nested_ternary_operator::check_node(node, acc, ctx);
 }
 
 /// Dispatch to all token-based handlers.
 ///
 /// Each handler checks `ctx.is_disabled_with_metadata()` internally.
 #[inline]
-fn check_token_handlers(
-    token: &SyntaxToken,
-    acc: &mut Vec<Diagnostic>,
-    sp_ctx: &SinglePassContext,
-) {
+fn check_token_handlers(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
     // Migrated handlers (Phase 2):
-    handlers::yo_letter_usage::check_token(token, acc, sp_ctx.ctx);
-    handlers::magic_date::check_token(token, acc, sp_ctx.ctx);
+    handlers::yo_letter_usage::check_token(token, acc, ctx);
+    handlers::magic_date::check_token(token, acc, ctx);
 }

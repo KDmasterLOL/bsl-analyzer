@@ -103,12 +103,40 @@ pub struct Method<'db, DB: ?Sized> {
     id: MethodId,
 }
 
-struct MethodInfo {
-    name: Name,
-    is_export: bool,
-    is_function: bool,
-    source_range: TextRange,
-    name_range: TextRange,
+pub(crate) struct MethodInfo {
+    pub(crate) name: Name,
+    pub(crate) is_export: bool,
+    pub(crate) is_function: bool,
+    pub(crate) source_range: TextRange,
+    pub(crate) name_range: TextRange,
+}
+
+pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<MethodInfo> {
+    let tree = db.item_tree(id.module.file_id);
+    let item = tree.top_level_items().get(id.local_id as usize)?;
+    match item {
+        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+            let proc = tree.procedure(*proc_idx);
+            Some(MethodInfo {
+                name: proc.name.clone(),
+                is_export: proc.is_export,
+                is_function: false,
+                source_range: proc.source_range,
+                name_range: proc.name_range,
+            })
+        }
+        hir_def::item_tree::ModItem::Function(func_idx) => {
+            let func = tree.function(*func_idx);
+            Some(MethodInfo {
+                name: func.name.clone(),
+                is_export: func.is_export,
+                is_function: true,
+                source_range: func.source_range,
+                name_range: func.name_range,
+            })
+        }
+        _ => None,
+    }
 }
 
 impl<'db, DB: DefDatabase + ?Sized> Method<'db, DB> {
@@ -189,10 +217,25 @@ pub struct Variable<'db, DB: ?Sized> {
     id: VariableId,
 }
 
-struct VariableInfo {
-    name: Name,
-    is_export: bool,
-    source_range: TextRange,
+pub(crate) struct VariableInfo {
+    pub(crate) name: Name,
+    pub(crate) is_export: bool,
+    pub(crate) source_range: TextRange,
+}
+
+pub(crate) fn get_variable_info(id: &VariableId, db: &dyn DefDatabase) -> Option<VariableInfo> {
+    let tree = db.item_tree(id.module.file_id);
+    let item = tree.top_level_items().get(id.local_id as usize)?;
+    if let hir_def::item_tree::ModItem::Variable(var_idx) = item {
+        let var = tree.variable(*var_idx);
+        Some(VariableInfo {
+            name: var.name.clone(),
+            is_export: var.is_export,
+            source_range: var.source_range,
+        })
+    } else {
+        None
+    }
 }
 
 impl<'db, DB: DefDatabase + ?Sized> Variable<'db, DB> {
@@ -426,88 +469,51 @@ impl<'db, DB: DefDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         // Find the enclosing method
         let mut node = token.parent()?;
         loop {
-            if let Some(proc_def) = syntax::ast::ProcedureDef::cast(node.clone()) {
-                // Build ExprScopes from procedure
-                let scopes = ExprScopes::from_procedure(&proc_def);
-                let root_scope = scopes.root_scope();
+            // Try procedure, then function
+            let (scopes, method_range) =
+                if let Some(proc_def) = syntax::ast::ProcedureDef::cast(node.clone()) {
+                    (ExprScopes::from_procedure(&proc_def), proc_def.syntax().text_range())
+                } else if let Some(func_def) = syntax::ast::FunctionDef::cast(node.clone()) {
+                    (ExprScopes::from_function(&func_def), func_def.syntax().text_range())
+                } else {
+                    node = node.parent()?;
+                    continue;
+                };
 
-                // Resolve name in scopes
-                if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
-                    // Find matching method in ItemTree by source_range
-                    let tree = self.db.item_tree(file_id);
-                    let proc_range = proc_def.syntax().text_range();
-                    for (idx, item) in tree.top_level_items().iter().enumerate() {
-                        if let hir_def::item_tree::ModItem::Procedure(proc_idx) = item {
-                            let proc = tree.procedure(*proc_idx);
-                            if proc.source_range != proc_range {
-                                continue;
-                            }
-                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                            return Some(match scope_def {
-                                ScopeDef::Parameter => {
-                                    let param_index = proc
-                                        .params
-                                        .iter()
-                                        .position(|p| p.name.eq_ignore_case(&name))
-                                        .unwrap_or(0)
-                                        as u32;
-                                    Definition::Parameter {
-                                        method_id,
-                                        param_name: name.clone(),
-                                        param_index,
-                                    }
-                                }
-                                ScopeDef::LocalVariable => {
-                                    Definition::Local { method_id, var_name: name.clone() }
-                                }
-                            });
-                        }
+            let root_scope = scopes.root_scope();
+            let scope_def = scopes.resolve_name(root_scope, &name)?;
+
+            // Find matching method in ItemTree by source_range
+            let tree = self.db.item_tree(file_id);
+            for (idx, item) in tree.top_level_items().iter().enumerate() {
+                let (params, source_range) = match item {
+                    hir_def::item_tree::ModItem::Procedure(proc_idx) => {
+                        let p = tree.procedure(*proc_idx);
+                        (&p.params, p.source_range)
                     }
-                }
-                return None;
-            }
-            if let Some(func_def) = syntax::ast::FunctionDef::cast(node.clone()) {
-                // Build ExprScopes from function
-                let scopes = ExprScopes::from_function(&func_def);
-                let root_scope = scopes.root_scope();
-
-                // Resolve name in scopes
-                if let Some(scope_def) = scopes.resolve_name(root_scope, &name) {
-                    // Find matching method in ItemTree by source_range
-                    let tree = self.db.item_tree(file_id);
-                    let func_range = func_def.syntax().text_range();
-                    for (idx, item) in tree.top_level_items().iter().enumerate() {
-                        if let hir_def::item_tree::ModItem::Function(func_idx) = item {
-                            let func = tree.function(*func_idx);
-                            if func.source_range != func_range {
-                                continue;
-                            }
-                            let method_id = MethodId { module: module_id, local_id: idx as u32 };
-                            return Some(match scope_def {
-                                ScopeDef::Parameter => {
-                                    let param_index = func
-                                        .params
-                                        .iter()
-                                        .position(|p| p.name.eq_ignore_case(&name))
-                                        .unwrap_or(0)
-                                        as u32;
-                                    Definition::Parameter {
-                                        method_id,
-                                        param_name: name.clone(),
-                                        param_index,
-                                    }
-                                }
-                                ScopeDef::LocalVariable => {
-                                    Definition::Local { method_id, var_name: name.clone() }
-                                }
-                            });
-                        }
+                    hir_def::item_tree::ModItem::Function(func_idx) => {
+                        let f = tree.function(*func_idx);
+                        (&f.params, f.source_range)
                     }
+                    _ => continue,
+                };
+                if source_range != method_range {
+                    continue;
                 }
-                return None;
+                let method_id = MethodId { module: module_id, local_id: idx as u32 };
+                return Some(match scope_def {
+                    ScopeDef::Parameter => {
+                        let param_index =
+                            params.iter().position(|p| p.name.eq_ignore_case(&name)).unwrap_or(0)
+                                as u32;
+                        Definition::Parameter { method_id, param_name: name.clone(), param_index }
+                    }
+                    ScopeDef::LocalVariable => {
+                        Definition::Local { method_id, var_name: name.clone() }
+                    }
+                });
             }
-
-            node = node.parent()?;
+            return None;
         }
     }
 

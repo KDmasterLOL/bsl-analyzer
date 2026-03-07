@@ -44,24 +44,6 @@ impl LoweringContext {
         }
     }
 
-    /// Push a new scope frame (for subqueries).
-    #[allow(dead_code)]
-    pub fn push_scope(&mut self) {
-        self.scope.push_frame();
-    }
-
-    /// Pop the current scope frame.
-    #[allow(dead_code)]
-    pub fn pop_scope(&mut self) {
-        self.scope.pop_frame();
-    }
-
-    /// Add a diagnostic.
-    #[allow(dead_code)]
-    pub fn add_diagnostic(&mut self, diagnostic: SdblDiagnostic) {
-        self.diagnostics.push(diagnostic);
-    }
-
     /// Record a token directly in the source map.
     pub(super) fn record_token(&mut self, token: &SyntaxToken, category: TokenCategory) {
         let info = TokenInfo::new(token.text_range(), token.kind(), token.text().to_string());

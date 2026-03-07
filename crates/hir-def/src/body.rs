@@ -370,9 +370,6 @@ pub enum BodyDiagnostic {
     /// Self-assignment (a = a).
     SelfAssign { range: TextRange },
 
-    /// Unused local variable.
-    UnusedVariable { name: String, range: TextRange },
-
     /// Function should have return.
     FunctionShouldHaveReturn { range: TextRange },
 
@@ -1032,7 +1029,6 @@ impl BodyDiagnostic {
             BodyDiagnostic::DisableSafeMode { range, .. } => *range,
             BodyDiagnostic::MagicNumber { range, .. } => *range,
             BodyDiagnostic::SelfAssign { range } => *range,
-            BodyDiagnostic::UnusedVariable { range, .. } => *range,
             BodyDiagnostic::FunctionShouldHaveReturn { range } => *range,
             BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => *range,
             BodyDiagnostic::MissedRequiredParameter { range, .. } => *range,
@@ -1110,19 +1106,16 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
     lower::lower_method(method_node, is_function)
 }
 
-/// Lower a method AST node to HIR Body with known external variable names.
+/// Lower a method AST node to HIR Body with line index for additional diagnostics.
 ///
-/// External variables (module-level) are passed so they're not registered
-/// as implicit local variables.
 /// When `line_index` is provided, additional diagnostics are emitted:
 /// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
-    known_externals: rustc_hash::FxHashSet<String>,
     line_index: Option<std::sync::Arc<line_index::LineIndex>>,
 ) -> LowerResult {
-    lower::lower_method_with_externals(method_node, is_function, known_externals, line_index)
+    lower::lower_method_with_externals(method_node, is_function, line_index)
 }
 
 /// Lower module-level code (statements outside procedures/functions).
@@ -1218,7 +1211,6 @@ mod tests {
                 context: MagicNumberContext::Other,
             },
             BodyDiagnostic::SelfAssign { range },
-            BodyDiagnostic::UnusedVariable { name: "x".to_string(), range },
             BodyDiagnostic::FunctionShouldHaveReturn { range },
             BodyDiagnostic::IfElseDuplicatedCodeBlock { range },
             BodyDiagnostic::CommitTransactionOutsideTryCatch { range },

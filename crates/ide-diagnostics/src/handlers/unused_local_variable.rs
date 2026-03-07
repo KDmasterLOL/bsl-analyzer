@@ -510,19 +510,6 @@ fn create_diagnostic(
     }
 }
 
-/// Creates diagnostic from HIR BodyDiagnostic (legacy path).
-///
-/// Called from lib.rs dispatch when `BodyDiagnostic::UnusedVariable` is encountered.
-/// This is the OLD detection path that will be removed in Phase 5.
-/// The NEW detection path is via `check()` function above.
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
-    let code = DiagnosticCode::UnusedLocalVariable;
-    if ctx.is_disabled_with_metadata(code) {
-        return None;
-    }
-    Some(create_diagnostic(name, range, code, ctx))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{assert_diagnostic_range, check_hir_diagnostic};
