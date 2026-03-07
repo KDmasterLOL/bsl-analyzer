@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-amd64
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-amd64
+            ext: ".exe"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/bsl-analyzer artifacts/bsl-launcher-${{ matrix.platform }}
+          cp target/${{ matrix.target }}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${{ matrix.platform }}
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir artifacts
+          cp target/${{ matrix.target }}/release/bsl-analyzer.exe artifacts/bsl-launcher-${{ matrix.platform }}.exe
+          cp target/${{ matrix.target }}/release/bsl-analyzer-app.exe artifacts/bsl-analyzer-app-${{ matrix.platform }}.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: artifacts/
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
