@@ -1,23 +1,16 @@
 # BSL Analyzer
 
-High-performance Language Server for BSL (1C:Enterprise) written in Rust.
+Высокопроизводительный Language Server для языка BSL (1С:Предприятие), написанный на Rust.
 
-## Features
+## Возможности
 
-- **180+ diagnostics** for BSL code quality analysis
-- **High performance** — 11s analysis of 121 MB / 6,540 files, 1.4 GB RAM
-- **LSP support** — full Language Server Protocol integration
-- **SonarQube integration** — SARIF reports, streaming mode for large projects
-- **Compatibility** with `.bsl-language-server.json` configuration format
-- **Cross-platform** — Linux, Windows, macOS (Apple Silicon)
+- **180+ диагностик** качества кода BSL
+- **LSP** — поддержка Language Server Protocol для IDE
+- **SonarQube** — отчёты SARIF, потоковый режим для крупных проектов
+- **Совместимость** с форматом конфигурации `.bsl-language-server.json`
+- **Кроссплатформенность** — Linux, Windows, macOS (Apple Silicon)
 
-## Project Status
-
-**Phase: Active Development (Alpha)**
-
-180 of 181 diagnostics implemented. See [docs/planning/ROADMAP.md](docs/planning/ROADMAP.md) for details.
-
-## Installation
+## Установка
 
 ### Linux
 
@@ -37,64 +30,36 @@ Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/downlo
 curl -fsSL https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-darwin-arm64 -o /usr/local/bin/bsl-analyzer && chmod +x /usr/local/bin/bsl-analyzer
 ```
 
-### Version Pinning (CI/CD)
+## Использование
 
-```bash
-# Use specific version
-BSL_ANALYZER_VERSION=0.1.3 bsl-analyzer analyze -s ./src
-
-# Or via command line
-bsl-analyzer --launcher-use 0.1.3 analyze -s ./src
-```
-
-## Architecture
-
-The project follows rust-analyzer architecture:
-
-```
-bsl-analyzer (LSP Server)
-    └── ide (High-level API)
-        ├── ide-diagnostics (181 diagnostics)
-        ├── ide-assists (Code actions)
-        └── ide-db (Database)
-            └── hir (Semantic analysis)
-                └── syntax (AST)
-                    └── parser
-                        └── lexer
-```
-
-See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) for details.
-
-## Building
-
-```bash
-cargo build --release
-```
-
-## Usage
-
-### LSP Server Mode
+### LSP-сервер
 
 ```bash
 bsl-analyzer lsp
 ```
 
-### Analysis Mode (for SonarQube)
+### Анализ (SonarQube)
 
 ```bash
-# Console output
+# Консольный вывод
 bsl-analyzer analyze -s ./my-project
 
-# SARIF report
+# SARIF-отчёт
 bsl-analyzer analyze -s ./my-project -r sarif -o ./reports
 
-# Streaming mode for large projects (low memory)
+# Потоковый режим (низкое потребление памяти)
 bsl-analyzer analyze -s ./my-project --streaming --format=jsonl > report.jsonl
 ```
 
-## Configuration
+### Фиксация версии (CI/CD)
 
-Uses `.bsl-analyzer.json` configuration format (also supports `.bsl-language-server.json` for compatibility with bsl-language-server).
+```bash
+BSL_ANALYZER_VERSION=0.1.33 bsl-analyzer analyze -s ./src
+```
+
+## Конфигурация
+
+Файл `.bsl-analyzer.json` (или `.bsl-language-server.json`):
 
 ```json
 {
@@ -109,105 +74,35 @@ Uses `.bsl-analyzer.json` configuration format (also supports `.bsl-language-ser
 }
 ```
 
-## Development
+## Сборка из исходников
 
-### Quick Start
-
-**Requirements:**
-- Rust 1.91+ (`rustup install stable`)
-- Git
-- jq (для скрипта проверки CI)
-
-**Setup:**
+**Требования:** Rust 1.91+
 
 ```bash
-# Clone repository
 git clone https://github.com/itrous/bsl-analyzer.git
 cd bsl-analyzer
-
-# Install pre-commit hooks (автоматический fmt и clippy)
-./scripts/setup-hooks.sh
-
-# Build
-cargo build
-
-# Run tests
-cargo test --all
-
-# Check formatting
-cargo fmt --all -- --check
-
-# Run clippy
-cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
 ```
 
-### Helper Scripts
-
-- **`./scripts/setup-hooks.sh`** — установка git pre-commit hooks
-- **`./scripts/ci-status.sh`** — проверка статуса CI
-
-### Contributing
-
-См. [CONTRIBUTING.md](CONTRIBUTING.md) для детальной информации о процессе разработки.
-
-**Обязательно к прочтению:**
-- [DEVELOPMENT_RULES.md](docs/contributing/DEVELOPMENT_RULES.md) — правила написания кода
-- [VERSIONING.md](docs/contributing/VERSIONING.md) — политика версионирования
-- [ROADMAP.md](docs/planning/ROADMAP.md) — план разработки (30 итераций)
-- [SOURCES.md](docs/planning/SOURCES.md) — проекты-источники
-
-### Project Structure
+## Архитектура
 
 ```
-bsl-analyzer/
-├── crates/
-│   ├── bsl-analyzer/      # Main LSP server binary
-│   ├── lexer/             # Lexical analysis
-│   ├── parser/            # Parsing (event-based)
-│   ├── syntax/            # Syntax trees (Rowan-based)
-│   ├── hir/               # High-level IR
-│   ├── hir-def/           # HIR definitions
-│   ├── ide/               # IDE features API
-│   ├── ide-db/            # IDE database
-│   ├── ide-diagnostics/   # All 181 diagnostics
-│   ├── ide-assists/       # Code actions
-│   ├── base-db/           # Base database (Salsa)
-│   ├── vfs/               # Virtual file system
-│   ├── project-model/     # Project configuration
-│   ├── profile/           # Profiling utilities
-│   └── test-*/            # Testing infrastructure
-├── docs/
-│   ├── planning/          # Roadmap, iterations, migration plans
-│   ├── architecture/      # Architecture documentation
-│   └── contributing/      # Development rules, versioning
-├── scripts/
-│   ├── setup-hooks.sh     # Setup git hooks
-│   ├── ci-status.sh       # Check GitLab CI status
-│   └── pre-commit         # Pre-commit hook
-└── xtask/                 # Build automation
-
+bsl-analyzer (LSP-сервер)
+    └── ide (API верхнего уровня)
+        ├── ide-diagnostics (180+ диагностик)
+        ├── ide-assists (Quick-fix действия)
+        └── ide-db (Salsa — инкрементальные вычисления)
+            └── hir (семантический анализ)
+                └── syntax (CST, Rowan)
+                    └── parser → lexer
 ```
 
-### Code Quality
+Подробнее: [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)
 
-Проект использует:
-- **rustfmt** — автоматическое форматирование
-- **clippy** — линтинг
-- **EditorConfig** — консистентные настройки редактора
-- **Pre-commit hooks** — автоматические проверки перед коммитом
-- **CI** — автоматическая проверка на каждый push
+## Участие в разработке
 
-## License
+См. [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Licensed under either of:
+## Лицензия
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+MIT или Apache-2.0, на выбор. См. [LICENSE-MIT](LICENSE-MIT) и [LICENSE-APACHE](LICENSE-APACHE).
