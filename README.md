@@ -103,6 +103,13 @@ bsl-analyzer (LSP-сервер)
 
 См. [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Благодарности
+
+Проект вдохновлён [BSL Language Server](https://github.com/1c-syntax/bsl-language-server) — инструментом статического анализа BSL на Java. Спасибо авторам за огромную работу по формализации диагностик и стандартов качества кода 1С.
+
+- [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) — статический анализатор BSL (Java, LGPL-3.0)
+- [1c-syntax](https://github.com/1c-syntax) — сообщество разработчиков инструментов для 1С
+
 ## Лицензия
 
 MIT или Apache-2.0, на выбор. См. [LICENSE-MIT](LICENSE-MIT) и [LICENSE-APACHE](LICENSE-APACHE).
