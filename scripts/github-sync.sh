@@ -14,7 +14,7 @@ set -euo pipefail
 
 # --- Конфигурация ---
 GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
-GITHUB_BRANCH="main"
+GITHUB_BRANCH="develop"
 
 # Файлы и директории, исключаемые из GitHub-зеркала
 EXCLUDE_PATTERNS=(
@@ -199,14 +199,19 @@ git diff --cached --stat | tail -1
 git commit -m "Release $COMMIT_TAG" \
     --author="BSL Analyzer <bsl-analyzer@users.noreply.github.com>"
 
-# Создаём тег
-git tag -a "$COMMIT_TAG" -m "Release $COMMIT_TAG"
-
-# Пушим
+# Пушим коммит
 log_info "Отправка в GitHub..."
 git push -u origin "$GITHUB_BRANCH"
-git push origin "$COMMIT_TAG"
+
+# Создаём тег (если ещё не существует)
+if git ls-remote --tags origin "$COMMIT_TAG" | grep -q "$COMMIT_TAG"; then
+    log_warn "Тег $COMMIT_TAG уже существует, пропускаем"
+else
+    git tag -a "$COMMIT_TAG" -m "Release $COMMIT_TAG"
+    git push origin "$COMMIT_TAG"
+    log_ok "Тег $COMMIT_TAG создан"
+fi
 
 log_ok "Синхронизация завершена!"
 log_ok "Коммит: Release $COMMIT_TAG"
-log_ok "URL: https://github.com/itrous/bsl-analyzer/releases/tag/$COMMIT_TAG"
+log_ok "URL: https://github.com/itrous/bsl-analyzer"
