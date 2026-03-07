@@ -293,6 +293,11 @@ impl Vfs {
         matches!(self.get_state(file_id), FileState::Exists(_))
     }
 
+    /// Returns the number of allocated file IDs.
+    pub fn num_file_ids(&self) -> u32 {
+        self.data.len() as u32
+    }
+
     /// Get the content of a file (for compatibility).
     ///
     /// Note: This doesn't return the actual stored content, as we don't

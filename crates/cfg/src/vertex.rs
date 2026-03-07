@@ -207,14 +207,6 @@ impl WhileLoopVertex {
     pub fn new(condition: ExprId) -> Self {
         Self { condition }
     }
-
-    // TODO(Phase 6.4): Re-add is_endless() method with Body parameter
-    // Check if this is an endless loop (While True / Пока Истина)
-    // Requires access to Body to check if condition is Literal::Bool(true)
-    //
-    // pub fn is_endless(&self, body: &hir_def::Body) -> bool {
-    //     matches!(body.expr(self.condition), hir_def::Expr::Literal(hir_def::Literal::Bool(true)))
-    // }
 }
 
 /// For loop vertex

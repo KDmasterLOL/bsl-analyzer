@@ -483,7 +483,7 @@ impl GlobalState {
         let mut vfs_files_added = 0;
 
         // Collect all VFS-loaded files
-        for file_id_raw in 0..10000u32 {
+        for file_id_raw in 0..vfs.num_file_ids() {
             let file_id = vfs::FileId(file_id_raw);
             if vfs.exists(file_id) {
                 let path = vfs.file_path(file_id);

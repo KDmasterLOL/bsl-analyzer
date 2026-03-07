@@ -14,8 +14,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg_types::IdConversion;
-use hir::{AnnotationKind, Expr, Name, Stmt};
+use hir::{AnnotationKind, Expr, IdConversion, Name, Stmt};
 use rustc_hash::FxHashSet;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {

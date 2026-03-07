@@ -8,12 +8,10 @@ rust-version.workspace = true
 [dependencies]
 base-db.workspace = true
 cfg.workspace = true
-cfg-types.workspace = true
 dataflow.workspace = true
 ide-db.workspace = true
 salsa.workspace = true
 hir.workspace = true
-parser.workspace = true
 syntax.workspace = true
 sdbl-hir.workspace = true
 rustc-hash.workspace = true
@@ -36,5 +34,6 @@ text-size.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+parser.workspace = true
 test-fixture.workspace = true
 uuid = { version = "1.0", features = ["v4"] }

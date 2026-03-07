@@ -67,12 +67,10 @@
 //! - Consistent with other diagnostics - same pattern as identical_expressions, incorrect_use_of_str_template
 //! - Better error recovery - HIR handles parse errors gracefully
 
-use cfg_types::{ExprId, IdConversion};
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Expr, Literal};
+use hir::{Expr, ExprId, IdConversion, Literal};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {

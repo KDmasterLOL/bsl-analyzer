@@ -129,12 +129,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 }
 
 fn collect_method_calls(body: &hir::Body, called_methods: &mut FxHashSet<String>) {
-    use cfg_types::IdConversion;
+    use hir::IdConversion;
 
     for (_expr_id, expr) in body.exprs_iter() {
         match expr {
             hir::Expr::Call { callee, .. } => {
-                let callee_opaque = cfg_types::ExprId::from_idx(*callee);
+                let callee_opaque = hir::ExprId::from_idx(*callee);
                 if let hir::Expr::Path(name) = body.expr(callee_opaque) {
                     called_methods.insert(name.as_str().to_lowercase());
                 }

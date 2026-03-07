@@ -39,12 +39,10 @@
 //! - Module-level code coverage (not just methods)
 //! - Cleaner recursive checking via ExprId references
 
-use cfg_types::{ExprId, IdConversion};
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Body, BodySourceMap, Expr, Name};
+use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,

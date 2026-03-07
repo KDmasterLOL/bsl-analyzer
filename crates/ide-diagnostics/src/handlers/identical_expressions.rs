@@ -56,8 +56,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg_types::IdConversion;
-use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, Literal, UnaryOp};
+use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, UnaryOp};
 use std::collections::HashSet;
 use syntax::{SyntaxKind, SyntaxNode}; // Keep for preprocessor fallback
 

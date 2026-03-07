@@ -37,13 +37,12 @@
 //! КонецПроцедуры
 //! ```
 
-use cfg_types::{BindingId, IdConversion};
 use rustc_hash::FxHashSet;
 
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModuleId;
+use hir::{BindingId, IdConversion, ModuleId};
 use ide_db::{RootDatabase, TextRange};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -326,7 +325,7 @@ fn check_method_with_module_liveness(
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
-            let target_opaque = cfg_types::ExprId::from_idx(*target);
+            let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 
@@ -419,7 +418,7 @@ fn check_module_level_code(
     for stmt_id in body.body_stmts() {
         if let hir::Stmt::Assign { target, .. } = body.stmt(stmt_id) {
             // Check if target is a simple path (variable assignment)
-            let target_opaque = cfg_types::ExprId::from_idx(*target);
+            let target_opaque = hir::ExprId::from_idx(*target);
             if let hir::Expr::Path(name) = body.expr(target_opaque) {
                 let lowercase_name = name.as_str().to_lowercase();
 

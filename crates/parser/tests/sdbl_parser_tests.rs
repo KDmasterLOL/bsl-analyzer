@@ -262,29 +262,6 @@ fn test_multiple_queries_trailing_semicolon() {
     check_no_errors("SELECT Name FROM Products; SELECT Code FROM Services;");
 }
 
-// TODO Phase 2: Error recovery is not fully implemented yet.
-// These tests are commented out until error recovery is improved.
-
-// #[test]
-// fn test_incomplete_select() {
-//     // Should recover gracefully
-//     let parse = parse_sdbl("SELECT");
-//     assert!(parse.has_errors());
-// }
-
-// #[test]
-// fn test_missing_from_table() {
-//     // SELECT without FROM is valid in some SQL dialects, but check our behavior
-//     let parse = parse_sdbl("SELECT Name FROM");
-//     assert!(parse.has_errors());
-// }
-
-// #[test]
-// fn test_unclosed_parenthesis() {
-//     let parse = parse_sdbl("SELECT * FROM (SELECT Name FROM Products");
-//     assert!(parse.has_errors());
-// }
-
 #[test]
 fn test_ast_alias_has_as_keyword() {
     use syntax::ast::{AstNode, SdblQueryPackage};

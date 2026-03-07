@@ -16,7 +16,7 @@ mod syntax_highlighting;
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use ide_assists::{Assist, AssistId, SourceChange};
-pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolInfo, SymbolKind, TextRange};
+pub use ide_db::{RootDatabase, RootDatabaseImpl, SymbolKind, TextRange};
 pub use ide_diagnostics::{
     all_diagnostic_codes, diagnostics as compute_diagnostics, docs, file_diagnostics_query,
     get_metadata, CleanCodeAttribute, Diagnostic, DiagnosticCode, DiagnosticOutput,

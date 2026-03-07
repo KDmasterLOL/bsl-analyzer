@@ -55,14 +55,6 @@ pub enum SymbolKind {
     Region,
 }
 
-/// Symbol information.
-#[derive(Debug, Clone)]
-pub struct SymbolInfo {
-    pub name: String,
-    pub kind: SymbolKind,
-    // TODO: Add more fields as needed
-}
-
 /// The root database for IDE operations.
 ///
 /// This database extends SourceDatabase, RootQueryDb, DefDatabase, HirDatabase, and MetadataDb,
@@ -386,20 +378,6 @@ impl RootDatabaseImpl {
             };
         }
     }
-
-    /// Invalidate manual HIR caches for a file.
-    ///
-    /// Called when file content changes.
-    ///
-    /// Note: All HIR queries are now Salsa-managed and invalidated automatically!
-    /// This method is kept for potential future non-Salsa caches.
-    fn invalidate_file(&self, _file_id: FileId) {
-        // All HIR queries migrated to Salsa - no manual invalidation needed!
-        // Salsa automatically invalidates:
-        // - item_tree, region_tree, conditional_tree, module_data, symbol_tree
-        // - infer_types, module_bodies, module_metadata
-        // - all_sdbl_in_file, sdbl_hir_in_file
-    }
 }
 
 #[salsa::db]
@@ -424,9 +402,6 @@ impl SourceDatabase for RootDatabaseImpl {
         // Use smart durability detection based on source root (library vs user code)
         // This ensures library files get HIGH durability, user files get LOW
         files.set_file_text_smart(self, file_id, text);
-        // Salsa automatically invalidates parse query
-        // But we need to manually invalidate HIR caches for now
-        self.invalidate_file(file_id);
     }
 
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {

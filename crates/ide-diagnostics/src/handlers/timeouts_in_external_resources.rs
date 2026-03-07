@@ -42,12 +42,10 @@
 //! ## Implementation
 //! Ported from:
 
-use cfg_types::{ExprId, IdConversion};
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Expr, Literal, Name, Stmt};
+use hir::{Expr, ExprId, IdConversion, Literal, Name, Stmt};
 use ide_db::TextRange;
 use rustc_hash::FxHashMap;
 

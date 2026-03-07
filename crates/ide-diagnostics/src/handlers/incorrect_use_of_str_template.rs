@@ -58,12 +58,10 @@
 //! З = СтрШаблон("Наименование %%1 (версия %%2)");
 //! ```
 
-use cfg_types::IdConversion;
-
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Expr, ExprId, Literal, MethodId, ModuleId, Stmt, StmtId};
+use hir::{Expr, ExprId, IdConversion, Literal, MethodId, ModuleId, Stmt, StmtId};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {

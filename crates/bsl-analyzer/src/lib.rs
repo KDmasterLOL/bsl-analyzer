@@ -5,7 +5,6 @@ pub mod tracing {
     pub use config::Config;
 }
 
-pub mod config;
 pub mod diff_filter;
 pub mod global_state;
 pub mod handlers;

@@ -2,7 +2,7 @@
 //!
 //! This is the main entry point for the LSP server.
 
-use std::{env, error::Error, fs, io, path::PathBuf, process::Command, sync::Arc};
+use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use ide_db::metadata;
@@ -1317,33 +1317,6 @@ fn analyze_streaming(
     }
 
     Ok(())
-}
-
-/// Retrieves changed files from git diff.
-#[allow(dead_code)] // Will be used in incremental mode implementation
-fn get_changed_files_from_git(
-    project_root: &PathBuf,
-    git_ref: &str,
-) -> Result<Vec<PathBuf>, Box<dyn Error + Send + Sync>> {
-    let output = Command::new("git")
-        .current_dir(project_root)
-        .args(["diff", "--name-only", git_ref])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git diff failed: {}", stderr).into());
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let files: Vec<PathBuf> = stdout
-        .lines()
-        .filter(|line| !line.is_empty())
-        .filter(|line| line.ends_with(".bsl")) // Only BSL files
-        .map(|line| project_root.join(line))
-        .collect();
-
-    Ok(files)
 }
 
 fn run_format(

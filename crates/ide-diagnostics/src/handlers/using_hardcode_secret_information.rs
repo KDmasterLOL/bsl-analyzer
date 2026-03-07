@@ -1,8 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg_types::{ExprId, IdConversion};
-use hir::{Body, BodySourceMap, Expr, ExprIdx, Literal, Stmt};
+use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Literal, Stmt};
 use once_cell::sync::Lazy;
 use regex::Regex;
 

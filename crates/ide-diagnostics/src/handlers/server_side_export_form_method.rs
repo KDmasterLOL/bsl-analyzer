@@ -20,7 +20,7 @@ use ide_db::TextRange;
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -92,15 +92,4 @@ fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsCont
         tags: ctx.tags(code),
         fixes: Vec::new(),
     }
-}
-
-/// Create diagnostics from metadata (for metadata-dispatch).
-pub fn from_metadata(
-    metadata: &hir::ModuleMetadata,
-    _config: &DiagnosticsConfig,
-) -> Vec<Diagnostic> {
-    // This diagnostic requires ItemTree (not just metadata)
-    // Return empty - actual check is done in check() function
-    let _ = metadata;
-    Vec::new()
 }

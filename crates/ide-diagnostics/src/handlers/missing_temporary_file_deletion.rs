@@ -65,8 +65,7 @@
 //!
 //! Ported from:
 
-use cfg_types::{IdConversion, StmtId};
-use hir::{Body, BodySourceMap, Expr, ExprIdx, Stmt};
+use hir::{Body, BodySourceMap, Expr, ExprIdx, IdConversion, Stmt, StmtId};
 
 use crate::define_metadata;
 use crate::metadata::*;
