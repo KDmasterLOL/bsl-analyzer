@@ -316,6 +316,25 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     // ========================================================================
+    // Config parameter helpers
+    // ========================================================================
+
+    /// Get integer config parameter with default value.
+    pub fn config_int(&self, code: crate::DiagnosticCode, param: &str, default: i64) -> i64 {
+        self.config.get_int(code, param).unwrap_or(default)
+    }
+
+    /// Get boolean config parameter with default value.
+    pub fn config_bool(&self, code: crate::DiagnosticCode, param: &str, default: bool) -> bool {
+        self.config.get_bool(code, param).unwrap_or(default)
+    }
+
+    /// Get string config parameter with default value.
+    pub fn config_string(&self, code: crate::DiagnosticCode, param: &str, default: &str) -> String {
+        self.config.get_string(code, param).unwrap_or(default).to_string()
+    }
+
+    // ========================================================================
     // Metadata-driven diagnostic helpers (Phase 4)
     // ========================================================================
 

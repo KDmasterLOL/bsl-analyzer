@@ -195,27 +195,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let module_bodies = ctx.module_bodies();
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    let mut diagnostics = Vec::new();
-
-    for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &root, &config, code, ctx, &mut diagnostics);
-    }
-
-    if let Some(module_result) = module_bodies.module_code_result() {
-        check_body(
-            &module_result.body,
-            &module_result.source_map,
-            &root,
-            &config,
-            code,
-            ctx,
-            &mut diagnostics,
-        );
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body(body, source_map, &root, &config, code, ctx, diags);
+    });
 
     diagnostics.sort_by_key(|d| d.range.start());
     diagnostics

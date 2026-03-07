@@ -57,20 +57,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
-#[derive(Debug, Clone)]
-struct Config {
-    max_method_size: usize,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let max_method_size =
-            ctx.config.get_int(DiagnosticCode::MethodSize, "maxMethodSize").unwrap_or(200) as usize;
-
-        Self { max_method_size }
-    }
-}
-
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch when `BodyDiagnostic::MethodSize` is encountered.
@@ -88,8 +74,8 @@ pub fn from_hir(
         return None;
     }
 
-    let config = Config::from_context(ctx);
-    if (size as usize) <= config.max_method_size {
+    let max_method_size = ctx.config_int(code, "maxMethodSize", 200) as usize;
+    if (size as usize) <= max_method_size {
         return None;
     }
 
@@ -97,7 +83,7 @@ pub fn from_hir(
         code,
         message: format!(
             "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
-            method_name, size, config.max_method_size
+            method_name, size, max_method_size
         ),
         severity: ctx.severity(code),
         range,

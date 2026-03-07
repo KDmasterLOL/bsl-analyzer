@@ -108,17 +108,17 @@ impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
         let code = DiagnosticCode::DuplicateStringLiteral;
 
-        let mut allowed = ctx.config.get_int(code, "allowedNumberCopies").unwrap_or(2) as usize;
+        let mut allowed = ctx.config_int(code, "allowedNumberCopies", 2) as usize;
         if allowed < 1 {
             tracing::warn!("allowedNumberCopies < 1 ({}), resetting to default (2)", allowed);
             allowed = 2;
         }
 
-        let analyze_file = ctx.config.get_bool(code, "analyzeFile").unwrap_or(false);
+        let analyze_file = ctx.config_bool(code, "analyzeFile", false);
 
-        let case_sensitive = ctx.config.get_bool(code, "caseSensitive").unwrap_or(false);
+        let case_sensitive = ctx.config_bool(code, "caseSensitive", false);
 
-        let min_length = ctx.config.get_int(code, "minTextLength").unwrap_or(5) as usize;
+        let min_length = ctx.config_int(code, "minTextLength", 5) as usize;
         let min_text_length = min_length.max(5);
 
         let excluded_methods = ctx

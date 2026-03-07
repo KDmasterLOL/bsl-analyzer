@@ -46,7 +46,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Consistent,
 };
 
-const DEFAULT_MAX_LINE_LENGTH: usize = 120;
+const DEFAULT_MAX_LINE_LENGTH: i64 = 120;
 const DEFAULT_CHECK_METHOD_DESCRIPTION: bool = true;
 const DEFAULT_EXCLUDE_TRAILING_COMMENTS: bool = false;
 
@@ -61,21 +61,14 @@ impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
         let code = DiagnosticCode::LineLength;
 
-        let max_line_length = ctx
-            .config
-            .get_int(code, "maxLineLength")
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(DEFAULT_MAX_LINE_LENGTH);
+        let max_line_length =
+            ctx.config_int(code, "maxLineLength", DEFAULT_MAX_LINE_LENGTH) as usize;
 
-        let check_method_description = ctx
-            .config
-            .get_bool(code, "checkMethodDescription")
-            .unwrap_or(DEFAULT_CHECK_METHOD_DESCRIPTION);
+        let check_method_description =
+            ctx.config_bool(code, "checkMethodDescription", DEFAULT_CHECK_METHOD_DESCRIPTION);
 
-        let exclude_trailing_comments = ctx
-            .config
-            .get_bool(code, "excludeTrailingComments")
-            .unwrap_or(DEFAULT_EXCLUDE_TRAILING_COMMENTS);
+        let exclude_trailing_comments =
+            ctx.config_bool(code, "excludeTrailingComments", DEFAULT_EXCLUDE_TRAILING_COMMENTS);
 
         tracing::debug!(
             max_line_length = max_line_length,

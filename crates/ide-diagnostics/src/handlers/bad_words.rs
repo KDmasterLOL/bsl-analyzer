@@ -60,11 +60,9 @@ struct Config {
 
 impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let bad_words_pattern =
-            ctx.config.get_string(DiagnosticCode::BadWords, "badWords").unwrap_or("").to_string();
+        let bad_words_pattern = ctx.config_string(DiagnosticCode::BadWords, "badWords", "");
 
-        let find_in_comments =
-            ctx.config.get_bool(DiagnosticCode::BadWords, "findInComments").unwrap_or(true);
+        let find_in_comments = ctx.config_bool(DiagnosticCode::BadWords, "findInComments", true);
 
         Self { bad_words_pattern, find_in_comments }
     }

@@ -85,27 +85,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::MissingCodeTryCatchEx, "commentAsCode")
         .unwrap_or(false);
 
-    let mut diagnostics = Vec::new();
-    let module_bodies = ctx.module_bodies();
+    // 3. Check all bodies (method bodies + module-level code)
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body_for_empty_except(body, source_map, comment_as_code, code, ctx, diags);
+    });
 
-    // 3. Check method bodies
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body_for_empty_except(body, source_map, comment_as_code, code, ctx, &mut diagnostics);
-    }
-
-    // 4. Check module-level code
-    if let Some(lower_result) = module_bodies.module_code_result() {
-        check_body_for_empty_except(
-            &lower_result.body,
-            &lower_result.source_map,
-            comment_as_code,
-            code,
-            ctx,
-            &mut diagnostics,
-        );
-    }
-
-    // 5. Sort diagnostics by position
+    // 4. Sort diagnostics by position
     diagnostics.sort_by_key(|d| d.range.start());
 
     diagnostics

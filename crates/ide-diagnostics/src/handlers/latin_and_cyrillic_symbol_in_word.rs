@@ -68,11 +68,11 @@ struct Config {
 
 impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let exclude_str = ctx
-            .config
-            .get_string(DiagnosticCode::LatinAndCyrillicSymbolInWord, "excludeWords")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| DEFAULT_EXCLUDE_WORDS.to_string());
+        let exclude_str = ctx.config_string(
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            "excludeWords",
+            DEFAULT_EXCLUDE_WORDS,
+        );
 
         let exclude_words: Vec<String> = exclude_str
             .split(',')
@@ -80,13 +80,11 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let allow_trailing_parts = ctx
-            .config
-            .get_bool(
-                DiagnosticCode::LatinAndCyrillicSymbolInWord,
-                "allowTrailingPartsInAnotherLanguage",
-            )
-            .unwrap_or(DEFAULT_ALLOW_TRAILING_PARTS);
+        let allow_trailing_parts = ctx.config_bool(
+            DiagnosticCode::LatinAndCyrillicSymbolInWord,
+            "allowTrailingPartsInAnotherLanguage",
+            DEFAULT_ALLOW_TRAILING_PARTS,
+        );
 
         Self { exclude_words, allow_trailing_parts }
     }

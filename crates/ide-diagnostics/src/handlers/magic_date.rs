@@ -64,11 +64,11 @@ struct Config {
 
 impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let authorized_str = ctx
-            .config
-            .get_string(DiagnosticCode::MagicDate, "authorizedDates")
-            .unwrap_or(DEFAULT_AUTHORIZED_DATES);
-
+        let authorized_str = ctx.config_string(
+            DiagnosticCode::MagicDate,
+            "authorizedDates",
+            DEFAULT_AUTHORIZED_DATES,
+        );
         let authorized_dates: HashSet<String> = authorized_str
             .split(',')
             .map(|s| s.trim().to_string())

@@ -531,9 +531,6 @@ pub(crate) enum CommitViolation {
     TryWithoutExcept,
     /// Code exists after CommitTransaction in try body
     CodeAfterCommit,
-    /// CommitTransaction is outside try-catch entirely (detected separately in lower_stmt_list)
-    #[allow(dead_code)]
-    OutsideTryCatch,
 }
 
 /// Check if a node is an executable statement (for counting purposes).

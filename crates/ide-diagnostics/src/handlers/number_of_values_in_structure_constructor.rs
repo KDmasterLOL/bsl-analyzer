@@ -49,26 +49,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_int(DiagnosticCode::NumberOfValuesInStructureConstructor, "maxValuesCount")
         .unwrap_or(DEFAULT_MAX_VALUES_COUNT) as usize;
 
-    let mut diagnostics = Vec::new();
-
-    let module_bodies = ctx.module_bodies();
-
-    // Check module-level code
-    if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(
-            &module_code.body,
-            &module_code.source_map,
-            max_values_count,
-            code,
-            ctx,
-            &mut diagnostics,
-        );
-    }
-
-    // Check all method bodies
-    for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, max_values_count, code, ctx, &mut diagnostics);
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body(body, source_map, max_values_count, code, ctx, diags);
+    });
 
     // Sort by position (HIR expressions are stored in arena, not source order)
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));

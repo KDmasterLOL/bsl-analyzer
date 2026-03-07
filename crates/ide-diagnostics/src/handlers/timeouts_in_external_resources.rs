@@ -132,23 +132,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let mut diagnostics = Vec::new();
-    let module_bodies = ctx.module_bodies();
 
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body_for_timeouts(body, source_map, code, ctx, &config, &mut diagnostics);
-    }
-
-    if let Some(lower_result) = module_bodies.module_code_result() {
-        check_body_for_timeouts(
-            &lower_result.body,
-            &lower_result.source_map,
-            code,
-            ctx,
-            &config,
-            &mut diagnostics,
-        );
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body_for_timeouts(body, source_map, code, ctx, &config, diags);
+    });
 
     diagnostics.sort_by_key(|d| d.range.start());
     diagnostics

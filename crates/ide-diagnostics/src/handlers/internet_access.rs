@@ -123,24 +123,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let mut diagnostics = Vec::new();
-    let module_bodies = ctx.module_bodies();
-
-    // Check method bodies
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body_for_internet_access(body, source_map, code, ctx, &mut diagnostics);
-    }
-
-    // Check module-level code
-    if let Some(lower_result) = module_bodies.module_code_result() {
-        check_body_for_internet_access(
-            &lower_result.body,
-            &lower_result.source_map,
-            code,
-            ctx,
-            &mut diagnostics,
-        );
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body_for_internet_access(body, source_map, code, ctx, diags);
+    });
 
     diagnostics.sort_by_key(|d| d.range.start());
     diagnostics

@@ -765,6 +765,32 @@ fn formatting_config_from_options(options: &lsp_types::FormattingOptions) -> ide
     }
 }
 
+/// Converts project-model formatting config (from `.bsl-analyzer.json`) into the IDE
+/// formatting config used by the formatter.
+///
+/// `project_model::FormattingConfig` carries only the two fields that are serialised
+/// from the config file (`indent_size`, `use_tabs`); all remaining fields fall back to
+/// their `ide::FormattingConfig` defaults so that the two types stay in sync
+/// automatically.
+///
+/// A `From` impl is not possible here due to the orphan rule (both types are defined in
+/// external crates relative to `bsl-analyzer`), so this free function serves the same
+/// purpose.
+///
+/// Called when the server applies workspace formatting config from the project model
+/// (as opposed to per-request LSP `FormattingOptions` handled by
+/// [`formatting_config_from_options`]).
+#[allow(dead_code)] // conversion infrastructure: will be called when project-model config is plumbed into LSP handlers
+fn formatting_config_from_project_model(
+    cfg: &project_model::FormattingConfig,
+) -> ide::FormattingConfig {
+    ide::FormattingConfig {
+        use_tabs: cfg.use_tabs,
+        indent_size: cfg.indent_size,
+        ..ide::FormattingConfig::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

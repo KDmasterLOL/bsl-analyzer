@@ -111,10 +111,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let mut diagnostics = Vec::new();
-
-    // Get module bodies from HIR (cached by Salsa)
-    let module_bodies = ctx.module_bodies();
 
     // Get line index (cached by Salsa)
     let line_index = ctx.line_index();
@@ -123,24 +119,9 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Check module-level code (code outside procedures/functions)
-    if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(
-            &module_code.body,
-            &module_code.source_map,
-            &mut diagnostics,
-            &config,
-            &line_index,
-            &root,
-            code,
-            ctx,
-        );
-    }
-
-    // Check all method bodies (procedures and functions)
-    for (_, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &mut diagnostics, &config, &line_index, &root, code, ctx);
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body(body, source_map, diags, &config, &line_index, &root, code, ctx);
+    });
 
     // Sort diagnostics by position (HIR expressions are stored in arena, not source order)
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));

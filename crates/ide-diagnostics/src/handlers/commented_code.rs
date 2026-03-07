@@ -66,10 +66,8 @@ struct Config {
 
 impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let exclusion_prefixes_str = ctx
-            .config
-            .get_string(DiagnosticCode::CommentedCode, "exclusionPrefixes")
-            .unwrap_or_default();
+        let exclusion_prefixes_str =
+            ctx.config_string(DiagnosticCode::CommentedCode, "exclusionPrefixes", "");
 
         let exclusion_prefixes: Vec<String> = exclusion_prefixes_str
             .split(',')

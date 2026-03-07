@@ -146,27 +146,28 @@ struct Config {
 
 impl Config {
     fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let authorized_str = ctx
-            .config
-            .get_string(DiagnosticCode::MagicNumber, "authorizedNumbers")
-            .unwrap_or(DEFAULT_AUTHORIZED_NUMBERS);
-
+        let authorized_str = ctx.config_string(
+            DiagnosticCode::MagicNumber,
+            "authorizedNumbers",
+            DEFAULT_AUTHORIZED_NUMBERS,
+        );
         let authorized_numbers: HashSet<String> = authorized_str
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
 
-        let allow_magic_indexes = ctx
-            .config
-            .get_bool(DiagnosticCode::MagicNumber, "allowMagicIndexes")
-            .unwrap_or(DEFAULT_ALLOW_MAGIC_INDEXES);
+        let allow_magic_indexes = ctx.config_bool(
+            DiagnosticCode::MagicNumber,
+            "allowMagicIndexes",
+            DEFAULT_ALLOW_MAGIC_INDEXES,
+        );
 
-        let excluded_constructors_str = ctx
-            .config
-            .get_string(DiagnosticCode::MagicNumber, "excludedConstructors")
-            .unwrap_or(DEFAULT_EXCLUDED_CONSTRUCTORS);
-
+        let excluded_constructors_str = ctx.config_string(
+            DiagnosticCode::MagicNumber,
+            "excludedConstructors",
+            DEFAULT_EXCLUDED_CONSTRUCTORS,
+        );
         let excluded_constructors: HashSet<String> = excluded_constructors_str
             .split(',')
             .map(|s| s.trim().to_lowercase())

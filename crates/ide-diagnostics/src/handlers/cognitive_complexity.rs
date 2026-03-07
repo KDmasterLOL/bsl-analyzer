@@ -101,22 +101,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-#[derive(Debug, Clone)]
-struct Config {
-    complexity_threshold: u32,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let complexity_threshold = ctx
-            .config
-            .get_int(DiagnosticCode::CognitiveComplexity, "complexityThreshold")
-            .unwrap_or(15) as u32;
-
-        Self { complexity_threshold }
-    }
-}
-
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch when `BodyDiagnostic::CognitiveComplexity` is encountered.
@@ -134,8 +118,8 @@ pub fn from_hir(
         return None;
     }
 
-    let config = Config::from_context(ctx);
-    if complexity <= config.complexity_threshold {
+    let complexity_threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
+    if complexity <= complexity_threshold {
         return None;
     }
 
@@ -145,7 +129,7 @@ pub fn from_hir(
         message: format!(
             "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
              Упростите логику или уменьшите вложенность",
-            method_type, method_name, complexity, config.complexity_threshold
+            method_type, method_name, complexity, complexity_threshold
         ),
         severity: ctx.severity(code),
         range,

@@ -49,20 +49,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_OPTIONAL_PARAMS: i64 = 3;
 
-struct Config {
-    max_optional_params: usize,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let max_optional_params = ctx
-            .config
-            .get_int(DiagnosticCode::NumberOfOptionalParams, "maxOptionalParamsCount")
-            .unwrap_or(DEFAULT_MAX_OPTIONAL_PARAMS) as usize;
-        Self { max_optional_params }
-    }
-}
-
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch when `BodyDiagnostic::NumberOfOptionalParams` is encountered.
@@ -80,8 +66,9 @@ pub fn from_hir(
         return None;
     }
 
-    let config = Config::from_context(ctx);
-    if (count as usize) <= config.max_optional_params {
+    let max_optional_params =
+        ctx.config_int(code, "maxOptionalParamsCount", DEFAULT_MAX_OPTIONAL_PARAMS) as usize;
+    if (count as usize) <= max_optional_params {
         return None;
     }
 
@@ -89,7 +76,7 @@ pub fn from_hir(
         code,
         message: format!(
             "Уменьшите количество необязательных параметров c {} до допустимого {}",
-            count, config.max_optional_params
+            count, max_optional_params
         ),
         severity: ctx.severity(code),
         range,

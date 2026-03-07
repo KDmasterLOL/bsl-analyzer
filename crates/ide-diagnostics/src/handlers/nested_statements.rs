@@ -79,22 +79,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-const DEFAULT_MAX_ALLOWED_LEVEL: usize = 4;
-
-struct Config {
-    max_allowed_level: usize,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let max_allowed_level = ctx
-            .config
-            .get_int(DiagnosticCode::NestedStatements, "maxAllowedLevel")
-            .unwrap_or(DEFAULT_MAX_ALLOWED_LEVEL as i64) as usize;
-
-        Self { max_allowed_level }
-    }
-}
+const DEFAULT_MAX_ALLOWED_LEVEL: i64 = 4;
 
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
@@ -113,8 +98,9 @@ pub fn from_hir(
         return None;
     }
 
-    let config = Config::from_context(ctx);
-    if (depth as usize) <= config.max_allowed_level {
+    let max_allowed_level =
+        ctx.config_int(code, "maxAllowedLevel", DEFAULT_MAX_ALLOWED_LEVEL) as usize;
+    if (depth as usize) <= max_allowed_level {
         return None;
     }
 

@@ -49,20 +49,6 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_PARAMS: i64 = 7;
 
-struct Config {
-    max_params: usize,
-}
-
-impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
-        let max_params = ctx
-            .config
-            .get_int(DiagnosticCode::NumberOfParams, "maxParamsCount")
-            .unwrap_or(DEFAULT_MAX_PARAMS) as usize;
-        Self { max_params }
-    }
-}
-
 /// Creates diagnostic from HIR BodyDiagnostic.
 ///
 /// Called from hir_dispatch when `BodyDiagnostic::NumberOfParams` is encountered.
@@ -80,8 +66,8 @@ pub fn from_hir(
         return None;
     }
 
-    let config = Config::from_context(ctx);
-    if (count as usize) <= config.max_params {
+    let max_params = ctx.config_int(code, "maxParamsCount", DEFAULT_MAX_PARAMS) as usize;
+    if (count as usize) <= max_params {
         return None;
     }
 
@@ -89,7 +75,7 @@ pub fn from_hir(
         code,
         message: format!(
             "Уменьшите количество параметров c {} до допустимого {}",
-            count, config.max_params
+            count, max_params
         ),
         severity: ctx.severity(code),
         range,

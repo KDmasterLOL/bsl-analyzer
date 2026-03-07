@@ -81,20 +81,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let mut diagnostics = Vec::new();
-
     // HIR-based checking - covers methods and module-level code
-    let module_bodies = ctx.module_bodies();
-
-    // Check module-level code (outside procedures/functions)
-    if let Some(module_code) = module_bodies.module_code_result() {
-        check_body(&module_code.body, &module_code.source_map, &mut diagnostics, code, ctx);
-    }
-
-    // Check all methods (procedures/functions)
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        check_body(body, source_map, &mut diagnostics, code, ctx);
-    }
+    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
+        check_body(body, source_map, diags, code, ctx);
+    });
 
     // AST fallback for preprocessor split expressions (Phase 5 evaluation)
     // These might not be properly captured by HIR lowering
