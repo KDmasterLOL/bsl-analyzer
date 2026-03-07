@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use base_db::FileIdInput;
-use hir_def::ModuleId;
+use hir::ModuleId;
 
 use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 
@@ -33,7 +33,7 @@ use crate::{metadata::ConfigurationPathInput, RootDatabase, SdblHirEntries};
 pub use crate::metadata::load_configuration;
 
 // Helper types for internal use
-type SdblInFile = Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>;
+type SdblInFile = Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>;
 
 /// Get metadata for a module (type and execution context).
 ///
@@ -61,7 +61,7 @@ type SdblInFile = Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>;
 pub fn module_metadata_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
-) -> Arc<hir_def::ModuleMetadata> {
+) -> Arc<hir::ModuleMetadata> {
     let _span = tracing::info_span!("module_metadata", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
 
@@ -70,7 +70,7 @@ pub fn module_metadata_query<'db>(
         Some(path) => path,
         None => {
             tracing::debug!("Could not determine file path for metadata");
-            return Arc::new(hir_def::ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown));
+            return Arc::new(hir::ModuleMetadata::unknown(bsl_metadata::ModuleType::Unknown));
         }
     };
 
@@ -110,7 +110,7 @@ pub fn module_metadata_query<'db>(
 /// SdblExprId uniquely identifies SDBL expression across all bodies in file.
 #[salsa::tracked(lru = 128)]
 pub fn all_sdbl_in_file_query<'db>(
-    db: &'db dyn hir_def::DefDatabase,
+    db: &'db dyn hir::DefDatabase,
     file_id_input: FileIdInput<'db>,
 ) -> Arc<SdblInFile> {
     let _span = tracing::debug_span!("all_sdbl_in_file", ?file_id_input).entered();
@@ -124,7 +124,7 @@ pub fn all_sdbl_in_file_query<'db>(
     // Collect from all method bodies (procedures and functions)
     for (local_id, body) in module_bodies.iter_bodies() {
         for (expr_id, query_info) in body.sdbl_exprs() {
-            let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+            let sdbl_expr_id = hir::SdblExprId::from_method(local_id, expr_id);
             result.push((sdbl_expr_id, query_info.clone()));
         }
     }
@@ -132,7 +132,7 @@ pub fn all_sdbl_in_file_query<'db>(
     // Collect from module-level code (statements outside methods)
     if let Some(module_code) = module_bodies.module_code() {
         for (expr_id, query_info) in module_code.sdbl_exprs() {
-            let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+            let sdbl_expr_id = hir::SdblExprId::from_module_code(expr_id);
             result.push((sdbl_expr_id, query_info.clone()));
         }
     }
@@ -239,7 +239,7 @@ pub fn module_cfgs_query<'db>(
     file_id_input: base_db::FileIdInput<'db>,
 ) -> Arc<cfg::ModuleCfgs> {
     let file_id = file_id_input.file_id(db);
-    let module_id = hir_def::ModuleId::new(file_id);
+    let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_cfgs", ?module_id).entered();
 
     // Get module bodies (Salsa dependency)
@@ -276,7 +276,7 @@ pub fn module_cfgs_query<'db>(
 #[salsa::tracked(lru = 256)]
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
-    method_id_input: hir_def::MethodIdInput<'db>,
+    method_id_input: hir::MethodIdInput<'db>,
 ) -> Arc<cfg::ControlFlowGraph> {
     let _span = tracing::info_span!("method_cfg_accessor", ?method_id_input).entered();
 
@@ -320,7 +320,7 @@ pub fn module_reaching_definitions_query<'db>(
     file_id_input: base_db::FileIdInput<'db>,
 ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
     let file_id = file_id_input.file_id(db);
-    let module_id = hir_def::ModuleId::new(file_id);
+    let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_reaching_definitions", ?module_id).entered();
 
     // Get shared CFGs (Salsa cached!)
@@ -392,7 +392,7 @@ pub fn module_reaching_definitions_query<'db>(
 #[salsa::tracked(lru = 256)]
 pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
-    method_id_input: hir_def::MethodIdInput<'db>,
+    method_id_input: hir::MethodIdInput<'db>,
 ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
     let _span = tracing::info_span!("reaching_definitions_accessor", ?method_id_input).entered();
 
@@ -427,7 +427,7 @@ pub fn module_liveness_analysis_query<'db>(
     file_id_input: base_db::FileIdInput<'db>,
 ) -> Arc<dataflow::liveness::ModuleLiveness> {
     let file_id = file_id_input.file_id(db);
-    let module_id = hir_def::ModuleId::new(file_id);
+    let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_liveness", ?module_id).entered();
 
     // Get shared CFGs (Salsa cached!)
@@ -482,7 +482,7 @@ pub fn module_liveness_analysis_query<'db>(
 #[salsa::tracked(lru = 256)]
 pub fn liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
-    method_id_input: hir_def::MethodIdInput<'db>,
+    method_id_input: hir::MethodIdInput<'db>,
 ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
     let _span = tracing::info_span!("liveness_analysis_accessor", ?method_id_input).entered();
 
@@ -516,7 +516,7 @@ pub fn module_level_cfg_query<'db>(
 ) -> Arc<cfg::ControlFlowGraph> {
     let _span = tracing::info_span!("module_level_cfg", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let module_id = hir_def::ModuleId::new(file_id);
+    let module_id = hir::ModuleId::new(file_id);
 
     // Get module bodies (cached)
     let module_bodies = db.module_bodies(module_id);
@@ -558,7 +558,7 @@ pub fn module_level_liveness_analysis_query<'db>(
 ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
     let _span = tracing::info_span!("module_level_liveness", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
-    let module_id = hir_def::ModuleId::new(file_id);
+    let module_id = hir::ModuleId::new(file_id);
 
     // Get module bodies (Salsa dependency tracked automatically)
     let module_bodies = db.module_bodies(module_id);

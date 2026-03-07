@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base_db::{FileIdInput, SourceRootId};
 use bsl_metadata::Configuration;
-use hir_def::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree};
+use hir::{ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree};
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
 
@@ -47,7 +47,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
         Some(load_configuration(self.db, path_input))
     }
 
-    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir_def::WorkspaceSymbols> {
+    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {
         self.db.workspace_symbols(source_root_id)
     }
 
@@ -112,7 +112,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.module_reaching_definitions(input)
     }
 
-    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree> {
+    fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
         self.db.region_tree(file_id)
     }
 
@@ -127,21 +127,21 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
         self.db.all_sdbl_in_file(file_id)
     }
 
-    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData> {
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir::ModuleData> {
         self.db.module_data(module_id)
     }
 
-    fn method_docs(&self, method_id: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+    fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         self.db.method_docs(method_id)
     }
 
     fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
         self.db.reaching_definitions(method_id)
     }

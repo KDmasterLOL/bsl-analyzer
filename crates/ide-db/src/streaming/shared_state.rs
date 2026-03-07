@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use crossbeam_utils::CachePadded;
 use dashmap::DashMap;
-use hir_def::{
+use hir::{
     ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree, WorkspaceSymbols,
 };
 use parking_lot::{Condvar, Mutex};
@@ -155,7 +155,7 @@ impl ParsedFile {
                     for (expr_id, query_info) in body.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+                            let sdbl_expr_id = hir::SdblExprId::from_method(local_id, expr_id);
                             queries_with_pos.push((pos, sdbl_expr_id, sdbl_ast.clone()));
                         }
                     }
@@ -166,7 +166,7 @@ impl ParsedFile {
                     for (expr_id, query_info) in module_code.sdbl_exprs() {
                         if let Some(ref sdbl_ast) = query_info.query_ast {
                             let pos = query_info.bsl_literal_range.start();
-                            let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+                            let sdbl_expr_id = hir::SdblExprId::from_module_code(expr_id);
                             queries_with_pos.push((pos, sdbl_expr_id, sdbl_ast.clone()));
                         }
                     }
@@ -837,10 +837,10 @@ mod tests {
         assert_eq!(state.try_claim(file_id), ClaimResult::ByUs);
 
         // Create minimal parse for SymbolTree
-        let module_id = hir_def::ModuleId::new(file_id);
+        let module_id = hir::ModuleId::new(file_id);
         let text = "";
         let parse = parser::parse(text); // Empty file
-        let item_tree = hir_def::ItemTree::from_parse(&parse);
+        let item_tree = hir::ItemTree::from_parse(&parse);
         let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, text));
 
         // Publish symbol tree
@@ -862,10 +862,10 @@ mod tests {
 
         // Claim and publish
         state.try_claim(file_id);
-        let module_id = hir_def::ModuleId::new(file_id);
+        let module_id = hir::ModuleId::new(file_id);
         let text = "";
         let parse = parser::parse(text); // Empty file
-        let item_tree = hir_def::ItemTree::from_parse(&parse);
+        let item_tree = hir::ItemTree::from_parse(&parse);
         let symbol_tree = Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, text));
         state.publish_symbol_tree(file_id, symbol_tree);
 
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_cache_parsed_file() {
-        use hir_def::{ItemTree, ModuleId};
+        use hir::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(10);
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_try_claim_for_diagnostics() {
-        use hir_def::{ItemTree, ModuleId, SymbolTree};
+        use hir::{ItemTree, ModuleId, SymbolTree};
         use syntax::Parse;
 
         let state = create_test_state(10);
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn test_cache_lifecycle() {
-        use hir_def::{ItemTree, ModuleId};
+        use hir::{ItemTree, ModuleId};
         use syntax::Parse;
 
         let state = create_test_state(3);

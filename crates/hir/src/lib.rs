@@ -39,6 +39,25 @@ pub use hir_def::docs::{MethodDocs, ParameterDoc};
 pub use hir_def::cognitive_complexity;
 pub use hir_def::cyclomatic_complexity;
 
+// Re-export additional types needed by ide-db
+pub use hir_def::compute_execution_context;
+pub use hir_def::region_tree::lower_regions;
+pub use hir_def::resolver::Resolution;
+pub use hir_def::workspace_index::{SymbolInfo as HirSymbolInfo, WorkspaceIndex};
+pub use hir_def::MethodIdInput;
+
+// Re-export Salsa query functions
+pub use hir_def::{
+    conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
+    module_bodies_query, module_data_query, module_index_query, region_tree_query,
+    symbol_tree_query, workspace_index_query, workspace_symbols_query,
+};
+
+// Re-export hir-ty types and queries
+pub use hir_ty::db::HirDatabase;
+pub use hir_ty::infer::{infer_query, type_of_expr_query};
+pub use hir_ty::{InferenceResult, Ty};
+
 use syntax::{ast::AstNode, TextRange};
 use vfs::FileId;
 

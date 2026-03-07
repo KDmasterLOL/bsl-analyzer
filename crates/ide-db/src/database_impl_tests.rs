@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base_db::{RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
-use hir_def::{DefDatabase, ModuleId};
+use hir::{DefDatabase, ModuleId};
 use vfs::FileId;
 use vfs::{file_set::FileSet, VfsPath};
 
@@ -182,7 +182,7 @@ fn test_symbol_tree_case_insensitive() {
     let symbol_tree = db.symbol_tree(module_id);
 
     // Case-insensitive lookup
-    use hir_def::Name;
+    use hir::Name;
     assert!(symbol_tree.find_method(&Name::new("МояПроцедура")).is_some());
     assert!(symbol_tree.find_method(&Name::new("мояпроцедура")).is_some());
     assert!(symbol_tree.find_method(&Name::new("МОЯПРОЦЕДУРА")).is_some());
@@ -224,8 +224,8 @@ fn test_symbol_tree_multi_file() {
 
 #[test]
 fn test_resolver_resolve_module_method() {
-    use hir_def::resolver::Resolver;
-    use hir_def::{ModuleId, Name};
+    use hir::Resolver;
+    use hir::{ModuleId, Name};
 
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -270,8 +270,8 @@ fn test_resolver_resolve_module_method() {
 
 #[test]
 fn test_resolver_resolve_module_method_case_insensitive() {
-    use hir_def::resolver::Resolver;
-    use hir_def::{ModuleId, Name};
+    use hir::Resolver;
+    use hir::{ModuleId, Name};
 
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -296,8 +296,8 @@ fn test_resolver_resolve_module_method_case_insensitive() {
 
 #[test]
 fn test_resolver_resolve_module_variable() {
-    use hir_def::resolver::Resolver;
-    use hir_def::{ModuleId, Name};
+    use hir::Resolver;
+    use hir::{ModuleId, Name};
 
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -326,9 +326,9 @@ fn test_resolver_resolve_module_variable() {
 
 #[test]
 fn test_resolver_resolve_name_hierarchy() {
-    use hir_def::resolver::{Resolution, Resolver};
-    use hir_def::scope::ExprScopes;
-    use hir_def::{ModuleId, Name};
+    use hir::ExprScopes;
+    use hir::{ModuleId, Name};
+    use hir::{Resolution, Resolver};
 
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -379,9 +379,9 @@ fn test_resolver_resolve_name_hierarchy() {
 
 #[test]
 fn test_resolver_shadowing_local_over_module() {
-    use hir_def::resolver::{Resolution, Resolver};
-    use hir_def::scope::ExprScopes;
-    use hir_def::{ModuleId, Name};
+    use hir::ExprScopes;
+    use hir::{ModuleId, Name};
+    use hir::{Resolution, Resolver};
 
     let mut db = RootDatabaseImpl::new();
     let file_id = FileId(0);
@@ -412,8 +412,8 @@ fn test_resolver_shadowing_local_over_module() {
 
 #[test]
 fn test_resolver_with_workspace_scope() {
-    use hir_def::resolver::Resolver;
-    use hir_def::ModuleId;
+    use hir::ModuleId;
+    use hir::Resolver;
 
     let file_id = FileId(0);
     let module_id = ModuleId::new(file_id);

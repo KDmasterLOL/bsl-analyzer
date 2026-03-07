@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base_db::{FileIdInput, Files, RootQueryDb, SourceDatabase, SourceRoot, SourceRootId};
-use hir_def::{
+use hir::{
     ConditionalTree, DefDatabase, ItemTree, ModuleBodies, ModuleData, ModuleId, RegionTree,
     SymbolTree,
 };
@@ -20,7 +20,7 @@ pub use vfs;
 /// Type alias for SDBL HIR entries in a file.
 ///
 /// Maps SdblExprId (unique across all bodies in file) to the corresponding SDBL package.
-pub type SdblHirEntries = Arc<Vec<(hir_def::SdblExprId, Arc<sdbl_hir::SdblPackage>)>>;
+pub type SdblHirEntries = Arc<Vec<(hir::SdblExprId, Arc<sdbl_hir::SdblPackage>)>>;
 
 pub mod metadata;
 pub mod provider;
@@ -69,7 +69,7 @@ pub struct SymbolInfo {
 /// providing full HIR functionality, type inference, and metadata support with caching.
 #[salsa::db]
 pub trait RootDatabase:
-    SourceDatabase + RootQueryDb + DefDatabase + hir_ty::db::HirDatabase + metadata::MetadataDb
+    SourceDatabase + RootQueryDb + DefDatabase + hir::HirDatabase + metadata::MetadataDb
 {
     /// Get configuration for a file (Salsa-cached).
     ///
@@ -88,7 +88,7 @@ pub trait RootDatabase:
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>;
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>>;
 
     /// Get SDBL HIR for all queries in a file.
     ///
@@ -199,7 +199,7 @@ pub trait RootDatabase:
     /// - `None` if analysis doesn't converge (malformed CFG, infinite loop)
     fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
 
     /// Compute liveness analysis for a method.
@@ -219,7 +219,7 @@ pub trait RootDatabase:
     /// - `None` if analysis doesn't converge (malformed CFG)
     fn liveness_analysis(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
 
     /// Get Control Flow Graph (CFG) for a method.
@@ -237,7 +237,7 @@ pub trait RootDatabase:
     ///
     /// ## Returns
     /// - `Arc<cfg::ControlFlowGraph>` with basic blocks, control flow edges, entry/exit points
-    fn method_cfg(&self, method_id: hir_def::MethodId) -> Arc<cfg::ControlFlowGraph>;
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<cfg::ControlFlowGraph>;
 
     /// Get Control Flow Graph (CFG) for module-level code.
     ///
@@ -250,7 +250,7 @@ pub trait RootDatabase:
     ///
     /// ## Returns
     /// - `Arc<cfg::ControlFlowGraph>` with CFG for module-level code, or empty CFG if none
-    fn module_level_cfg(&self, module_id: hir_def::ModuleId) -> Arc<cfg::ControlFlowGraph>;
+    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<cfg::ControlFlowGraph>;
 
     /// Compute liveness analysis for module-level code.
     ///
@@ -266,7 +266,7 @@ pub trait RootDatabase:
     /// - `None` if no module-level code or analysis doesn't converge
     fn module_level_liveness_analysis(
         &self,
-        module_id: hir_def::ModuleId,
+        module_id: hir::ModuleId,
     ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
 
     // ========================================================================
@@ -476,31 +476,31 @@ impl DefDatabase for RootDatabaseImpl {
     fn item_tree(&self, file_id: FileId) -> Arc<ItemTree> {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        hir_def::item_tree_query(self, file_id_input)
+        hir::item_tree_query(self, file_id_input)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<RegionTree> {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        hir_def::region_tree_query(self, file_id_input)
+        hir::region_tree_query(self, file_id_input)
     }
 
     fn conditional_tree(&self, file_id: FileId) -> Arc<ConditionalTree> {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, file_id);
-        hir_def::conditional_tree_query(self, file_id_input)
+        hir::conditional_tree_query(self, file_id_input)
     }
 
     fn module_data(&self, module_id: ModuleId) -> Arc<ModuleData> {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::module_data_query(self, file_id_input)
+        hir::module_data_query(self, file_id_input)
     }
 
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
         // Use Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::symbol_tree_query(self, file_id_input)
+        hir::symbol_tree_query(self, file_id_input)
     }
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies> {
@@ -509,16 +509,16 @@ impl DefDatabase for RootDatabaseImpl {
         // via module_metadata() query. This is critical for performance - cloning
         // ModuleBodies was causing massive memory overhead.
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::module_bodies_query(self, file_id_input)
+        hir::module_bodies_query(self, file_id_input)
     }
 
-    fn module_metadata(&self, module_id: ModuleId) -> Arc<hir_def::ModuleMetadata> {
+    fn module_metadata(&self, module_id: ModuleId) -> Arc<hir::ModuleMetadata> {
         // Call Salsa tracked query (caching handled by Salsa)
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         module_metadata_query(self, file_id_input)
     }
 
-    fn method_docs(&self, method: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+    fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         // Get docs from SymbolTree (parsed once during SymbolTree construction)
         let symbol_tree = self.symbol_tree(method.module);
         let method_symbol = symbol_tree.find_method_by_id(method)?;
@@ -528,50 +528,47 @@ impl DefDatabase for RootDatabaseImpl {
     fn workspace_symbols(
         &self,
         source_root_id: base_db::SourceRootId,
-    ) -> Arc<hir_def::WorkspaceSymbols> {
+    ) -> Arc<hir::WorkspaceSymbols> {
         // Call Salsa-tracked workspace_symbols_query from hir-def
         let source_root_input = self.source_root_input(source_root_id);
-        hir_def::workspace_symbols_query(self, source_root_input)
+        hir::workspace_symbols_query(self, source_root_input)
     }
 
-    fn workspace_index(
-        &self,
-        source_root_id: base_db::SourceRootId,
-    ) -> Arc<hir_def::WorkspaceIndex> {
+    fn workspace_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceIndex> {
         // Call Salsa-tracked workspace_index_query from hir-def
         let source_root_input = self.source_root_input(source_root_id);
-        hir_def::workspace_index_query(self, source_root_input)
+        hir::workspace_index_query(self, source_root_input)
     }
 
-    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir_def::ExternalRef>> {
+    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>> {
         // Call Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::file_external_refs_query(self, file_id_input)
+        hir::file_external_refs_query(self, file_id_input)
     }
 
-    fn module_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir_def::ModuleIndex> {
+    fn module_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::ModuleIndex> {
         // Call Salsa-tracked module_index_query from hir-def
         let source_root_input = self.source_root_input(source_root_id);
-        hir_def::module_index_query(self, source_root_input)
+        hir::module_index_query(self, source_root_input)
     }
 
     fn file_dependencies(&self, module_id: ModuleId) -> Arc<Vec<FileId>> {
         // Call Salsa tracked query with FileIdInput
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        hir_def::file_dependencies_query(self, file_id_input)
+        hir::file_dependencies_query(self, file_id_input)
     }
 }
 
 #[salsa::db]
-impl hir_ty::db::HirDatabase for RootDatabaseImpl {
-    fn infer(&self, file_id: FileId) -> Arc<hir_ty::InferenceResult> {
+impl hir::HirDatabase for RootDatabaseImpl {
+    fn infer(&self, file_id: FileId) -> Arc<hir::InferenceResult> {
         // Call hir-ty query function
-        hir_ty::infer::infer_query(self, file_id)
+        hir::infer_query(self, file_id)
     }
 
-    fn type_of_expr(&self, file_id: FileId, expr: hir_def::ExprId) -> hir_ty::Ty {
+    fn type_of_expr(&self, file_id: FileId, expr: hir::ExprId) -> hir::Ty {
         // Call hir-ty query function
-        hir_ty::infer::type_of_expr_query(self, file_id, expr)
+        hir::type_of_expr_query(self, file_id, expr)
     }
 }
 
@@ -590,7 +587,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
         // Call Salsa tracked query (caching handled by Salsa)
         let file_id_input = base_db::FileIdInput::new(self, file_id);
         all_sdbl_in_file_query(self, file_id_input)
@@ -629,29 +626,29 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
         // Call Salsa tracked query (Phase 6.5 - automatic caching & invalidation)
-        let method_id_input = hir_def::MethodIdInput::new(self, method_id);
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
         reaching_definitions_query(self, method_id_input)
     }
 
     fn liveness_analysis(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
         // Call Salsa tracked query (backward dataflow analysis)
-        let method_id_input = hir_def::MethodIdInput::new(self, method_id);
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
         liveness_analysis_query(self, method_id_input)
     }
 
-    fn method_cfg(&self, method_id: hir_def::MethodId) -> Arc<cfg::ControlFlowGraph> {
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<cfg::ControlFlowGraph> {
         // Call Salsa tracked query (Phase 6.6 - CFG caching & reuse)
-        let method_id_input = hir_def::MethodIdInput::new(self, method_id);
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
         method_cfg_query(self, method_id_input)
     }
 
-    fn module_level_cfg(&self, module_id: hir_def::ModuleId) -> Arc<cfg::ControlFlowGraph> {
+    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<cfg::ControlFlowGraph> {
         // Call Salsa tracked query for module-level code CFG
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         queries::module_level_cfg_query(self, file_id_input)
@@ -659,7 +656,7 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn module_level_liveness_analysis(
         &self,
-        module_id: hir_def::ModuleId,
+        module_id: hir::ModuleId,
     ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
         // Call Salsa tracked query for module-level liveness analysis
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
-use hir_def::{
+use hir::{
     ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree, WorkspaceSymbols,
 };
 use rustc_hash::FxHashMap;
@@ -300,9 +300,9 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
 
-    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree> {
+    fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
         let parse = self.parse(file_id);
-        Arc::new(hir_def::region_tree::lower_regions(&parse.syntax_node()))
+        Arc::new(hir::lower_regions(&parse.syntax_node()))
     }
 
     fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>> {
@@ -366,7 +366,7 @@ impl AnalysisProvider for StreamingProvider {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>> {
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.module_bodies(module_id);
 
@@ -375,7 +375,7 @@ impl AnalysisProvider for StreamingProvider {
         // Collect from all method bodies (procedures and functions)
         for (local_id, body) in module_bodies.iter_bodies() {
             for (expr_id, query_info) in body.sdbl_exprs() {
-                let sdbl_expr_id = hir_def::SdblExprId::from_method(local_id, expr_id);
+                let sdbl_expr_id = hir::SdblExprId::from_method(local_id, expr_id);
                 result.push((sdbl_expr_id, query_info.clone()));
             }
         }
@@ -383,7 +383,7 @@ impl AnalysisProvider for StreamingProvider {
         // Collect from module-level code (statements outside methods)
         if let Some(module_code) = module_bodies.module_code() {
             for (expr_id, query_info) in module_code.sdbl_exprs() {
-                let sdbl_expr_id = hir_def::SdblExprId::from_module_code(expr_id);
+                let sdbl_expr_id = hir::SdblExprId::from_module_code(expr_id);
                 result.push((sdbl_expr_id, query_info.clone()));
             }
         }
@@ -394,12 +394,12 @@ impl AnalysisProvider for StreamingProvider {
         Arc::new(result)
     }
 
-    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData> {
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir::ModuleData> {
         let item_tree = self.item_tree(module_id.file_id);
-        Arc::new(hir_def::ModuleData::from_item_tree(module_id, item_tree))
+        Arc::new(hir::ModuleData::from_item_tree(module_id, item_tree))
     }
 
-    fn method_docs(&self, method_id: hir_def::MethodId) -> Option<Arc<hir_def::docs::MethodDocs>> {
+    fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
         // Get docs from SymbolTree (parsed once during construction)
         let symbol_tree = self.symbol_tree(method_id.module);
         let method = symbol_tree.find_method_by_id(method_id)?;
@@ -408,7 +408,7 @@ impl AnalysisProvider for StreamingProvider {
 
     fn reaching_definitions(
         &self,
-        method_id: hir_def::MethodId,
+        method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
         // Get module-level reaching definitions
         let module_reaching_defs = self.module_reaching_definitions(method_id.module.file_id);

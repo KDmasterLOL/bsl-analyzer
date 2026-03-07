@@ -194,7 +194,10 @@ impl Files {
     ///
     /// Panics if the file has not been set.
     pub fn file_text(&self, file_id: FileId) -> FileTextInput {
-        self.file_texts.get(&file_id).map(|entry| *entry.value()).expect("file text not set")
+        self.file_texts.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
+            tracing::error!(?file_id, "file text not set — this is a programming error, all files must be loaded before queries run");
+            panic!("file text not set for {:?}", file_id)
+        })
     }
 
     /// Try to get the Salsa input for file text.
@@ -285,10 +288,10 @@ impl Files {
 
     /// Get the Salsa input for source root.
     pub fn source_root(&self, source_root_id: SourceRootId) -> SourceRootInput {
-        self.source_roots
-            .get(&source_root_id)
-            .map(|entry| *entry.value())
-            .expect("source root not set")
+        self.source_roots.get(&source_root_id).map(|entry| *entry.value()).unwrap_or_else(|| {
+            tracing::error!(?source_root_id, "source root not set — this is a programming error");
+            panic!("source root not set for {:?}", source_root_id)
+        })
     }
 
     /// Set the source root.
@@ -314,10 +317,10 @@ impl Files {
 
     /// Get the Salsa input for file source root mapping.
     pub fn file_source_root(&self, file_id: FileId) -> FileSourceRootInput {
-        self.file_source_roots
-            .get(&file_id)
-            .map(|entry| *entry.value())
-            .expect("file source root not set")
+        self.file_source_roots.get(&file_id).map(|entry| *entry.value()).unwrap_or_else(|| {
+            tracing::error!(?file_id, "file source root not set — this is a programming error");
+            panic!("file source root not set for {:?}", file_id)
+        })
     }
 
     /// Set the file source root mapping.

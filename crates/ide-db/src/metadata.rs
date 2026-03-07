@@ -569,7 +569,7 @@ pub(crate) fn load_form_from_path(file_path: &Path) -> Option<Arc<bsl_metadata::
 pub fn build_module_metadata(
     file_path: &Path,
     configuration: Option<&bsl_metadata::Configuration>,
-) -> hir_def::ModuleMetadata {
+) -> hir::ModuleMetadata {
     let uri = file_path.to_string_lossy().to_string();
 
     // Parse module path to get MDO type and name
@@ -595,7 +595,7 @@ pub fn build_module_metadata(
             bsl_metadata::ModuleType::CommonModule => {
                 // Find CommonModule by URI
                 if let Some(cm) = find_common_module_by_uri(config, file_path) {
-                    execution_context = Some(hir_def::compute_execution_context(&cm));
+                    execution_context = Some(hir::compute_execution_context(&cm));
                     common_module = Some(Arc::new(cm));
                 }
             }
@@ -648,7 +648,7 @@ pub fn build_module_metadata(
         form = load_form_from_path(file_path);
     }
 
-    hir_def::ModuleMetadata {
+    hir::ModuleMetadata {
         module_type,
         execution_context,
         common_module,
@@ -670,12 +670,10 @@ pub(crate) fn find_http_service_by_path(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<Arc<bsl_metadata::HTTPService>> {
-    let file_str = file_path.to_string_lossy();
+    let file_str = file_path.to_string_lossy().replace('\\', "/");
 
     // Extract HTTP service name from path: HTTPServices/<Name>/Ext/Module.bsl
     let parts: Vec<&str> = file_str.split('/').collect();
-    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
-    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
 
     // Find HTTPServices in path
     let http_idx = parts.iter().position(|&p| p == "HTTPServices")?;
@@ -696,12 +694,10 @@ pub(crate) fn find_web_service_by_path(
     configuration: &bsl_metadata::Configuration,
     file_path: &Path,
 ) -> Option<Arc<bsl_metadata::WebService>> {
-    let file_str = file_path.to_string_lossy();
+    let file_str = file_path.to_string_lossy().replace('\\', "/");
 
     // Extract Web service name from path: WebServices/<Name>/Ext/Module.bsl
     let parts: Vec<&str> = file_str.split('/').collect();
-    let parts_backslash: Vec<&str> = file_str.split('\\').collect();
-    let parts = if parts.len() > parts_backslash.len() { parts } else { parts_backslash };
 
     // Find WebServices in path
     let ws_idx = parts.iter().position(|&p| p == "WebServices")?;

@@ -9,9 +9,8 @@ use std::sync::Arc;
 
 use base_db::SourceRootId;
 use bsl_metadata::Configuration;
-use hir_def::{
-    docs::MethodDocs, ItemTree, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata,
-    SymbolTree,
+use hir::{
+    ItemTree, MethodDocs, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
@@ -45,7 +44,7 @@ pub trait AnalysisProvider {
     ///
     /// Maps CommonModule names to their exported methods.
     /// Used for qualified name resolution: `CommonModule.Method()`.
-    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir_def::WorkspaceSymbols>;
+    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
 
     /// Get module index (name -> FileId mapping).
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
@@ -86,7 +85,7 @@ pub trait AnalysisProvider {
     // ========================================================================
 
     /// Get region tree for file (module structure with regions).
-    fn region_tree(&self, file_id: FileId) -> Arc<hir_def::RegionTree>;
+    fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree>;
 
     /// Get module-level regions (top-level regions in file).
     fn module_level_regions(&self, file_id: FileId) -> Arc<Vec<base_db::RegionInfo>>;
@@ -107,14 +106,14 @@ pub trait AnalysisProvider {
     fn all_sdbl_in_file(
         &self,
         file_id: FileId,
-    ) -> Arc<Vec<(hir_def::SdblExprId, syntax::SdblQueryInfo)>>;
+    ) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>>;
 
     // ========================================================================
     // Module Information
     // ========================================================================
 
     /// Get module data (name, type, etc.) for a module.
-    fn module_data(&self, module_id: ModuleId) -> Arc<hir_def::ModuleData>;
+    fn module_data(&self, module_id: ModuleId) -> Arc<hir::ModuleData>;
 
     /// Get parsed documentation for a method.
     ///
@@ -230,7 +229,7 @@ mod tests {
         let symbols = provider.symbol_tree(module_id);
 
         // Should find the "Тест" procedure
-        assert!(symbols.find_method(&hir_def::Name::new("Тест")).is_some());
+        assert!(symbols.find_method(&hir::Name::new("Тест")).is_some());
     }
 
     #[test]

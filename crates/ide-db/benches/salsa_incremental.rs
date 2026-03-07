@@ -3,7 +3,7 @@
 //! Tests cache hit performance, incremental update speed, and memory efficiency.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use hir_def::DefDatabase;
+use hir::DefDatabase;
 use ide_db::{
     base_db::{RootQueryDb, SourceDatabase},
     RootDatabaseImpl,
@@ -150,7 +150,7 @@ fn bench_item_tree_incremental(c: &mut Criterion) {
 /// Benchmark: Symbol tree cache hit
 fn bench_symbol_tree_cache_hit(c: &mut Criterion) {
     let db = setup_db(100);
-    let module_id = hir_def::ModuleId::new(FileId(50));
+    let module_id = hir::ModuleId::new(FileId(50));
 
     // Prime the cache
     let _ = db.symbol_tree(module_id);

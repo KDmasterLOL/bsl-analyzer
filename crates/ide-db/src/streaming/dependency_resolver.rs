@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use hir_def::{ItemTree, ModuleId, SymbolTree};
+use hir::{ItemTree, ModuleId, SymbolTree};
 use syntax::Parse;
 use vfs::FileId;
 
@@ -198,8 +198,8 @@ mod tests {
         let global = Arc::new(GlobalContext {
             configuration: None,
             symbol_trees: FxHashMap::default(),
-            workspace_symbols: Arc::new(hir_def::WorkspaceSymbols::default()),
-            module_index: Arc::new(hir_def::ModuleIndex::new()),
+            workspace_symbols: Arc::new(hir::WorkspaceSymbols::default()),
+            module_index: Arc::new(hir::ModuleIndex::new()),
             file_set: Arc::new(file_set),
             file_reader: FileReader::in_memory(files.clone()),
         });
@@ -257,7 +257,7 @@ mod tests {
         let symbol_tree = result.unwrap();
 
         // Verify SymbolTree was built
-        assert!(symbol_tree.find_method(&hir_def::Name::new("ТестФункция")).is_some());
+        assert!(symbol_tree.find_method(&hir::Name::new("ТестФункция")).is_some());
 
         // Verify file status is SymbolTreeReady (not Completed)
         assert!(shared_state.is_symbol_tree_ready(file_id));
@@ -288,8 +288,8 @@ mod tests {
         let symbol_tree = shared_state.get_symbol_tree(file_id).unwrap();
 
         // Verify both methods present
-        assert!(symbol_tree.find_method(&hir_def::Name::new("А")).is_some());
-        assert!(symbol_tree.find_method(&hir_def::Name::new("Б")).is_some());
+        assert!(symbol_tree.find_method(&hir::Name::new("А")).is_some());
+        assert!(symbol_tree.find_method(&hir::Name::new("Б")).is_some());
     }
 
     #[test]
@@ -329,8 +329,8 @@ mod tests {
         let tree_a = result_a.unwrap();
         let tree_b = result_b.unwrap();
 
-        assert!(tree_a.find_method(&hir_def::Name::new("ИзА")).is_some());
-        assert!(tree_b.find_method(&hir_def::Name::new("ИзБ")).is_some());
+        assert!(tree_a.find_method(&hir::Name::new("ИзА")).is_some());
+        assert!(tree_b.find_method(&hir::Name::new("ИзБ")).is_some());
     }
 
     #[test]

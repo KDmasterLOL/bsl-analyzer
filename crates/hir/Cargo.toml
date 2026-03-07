@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 hir-def.workspace = true
+hir-ty.workspace = true
 base-db.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true

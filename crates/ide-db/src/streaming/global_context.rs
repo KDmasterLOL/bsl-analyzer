@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use bsl_metadata::Configuration;
-use hir_def::{ModuleIndex, SymbolTree, WorkspaceSymbols};
+use hir::{ModuleIndex, SymbolTree, WorkspaceSymbols};
 use rustc_hash::FxHashMap;
 use vfs::{file_set::FileSet, FileId};
 
