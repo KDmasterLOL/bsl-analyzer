@@ -237,7 +237,7 @@ pub fn sdbl_hir_in_file_query<'db>(
 pub fn module_cfgs_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<cfg::ModuleCfgs> {
+) -> Arc<hir::cfg::ModuleCfgs> {
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_cfgs", ?module_id).entered();
@@ -249,13 +249,16 @@ pub fn module_cfgs_query<'db>(
     let mut cfgs = rustc_hash::FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
         let source_map = module_bodies.source_map(local_id);
-        let cfg =
-            cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, source_map);
+        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
+            body.body_stmts_typed(),
+            body,
+            source_map,
+        );
         cfgs.insert(local_id, Arc::new(cfg));
     }
 
     tracing::debug!(count = cfgs.len(), "Built module CFGs");
-    Arc::new(cfg::ModuleCfgs::new(cfgs))
+    Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
 }
 
 /// Get CFG for a single method (backward compatible accessor).
@@ -277,7 +280,7 @@ pub fn module_cfgs_query<'db>(
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
-) -> Arc<cfg::ControlFlowGraph> {
+) -> Arc<hir::cfg::ControlFlowGraph> {
     let _span = tracing::info_span!("method_cfg_accessor", ?method_id_input).entered();
 
     let method_id = method_id_input.method_id(db);
@@ -293,7 +296,7 @@ pub fn method_cfg_query<'db>(
         .cloned() // Clone Arc (cheap - just ref count bump)
         .unwrap_or_else(|| {
             tracing::debug!("No CFG found for method: {:?}", method_id);
-            Arc::new(cfg::ControlFlowGraph::new())
+            Arc::new(hir::cfg::ControlFlowGraph::new())
         })
 }
 
@@ -318,7 +321,7 @@ pub fn method_cfg_query<'db>(
 pub fn module_reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_reaching_definitions", ?module_id).entered();
@@ -345,31 +348,33 @@ pub fn module_reaching_definitions_query<'db>(
             })
             .collect();
         let def_index =
-            dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
+            hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
 
         // Initialize entry state with parameters
-        let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
+        let mut initial_defs = hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
         for param_id in body.params() {
             let binding = body.binding(param_id);
-            let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
+            let def = hir::dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
             initial_defs.insert(&def);
         }
 
         // Run dataflow analysis
-        let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
-        let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-        solver.set_max_iterations(dataflow::DEFAULT_MAX_ITERATIONS);
-        solver.set_bottom_factory(|| dataflow::reaching_defs::ReachingDefs::new(def_index.clone()));
+        let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
+        let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+        solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
+        solver.set_bottom_factory(|| {
+            hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
+        });
         solver.set_initial_state(initial_defs);
 
         if let Some(dataflow_result) = solver.solve() {
-            let result = dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
             results.insert(local_id, Arc::new(result));
         }
     }
 
     tracing::debug!(count = results.len(), "Analyzed reaching definitions");
-    Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
+    Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
 }
 
 /// Get reaching definitions for a single method (backward compatible accessor).
@@ -393,7 +398,7 @@ pub fn module_reaching_definitions_query<'db>(
 pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
-) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
     let _span = tracing::info_span!("reaching_definitions_accessor", ?method_id_input).entered();
 
     let method_id = method_id_input.method_id(db);
@@ -425,7 +430,7 @@ pub fn reaching_definitions_query<'db>(
 pub fn module_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<dataflow::liveness::ModuleLiveness> {
+) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
     let _span = tracing::info_span!("module_liveness", ?module_id).entered();
@@ -444,21 +449,21 @@ pub fn module_liveness_analysis_query<'db>(
         };
 
         // Build variable index
-        let var_index = dataflow::liveness::VariableIndex::from_body(body);
+        let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
 
         // Run liveness analysis
-        if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
+        if let Some(liveness_result) = hir::dataflow::liveness::liveness_analysis_direct(
             body,
             cfg,
             var_index,
-            dataflow::DEFAULT_MAX_ITERATIONS,
+            hir::dataflow::DEFAULT_MAX_ITERATIONS,
         ) {
             results.insert(local_id, Arc::new(liveness_result));
         }
     }
 
     tracing::debug!(count = results.len(), "Analyzed liveness");
-    Arc::new(dataflow::liveness::ModuleLiveness::new(results))
+    Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
 }
 
 /// Get liveness analysis for a single method (backward compatible accessor).
@@ -483,7 +488,7 @@ pub fn module_liveness_analysis_query<'db>(
 pub fn liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
-) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
     let _span = tracing::info_span!("liveness_analysis_accessor", ?method_id_input).entered();
 
     let method_id = method_id_input.method_id(db);
@@ -513,7 +518,7 @@ pub fn liveness_analysis_query<'db>(
 pub fn module_level_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<cfg::ControlFlowGraph> {
+) -> Arc<hir::cfg::ControlFlowGraph> {
     let _span = tracing::info_span!("module_level_cfg", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
@@ -527,12 +532,12 @@ pub fn module_level_cfg_query<'db>(
         None => {
             // No module-level code
             tracing::debug!("No module-level code in module: {:?}", module_id);
-            return Arc::new(cfg::ControlFlowGraph::new());
+            return Arc::new(hir::cfg::ControlFlowGraph::new());
         }
     };
 
     // Build CFG from HIR body
-    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
+    let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
     tracing::debug!("Built module-level CFG: {} vertices", cfg.vertices().count());
 
     Arc::new(cfg)
@@ -555,7 +560,7 @@ pub fn module_level_cfg_query<'db>(
 pub fn module_level_liveness_analysis_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: base_db::FileIdInput<'db>,
-) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
     let _span = tracing::info_span!("module_level_liveness", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
     let module_id = hir::ModuleId::new(file_id);
@@ -577,17 +582,17 @@ pub fn module_level_liveness_analysis_query<'db>(
     let cfg = db.module_level_cfg(module_id);
 
     // Create variable index for BitSet-based liveness (maps variable names to indices)
-    let var_index = dataflow::liveness::VariableIndex::from_body(body);
+    let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
 
     // Run backward dataflow analysis for liveness
-    let transfer = dataflow::liveness::LivenessTransfer;
-    let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+    let transfer = hir::dataflow::liveness::LivenessTransfer;
+    let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
 
     // Configure solver for backward analysis
-    solver.set_direction(dataflow::Direction::Backward);
+    solver.set_direction(hir::dataflow::Direction::Backward);
 
     // Initialize all blocks with BitSet-based bottom element (requires var_index)
-    solver.set_bottom_factory(|| dataflow::liveness::Liveness::new(var_index.clone()));
+    solver.set_bottom_factory(|| hir::dataflow::liveness::Liveness::new(var_index.clone()));
 
     // Max iterations: defaults to 1000 (sufficient for complex real-world methods)
 

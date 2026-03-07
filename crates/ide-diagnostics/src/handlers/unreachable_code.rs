@@ -42,7 +42,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg::CfgVertex;
+use hir::cfg::CfgVertex;
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -105,7 +105,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         let source_map = &module_result.source_map;
 
         // Build CFG for module code
-        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
             body.body_stmts_typed(),
             body,
             Some(source_map),
@@ -135,14 +135,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
 /// Collect ranges of unreachable vertices from CFG.
 fn collect_unreachable_ranges<F>(
-    cfg: &cfg::ControlFlowGraph,
+    cfg: &hir::cfg::ControlFlowGraph,
     source_map: &hir::BodySourceMap,
-    entry: cfg::NodeIndex,
-    exit: cfg::NodeIndex,
+    entry: hir::cfg::NodeIndex,
+    exit: hir::cfg::NodeIndex,
     is_unreachable: F,
 ) -> Vec<TextRange>
 where
-    F: Fn(cfg::NodeIndex) -> bool,
+    F: Fn(hir::cfg::NodeIndex) -> bool,
 {
     let mut ranges = Vec::new();
 
@@ -243,9 +243,9 @@ fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange>
 /// A vertex is reachable if there's a path from entry following edges that are NOT
 /// dead code edges (AdjacentCode).
 fn compute_reachable_vertices(
-    cfg: &cfg::ControlFlowGraph,
-    entry: cfg::NodeIndex,
-) -> std::collections::HashSet<cfg::NodeIndex> {
+    cfg: &hir::cfg::ControlFlowGraph,
+    entry: hir::cfg::NodeIndex,
+) -> std::collections::HashSet<hir::cfg::NodeIndex> {
     use std::collections::HashSet;
 
     let mut reachable = HashSet::new();
@@ -274,9 +274,9 @@ fn compute_reachable_vertices(
 /// when following edges BACKWARDS. Vertices that are completely disconnected from
 /// reachable vertices (e.g., inside an externally unreachable If) are excluded.
 fn compute_locally_unreachable(
-    cfg: &cfg::ControlFlowGraph,
-    reachable: &std::collections::HashSet<cfg::NodeIndex>,
-) -> std::collections::HashSet<cfg::NodeIndex> {
+    cfg: &hir::cfg::ControlFlowGraph,
+    reachable: &std::collections::HashSet<hir::cfg::NodeIndex>,
+) -> std::collections::HashSet<hir::cfg::NodeIndex> {
     use std::collections::HashSet;
 
     // Do backward DFS from each unreachable vertex to see if it can reach
@@ -299,9 +299,9 @@ fn compute_locally_unreachable(
 
 /// Check if vertex can reach any reachable vertex by following edges backwards.
 fn can_reach_reachable_backwards(
-    cfg: &cfg::ControlFlowGraph,
-    start: cfg::NodeIndex,
-    reachable: &std::collections::HashSet<cfg::NodeIndex>,
+    cfg: &hir::cfg::ControlFlowGraph,
+    start: hir::cfg::NodeIndex,
+    reachable: &std::collections::HashSet<hir::cfg::NodeIndex>,
 ) -> bool {
     use std::collections::HashSet;
 

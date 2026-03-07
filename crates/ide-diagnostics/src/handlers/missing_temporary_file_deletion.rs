@@ -164,7 +164,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if let Some(module_result) = module_bodies.module_code_result() {
         let body = &module_result.body;
         let source_map = &module_result.source_map;
-        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
             body.body_stmts_typed(),
             body,
             Some(source_map),
@@ -181,7 +181,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 fn check_body(
     body: &Body,
     source_map: &BodySourceMap,
-    cfg: Option<&cfg::ControlFlowGraph>,
+    cfg: Option<&hir::cfg::ControlFlowGraph>,
     config: &Config,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
@@ -278,8 +278,8 @@ fn has_deletion_in_body(
     var_name: &str,
     config: &Config,
     get_temp_stmt: Option<StmtId>,
-    stmt_to_block: Option<&rustc_hash::FxHashMap<StmtId, cfg::NodeIndex>>,
-    cfg: Option<&cfg::ControlFlowGraph>,
+    stmt_to_block: Option<&rustc_hash::FxHashMap<StmtId, hir::cfg::NodeIndex>>,
+    cfg: Option<&hir::cfg::ControlFlowGraph>,
 ) -> bool {
     // Find the CFG block containing GetTempFileName (for reachability check)
     let get_temp_block = get_temp_stmt.and_then(|s| stmt_to_block.and_then(|m| m.get(&s).copied()));
@@ -384,11 +384,11 @@ fn expr_contains_var(body: &Body, expr_idx: ExprIdx, var_name: &str) -> bool {
 
 /// Build mapping from StmtId → CFG NodeIndex (basic block).
 fn build_stmt_to_block_map(
-    cfg: &cfg::ControlFlowGraph,
-) -> rustc_hash::FxHashMap<StmtId, cfg::NodeIndex> {
+    cfg: &hir::cfg::ControlFlowGraph,
+) -> rustc_hash::FxHashMap<StmtId, hir::cfg::NodeIndex> {
     let mut map = rustc_hash::FxHashMap::default();
     for (node_idx, vertex) in cfg.vertices() {
-        if let cfg::CfgVertex::BasicBlock(block) = vertex {
+        if let hir::cfg::CfgVertex::BasicBlock(block) = vertex {
             for &stmt_id in block.statements() {
                 map.insert(stmt_id, node_idx);
             }
@@ -400,8 +400,8 @@ fn build_stmt_to_block_map(
 /// Check if any deletion call is reachable from the GetTempFileName block via CFG.
 fn is_deletion_reachable_from(
     body: &Body,
-    cfg: &cfg::ControlFlowGraph,
-    from_block: cfg::NodeIndex,
+    cfg: &hir::cfg::ControlFlowGraph,
+    from_block: hir::cfg::NodeIndex,
     var_name: &str,
     config: &Config,
 ) -> bool {
@@ -413,7 +413,7 @@ fn is_deletion_reachable_from(
 
     while let Some(current) = queue.pop_front() {
         // Check if current block contains a deletion call
-        if let Some(cfg::CfgVertex::BasicBlock(block)) = cfg.vertex(current) {
+        if let Some(hir::cfg::CfgVertex::BasicBlock(block)) = cfg.vertex(current) {
             for &stmt_id in block.statements() {
                 let stmt = body.stmt(stmt_id);
                 let call_exprs = match stmt {

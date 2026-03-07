@@ -84,7 +84,7 @@ pub struct DiagnosticsConfig {
     pub enabled: Vec<DiagnosticCode>,
     pub parameters: HashMap<DiagnosticCode, serde_json::Value>,
     pub ordinary_app_support: bool,
-    /// Maximum iterations for dataflow analysis (default: dataflow::DEFAULT_MAX_ITERATIONS)
+    /// Maximum iterations for dataflow analysis (default: hir::dataflow::DEFAULT_MAX_ITERATIONS)
     ///
     /// Controls convergence limit for liveness analysis and other dataflow algorithms.
     /// Increase this for very complex methods with deep nesting or many loops.
@@ -107,7 +107,7 @@ impl Default for DiagnosticsConfig {
             enabled: Vec::new(),
             parameters: HashMap::new(),
             ordinary_app_support: false,
-            dataflow_max_iterations: dataflow::DEFAULT_MAX_ITERATIONS,
+            dataflow_max_iterations: hir::dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
             only_enabled: None,
         }
@@ -147,7 +147,7 @@ impl DiagnosticsConfig {
             enabled,
             parameters: HashMap::new(),
             ordinary_app_support: false,
-            dataflow_max_iterations: dataflow::DEFAULT_MAX_ITERATIONS,
+            dataflow_max_iterations: hir::dataflow::DEFAULT_MAX_ITERATIONS,
             metadata_overrides: HashMap::new(),
             only_enabled: None,
         }
@@ -193,7 +193,7 @@ impl<'de> serde::Deserialize<'de> for DiagnosticsConfig {
                 let mut enabled = Vec::new();
                 let mut parameters = HashMap::new();
                 let mut ordinary_app_support = false;
-                let mut dataflow_max_iterations = dataflow::DEFAULT_MAX_ITERATIONS;
+                let mut dataflow_max_iterations = hir::dataflow::DEFAULT_MAX_ITERATIONS;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {

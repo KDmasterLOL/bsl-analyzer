@@ -123,7 +123,7 @@ pub trait RootDatabase:
     /// When any method changes, module_bodies invalidates the entire module,
     /// which cascades to invalidate ALL per-method queries. Module-level
     /// granularity matches the actual invalidation granularity.
-    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<cfg::ModuleCfgs>;
+    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs>;
 
     /// Compute reaching definitions for all methods in a module (batch processing).
     ///
@@ -141,7 +141,7 @@ pub trait RootDatabase:
     fn module_reaching_definitions(
         &self,
         file_id_input: FileIdInput,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
 
     /// Compute liveness analysis for all methods in a module (batch processing).
     ///
@@ -156,7 +156,7 @@ pub trait RootDatabase:
     fn module_liveness_analysis(
         &self,
         file_id_input: FileIdInput,
-    ) -> Arc<dataflow::liveness::ModuleLiveness>;
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness>;
 
     // ========================================================================
     // Per-Method Dataflow Accessors (Backward Compatible)
@@ -192,7 +192,7 @@ pub trait RootDatabase:
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
     /// Compute liveness analysis for a method.
     ///
@@ -212,7 +212,7 @@ pub trait RootDatabase:
     fn liveness_analysis(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
 
     /// Get Control Flow Graph (CFG) for a method.
     ///
@@ -228,8 +228,8 @@ pub trait RootDatabase:
     /// - Reused across multiple dataflow analyses
     ///
     /// ## Returns
-    /// - `Arc<cfg::ControlFlowGraph>` with basic blocks, control flow edges, entry/exit points
-    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<cfg::ControlFlowGraph>;
+    /// - `Arc<hir::cfg::ControlFlowGraph>` with basic blocks, control flow edges, entry/exit points
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph>;
 
     /// Get Control Flow Graph (CFG) for module-level code.
     ///
@@ -241,8 +241,8 @@ pub trait RootDatabase:
     /// - Invalidated when module body changes
     ///
     /// ## Returns
-    /// - `Arc<cfg::ControlFlowGraph>` with CFG for module-level code, or empty CFG if none
-    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<cfg::ControlFlowGraph>;
+    /// - `Arc<hir::cfg::ControlFlowGraph>` with CFG for module-level code, or empty CFG if none
+    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<hir::cfg::ControlFlowGraph>;
 
     /// Compute liveness analysis for module-level code.
     ///
@@ -259,7 +259,7 @@ pub trait RootDatabase:
     fn module_level_liveness_analysis(
         &self,
         module_id: hir::ModuleId,
-    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>>;
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
 
     // ========================================================================
     // Line Index Query
@@ -576,7 +576,7 @@ impl RootDatabase for RootDatabaseImpl {
 
     // Module-level dataflow queries (batch processing)
 
-    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<cfg::ModuleCfgs> {
+    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs> {
         // Call Salsa tracked query - builds CFGs for all methods at once
         queries::module_cfgs_query(self, file_id_input)
     }
@@ -584,7 +584,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn module_reaching_definitions(
         &self,
         file_id_input: FileIdInput,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         // Call Salsa tracked query - analyzes all methods with shared CFGs
         queries::module_reaching_definitions_query(self, file_id_input)
     }
@@ -592,7 +592,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn module_liveness_analysis(
         &self,
         file_id_input: FileIdInput,
-    ) -> Arc<dataflow::liveness::ModuleLiveness> {
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
         // Call Salsa tracked query - analyzes all methods with shared CFGs
         queries::module_liveness_analysis_query(self, file_id_input)
     }
@@ -602,7 +602,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         // Call Salsa tracked query (Phase 6.5 - automatic caching & invalidation)
         let method_id_input = hir::MethodIdInput::new(self, method_id);
         reaching_definitions_query(self, method_id_input)
@@ -611,19 +611,19 @@ impl RootDatabase for RootDatabaseImpl {
     fn liveness_analysis(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
         // Call Salsa tracked query (backward dataflow analysis)
         let method_id_input = hir::MethodIdInput::new(self, method_id);
         liveness_analysis_query(self, method_id_input)
     }
 
-    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<cfg::ControlFlowGraph> {
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
         // Call Salsa tracked query (Phase 6.6 - CFG caching & reuse)
         let method_id_input = hir::MethodIdInput::new(self, method_id);
         method_cfg_query(self, method_id_input)
     }
 
-    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<cfg::ControlFlowGraph> {
+    fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<hir::cfg::ControlFlowGraph> {
         // Call Salsa tracked query for module-level code CFG
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         queries::module_level_cfg_query(self, file_id_input)
@@ -632,7 +632,7 @@ impl RootDatabase for RootDatabaseImpl {
     fn module_level_liveness_analysis(
         &self,
         module_id: hir::ModuleId,
-    ) -> Option<Arc<dataflow::DataflowResult<dataflow::liveness::Liveness>>> {
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
         // Call Salsa tracked query for module-level liveness analysis
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         queries::module_level_liveness_analysis_query(self, file_id_input)

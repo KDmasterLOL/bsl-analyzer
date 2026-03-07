@@ -205,17 +205,17 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get module CFGs (batch).
-    pub fn module_cfgs(&self) -> Arc<cfg::ModuleCfgs> {
+    pub fn module_cfgs(&self) -> Arc<hir::cfg::ModuleCfgs> {
         self.query(|p| p.module_cfgs(self.file_id))
     }
 
     /// Get module liveness analysis (batch).
-    pub fn module_liveness(&self) -> Arc<dataflow::liveness::ModuleLiveness> {
+    pub fn module_liveness(&self) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
         self.query(|p| p.module_liveness_analysis(self.file_id))
     }
 
     /// Get module reaching definitions (batch).
-    pub fn module_reaching_defs(&self) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    pub fn module_reaching_defs(&self) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         self.query(|p| p.module_reaching_definitions(self.file_id))
     }
 
@@ -254,7 +254,7 @@ impl<'a> DiagnosticsContext<'a> {
     pub fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         self.query(|p| p.reaching_definitions(method_id))
     }
 

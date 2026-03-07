@@ -49,7 +49,7 @@ pub struct ParsedFile {
 
     /// Lazily computed CFGs for all methods.
     /// Computed on first access during Phase 2 (requires module_bodies).
-    module_cfgs: OnceLock<Arc<cfg::ModuleCfgs>>,
+    module_cfgs: OnceLock<Arc<hir::cfg::ModuleCfgs>>,
 
     /// Lazily computed SDBL HIR for all queries.
     /// Computed on first access during Phase 2 (requires configuration for type inference).
@@ -109,7 +109,7 @@ impl ParsedFile {
     ///
     /// Thread-safe: computed only once even with concurrent access.
     /// Requires module_bodies (which will be computed if needed).
-    pub fn module_cfgs(&self) -> Arc<cfg::ModuleCfgs> {
+    pub fn module_cfgs(&self) -> Arc<hir::cfg::ModuleCfgs> {
         self.module_cfgs
             .get_or_init(|| {
                 let bodies = self.module_bodies();
@@ -117,7 +117,7 @@ impl ParsedFile {
 
                 for (local_id, body) in bodies.iter_bodies() {
                     let source_map = bodies.source_map(local_id);
-                    let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+                    let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
                         body.body_stmts_typed(),
                         body,
                         source_map,
@@ -125,7 +125,7 @@ impl ParsedFile {
                     cfgs.insert(local_id, Arc::new(cfg));
                 }
 
-                Arc::new(cfg::ModuleCfgs::new(cfgs))
+                Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
             })
             .clone()
     }

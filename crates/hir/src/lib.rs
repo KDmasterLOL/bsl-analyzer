@@ -39,6 +39,10 @@ pub use hir_def::docs::{MethodDocs, ParameterDoc};
 pub use hir_def::cognitive_complexity;
 pub use hir_def::cyclomatic_complexity;
 
+// CFG and dataflow analysis — re-exported for upper layers
+pub use ::cfg;
+pub use dataflow;
+
 // Re-export additional types needed by ide-db
 pub use hir_def::compute_execution_context;
 pub use hir_def::region_tree::lower_regions;

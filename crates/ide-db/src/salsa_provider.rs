@@ -93,12 +93,15 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.file_source_root_input(file_id).source_root_id(self.db)
     }
 
-    fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs> {
+    fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.module_cfgs(input)
     }
 
-    fn module_liveness_analysis(&self, file_id: FileId) -> Arc<dataflow::liveness::ModuleLiveness> {
+    fn module_liveness_analysis(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.module_liveness_analysis(input)
     }
@@ -106,7 +109,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn module_reaching_definitions(
         &self,
         file_id: FileId,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.module_reaching_definitions(input)
     }
@@ -141,7 +144,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         self.db.reaching_definitions(method_id)
     }
 

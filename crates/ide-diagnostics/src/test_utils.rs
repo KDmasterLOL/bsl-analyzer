@@ -372,7 +372,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn module_liveness_analysis(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<dataflow::liveness::ModuleLiveness> {
+    ) -> std::sync::Arc<hir::dataflow::liveness::ModuleLiveness> {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;
         let input = FileIdInput::new(&self.db, file_id);
@@ -382,7 +382,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn module_reaching_definitions(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    ) -> std::sync::Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;
         let input = FileIdInput::new(&self.db, file_id);
@@ -392,7 +392,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<std::sync::Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+    ) -> Option<std::sync::Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         use ide_db::RootDatabase;
         self.db.reaching_definitions(method_id)
     }
@@ -444,7 +444,7 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.method_docs(method_id)
     }
 
-    fn module_cfgs(&self, file_id: vfs::FileId) -> std::sync::Arc<cfg::ModuleCfgs> {
+    fn module_cfgs(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::cfg::ModuleCfgs> {
         use ide_db::base_db::FileIdInput;
         use ide_db::RootDatabase;
         let input = FileIdInput::new(&self.db, file_id);

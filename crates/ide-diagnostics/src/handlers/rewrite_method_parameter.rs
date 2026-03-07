@@ -167,7 +167,9 @@ pub fn from_hir(
     // If there's only one definition and it's the parameter → not used before overwrite
     if param_definitions.len() == 1 {
         let single_def = param_definitions[0];
-        if let dataflow::reaching_defs::DefSite::Parameter(def_binding_id) = single_def.def_site {
+        if let hir::dataflow::reaching_defs::DefSite::Parameter(def_binding_id) =
+            single_def.def_site
+        {
             if def_binding_id == param_id {
                 // Check if parameter is used in RHS of this assignment
                 // If yes, this is not "overwrite without use" (e.g., Param = Param or Param = Func(Param))

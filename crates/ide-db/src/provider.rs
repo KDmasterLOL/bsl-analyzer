@@ -126,16 +126,19 @@ pub trait AnalysisProvider {
     // ========================================================================
 
     /// Get CFGs for all methods in module (batch).
-    fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs>;
+    fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs>;
 
     /// Get liveness analysis for all methods (batch).
-    fn module_liveness_analysis(&self, file_id: FileId) -> Arc<dataflow::liveness::ModuleLiveness>;
+    fn module_liveness_analysis(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness>;
 
     /// Get reaching definitions for all methods (batch).
     fn module_reaching_definitions(
         &self,
         file_id: FileId,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
 
     // ========================================================================
     // Per-Method Dataflow (for specific diagnostics)
@@ -147,7 +150,7 @@ pub trait AnalysisProvider {
     fn reaching_definitions(
         &self,
         method_id: MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
     // ========================================================================
     // VFS Resolution (for metadata lookups)

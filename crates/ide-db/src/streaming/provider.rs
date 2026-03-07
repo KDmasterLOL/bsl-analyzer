@@ -195,7 +195,7 @@ impl AnalysisProvider for StreamingProvider {
     // Dataflow Analysis (computed on-the-fly)
     // ========================================================================
 
-    fn module_cfgs(&self, file_id: FileId) -> Arc<cfg::ModuleCfgs> {
+    fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs> {
         // Check ParsedFile cache (lazy computation via OnceLock)
         if let Some(ref shared_state) = self.shared_state {
             if let Some(parsed) = shared_state.get_parsed_file(file_id) {
@@ -210,7 +210,7 @@ impl AnalysisProvider for StreamingProvider {
         let mut cfgs = FxHashMap::default();
         for (local_id, body) in module_bodies.iter_bodies() {
             let source_map = module_bodies.source_map(local_id);
-            let cfg = cfg::CfgBuilder::new().build_graph_from_hir(
+            let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
                 body.body_stmts_typed(),
                 body,
                 source_map,
@@ -218,10 +218,13 @@ impl AnalysisProvider for StreamingProvider {
             cfgs.insert(local_id, Arc::new(cfg));
         }
 
-        Arc::new(cfg::ModuleCfgs::new(cfgs))
+        Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
     }
 
-    fn module_liveness_analysis(&self, file_id: FileId) -> Arc<dataflow::liveness::ModuleLiveness> {
+    fn module_liveness_analysis(
+        &self,
+        file_id: FileId,
+    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
         let module_bodies = self.module_bodies(module_id);
@@ -233,25 +236,25 @@ impl AnalysisProvider for StreamingProvider {
                 None => continue,
             };
 
-            let var_index = dataflow::liveness::VariableIndex::from_body(body);
+            let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
 
-            if let Some(liveness_result) = dataflow::liveness::liveness_analysis_direct(
+            if let Some(liveness_result) = hir::dataflow::liveness::liveness_analysis_direct(
                 body,
                 cfg,
                 var_index,
-                dataflow::DEFAULT_MAX_ITERATIONS,
+                hir::dataflow::DEFAULT_MAX_ITERATIONS,
             ) {
                 results.insert(local_id, Arc::new(liveness_result));
             }
         }
 
-        Arc::new(dataflow::liveness::ModuleLiveness::new(results))
+        Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
     }
 
     fn module_reaching_definitions(
         &self,
         file_id: FileId,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
+    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
         let module_id = ModuleId::new(file_id);
         let module_cfgs = self.module_cfgs(file_id);
         let module_bodies = self.module_bodies(module_id);
@@ -272,32 +275,34 @@ impl AnalysisProvider for StreamingProvider {
                 })
                 .collect();
             let def_index =
-                dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
+                hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
 
             // Initialize entry state with parameters
-            let mut initial_defs = dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
+            let mut initial_defs =
+                hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
             for param_id in body.params() {
                 let binding = body.binding(param_id);
-                let def = dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
+                let def =
+                    hir::dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
                 initial_defs.insert(&def);
             }
 
             // Run dataflow analysis
-            let transfer = dataflow::reaching_defs::ReachingDefsTransfer;
-            let mut solver = dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-            solver.set_max_iterations(dataflow::DEFAULT_MAX_ITERATIONS);
+            let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
+            let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
+            solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
             solver.set_bottom_factory(|| {
-                dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
+                hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
             });
             solver.set_initial_state(initial_defs);
 
             if let Some(dataflow_result) = solver.solve() {
-                let result = dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
+                let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(dataflow_result);
                 results.insert(local_id, Arc::new(result));
             }
         }
 
-        Arc::new(dataflow::reaching_defs::ModuleReachingDefs::new(results))
+        Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
@@ -409,7 +414,7 @@ impl AnalysisProvider for StreamingProvider {
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         // Get module-level reaching definitions
         let module_reaching_defs = self.module_reaching_definitions(method_id.module.file_id);
 

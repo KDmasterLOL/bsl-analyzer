@@ -124,8 +124,8 @@ pub fn from_hir(
 /// Check if function has missing return paths using CFG analysis.
 ///
 /// Returns true if some execution paths don't have explicit return statements.
-fn check_missing_return_in_cfg(body: &hir::Body, cfg: &cfg::ControlFlowGraph) -> bool {
-    use cfg::{CfgEdgeType, CfgVertex};
+fn check_missing_return_in_cfg(body: &hir::Body, cfg: &hir::cfg::ControlFlowGraph) -> bool {
+    use hir::cfg::{CfgEdgeType, CfgVertex};
 
     let exit_point = cfg.exit_point();
 
@@ -170,12 +170,12 @@ fn check_missing_return_in_cfg(body: &hir::Body, cfg: &cfg::ControlFlowGraph) ->
 
 /// Check if a basic block has missing return.
 fn check_basic_block_missing_return(
-    vertex_idx: cfg::NodeIndex,
-    block: &cfg::BasicBlockVertex,
-    cfg: &cfg::ControlFlowGraph,
+    vertex_idx: hir::cfg::NodeIndex,
+    block: &hir::cfg::BasicBlockVertex,
+    cfg: &hir::cfg::ControlFlowGraph,
     body: &hir::Body,
 ) -> bool {
-    use cfg::{CfgEdgeType, CfgVertex};
+    use hir::cfg::{CfgEdgeType, CfgVertex};
     use hir::Stmt;
 
     if block.is_empty() {

@@ -42,7 +42,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use cfg::{CfgEdgeType, CfgVertex, ControlFlowGraph, NodeIndex};
+use hir::cfg::{CfgEdgeType, CfgVertex, ControlFlowGraph, NodeIndex};
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Stmt, StmtId};
 use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
