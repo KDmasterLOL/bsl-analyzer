@@ -23,6 +23,7 @@ EXCLUDE_PATTERNS=(
     "scripts/ci-status.sh"
     ".omc/"
     ".claude/"
+    "crates/bsl-launcher/release-source.github.json"
 )
 
 # --- Цвета ---
@@ -183,6 +184,10 @@ cd "$WORK_DIR/github"
 
 # Синхронизируем файлы
 sync_files "$PROJECT_ROOT" "$WORK_DIR/github"
+
+# Подмена конфига для GitHub-сборки
+cp "$PROJECT_ROOT/crates/bsl-launcher/release-source.github.json" \
+   "$WORK_DIR/github/crates/bsl-launcher/release-source.json"
 
 # Проверяем есть ли изменения
 git add -A

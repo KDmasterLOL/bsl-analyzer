@@ -1,0 +1,6 @@
+{
+    "provider": "server",
+    "url": "https://dev.runsystems.ru/releases",
+    "product": "bsl-analyzer",
+    "public_key": "a2618f20b4a0d270b627c164f5b8bcecc7559f85a25489620d7ab614cc8efbe8"
+}
