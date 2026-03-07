@@ -994,6 +994,9 @@ fn analyze_streaming(
 
     let _span = tracing::info_span!("cli_analyze_streaming").entered();
 
+    // Canonicalize source_dir to avoid double-join in FileReader::from_disk
+    let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
+
     // Profiling mode enabled when --only-diagnostic is set
     let profiling_enabled = only_diagnostic.is_some();
     if let Some(ref diag) = only_diagnostic {
