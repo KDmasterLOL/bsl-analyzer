@@ -2,6 +2,10 @@
 //!
 //! This is the main entry point for the LSP server.
 
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::{env, error::Error, fs, io, path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand, ValueEnum};

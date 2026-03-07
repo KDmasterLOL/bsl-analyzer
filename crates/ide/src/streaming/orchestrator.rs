@@ -300,30 +300,22 @@ impl AnalysisOrchestrator {
         let file_set_arc = Arc::new(file_set.clone());
         let file_reader = FileReader::from_disk(self.workspace_root.clone(), file_set_arc.clone());
 
-        // 3. Build all SymbolTrees (Phase 1 only)
+        // 3. Build all SymbolTrees in parallel
+        use rayon::prelude::*;
         info!(num_files = files.len(), "Building SymbolTrees");
-        let mut symbol_trees = FxHashMap::default();
 
-        for &file_id in files {
-            let text = file_reader.read(file_id).unwrap_or_default();
-
-            // Parse
-            let parse = parser::parse(&text);
-            if parse.has_errors() {
-                let errors: Vec<_> = parse.errors().iter().take(3).map(|e| e.to_string()).collect();
-                warn!(file_id = ?file_id, errors = ?errors, "Parse errors in initialization");
-            }
-
-            // Lower to ItemTree
-            let item_tree = ItemTree::from_parse(&parse);
-
-            // Build SymbolTree
-            let module_id = ModuleId::new(file_id);
-            let symbol_tree =
-                Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
-
-            symbol_trees.insert(file_id, symbol_tree);
-        }
+        let symbol_trees: FxHashMap<_, _> = files
+            .par_iter()
+            .map(|&file_id| {
+                let text = file_reader.read(file_id).unwrap_or_default();
+                let parse = parser::parse(&text);
+                let item_tree = ItemTree::from_parse(&parse);
+                let module_id = ModuleId::new(file_id);
+                let symbol_tree =
+                    Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
+                (file_id, symbol_tree)
+            })
+            .collect();
 
         info!(num_symbol_trees = symbol_trees.len(), "SymbolTrees built successfully");
 

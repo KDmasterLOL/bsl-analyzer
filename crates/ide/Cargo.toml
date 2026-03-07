@@ -25,6 +25,7 @@ serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
 either = "1.9"
 rustc-hash = "2.1"
 
