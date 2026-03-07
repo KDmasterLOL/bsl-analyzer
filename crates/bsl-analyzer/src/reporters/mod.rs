@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ide_diagnostics::DiagnosticOutput;
+use ide::DiagnosticOutput;
 
 pub mod console;
 pub mod json;

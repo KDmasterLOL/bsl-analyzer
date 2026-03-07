@@ -4,8 +4,7 @@
 //! (Diagnostic, TextRange, etc.) to LSP types (lsp_types).
 
 use ide::{Diagnostic as IdeDiagnostic, HlMod, HlRange, HlTag, Severity};
-use ide_db::TextRange;
-use ide_diagnostics::DiagnosticTag as IdeTag;
+use ide::{DiagnosticTag as IdeTag, TextRange};
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, Location,
@@ -134,7 +133,7 @@ pub fn code_action(
     text: &str,
     uri: &Url,
     diag: &IdeDiagnostic,
-    fix: &ide_diagnostics::Fix,
+    fix: &ide::Fix,
 ) -> Option<lsp_types::CodeAction> {
     let edits: Vec<lsp_types::TextEdit> = fix
         .edits

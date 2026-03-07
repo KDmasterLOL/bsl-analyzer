@@ -1114,46 +1114,26 @@ pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult 
 ///
 /// External variables (module-level) are passed so they're not registered
 /// as implicit local variables.
+/// When `line_index` is provided, additional diagnostics are emitted:
+/// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
     known_externals: rustc_hash::FxHashSet<String>,
+    line_index: Option<std::sync::Arc<line_index::LineIndex>>,
 ) -> LowerResult {
-    lower::lower_method_with_externals(method_node, is_function, known_externals)
-}
-
-/// Lower a method AST node to HIR Body with known externals and line index.
-///
-/// This version supports OneStatementPerLine diagnostic by tracking statement lines.
-pub fn lower_method_with_externals_and_line_index(
-    method_node: &SyntaxNode,
-    is_function: bool,
-    known_externals: rustc_hash::FxHashSet<String>,
-    line_index: std::sync::Arc<line_index::LineIndex>,
-) -> LowerResult {
-    lower::lower_method_with_externals_and_line_index(
-        method_node,
-        is_function,
-        known_externals,
-        line_index,
-    )
+    lower::lower_method_with_externals(method_node, is_function, known_externals, line_index)
 }
 
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.
-pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
-    lower::lower_module_code(root)
-}
-
-/// Lower module-level code with line index for OneStatementPerLine diagnostic.
-///
-/// This version supports OneStatementPerLine diagnostic by tracking statement lines.
-pub fn lower_module_code_with_line_index(
+/// When `line_index` is provided, OneStatementPerLine diagnostic is emitted.
+pub fn lower_module_code(
     root: &SyntaxNode,
-    line_index: std::sync::Arc<line_index::LineIndex>,
+    line_index: Option<std::sync::Arc<line_index::LineIndex>>,
 ) -> LowerResult {
-    lower::lower_module_code_with_line_index(root, line_index)
+    lower::lower_module_code(root, line_index)
 }
 
 #[cfg(test)]

@@ -624,10 +624,22 @@ impl ModuleBodies {
     ///
     /// This is the pure version for streaming mode.
     pub fn from_parse(parse: &syntax::Parse<syntax::SyntaxNode>, module_id: ModuleId) -> Self {
+        let root = parse.syntax_node();
+        Self::lower_from_root(&root, module_id, None)
+    }
+
+    /// Shared lowering logic for both streaming and Salsa modes.
+    ///
+    /// Walks the AST once, collects module variables and method nodes,
+    /// then lowers all method bodies and module-level code.
+    fn lower_from_root(
+        root: &syntax::SyntaxNode,
+        module_id: ModuleId,
+        line_index: Option<std::sync::Arc<line_index::LineIndex>>,
+    ) -> Self {
         use rustc_hash::FxHashSet;
         use syntax::SyntaxKind;
 
-        let root = parse.syntax_node();
         let mut result = ModuleBodies::new();
         let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
 
@@ -668,19 +680,23 @@ impl ModuleBodies {
         // Lower all methods
         for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
             let method_idx = method_idx as u32;
-            let lower_result =
-                body::lower_method_with_externals(&node, is_function, module_var_names.clone());
+            let lower_result = body::lower_method_with_externals(
+                &node,
+                is_function,
+                module_var_names.clone(),
+                line_index.clone(),
+            );
 
-            let method_id_val = MethodId { module: module_id, local_id: method_idx };
+            let method_id = MethodId { module: module_id, local_id: method_idx };
             for diag in &lower_result.diagnostics {
-                result.all_diagnostics.push((method_id_val, diag.clone()));
+                result.all_diagnostics.push((method_id, diag.clone()));
             }
 
             result.bodies.insert(method_idx, lower_result);
         }
 
         // Lower module-level code
-        let module_code_result = body::lower_module_code(&root);
+        let module_code_result = body::lower_module_code(root, line_index);
         let module_method_id = MethodId { module: module_id, local_id: u32::MAX };
         for diag in &module_code_result.diagnostics {
             result.all_diagnostics.push((module_method_id, diag.clone()));
@@ -811,90 +827,14 @@ pub fn compute_execution_context(common_module: &bsl_metadata::CommonModule) -> 
 /// This function walks the AST and lowers each procedure/function body to HIR.
 /// Also tracks module-level variables and emits diagnostics for unused ones.
 pub fn lower_module_bodies(db: &dyn base_db::RootQueryDb, module_id: ModuleId) -> ModuleBodies {
-    use rustc_hash::FxHashSet;
-    use syntax::SyntaxKind;
-
     let parse = db.parse(module_id.file_id);
     let root = parse.syntax_node();
 
-    let mut result = ModuleBodies::new();
-
-    // Optimization: Single pass to collect both module variables and method nodes
-    // This avoids two separate root.descendants() traversals
-    let mut method_nodes: Vec<(syntax::SyntaxNode, bool)> = Vec::new();
-
-    for node in root.descendants() {
-        match node.kind() {
-            SyntaxKind::VAR_DEF => {
-                // Check if this VAR_DEF is inside a method
-                let is_inside_method = node.ancestors().any(|n| {
-                    matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
-                });
-
-                if !is_inside_method {
-                    collect_module_vars(&node, &mut result.module_vars);
-                }
-            }
-            SyntaxKind::PROCEDURE_DEF => {
-                method_nodes.push((node, false)); // false = procedure
-            }
-            SyntaxKind::FUNCTION_DEF => {
-                method_nodes.push((node, true)); // true = function
-            }
-            _ => {}
-        }
-    }
-
-    // Deduplicate module variables
-    {
-        let mut seen_names: FxHashSet<String> = FxHashSet::default();
-        result.module_vars.retain(|var| {
-            let key = var.name.to_lowercase();
-            seen_names.insert(key)
-        });
-    }
-
-    // Create set of module variable names for method lowering
-    let module_var_names: FxHashSet<String> =
-        result.module_vars.iter().map(|v| v.name.to_lowercase()).collect();
-
-    // Create line index for OneStatementPerLine diagnostic
     let file_text_input = db.file_text_input(module_id.file_id);
     let file_text = file_text_input.text(db);
     let line_index = std::sync::Arc::new(line_index::LineIndex::new(&file_text));
 
-    // Lower all collected methods
-    for (method_idx, (node, is_function)) in method_nodes.into_iter().enumerate() {
-        let method_idx = method_idx as u32;
-        let lower_result = body::lower_method_with_externals_and_line_index(
-            &node,
-            is_function,
-            module_var_names.clone(),
-            line_index.clone(),
-        );
-
-        // Collect diagnostics with MethodId
-        let method_id = MethodId { module: module_id, local_id: method_idx };
-        for diag in &lower_result.diagnostics {
-            result.all_diagnostics.push((method_id, diag.clone()));
-        }
-
-        result.bodies.insert(method_idx, lower_result);
-    }
-
-    // Third pass: lower module-level code (statements outside procedures)
-    let module_code_result = body::lower_module_code_with_line_index(&root, line_index);
-
-    // Collect diagnostics from module-level code
-    // Use a special MethodId with local_id = u32::MAX to indicate module-level code
-    let module_method_id = MethodId { module: module_id, local_id: u32::MAX };
-    for diag in &module_code_result.diagnostics {
-        result.all_diagnostics.push((module_method_id, diag.clone()));
-    }
-
-    result.module_code = Some(module_code_result);
-
-    result
+    ModuleBodies::lower_from_root(&root, module_id, Some(line_index))
 }
 
 /// Collect module-level variable declarations from a VAR_DEF node.

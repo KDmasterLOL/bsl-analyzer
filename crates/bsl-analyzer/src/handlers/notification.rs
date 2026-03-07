@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use base_db::FileIdInput;
-use ide_diagnostics::file_diagnostics_query;
+use ide::file_diagnostics_query;
 use line_index::LineIndex;
 use lsp_server::Notification;
 use lsp_types::{

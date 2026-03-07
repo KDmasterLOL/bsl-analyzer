@@ -376,7 +376,7 @@ fn test_preprocessor_split_expressions() {
     println!("\n=== SYNTAX TREE ===");
     println!("{:#?}", root);
 
-    let result = super::super::lower_module_code(&root);
+    let result = super::super::lower_module_code(&root, None);
 
     println!("\n=== HIR LOWERING ===");
     println!("Body stmts: {}", result.body.body_stmts.len());

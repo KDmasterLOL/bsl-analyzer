@@ -376,7 +376,7 @@ impl LoweringCtx {
 
 /// Lower a method AST node to HIR.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
-    lower_method_with_externals(method_node, is_function, FxHashSet::default())
+    lower_method_with_externals(method_node, is_function, FxHashSet::default(), None)
 }
 
 /// Check if method has ONLY &НаКлиенте annotation.
@@ -669,163 +669,24 @@ fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
 ///
 /// External variable names (like module-level variables) are passed to avoid
 /// registering them as implicit local variables.
+/// When `line_index` is provided, additional diagnostics are emitted:
+/// OneStatementPerLine, TooManyReturns, MethodSize, and method-scoped metrics.
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
     known_externals: FxHashSet<String>,
+    line_index: Option<Arc<LineIndex>>,
 ) -> LowerResult {
     let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
 
-    // Check if method is client-only (&НаКлиенте annotation ONLY)
+    if let Some(li) = line_index {
+        ctx.set_line_index(li);
+    }
+
+    // Check method annotations
     ctx.is_client_only = is_client_only_method(method_node);
-
-    // Check if method has "БезКонтекста" (NoContext) annotation
     ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
-
-    // Check if method has &Вместо / &Around annotation
     ctx.is_instead_method = is_around_annotation_method(method_node);
-
-    // Check if method is server-side (has server annotation)
-    ctx.is_server_method = is_server_method(method_node);
-
-    // Check for FunctionNameStartsWithGet diagnostic
-    if is_function {
-        // Get function name
-        if let Some(name_token) = method_node
-            .children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|tok| tok.kind() == SyntaxKind::IDENT)
-        {
-            let name_text = name_token.text();
-            // Check if name starts with "Получить" (case-insensitive)
-            // Only Russian "Получить" is checked, not English "Get"
-            if name_text.to_lowercase().starts_with("получить") {
-                ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
-                    name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
-
-            // Check for GlobalContextMethodCollision8312 diagnostic
-            // Applies to both functions and procedures
-            if is_global_context_collision_8312(name_text) {
-                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
-                    method_name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
-        }
-    } else {
-        // For procedures, only check GlobalContextMethodCollision8312
-        if let Some(name_token) = method_node
-            .children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|tok| tok.kind() == SyntaxKind::IDENT)
-        {
-            let name_text = name_token.text();
-            if is_global_context_collision_8312(name_text) {
-                ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
-                    method_name: name_text.to_string(),
-                    range: name_token.text_range(),
-                });
-            }
-        }
-    }
-
-    // Lower parameters
-    if let Some(param_list) = method_node.children().find(|n| n.kind() == SyntaxKind::PARAM_LIST) {
-        let params = stmt::lower_params(&mut ctx, &param_list);
-        ctx.body.params = params.into_boxed_slice();
-    }
-
-    // Lower body statements
-    if let Some(stmt_list) = method_node.children().find(|n| n.kind() == SyntaxKind::STMT_LIST) {
-        let stmts = stmt::lower_stmt_list(&mut ctx, &stmt_list);
-        ctx.body.body_stmts = stmts.into_boxed_slice();
-
-        // Control flow checks (combined single-pass analysis)
-        // Optimization: Single descendants() traversal for all control flow checks
-        let cf_analysis = control_flow::analyze_control_flow(&stmt_list);
-
-        // Check for FunctionShouldHaveReturn (no return statement at all)
-        if is_function && !cf_analysis.has_return {
-            // Get function name range for diagnostic
-            let name_range = method_node
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT)
-                .map(|tok| tok.text_range())
-                .unwrap_or_else(|| method_node.text_range());
-
-            ctx.emit(BodyDiagnostic::FunctionShouldHaveReturn { range: name_range });
-        }
-
-        // Check for MissingReturn (some paths don't return)
-        // NOTE: CFG-based analysis is performed in ide-diagnostics handler
-        // to avoid circular dependency (hir-def → cfg → hir-def)
-        // This stub emits diagnostic if function has at least one return statement
-        // The actual path analysis happens in all_function_path_must_have_return handler
-        if is_function && cf_analysis.has_return {
-            // Get function name range for diagnostic
-            let name_range = method_node
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT)
-                .map(|tok| tok.text_range())
-                .unwrap_or_else(|| method_node.text_range());
-
-            // Emit candidate diagnostic - handler will use CFG to validate
-            ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
-        }
-
-        // NOTE: Empty function/procedure bodies are NOT checked by EmptyCodeBlock diagnostic.
-        // They are handled by a separate diagnostic (if needed).
-
-        // Check for code after async calls (using pre-collected call statements)
-        diagnostics::check_code_after_async_call(&mut ctx, &cf_analysis.call_stmts[..]);
-    }
-
-    // Check for FunctionReturnsSamePrimitive
-    if is_function {
-        check_function_returns_same_primitive(&mut ctx, method_node);
-    }
-
-    // Collect referenced externals (variables used but not declared locally)
-    let referenced_externals = collect_referenced_externals(&ctx.body);
-
-    LowerResult {
-        body: ctx.body,
-        source_map: ctx.source_map,
-        diagnostics: ctx.diagnostics,
-        referenced_externals,
-        external_refs: ctx.external_refs,
-    }
-}
-
-/// Lower a method AST node to HIR with known externals and line index for OneStatementPerLine.
-///
-/// This is the full version that supports OneStatementPerLine diagnostic.
-pub fn lower_method_with_externals_and_line_index(
-    method_node: &SyntaxNode,
-    is_function: bool,
-    known_externals: FxHashSet<String>,
-    line_index: Arc<LineIndex>,
-) -> LowerResult {
-    let mut ctx = LoweringCtx::new_with_externals(is_function, known_externals);
-
-    // Set line index for OneStatementPerLine diagnostic
-    ctx.set_line_index(line_index);
-
-    // Check if method is client-only (&НаКлиенте annotation ONLY)
-    ctx.is_client_only = is_client_only_method(method_node);
-
-    // Check if method has "БезКонтекста" (NoContext) annotation
-    ctx.has_no_context_annotation = has_no_context_annotation_method(method_node);
-
-    // Check if method has &Вместо / &Around annotation
-    ctx.is_instead_method = is_around_annotation_method(method_node);
-
-    // Check if method is server-side (has server annotation)
     ctx.is_server_method = is_server_method(method_node);
 
     // Extract method name once for all checks
@@ -843,7 +704,6 @@ pub fn lower_method_with_externals_and_line_index(
     if let Some(ref token) = name_token {
         let name_text = token.text();
 
-        // Check FunctionNameStartsWithGet (functions only)
         if is_function && name_text.to_lowercase().starts_with("получить") {
             ctx.emit(BodyDiagnostic::FunctionNameStartsWithGet {
                 name: name_text.to_string(),
@@ -851,7 +711,6 @@ pub fn lower_method_with_externals_and_line_index(
             });
         }
 
-        // Check GlobalContextMethodCollision8312 (both functions and procedures)
         if is_global_context_collision_8312(name_text) {
             ctx.emit(BodyDiagnostic::GlobalContextMethodCollision8312 {
                 method_name: name_text.to_string(),
@@ -871,31 +730,25 @@ pub fn lower_method_with_externals_and_line_index(
         let stmts = stmt::lower_stmt_list(&mut ctx, &stmt_list);
         ctx.body.body_stmts = stmts.into_boxed_slice();
 
-        // Control flow checks
+        // Control flow checks (combined single-pass analysis)
         let cf_analysis = control_flow::analyze_control_flow(&stmt_list);
 
-        // Check for FunctionShouldHaveReturn (no return statement at all)
-        if is_function && !cf_analysis.has_return {
-            let name_range = method_node
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT)
-                .map(|tok| tok.text_range())
+        if is_function {
+            let name_range = name_token
+                .as_ref()
+                .map(|t| t.text_range())
                 .unwrap_or_else(|| method_node.text_range());
 
-            ctx.emit(BodyDiagnostic::FunctionShouldHaveReturn { range: name_range });
-        }
+            // Check for FunctionShouldHaveReturn (no return statement at all)
+            if !cf_analysis.has_return {
+                ctx.emit(BodyDiagnostic::FunctionShouldHaveReturn { range: name_range });
+            }
 
-        // Check for MissingReturn (some paths don't return)
-        if is_function && cf_analysis.has_return {
-            let name_range = method_node
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|tok| tok.kind() == SyntaxKind::IDENT)
-                .map(|tok| tok.text_range())
-                .unwrap_or_else(|| method_node.text_range());
-
-            ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
+            // Check for MissingReturn (some paths don't return)
+            // NOTE: CFG-based analysis is performed in ide-diagnostics handler
+            if cf_analysis.has_return {
+                ctx.emit(BodyDiagnostic::MissingReturn { range: name_range });
+            }
         }
 
         // Check for code after async calls
@@ -907,7 +760,7 @@ pub fn lower_method_with_externals_and_line_index(
         check_function_returns_same_primitive(&mut ctx, method_node);
     }
 
-    // Emit OneStatementPerLine diagnostics
+    // Emit OneStatementPerLine diagnostics (no-op without line_index)
     ctx.emit_one_statement_per_line_diagnostics();
 
     // Emit TooManyReturns diagnostic
@@ -915,7 +768,7 @@ pub fn lower_method_with_externals_and_line_index(
         ctx.emit_too_many_returns_diagnostic(token.text().to_string(), token.text_range());
     }
 
-    // Emit method-scoped diagnostics (Phase 4)
+    // Emit method-scoped diagnostics (complexity, size, params)
     if let Some(ref token) = name_token {
         emit_method_scoped_diagnostics(
             &mut ctx,
@@ -926,7 +779,7 @@ pub fn lower_method_with_externals_and_line_index(
         );
     }
 
-    // Collect referenced externals
+    // Collect referenced externals (variables used but not declared locally)
     let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {
@@ -941,16 +794,18 @@ pub fn lower_method_with_externals_and_line_index(
 /// Lower module-level code (statements outside procedures/functions).
 ///
 /// This handles initialization code that runs when the module is loaded.
-/// Also detects unreachable code at the module level.
-pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
+/// When `line_index` is provided, OneStatementPerLine diagnostic is emitted.
+pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) -> LowerResult {
     let mut ctx = LoweringCtx::new(false);
+
+    if let Some(li) = line_index {
+        ctx.set_line_index(li);
+    }
 
     let mut stmts = Vec::new();
 
     for node in root.children() {
-        // Handle preprocessor directives at module level
         if node.kind() == SyntaxKind::PRE_IF_DIR {
-            // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
             if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
                 let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
                 stmts.push(stmt_id);
@@ -958,101 +813,29 @@ pub fn lower_module_code(root: &SyntaxNode) -> LowerResult {
             continue;
         }
         if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            // Lower statements from region (adds them to body)
             let (region_stmts, _region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
             stmts.extend(region_stmts);
             continue;
         }
 
-        // Skip non-statement nodes (procedures, functions, var declarations, etc.)
         if !control_flow::is_statement_node(&node) {
             continue;
         }
 
         // Skip VAR_DEF - module-level Перем declarations are tracked separately
-        // in lower_module_bodies via module_vars. Processing them here would cause
-        // duplicate unused variable diagnostics.
+        // in lower_module_bodies via module_vars.
         if node.kind() == SyntaxKind::VAR_DEF {
             continue;
         }
 
-        // Lower the statement
         if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
             stmts.push(stmt_id);
 
-            // Check for missing semicolon (SemicolonPresence diagnostic)
-            if !stmt::should_skip_semicolon_check(&node) && !stmt::has_trailing_semicolon(&node) {
-                let range = stmt::get_last_meaningful_token_range(&node);
-                ctx.emit(BodyDiagnostic::MissingSemicolon { range });
-            }
-        }
-    }
-
-    ctx.body.body_stmts = stmts.into_boxed_slice();
-
-    // Collect referenced externals (variables used but not declared locally)
-    let referenced_externals = collect_referenced_externals(&ctx.body);
-
-    LowerResult {
-        body: ctx.body,
-        source_map: ctx.source_map,
-        diagnostics: ctx.diagnostics,
-        referenced_externals,
-        external_refs: ctx.external_refs,
-    }
-}
-
-/// Lower module-level code with line index for OneStatementPerLine diagnostic.
-///
-/// This is the full version that supports OneStatementPerLine diagnostic.
-pub fn lower_module_code_with_line_index(
-    root: &SyntaxNode,
-    line_index: Arc<LineIndex>,
-) -> LowerResult {
-    let mut ctx = LoweringCtx::new(false);
-
-    // Set line index for OneStatementPerLine diagnostic
-    ctx.set_line_index(line_index);
-
-    let mut stmts = Vec::new();
-
-    for node in root.children() {
-        // Handle preprocessor directives at module level
-        if node.kind() == SyntaxKind::PRE_IF_DIR {
-            // Lower to Stmt::PreprocIf (creates HIR structure for CFG)
-            if let Some(stmt) = preproc::lower_preproc_if(&mut ctx, &node) {
-                let stmt_id = ctx.alloc_stmt(stmt, node.text_range());
-                stmts.push(stmt_id);
-            }
-            continue;
-        }
-        if node.kind() == SyntaxKind::PRE_REGION_DIR {
-            // Lower statements from region (adds them to body)
-            let (region_stmts, _region_terminates) = preproc::lower_region_stmts(&mut ctx, &node);
-            stmts.extend(region_stmts);
-            continue;
-        }
-
-        // Skip non-statement nodes (procedures, functions, var declarations, etc.)
-        if !control_flow::is_statement_node(&node) {
-            continue;
-        }
-
-        // Skip VAR_DEF - module-level Перем declarations are tracked separately
-        if node.kind() == SyntaxKind::VAR_DEF {
-            continue;
-        }
-
-        // Lower the statement
-        if let Some(stmt_id) = stmt::lower_stmt(&mut ctx, &node) {
-            stmts.push(stmt_id);
-
-            // Track statement line for OneStatementPerLine diagnostic
+            // Track statement line for OneStatementPerLine diagnostic (no-op without line_index)
             if !stmt::should_skip_one_statement_per_line(&node) {
                 ctx.track_statement_line(node.text_range());
             }
 
-            // Check for missing semicolon (SemicolonPresence diagnostic)
             if !stmt::should_skip_semicolon_check(&node) && !stmt::has_trailing_semicolon(&node) {
                 let range = stmt::get_last_meaningful_token_range(&node);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
@@ -1062,10 +845,9 @@ pub fn lower_module_code_with_line_index(
 
     ctx.body.body_stmts = stmts.into_boxed_slice();
 
-    // Emit OneStatementPerLine diagnostics
+    // Emit OneStatementPerLine diagnostics (no-op without line_index)
     ctx.emit_one_statement_per_line_diagnostics();
 
-    // Collect referenced externals
     let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {

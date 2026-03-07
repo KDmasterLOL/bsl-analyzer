@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn run_rules_command(command: RulesCommands) -> Result<(), Box<dyn Error + Send + Sync>> {
-    use ide_diagnostics::{all_diagnostic_codes, docs, get_metadata};
+    use ide::{all_diagnostic_codes, docs, get_metadata};
 
     match command {
         RulesCommands::Export { format, lang, output } => {
@@ -302,7 +302,7 @@ fn lang_is_russian() -> bool {
 }
 
 fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
-    use ide_diagnostics::{
+    use ide::{
         all_diagnostic_codes, docs, get_metadata, CleanCodeAttribute, DiagnosticSeverityLevel,
         DiagnosticType, ImpactSeverity, SoftwareQuality,
     };
@@ -390,8 +390,8 @@ fn export_rules(lang: &str, format: &RulesFormat) -> serde_json::Value {
     }
 }
 
-fn tag_to_str(tag: &ide_diagnostics::MetadataTag) -> &'static str {
-    use ide_diagnostics::MetadataTag;
+fn tag_to_str(tag: &ide::MetadataTag) -> &'static str {
+    use ide::MetadataTag;
     match tag {
         MetadataTag::Standard => "standard",
         MetadataTag::Lockinos => "lockinos",
@@ -661,8 +661,8 @@ fn analyze_salsa(
     diff_filter: Option<bsl_analyzer::diff_filter::DiffFilter>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use base_db::SourceDatabase;
+    use ide::DiagnosticsContext;
     use ide::{DiagnosticsConfig, RootDatabaseImpl};
-    use ide_diagnostics::DiagnosticsContext;
     use indicatif::{ProgressBar, ProgressStyle};
     use rayon::prelude::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -841,7 +841,7 @@ fn analyze_salsa(
             // Catch panics to continue analyzing other files if one fails
             let file_start = std::time::Instant::now();
             let diagnostics =
-                match catch_unwind(AssertUnwindSafe(|| ide_diagnostics::diagnostics(&ctx))) {
+                match catch_unwind(AssertUnwindSafe(|| ide::compute_diagnostics(&ctx))) {
                     Ok(diags) => diags,
                     Err(e) => {
                         tracing::error!("Panic analyzing {:?}: {:?}", path, e);

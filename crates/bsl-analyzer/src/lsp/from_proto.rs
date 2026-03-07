@@ -4,7 +4,7 @@
 //! our internal representation (FileId, TextSize, etc.).
 
 use anyhow::{anyhow, Result};
-use ide_db::TextRange;
+use ide::TextRange;
 use line_index::{LineCol, LineIndex, TextSize};
 use lsp_types::{Position, Url};
 use vfs::FileId;

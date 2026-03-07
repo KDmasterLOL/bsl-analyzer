@@ -133,46 +133,38 @@ impl<'a> DiagnosticsContext<'a> {
         Some(vfs_path.as_path().to_string_lossy().to_string())
     }
 
+    /// Dispatch to provider if available, else create a SalsaProvider for db fallback.
+    ///
+    /// Eliminates repetitive `if let Some(provider) { ... } self.db.xxx()` dispatch blocks.
+    fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
+        if let Some(provider) = self.provider {
+            f(provider)
+        } else {
+            let salsa = ide_db::SalsaProvider::new(self.db, self.configuration_path_input);
+            f(&salsa)
+        }
+    }
+
     // ========================================================================
     // Helper methods for accessing data
-    // These methods use provider when available, falling back to db.
-    //
-    // Methods by category:
-    //   Text access:            parse, file_text, line_index
-    //   HIR & semantic:         module_bodies, module_metadata, symbol_tree,
-    //                           symbol_tree_for, item_tree, module_data, method_docs
-    //   Source structure:        source_root_id, region_tree, module_level_regions
-    //   Cross-module resolution: module_index,
-    //                           resolve_vfs_path, resolve_qualified_path
-    //   SDBL:                   sdbl_hir_in_file, all_sdbl_in_file
-    //   Dataflow:               module_cfgs, module_liveness,
-    //                           module_reaching_defs, reaching_definitions
+    // These methods use query() for provider/db dispatch.
     // ========================================================================
 
     /// Get parsed AST for current file.
     pub fn parse(&self) -> syntax::Parse<syntax::SyntaxNode> {
-        if let Some(provider) = self.provider {
-            return provider.parse(self.file_id);
-        }
-        self.db.parse(self.file_id)
+        self.query(|p| p.parse(self.file_id))
     }
 
     /// Get lowered HIR bodies for current module.
     pub fn module_bodies(&self) -> Arc<hir::ModuleBodies> {
         let module_id = hir::ModuleId::new(self.file_id);
-        if let Some(provider) = self.provider {
-            return provider.module_bodies(module_id);
-        }
-        self.db.module_bodies(module_id)
+        self.query(|p| p.module_bodies(module_id))
     }
 
     /// Get module metadata for current file.
     pub fn module_metadata(&self) -> Arc<hir::ModuleMetadata> {
         let module_id = hir::ModuleId::new(self.file_id);
-        if let Some(provider) = self.provider {
-            return provider.module_metadata(module_id);
-        }
-        self.db.module_metadata(module_id)
+        self.query(|p| p.module_metadata(module_id))
     }
 
     /// Get symbol tree for current module.
@@ -182,162 +174,93 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     /// Get symbol tree for specific module.
-    ///
-    /// Use this when you need SymbolTree for a module other than the current file.
     pub fn symbol_tree_for(&self, module_id: hir::ModuleId) -> Arc<hir::SymbolTree> {
-        if let Some(provider) = self.provider {
-            return provider.symbol_tree(module_id);
-        }
-        self.db.symbol_tree(module_id)
+        self.query(|p| p.symbol_tree(module_id))
     }
 
     /// Get item tree for current file.
     pub fn item_tree(&self) -> Arc<hir::ItemTree> {
-        if let Some(provider) = self.provider {
-            return provider.item_tree(self.file_id);
-        }
-        self.db.item_tree(self.file_id)
+        self.query(|p| p.item_tree(self.file_id))
     }
 
-    /// Get file text as String (abstracted from db/provider).
-    ///
-    /// This method provides unified access to file text:
-    /// - In streaming mode: returns provider's Arc<String>
-    /// - In LSP mode: gets FileTextInput from db and calls .text(db)
-    ///
-    /// IMPORTANT: Use this instead of ctx.db.file_text_input() to enable streaming mode.
+    /// Get file text as String.
     pub fn file_text(&self) -> Arc<String> {
-        if let Some(provider) = self.provider {
-            let text = provider.file_text(self.file_id);
-            return Arc::new(text);
-        }
-        let input = self.db.file_text_input(self.file_id);
-        let text: String = input.text(self.db).to_string();
-        Arc::new(text)
+        Arc::new(self.query(|p| p.file_text(self.file_id)))
     }
 
     /// Get line index for current file.
     pub fn line_index(&self) -> Arc<line_index::LineIndex> {
-        if let Some(provider) = self.provider {
-            return provider.line_index(self.file_id);
-        }
-        let input = base_db::FileIdInput::new(self.db, self.file_id);
-        self.db.line_index(input)
+        self.query(|p| p.line_index(self.file_id))
     }
 
     /// Get source root ID for current file.
     pub fn source_root_id(&self) -> base_db::SourceRootId {
-        if let Some(provider) = self.provider {
-            return provider.file_source_root_id(self.file_id);
-        }
-        self.db.file_source_root_input(self.file_id).source_root_id(self.db)
+        self.query(|p| p.file_source_root_id(self.file_id))
     }
 
     /// Get module index for cross-module resolution.
     pub fn module_index(&self) -> Arc<hir::ModuleIndex> {
         let source_root_id = self.source_root_id();
-        if let Some(provider) = self.provider {
-            return provider.module_index(source_root_id);
-        }
-        self.db.module_index(source_root_id)
+        self.query(|p| p.module_index(source_root_id))
     }
 
     /// Get module CFGs (batch).
     pub fn module_cfgs(&self) -> Arc<cfg::ModuleCfgs> {
-        if let Some(provider) = self.provider {
-            return provider.module_cfgs(self.file_id);
-        }
-        let input = base_db::FileIdInput::new(self.db, self.file_id);
-        self.db.module_cfgs(input)
+        self.query(|p| p.module_cfgs(self.file_id))
     }
 
     /// Get module liveness analysis (batch).
     pub fn module_liveness(&self) -> Arc<dataflow::liveness::ModuleLiveness> {
-        if let Some(provider) = self.provider {
-            return provider.module_liveness_analysis(self.file_id);
-        }
-        let input = base_db::FileIdInput::new(self.db, self.file_id);
-        self.db.module_liveness_analysis(input)
+        self.query(|p| p.module_liveness_analysis(self.file_id))
     }
 
     /// Get module reaching definitions (batch).
     pub fn module_reaching_defs(&self) -> Arc<dataflow::reaching_defs::ModuleReachingDefs> {
-        if let Some(provider) = self.provider {
-            return provider.module_reaching_definitions(self.file_id);
-        }
-        let input = base_db::FileIdInput::new(self.db, self.file_id);
-        self.db.module_reaching_definitions(input)
+        self.query(|p| p.module_reaching_definitions(self.file_id))
     }
 
     /// Get region tree for current file.
     pub fn region_tree(&self) -> Arc<hir::RegionTree> {
-        if let Some(provider) = self.provider {
-            return provider.region_tree(self.file_id);
-        }
-        self.db.region_tree(self.file_id)
+        self.query(|p| p.region_tree(self.file_id))
     }
 
     /// Get module-level regions for current file.
     pub fn module_level_regions(&self) -> Arc<Vec<base_db::RegionInfo>> {
-        if let Some(provider) = self.provider {
-            return provider.module_level_regions(self.file_id);
-        }
-        self.db.module_level_regions(self.file_id)
+        self.query(|p| p.module_level_regions(self.file_id))
     }
 
     /// Get SDBL HIR for all queries in current file.
     pub fn sdbl_hir_in_file(&self) -> ide_db::SdblHirEntries {
-        if let Some(provider) = self.provider {
-            return provider.sdbl_hir_in_file(self.file_id);
-        }
-        self.db.sdbl_hir_in_file(self.file_id)
+        self.query(|p| p.sdbl_hir_in_file(self.file_id))
     }
 
     /// Get all SDBL queries (parsed AST) in current file.
     pub fn all_sdbl_in_file(&self) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
-        if let Some(provider) = self.provider {
-            return provider.all_sdbl_in_file(self.file_id);
-        }
-        self.db.all_sdbl_in_file(self.file_id)
+        self.query(|p| p.all_sdbl_in_file(self.file_id))
     }
 
     /// Get module data for current file.
     pub fn module_data(&self) -> Arc<hir::ModuleData> {
         let module_id = hir::ModuleId::new(self.file_id);
-        if let Some(provider) = self.provider {
-            return provider.module_data(module_id);
-        }
-        self.db.module_data(module_id)
+        self.query(|p| p.module_data(module_id))
     }
 
     /// Get parsed documentation for a method.
-    ///
-    /// Extracts and parses leading comments (lines starting with //)
-    /// before a procedure or function definition.
     pub fn method_docs(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
-        if let Some(provider) = self.provider {
-            return provider.method_docs(method_id);
-        }
-        self.db.method_docs(method_id)
+        self.query(|p| p.method_docs(method_id))
     }
 
     /// Get reaching definitions for a specific method.
-    ///
-    /// Returns `None` if analysis doesn't converge.
     pub fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
     ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
-        if let Some(provider) = self.provider {
-            return provider.reaching_definitions(method_id);
-        }
-        self.db.reaching_definitions(method_id)
+        self.query(|p| p.reaching_definitions(method_id))
     }
 
     /// Resolve VfsPath to FileId.
     ///
-    /// Used for finding metadata files given their URI from Configuration.
-    /// IMPORTANT: This method uses ctx.file_set for fast path when available.
+    /// Uses file_set fast path when available, otherwise dispatches via query().
     pub fn resolve_vfs_path(
         &self,
         source_root_id: base_db::SourceRootId,
@@ -346,11 +269,7 @@ impl<'a> DiagnosticsContext<'a> {
         if let Some(file_set) = self.file_set {
             return file_set.file_for_path(vfs_path).copied();
         }
-
-        if let Some(provider) = self.provider {
-            return provider.resolve_vfs_path(source_root_id, vfs_path);
-        }
-        self.db.resolve_vfs_path(source_root_id, vfs_path)
+        self.query(|p| p.resolve_vfs_path(source_root_id, vfs_path))
     }
 
     /// Resolve qualified path (Module.Method) using provider-first pattern.

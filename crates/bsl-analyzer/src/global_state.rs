@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use base_db::{DiagnosticsConfigId, DiagnosticsConfigInput};
 use crossbeam_channel::{Receiver, Sender};
 use ide::Analysis;
-use ide_db::RootDatabaseImpl;
+use ide::RootDatabaseImpl;
 use lsp_server::{Message, ReqQueue, Response};
 use lsp_types::Url;
 use parking_lot::RwLock;
@@ -183,17 +183,17 @@ impl GlobalState {
 
     /// Converts project diagnostics config to hashable DiagnosticsConfigInput.
     ///
-    /// Deserializes the raw JSON into `ide_diagnostics::DiagnosticsConfig`,
+    /// Deserializes the raw JSON into `ide::DiagnosticsConfig`,
     /// then converts to the Salsa-compatible `DiagnosticsConfigInput`.
     fn config_from_project(project: &Project) -> DiagnosticsConfigInput {
-        // Deserialize JSON into ide_diagnostics::DiagnosticsConfig
-        let config: ide_diagnostics::DiagnosticsConfig = match serde_json::from_value(
+        // Deserialize JSON into ide::DiagnosticsConfig
+        let config: ide::DiagnosticsConfig = match serde_json::from_value(
             project.config.diagnostics.clone(),
         ) {
             Ok(config) => config,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to deserialize diagnostics config, using defaults");
-                ide_diagnostics::DiagnosticsConfig::default()
+                ide::DiagnosticsConfig::default()
             }
         };
 
