@@ -701,16 +701,3 @@ Run `bsl-analyzer validate-config` to check configuration:
 bsl-analyzer validate-config .bsl-language-server.json
 ```
 
----
-
-## Related Documentation
-
-- [README.md](./README.md) - Diagnostics Migration Plan Index
-- [MIGRATION_PLAN_A_C.md](./MIGRATION_PLAN_A_C.md) - Part 1: A-C
-- [MIGRATION_PLAN_D_M.md](./MIGRATION_PLAN_D_M.md) - Part 2: D-M
-- [MIGRATION_PLAN_N_S.md](./MIGRATION_PLAN_N_S.md) - Part 3: N-S
-- [MIGRATION_PLAN_T_Z.md](./MIGRATION_PLAN_T_Z.md) - Part 4: T-Z
-
----
-
-**Last Updated:** 2025-12-30
