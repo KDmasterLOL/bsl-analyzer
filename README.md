@@ -47,8 +47,8 @@ bsl-analyzer analyze -s ./my-project
 # SARIF-отчёт
 bsl-analyzer analyze -s ./my-project -r sarif -o ./reports
 
-# Потоковый режим (низкое потребление памяти)
-bsl-analyzer analyze -s ./my-project --streaming --format=jsonl > report.jsonl
+# JSONL-вывод (для SonarQube)
+bsl-analyzer analyze -s ./my-project --format=jsonl > report.jsonl
 ```
 
 ### Фиксация версии (CI/CD)
@@ -94,7 +94,7 @@ cargo build --release
 
 **Система:** AMD Ryzen 5 5600X (6 ядер / 12 потоков), 32 GB RAM, Linux 6.19, NVMe SSD
 
-**Методика:** `/usr/bin/time -v` (GNU time), холодный запуск без кэша. bsl-analyzer в streaming-режиме (`--streaming`), bsl-language-server в стандартном режиме. Оба инструмента используют все доступные ядра.
+**Методика:** `/usr/bin/time -v` (GNU time), холодный запуск без кэша. Оба инструмента используют все доступные ядра.
 
 | Метрика | bsl-language-server 0.28.5 | bsl-analyzer 0.1.36 | Разница |
 |---------|---------------------------|---------------------|---------|

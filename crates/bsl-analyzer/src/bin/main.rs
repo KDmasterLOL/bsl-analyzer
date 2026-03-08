@@ -97,18 +97,21 @@ enum Commands {
         #[arg(long, requires = "incremental", conflicts_with = "changed_files")]
         git_diff: Option<String>,
 
-        /// Use streaming mode (low memory, parallel file processing)
-        /// Recommended for large projects (>1000 files)
-        #[arg(long)]
+        /// [deprecated] Streaming is now the default for CLI, this flag is ignored
+        #[arg(long, hide = true)]
         streaming: bool,
 
-        /// Number of worker threads for streaming mode (default: CPU cores)
-        #[arg(long, requires = "streaming")]
+        /// Use Salsa mode instead of streaming (for testing/debugging only)
+        #[arg(long, hide = true)]
+        salsa: bool,
+
+        /// Number of worker threads (default: CPU cores)
+        #[arg(long)]
         workers: Option<usize>,
 
-        /// Output format for streaming mode
+        /// Output format
         /// jsonl: JSON Lines streaming output (for SonarQube integration)
-        #[arg(long, value_enum, default_value_t = OutputFormat::Console, requires = "streaming")]
+        #[arg(long, value_enum, default_value_t = OutputFormat::Console)]
         format: OutputFormat,
 
         /// Run only this diagnostic (enables profiling output)
@@ -230,7 +233,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
-            streaming,
+            streaming: _, // deprecated, ignored
+            salsa,
             workers,
             format,
             only_diagnostic,
@@ -245,7 +249,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             incremental,
             changed_files,
             git_diff,
-            streaming,
+            salsa,
             workers,
             format,
             only_diagnostic,
@@ -559,7 +563,7 @@ fn analyze(
     _incremental: bool,
     _changed_files: Option<Vec<PathBuf>>,
     _git_diff: Option<String>,
-    streaming: bool,
+    salsa: bool,
     workers: Option<usize>,
     format: OutputFormat,
     only_diagnostic: Option<String>,
@@ -572,8 +576,19 @@ fn analyze(
         None
     };
 
-    // Route to streaming or Salsa mode
-    if streaming {
+    // CLI defaults to streaming mode; --salsa flag switches to Salsa (for testing)
+    if salsa {
+        analyze_salsa(
+            source_dir,
+            workspace_dir,
+            output_dir,
+            config_path,
+            reporters,
+            quiet,
+            only_diagnostic,
+            diff_filter,
+        )
+    } else {
         analyze_streaming(
             source_dir,
             workspace_dir,
@@ -583,17 +598,6 @@ fn analyze(
             quiet,
             workers,
             format,
-            only_diagnostic,
-            diff_filter,
-        )
-    } else {
-        analyze_salsa(
-            source_dir,
-            workspace_dir,
-            output_dir,
-            config_path,
-            reporters,
-            quiet,
             only_diagnostic,
             diff_filter,
         )
