@@ -18,7 +18,6 @@
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 
@@ -36,51 +35,37 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the QueryToMissingMetadata diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
+/// Single-pass dispatch for QueryToMissingMetadata.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::QueryToMissingMetadata { table_name, range } = diag {
+        let code = DiagnosticCode::QueryToMissingMetadata;
+        diagnostics.push(Diagnostic {
+            code,
+            message: format!(
+                "Исправьте обращение к несуществующему метаданному \"{}\" в запросе",
+                table_name
+            ),
+            severity: ctx.severity(code),
+            range: mapper.map_range(*range, query_text),
+            tags: ctx.tags(code),
+            fixes: vec![],
+        });
+    }
+}
+
+/// Runs the QueryToMissingMetadata diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::QueryToMissingMetadata;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-    let bsl_source = ctx.file_text();
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
-    {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::QueryToMissingMetadata { table_name, range } = hir_diag
-            {
-                let bsl_range = mapper.map_range(*range, &query_info.query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: format!(
-                        "Исправьте обращение к несуществующему метаданному \"{}\" в запросе",
-                        table_name
-                    ),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
-        }
-    }
-
-    diagnostics
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
+        ctx,
+        DiagnosticCode::QueryToMissingMetadata,
+        dispatch,
+    )
 }
 
 #[cfg(test)]

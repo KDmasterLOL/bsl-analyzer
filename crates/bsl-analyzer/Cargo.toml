@@ -55,6 +55,10 @@ rustc-hash.workspace = true
 # Error handling
 anyhow.workspace = true
 
+# Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+tikv-jemallocator.workspace = true
+
 # Utilities
 walkdir.workspace = true
 

@@ -1,6 +1,5 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 
@@ -18,47 +17,34 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Single-pass dispatch for VirtualTableCallWithoutParameters.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::VirtualTableCallWithoutParameters { range, .. } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::VirtualTableCallWithoutParameters,
+            "Не следует использовать виртуальные таблицы без параметров",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
+/// Runs the VirtualTableCallWithoutParameters diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::VirtualTableCallWithoutParameters;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-    let bsl_source = ctx.file_text();
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
-    {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::VirtualTableCallWithoutParameters { range, .. } =
-                hir_diag
-            {
-                let bsl_range = mapper.map_range(*range, &query_info.query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: "Не следует использовать виртуальные таблицы без параметров"
-                        .to_string(),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
-        }
-    }
-
-    diagnostics
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
+        ctx,
+        DiagnosticCode::VirtualTableCallWithoutParameters,
+        dispatch,
+    )
 }
 
 #[cfg(test)]

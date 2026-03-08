@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.35"
+version = "0.1.36"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -85,6 +85,9 @@ tracing-tree = "0.4.0"
 
 # Parallelism
 rayon = "1.8"
+
+# Allocator
+tikv-jemallocator = "0.6"
 
 # Progress indicators
 indicatif = "0.17"

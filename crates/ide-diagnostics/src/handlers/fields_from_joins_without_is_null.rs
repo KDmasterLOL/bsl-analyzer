@@ -53,8 +53,8 @@
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use sdbl_hir;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -70,101 +70,52 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the FieldsFromJoinsWithoutIsNull diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::FieldsFromJoinsWithoutIsNull;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    // Get SDBL HIR with collected diagnostics
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-
-    let bsl_source = ctx.file_text();
-
-    // Get SDBL queries for position mapping
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    // Build shared line index (optimization)
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    // Helper function to recursively extract diagnostics from HIR and UNION subqueries
-    fn extract_diagnostics(
-        hir: &sdbl_hir::SdblHir,
-        mapper: &SdblPositionMapper,
-        query_text: &str,
-        code: DiagnosticCode,
-        ctx: &DiagnosticsContext,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        // Extract diagnostics from current query
-        for hir_diag in &hir.diagnostics {
-            if let sdbl_hir::SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
-                join_type,
-                range: _,
-                unprotected_fields,
-            } = hir_diag
-            {
-                let join_type_str = match join_type {
-                    sdbl_hir::JoinType::Left => "ЛЕВОГО СОЕДИНЕНИЯ",
-                    sdbl_hir::JoinType::Right => "ПРАВОГО СОЕДИНЕНИЯ",
-                    sdbl_hir::JoinType::Full => "ПОЛНОГО СОЕДИНЕНИЯ",
-                    _ => "СОЕДИНЕНИЯ",
-                };
-
-                let message = format!(
-                    "Для полей из {} добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ",
-                    join_type_str
-                );
-
-                // Create one diagnostic per unprotected field, highlighting the field itself
-                for field_ref in unprotected_fields {
-                    let bsl_range = mapper.map_range(field_ref.range, query_text);
-
-                    diagnostics.push(Diagnostic {
-                        code,
-                        message: message.clone(),
-                        severity: ctx.severity(code),
-                        range: bsl_range,
-                        tags: ctx.tags(code),
-                        fixes: vec![],
-                    });
-                }
-            }
-        }
-
-        // Recursively extract diagnostics from UNION subqueries
-        for union in &hir.unions {
-            extract_diagnostics(&union.query, mapper, query_text, code, ctx, diagnostics);
-        }
-    }
-
-    // Process HIR diagnostics
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
+/// Single-pass dispatch for FieldsFromJoinsWithoutIsNull.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
+        join_type,
+        unprotected_fields,
+        ..
+    } = diag
     {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        // Extract diagnostics recursively from all queries (including UNION subqueries)
-        for query in sdbl_package.queries() {
-            extract_diagnostics(
-                &query.hir,
-                &mapper,
-                &query_info.query_text,
+        let code = DiagnosticCode::FieldsFromJoinsWithoutIsNull;
+        let join_type_str = match join_type {
+            sdbl_hir::JoinType::Left => "ЛЕВОГО СОЕДИНЕНИЯ",
+            sdbl_hir::JoinType::Right => "ПРАВОГО СОЕДИНЕНИЯ",
+            sdbl_hir::JoinType::Full => "ПОЛНОГО СОЕДИНЕНИЯ",
+            _ => "СОЕДИНЕНИЯ",
+        };
+        let message = format!(
+            "Для полей из {} добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ",
+            join_type_str
+        );
+        for field_ref in unprotected_fields {
+            let bsl_range = mapper.map_range(field_ref.range, query_text);
+            diagnostics.push(Diagnostic {
                 code,
-                ctx,
-                &mut diagnostics,
-            );
+                message: message.clone(),
+                severity: ctx.severity(code),
+                range: bsl_range,
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
         }
     }
+}
 
-    diagnostics
+/// Runs the FieldsFromJoinsWithoutIsNull diagnostic (standalone, used in tests).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
+        ctx,
+        DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+        dispatch,
+    )
 }
 
 #[cfg(test)]

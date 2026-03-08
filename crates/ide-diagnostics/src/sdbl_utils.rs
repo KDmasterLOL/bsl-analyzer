@@ -8,21 +8,54 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
-/// Collect SDBL diagnostics matching a single variant with only a `range` field.
+/// Function signature for single-pass SDBL diagnostic dispatch.
 ///
-/// This helper extracts the common boilerplate shared by most SDBL diagnostic handlers:
-/// disabled check → sdbl_hir_in_file → build_line_index → zip iteration → match → map_range → push.
+/// Each SDBL handler exports a `dispatch` function with this signature.
+/// The runner calls all enabled dispatch functions for each diagnostic
+/// in a single pass, avoiding redundant data computation (OCP pattern).
+pub type SdblDispatchFn = fn(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+);
+
+/// Create a simple SDBL diagnostic (variant → range → BSL mapping).
 ///
-/// `matcher` should return `Some(range)` for the target `SdblDiagnostic` variant, `None` otherwise.
-pub fn collect_sdbl_simple<F>(
+/// Helper for `dispatch` functions that follow the common pattern:
+/// match variant → extract range → map to BSL → push diagnostic.
+pub fn dispatch_simple(
     ctx: &DiagnosticsContext,
     code: DiagnosticCode,
     message: &str,
-    matcher: F,
-) -> Vec<Diagnostic>
-where
-    F: Fn(&sdbl_hir::SdblDiagnostic) -> Option<TextRange>,
-{
+    range: TextRange,
+    mapper: &SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    diagnostics.push(Diagnostic {
+        code,
+        message: message.to_string(),
+        severity: ctx.severity(code),
+        range: mapper.map_range(range, query_text),
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
+}
+
+/// Run a dispatch function standalone (for tests and non-single-pass usage).
+///
+/// Sets up shared data (SDBL HIR, file text, line index) once and iterates
+/// all diagnostics, calling `dispatch_fn` for each one. This is the standalone
+/// equivalent of what the single-pass runner does for all handlers at once.
+///
+/// Business logic lives in the handler's `dispatch` function (single source of truth).
+pub fn collect_sdbl_via_dispatch(
+    ctx: &DiagnosticsContext,
+    code: DiagnosticCode,
+    dispatch_fn: SdblDispatchFn,
+) -> Vec<Diagnostic> {
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
@@ -40,18 +73,7 @@ where
         let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
 
         for hir_diag in sdbl_package.all_diagnostics() {
-            if let Some(range) = matcher(hir_diag) {
-                let bsl_range = mapper.map_range(range, &query_info.query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: message.to_string(),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
+            dispatch_fn(ctx, hir_diag, &mapper, &query_info.query_text, &mut diagnostics);
         }
     }
 

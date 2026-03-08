@@ -102,7 +102,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "base-db"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "dashmap",
  "expect-test",
@@ -170,7 +170,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "bsl-analyzer"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "base-db",
@@ -194,6 +194,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stdx",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -205,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-launcher"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "dirs",
@@ -221,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "bsl-metadata"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "quick-xml",
  "rayon",
@@ -294,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "cfg"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "cfg-types",
  "expect-test",
@@ -316,7 +317,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg-types"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "la-arena",
 ]
@@ -588,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "dataflow"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "cfg",
@@ -958,7 +959,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hir"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -977,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "hir-def"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1228,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "ide"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "bsl-metadata",
  "bsl-platform",
@@ -1242,6 +1243,7 @@ dependencies = [
  "lexer",
  "parser",
  "project-model",
+ "rayon",
  "rustc-hash 2.1.1",
  "sdbl-hir",
  "serde",
@@ -1260,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "ide-assists"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "expect-test",
  "hir",
@@ -1273,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "ide-db"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1300,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "ide-diagnostics"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "bsl-metadata",
@@ -1413,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "intern"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "dashmap",
  "once_cell",
@@ -1545,7 +1547,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lexer"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "expect-test",
  "logos",
@@ -1571,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "line-index"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "text-size",
 ]
@@ -1807,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "parser"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "expect-test",
  "lexer",
@@ -1954,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "profile"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "cfg-if",
  "libc",
@@ -1965,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "project-model"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "bsl-metadata",
@@ -2378,7 +2380,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdbl-hir"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "bsl-metadata",
  "expect-test",
@@ -2578,7 +2580,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdx"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -2655,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "syntax"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "expect-test",
  "parser",
@@ -2688,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "test-fixture"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "base-db",
  "ide-db",
@@ -2699,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "expect-test",
 ]
@@ -2784,6 +2786,16 @@ checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
 dependencies = [
  "cc",
  "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]
@@ -3047,7 +3059,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vfs"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "crossbeam-channel",
  "indexmap",
@@ -3507,7 +3519,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "clap",

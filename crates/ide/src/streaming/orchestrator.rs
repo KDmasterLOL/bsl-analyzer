@@ -300,30 +300,22 @@ impl AnalysisOrchestrator {
         let file_set_arc = Arc::new(file_set.clone());
         let file_reader = FileReader::from_disk(self.workspace_root.clone(), file_set_arc.clone());
 
-        // 3. Build all SymbolTrees (Phase 1 only)
+        // 3. Build all SymbolTrees in parallel
+        use rayon::prelude::*;
         info!(num_files = files.len(), "Building SymbolTrees");
-        let mut symbol_trees = FxHashMap::default();
 
-        for &file_id in files {
-            let text = file_reader.read(file_id).unwrap_or_default();
-
-            // Parse
-            let parse = parser::parse(&text);
-            if parse.has_errors() {
-                let errors: Vec<_> = parse.errors().iter().take(3).map(|e| e.to_string()).collect();
-                warn!(file_id = ?file_id, errors = ?errors, "Parse errors in initialization");
-            }
-
-            // Lower to ItemTree
-            let item_tree = ItemTree::from_parse(&parse);
-
-            // Build SymbolTree
-            let module_id = ModuleId::new(file_id);
-            let symbol_tree =
-                Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
-
-            symbol_trees.insert(file_id, symbol_tree);
-        }
+        let symbol_trees: FxHashMap<_, _> = files
+            .par_iter()
+            .map(|&file_id| {
+                let text = file_reader.read(file_id).unwrap_or_default();
+                let parse = parser::parse(&text);
+                let item_tree = ItemTree::from_parse(&parse);
+                let module_id = ModuleId::new(file_id);
+                let symbol_tree =
+                    Arc::new(SymbolTree::from_item_tree(&item_tree, module_id, &parse, &text));
+                (file_id, symbol_tree)
+            })
+            .collect();
 
         info!(num_symbol_trees = symbol_trees.len(), "SymbolTrees built successfully");
 
@@ -388,25 +380,37 @@ impl AnalysisOrchestrator {
 
         let configuration = global_context.configuration.as_ref();
         let file_set = &global_context.file_set;
+        let workspace_root = &self.workspace_root;
 
-        let mut files_with_priority: Vec<(FileId, u8)> = files
+        let mut files_with_priority: Vec<(FileId, u8, u64)> = files
             .into_iter()
             .map(|file_id| {
-                let priority = file_set
-                    .path_for_file(&file_id)
-                    .map(|vfs_path| {
-                        super::file_priority::compute_priority(vfs_path.as_path(), configuration)
-                    })
+                let vfs_path = file_set.path_for_file(&file_id);
+                let priority = vfs_path
+                    .map(|p| super::file_priority::compute_priority(p.as_path(), configuration))
                     .unwrap_or(super::file_priority::priority::OTHER);
-                (file_id, priority)
+
+                let file_size = vfs_path
+                    .and_then(|p| {
+                        let path = if p.as_path().is_absolute() {
+                            p.as_path().to_path_buf()
+                        } else {
+                            workspace_root.join(p.as_path())
+                        };
+                        std::fs::metadata(&path).ok().map(|m| m.len())
+                    })
+                    .unwrap_or(0);
+
+                (file_id, priority, file_size)
             })
             .collect();
 
-        files_with_priority.sort_by_key(|&(_, priority)| priority);
+        // Primary: priority ASC (module type), secondary: file size DESC (large files first)
+        files_with_priority.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.2.cmp(&a.2)));
 
         if tracing::enabled!(tracing::Level::DEBUG) {
             let mut counts = [0usize; 8];
-            for &(_, priority) in &files_with_priority {
+            for &(_, priority, _) in &files_with_priority {
                 if (priority as usize) < counts.len() {
                     counts[priority as usize] += 1;
                 }
@@ -424,7 +428,7 @@ impl AnalysisOrchestrator {
             );
         }
 
-        files_with_priority.into_iter().map(|(file_id, _)| file_id).collect()
+        files_with_priority.into_iter().map(|(file_id, _, _)| file_id).collect()
     }
 
     /// Load 1C metadata via ProjectConfig.

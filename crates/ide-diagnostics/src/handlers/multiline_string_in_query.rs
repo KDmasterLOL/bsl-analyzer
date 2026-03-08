@@ -28,8 +28,8 @@
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use sdbl_hir;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -45,81 +45,34 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the MultilineStringInQuery diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
+/// Single-pass dispatch for MultilineStringInQuery.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::MultilineString { range } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::MultilineStringInQuery,
+            "Check if multiline literal is correct",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
+/// Runs the MultilineStringInQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::MultilineStringInQuery;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    // Get SDBL HIR with collected diagnostics
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-
-    let bsl_source = ctx.file_text();
-
-    // Get SDBL queries for position mapping
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    // Build shared line index (optimization)
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    // Helper function to recursively extract diagnostics from HIR and UNION subqueries
-    fn extract_diagnostics(
-        hir: &sdbl_hir::SdblHir,
-        mapper: &SdblPositionMapper,
-        query_text: &str,
-        code: DiagnosticCode,
-        ctx: &DiagnosticsContext,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        // Extract diagnostics from current query
-        for hir_diag in &hir.diagnostics {
-            if let sdbl_hir::SdblDiagnostic::MultilineString { range } = hir_diag {
-                let bsl_range = mapper.map_range(*range, query_text);
-
-                diagnostics.push(Diagnostic {
-                    code,
-                    message: "Check if multiline literal is correct".to_string(),
-                    severity: ctx.severity(code),
-                    range: bsl_range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                });
-            }
-        }
-
-        // Recursively extract diagnostics from UNION subqueries
-        for union in &hir.unions {
-            extract_diagnostics(&union.query, mapper, query_text, code, ctx, diagnostics);
-        }
-    }
-
-    // Process HIR diagnostics
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
-    {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
-
-        // Extract diagnostics recursively from all queries (including UNION subqueries)
-        for query in sdbl_package.queries() {
-            extract_diagnostics(
-                &query.hir,
-                &mapper,
-                &query_info.query_text,
-                code,
-                ctx,
-                &mut diagnostics,
-            );
-        }
-    }
-
-    diagnostics
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
+        ctx,
+        DiagnosticCode::MultilineStringInQuery,
+        dispatch,
+    )
 }
 
 #[cfg(test)]

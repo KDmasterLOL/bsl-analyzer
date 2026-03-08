@@ -17,17 +17,21 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
+/// Single-pass dispatch for UnionAll.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::UnionWithoutAll { range } = diag {
+        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::UnionAll, "Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ", *range, mapper, query_text, diagnostics);
+    }
+}
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
-        ctx,
-        DiagnosticCode::UnionAll,
-        "Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к \
-         излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::UnionWithoutAll { range } => Some(*range),
-            _ => None,
-        },
-    )
+    crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::UnionAll, dispatch)
 }
 
 #[cfg(test)]

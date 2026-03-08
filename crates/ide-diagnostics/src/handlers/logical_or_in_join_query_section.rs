@@ -59,18 +59,33 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the LogicalOrInJoinQuerySection diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
+/// Single-pass dispatch for LogicalOrInJoinQuerySection.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::LogicalOrInJoin { range } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::LogicalOrInJoinQuerySection,
+            "Обнаружен оператор 'ИЛИ' в условии соединения",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
+/// Runs the LogicalOrInJoinQuerySection diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
         DiagnosticCode::LogicalOrInJoinQuerySection,
-        "Обнаружен оператор 'ИЛИ' в условии соединения",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::LogicalOrInJoin { range } => Some(*range),
-            _ => None,
-        },
+        dispatch,
     )
 }
 
