@@ -1,6 +1,5 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::sdbl_utils::SdblPositionMapper;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use sdbl_hir;
 
@@ -21,67 +20,55 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_SKIP_SELECT_TOP_ONE: bool = true;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::SelectTopWithoutOrderBy;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let skip_select_top_one =
-        ctx.config.get_bool(code, "skipSelectTopOne").unwrap_or(DEFAULT_SKIP_SELECT_TOP_ONE);
-
-    let sdbl_hirs = ctx.sdbl_hir_in_file();
-    let bsl_source = ctx.file_text();
-    let sdbl_queries = ctx.all_sdbl_in_file();
-
-    use crate::sdbl_utils::build_line_index_shared;
-    let line_starts = build_line_index_shared(&bsl_source);
-
-    let mut diagnostics = Vec::new();
-
-    for ((_expr_id, sdbl_package), (_query_expr_id, query_info)) in
-        sdbl_hirs.iter().zip(sdbl_queries.iter())
+/// Single-pass dispatch for SelectTopWithoutOrderBy.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::SelectTopWithoutOrderBy {
+        top_value,
+        in_union,
+        has_where,
+        range,
+    } = diag
     {
-        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
+        let skip_select_top_one = ctx
+            .config
+            .get_bool(DiagnosticCode::SelectTopWithoutOrderBy, "skipSelectTopOne")
+            .unwrap_or(DEFAULT_SKIP_SELECT_TOP_ONE);
 
-        for hir_diag in sdbl_package.all_diagnostics() {
-            if let sdbl_hir::SdblDiagnostic::SelectTopWithoutOrderBy {
-                top_value,
-                in_union,
-                has_where,
-                range,
-            } = hir_diag
-            {
-                // In UNION: always report (TOP in UNION is always problematic)
-                // Otherwise: apply skipSelectTopOne logic
-                let should_report = if *in_union {
-                    true
-                } else if *top_value == 1 || *top_value == 0 {
-                    // TOP 1 / TOP 0: skip if skipSelectTopOne=true OR if has WHERE clause
-                    !skip_select_top_one && !*has_where
-                } else {
-                    // TOP N (N > 1): always report when no ORDER BY
-                    true
-                };
+        let should_report = if *in_union {
+            true
+        } else if *top_value == 1 || *top_value == 0 {
+            !skip_select_top_one && !*has_where
+        } else {
+            true
+        };
 
-                if should_report {
-                    let bsl_range = mapper.map_range(*range, &query_info.query_text);
-
-                    diagnostics.push(Diagnostic {
-                        code,
-                        message: "Измените запрос, добавив сортировку".to_string(),
-                        severity: ctx.severity(code),
-                        range: bsl_range,
-                        tags: ctx.tags(code),
-                        fixes: vec![],
-                    });
-                }
-            }
+        if should_report {
+            let code = DiagnosticCode::SelectTopWithoutOrderBy;
+            diagnostics.push(Diagnostic {
+                code,
+                message: "Измените запрос, добавив сортировку".to_string(),
+                severity: ctx.severity(code),
+                range: mapper.map_range(*range, query_text),
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
         }
     }
+}
 
-    diagnostics
+/// Runs the SelectTopWithoutOrderBy diagnostic (standalone, used in tests).
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
+        ctx,
+        DiagnosticCode::SelectTopWithoutOrderBy,
+        dispatch,
+    )
 }
 
 #[cfg(test)]

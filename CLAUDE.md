@@ -6,9 +6,7 @@ Guidance for Claude Code when working with bsl-analyzer codebase.
 
 **BSL Analyzer** - High-performance production ready LSP for BSL (1C:Enterprise) in Rust.
 
-**Performance (doc3: 121 MB, 6,540 files):** 11.2s analysis time, 1.4 GB memory usage
-
-See `docs/planning/PERFORMANCE_REAL_DATA.md` for benchmarks.
+**Performance:** 2.5x faster, 3.1x less memory than bsl-language-server (12,578 files, 500 MB)
 
 ## Quick Reference
 

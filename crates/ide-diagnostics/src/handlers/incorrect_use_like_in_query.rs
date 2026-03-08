@@ -16,15 +16,32 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Single-pass dispatch for IncorrectUseLikeInQuery.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::IncorrectUseLikeInQuery { range } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::IncorrectUseLikeInQuery,
+            "Нужно исправить выражение в соответствии со стандартом",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
         DiagnosticCode::IncorrectUseLikeInQuery,
-        "Нужно исправить выражение в соответствии со стандартом",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::IncorrectUseLikeInQuery { range } => Some(*range),
-            _ => None,
-        },
+        dispatch,
     )
 }
 

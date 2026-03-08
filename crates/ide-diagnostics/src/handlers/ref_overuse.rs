@@ -38,19 +38,30 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the RefOveruse diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
+/// Single-pass dispatch for RefOveruse.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::RefOveruse { range } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::RefOveruse,
+            "Избавьтесь от получения поля \"Ссылка\" в запросе.",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
+/// Runs the RefOveruse diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
-        ctx,
-        DiagnosticCode::RefOveruse,
-        "Избавьтесь от получения поля \"Ссылка\" в запросе.",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::RefOveruse { range } => Some(*range),
-            _ => None,
-        },
-    )
+    crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::RefOveruse, dispatch)
 }
 
 #[cfg(test)]

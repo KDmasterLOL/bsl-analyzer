@@ -560,6 +560,11 @@ pub fn collect_configuration_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 ///
 /// Diagnostics for BSL's SQL-like query language that use SDBL HIR lowering.
 /// Diagnostics are collected during SDBL AST→HIR transformation.
+///
+/// Uses single-pass architecture: shared data (SDBL HIR, file text, line index)
+/// is computed once, then all diagnostics are dispatched in a single iteration.
+/// This eliminates 16× redundant line index builds and iterations that caused
+/// the straggler bottleneck on large files (~26s → ~2s for a 7.8MB file).
 pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Early exit: skip if none of our diagnostics are enabled
     if !ctx.config.any_enabled(SDBL_HIR_DIAGNOSTICS) {
@@ -568,80 +573,87 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 
     let mut diagnostics = Vec::new();
 
-    // QueryParseError runs first - detects parse errors at AST level
+    // QueryParseError is AST-only (no SDBL HIR needed), runs separately
     diagnostics.extend(run_diagnostic("QueryParseError", ctx, handlers::query_parse_error::check));
-    diagnostics.extend(run_diagnostic(
-        "AssignAliasFieldsInQuery",
-        ctx,
-        handlers::assign_alias_fields_in_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "FieldsFromJoinsWithoutIsNull",
-        ctx,
-        handlers::fields_from_joins_without_is_null::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "FullOuterJoinQuery",
-        ctx,
-        handlers::full_outer_join_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "IncorrectUseLikeInQuery",
-        ctx,
-        handlers::incorrect_use_like_in_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "JoinWithSubQuery",
-        ctx,
-        handlers::join_with_sub_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "JoinWithVirtualTable",
-        ctx,
-        handlers::join_with_virtual_table::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "LogicalOrInJoinQuerySection",
-        ctx,
-        handlers::logical_or_in_join_query_section::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "LogicalOrInTheWhereSectionOfQuery",
-        ctx,
-        handlers::logical_or_in_the_where_section_of_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MultilineStringInQuery",
-        ctx,
-        handlers::multiline_string_in_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "QueryNestedFieldsByDot",
-        ctx,
-        handlers::query_nested_fields_by_dot::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "QueryToMissingMetadata",
-        ctx,
-        handlers::query_to_missing_metadata::check,
-    ));
-    diagnostics.extend(run_diagnostic("RefOveruse", ctx, handlers::ref_overuse::check));
-    diagnostics.extend(run_diagnostic(
-        "SelectTopWithoutOrderBy",
-        ctx,
-        handlers::select_top_without_order_by::check,
-    ));
-    diagnostics.extend(run_diagnostic("UnionAll", ctx, handlers::union_all::check));
-    diagnostics.extend(run_diagnostic(
-        "UsingLikeInQuery",
-        ctx,
-        handlers::using_like_in_query::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "VirtualTableCallWithoutParameters",
-        ctx,
-        handlers::virtual_table_call_without_parameters::check,
-    ));
+
+    // All remaining 16 handlers share the same data — single-pass dispatch
+    diagnostics.extend(collect_sdbl_hir_single_pass(ctx));
+
+    diagnostics
+}
+
+/// Dispatch table: maps each SDBL diagnostic code to its handler's dispatch function.
+///
+/// Each handler encapsulates its own matching logic (Strategy pattern / OCP).
+/// To add a new SDBL diagnostic, add one line here + a `dispatch` fn in the handler.
+const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
+    (DiagnosticCode::AssignAliasFieldsInQuery, handlers::assign_alias_fields_in_query::dispatch),
+    (
+        DiagnosticCode::FieldsFromJoinsWithoutIsNull,
+        handlers::fields_from_joins_without_is_null::dispatch,
+    ),
+    (DiagnosticCode::FullOuterJoinQuery, handlers::full_outer_join_query::dispatch),
+    (DiagnosticCode::IncorrectUseLikeInQuery, handlers::incorrect_use_like_in_query::dispatch),
+    (DiagnosticCode::JoinWithSubQuery, handlers::join_with_sub_query::dispatch),
+    (DiagnosticCode::JoinWithVirtualTable, handlers::join_with_virtual_table::dispatch),
+    (
+        DiagnosticCode::LogicalOrInJoinQuerySection,
+        handlers::logical_or_in_join_query_section::dispatch,
+    ),
+    (
+        DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
+        handlers::logical_or_in_the_where_section_of_query::dispatch,
+    ),
+    (DiagnosticCode::MultilineStringInQuery, handlers::multiline_string_in_query::dispatch),
+    (DiagnosticCode::QueryNestedFieldsByDot, handlers::query_nested_fields_by_dot::dispatch),
+    (DiagnosticCode::QueryToMissingMetadata, handlers::query_to_missing_metadata::dispatch),
+    (DiagnosticCode::RefOveruse, handlers::ref_overuse::dispatch),
+    (DiagnosticCode::SelectTopWithoutOrderBy, handlers::select_top_without_order_by::dispatch),
+    (DiagnosticCode::UnionAll, handlers::union_all::dispatch),
+    (DiagnosticCode::UsingLikeInQuery, handlers::using_like_in_query::dispatch),
+    (
+        DiagnosticCode::VirtualTableCallWithoutParameters,
+        handlers::virtual_table_call_without_parameters::dispatch,
+    ),
+];
+
+/// Single-pass SDBL HIR diagnostic collector.
+///
+/// Pre-computes shared data (SDBL HIR, file text, line index) once, then dispatches
+/// each diagnostic to all enabled handlers via the `SDBL_DISPATCH` table.
+///
+/// Previously each of the 16 handlers independently rebuilt the line index and
+/// iterated all diagnostics (16× redundant work). This single-pass approach
+/// eliminated the straggler bottleneck (~26s → ~2s for a 7.8MB file).
+fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    use crate::sdbl_utils::{build_line_index_shared, SdblPositionMapper};
+
+    // Filter dispatch table to only enabled handlers
+    let enabled: Vec<_> =
+        SDBL_DISPATCH.iter().filter(|(code, _)| !ctx.is_disabled_with_metadata(*code)).collect();
+
+    if enabled.is_empty() {
+        return Vec::new();
+    }
+
+    // Pre-compute shared data ONCE
+    let sdbl_hirs = ctx.sdbl_hir_in_file();
+    let bsl_source = ctx.file_text();
+    let sdbl_queries = ctx.all_sdbl_in_file();
+    let line_starts = build_line_index_shared(&bsl_source);
+
+    let mut diagnostics = Vec::new();
+
+    // SINGLE PASS: one iteration over all queries × diagnostics
+    for ((_, sdbl_package), (_, query_info)) in sdbl_hirs.iter().zip(sdbl_queries.iter()) {
+        let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
+
+        for hir_diag in sdbl_package.all_diagnostics() {
+            for (_, dispatch_fn) in &enabled {
+                dispatch_fn(ctx, hir_diag, &mapper, &query_info.query_text, &mut diagnostics);
+            }
+        }
+    }
 
     diagnostics
 }

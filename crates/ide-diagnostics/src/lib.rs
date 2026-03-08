@@ -126,13 +126,24 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// empty vec. Other collectors continue to produce partial results.
 /// This is the single source of truth for panic recovery in diagnostic collection.
 fn safe_collect(name: &str, f: impl FnOnce() -> Vec<Diagnostic>) -> Vec<Diagnostic> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+    let start = std::time::Instant::now();
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(diags) => diags,
         Err(e) => {
             tracing::warn!("Panic in collector '{name}': {e:?}");
             Vec::new()
         }
+    };
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 100 {
+        tracing::info!(
+            collector = name,
+            elapsed_ms = elapsed.as_millis() as u64,
+            diags = result.len(),
+            "Slow collector"
+        );
     }
+    result
 }
 
 /// Remove duplicate diagnostics with the same code and overlapping/contained ranges.

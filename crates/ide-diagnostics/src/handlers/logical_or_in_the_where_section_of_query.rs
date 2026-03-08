@@ -51,18 +51,25 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Runs the LogicalOrInTheWhereSectionOfQuery diagnostic.
-///
-/// Uses SDBL HIR with diagnostics collected during lowering.
+/// Single-pass dispatch for LogicalOrInTheWhereSectionOfQuery.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } = diag {
+        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::LogicalOrInTheWhereSectionOfQuery, "Using OR operator in WHERE clause severely degrades query performance. Consider rewriting using UNION or restructuring conditions", *range, mapper, query_text, diagnostics);
+    }
+}
+
+/// Runs the LogicalOrInTheWhereSectionOfQuery diagnostic (standalone, used in tests).
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
+    crate::sdbl_utils::collect_sdbl_via_dispatch(
         ctx,
         DiagnosticCode::LogicalOrInTheWhereSectionOfQuery,
-        "Using OR operator in WHERE clause severely degrades query performance. Consider rewriting using UNION or restructuring conditions",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } => Some(*range),
-            _ => None,
-        },
+        dispatch,
     )
 }
 

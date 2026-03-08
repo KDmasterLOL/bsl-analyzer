@@ -17,16 +17,29 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Adaptable,
 };
 
+/// Single-pass dispatch for UsingLikeInQuery.
+pub(crate) fn dispatch(
+    ctx: &DiagnosticsContext,
+    diag: &sdbl_hir::SdblDiagnostic,
+    mapper: &crate::sdbl_utils::SdblPositionMapper,
+    query_text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } = diag {
+        crate::sdbl_utils::dispatch_simple(
+            ctx,
+            DiagnosticCode::UsingLikeInQuery,
+            "Измените выражение, чтобы не использовать 'ПОДОБНО'",
+            *range,
+            mapper,
+            query_text,
+            diagnostics,
+        );
+    }
+}
+
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    crate::sdbl_utils::collect_sdbl_simple(
-        ctx,
-        DiagnosticCode::UsingLikeInQuery,
-        "Измените выражение, чтобы не использовать 'ПОДОБНО'",
-        |diag| match diag {
-            sdbl_hir::SdblDiagnostic::UsingLikeInQuery { range } => Some(*range),
-            _ => None,
-        },
-    )
+    crate::sdbl_utils::collect_sdbl_via_dispatch(ctx, DiagnosticCode::UsingLikeInQuery, dispatch)
 }
 
 #[cfg(test)]
