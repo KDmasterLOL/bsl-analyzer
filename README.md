@@ -96,7 +96,7 @@ cargo build --release
 
 **Методика:** `/usr/bin/time -v` (GNU time), холодный запуск без кэша. bsl-analyzer в streaming-режиме (`--streaming`), bsl-language-server в стандартном режиме. Оба инструмента используют все доступные ядра.
 
-| Метрика | bsl-language-server 0.28.5 | bsl-analyzer 0.1.35 | Разница |
+| Метрика | bsl-language-server 0.28.5 | bsl-analyzer 0.1.36 | Разница |
 |---------|---------------------------|---------------------|---------|
 | **Wall time** | 132.6s | 52.8s | 2.5x быстрее |
 | **CPU time** | 1388.7s | 499.0s | 2.8x меньше CPU |
