@@ -4,11 +4,11 @@ This document describes the BSL Analyzer diagnostic metadata definitions and ver
 
 ## Overview
 
-All 171 diagnostic metadata definitions are verified for correctness and consistency.
+All 180 diagnostic metadata definitions are verified for correctness and consistency.
 
 ## Verification Status
 
-**✅ 171/171 diagnostics have metadata definitions (100%)**
+**180/180 diagnostics have metadata definitions (100%)**
 
 ### Verified Diagnostic Categories
 
@@ -100,7 +100,7 @@ cargo test -p ide-diagnostics metadata_registry::tests
 ```
 
 Test coverage:
-- ✅ All diagnostics have metadata (171/171)
+- All diagnostics have metadata (180/180)
 - ✅ LSP severity mapping
 - ✅ Tags coverage
 - ✅ activatedByDefault consistency
@@ -147,6 +147,6 @@ This is the only known difference and does not affect compatibility.
 
 ## Status
 
-**✅ 100% Coverage Achieved**
+**100% Coverage Achieved**
 
-All 171 DiagnosticCode variants have complete metadata definitions.
+All 180 DiagnosticCode variants have complete metadata definitions.

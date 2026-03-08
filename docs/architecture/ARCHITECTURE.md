@@ -19,7 +19,7 @@ BSL Analyzer использует инкрементальную архитек�
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
 │ide-diagnostics│    │  ide-assists  │    │    ide-db     │
-│ 171 diagnostics│   │ Code actions  │    │ RootDatabase  │
+│180+ diagnostics│   │ Code actions  │    │ RootDatabase  │
 └───────────────┘    └───────────────┘    └───────────────┘
                               │
                               ▼
@@ -56,7 +56,7 @@ BSL Analyzer использует инкрементальную архитек�
 |------|--------|------------|
 | **Анализ** | lexer, parser, syntax | Tokenization (80+ BSL, 150+ SDBL), Rowan CST |
 | **Семантика** | hir-def, hir-ty, hir | ItemTree, SymbolTree, type inference |
-| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 171 диагностика, code actions, LSP API |
+| **IDE** | ide-db, ide-diagnostics, ide-assists, ide | 180+ диагностик, code actions, LSP API |
 | **SDBL** | sdbl-hir | Query language HIR + type inference |
 | **Dataflow** | cfg, cfg-types, dataflow | CFG, reaching definitions, liveness |
 | **Metadata** | bsl-metadata, bsl-platform | 1C configuration, platform types |
@@ -133,7 +133,7 @@ ide-diagnostics/lib.rs → match BodyDiagnostic { ... } → handlers/*
 
 ### DiagnosticMetadata Architecture
 
-Metadata-driven система для всех 144 диагностик (100% coverage):
+Metadata-driven система для всех 180+ диагностик (100% coverage):
 - **Zero-cost abstraction**: compile-time const metadata + runtime config merging
 - **Центральный registry**: все severity/tags/minutesToFix в `metadata_registry.rs`
 - **Runtime overrides**: JSON config может переопределить severity/type/tags
