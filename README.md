@@ -16,13 +16,13 @@
 
 <!-- INSTALL_URL:gitlab -->
 ```bash
-curl -fsSL https://gitlab.runsystems.ru/proit/bsl-analyzer/-/raw/develop/scripts/install.sh | bash
+curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash
 ```
 
 Или с указанием версии:
 
 ```bash
-curl -fsSL https://gitlab.runsystems.ru/proit/bsl-analyzer/-/raw/develop/scripts/install.sh | bash -s -- --version 0.1.38
+curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash -s -- --version 0.1.38
 ```
 <!-- /INSTALL_URL -->
 
