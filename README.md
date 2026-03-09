@@ -12,22 +12,24 @@
 
 ## Установка
 
-### Linux
+### Linux / macOS
+
+<!-- INSTALL_URL:github -->
+```bash
+curl -fsSL https://raw.githubusercontent.com/itrous/bsl-analyzer/develop/scripts/install.sh | bash
+```
+
+Или с указанием версии:
 
 ```bash
-curl -fsSL https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-linux-amd64 -o ~/.local/bin/bsl-analyzer && chmod +x ~/.local/bin/bsl-analyzer
+curl -fsSL https://raw.githubusercontent.com/itrous/bsl-analyzer/develop/scripts/install.sh | bash -s -- --version 0.1.38
 ```
+<!-- /INSTALL_URL -->
 
 ### Windows (PowerShell)
 
 ```powershell
 Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-windows-amd64.exe" -OutFile bsl-analyzer.exe
-```
-
-### macOS (Apple Silicon)
-
-```bash
-curl -fsSL https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-darwin-arm64 -o /usr/local/bin/bsl-analyzer && chmod +x /usr/local/bin/bsl-analyzer
 ```
 
 ## Использование

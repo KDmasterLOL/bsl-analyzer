@@ -14,6 +14,7 @@ set -euo pipefail
 
 # --- Конфигурация ---
 GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
+GITHUB_REPO_SLUG="itrous/bsl-analyzer"
 GITHUB_BRANCH="develop"
 
 # Файлы и директории, исключаемые из GitHub-зеркала
@@ -188,6 +189,26 @@ sync_files "$PROJECT_ROOT" "$WORK_DIR/github"
 # Подмена конфига для GitHub-сборки
 cp "$PROJECT_ROOT/crates/bsl-launcher/release-source.github.json" \
    "$WORK_DIR/github/crates/bsl-launcher/release-source.json"
+
+# Подмена источника в install.sh для GitHub
+sed -i.bak 's/^INSTALL_SOURCE="gitlab"/INSTALL_SOURCE="github"/' \
+    "$WORK_DIR/github/scripts/install.sh"
+rm -f "$WORK_DIR/github/scripts/install.sh.bak"
+
+# Подмена URL установки в README для GitHub
+sed -i.bak '/<!-- INSTALL_URL:gitlab -->/,/<!-- \/INSTALL_URL -->/c\
+<!-- INSTALL_URL:github -->\
+```bash\
+curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scripts/install.sh | bash\
+```\
+\
+Или с указанием версии:\
+\
+```bash\
+curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scripts/install.sh | bash -s -- --version 0.1.38\
+```\
+<!-- /INSTALL_URL -->' "$WORK_DIR/github/README.md"
+rm -f "$WORK_DIR/github/README.md.bak"
 
 # Проверяем есть ли изменения
 git add -A
