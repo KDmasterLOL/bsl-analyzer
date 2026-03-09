@@ -362,6 +362,55 @@ pub enum TokenKind {
     Error,
 }
 
+impl TokenKind {
+    /// Returns true if this is a BSL keyword token.
+    pub fn is_keyword(self) -> bool {
+        matches!(
+            self,
+            TokenKind::KwProcedure
+                | TokenKind::KwEndProcedure
+                | TokenKind::KwFunction
+                | TokenKind::KwEndFunction
+                | TokenKind::KwExport
+                | TokenKind::KwVal
+                | TokenKind::KwIf
+                | TokenKind::KwThen
+                | TokenKind::KwElsIf
+                | TokenKind::KwElse
+                | TokenKind::KwEndIf
+                | TokenKind::KwFor
+                | TokenKind::KwEach
+                | TokenKind::KwIn
+                | TokenKind::KwTo
+                | TokenKind::KwWhile
+                | TokenKind::KwDo
+                | TokenKind::KwEndDo
+                | TokenKind::KwReturn
+                | TokenKind::KwContinue
+                | TokenKind::KwBreak
+                | TokenKind::KwGoto
+                | TokenKind::KwTry
+                | TokenKind::KwExcept
+                | TokenKind::KwEndTry
+                | TokenKind::KwRaise
+                | TokenKind::KwVar
+                | TokenKind::KwNew
+                | TokenKind::KwExecute
+                | TokenKind::KwAddHandler
+                | TokenKind::KwRemoveHandler
+                | TokenKind::KwAsync
+                | TokenKind::KwAwait
+                | TokenKind::KwAnd
+                | TokenKind::KwOr
+                | TokenKind::KwNot
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwUndefined
+                | TokenKind::KwNull
+        )
+    }
+}
+
 /// A token with its kind, text, and position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {

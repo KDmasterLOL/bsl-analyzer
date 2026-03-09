@@ -134,8 +134,8 @@ pub fn procedure_def_content(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Name
-    if p.at(TokenKind::Ident) {
+    // Name (accept keywords for error recovery — platform will reject reserved words)
+    if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
         p.bump();
     }
 
@@ -179,8 +179,8 @@ pub fn function_def_content(p: &mut Parser) {
 
     p.skip_trivia();
 
-    // Name
-    if p.at(TokenKind::Ident) {
+    // Name (accept keywords for error recovery — platform will reject reserved words)
+    if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
         p.bump();
     }
 

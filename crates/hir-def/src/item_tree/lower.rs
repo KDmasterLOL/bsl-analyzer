@@ -87,7 +87,7 @@ impl Ctx {
 
     /// Lower a procedure definition.
     fn lower_procedure(&mut self, proc: &ast::ProcedureDef) {
-        let name_token = proc.name();
+        let name_token = proc.name_or_keyword();
         let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
         let name_range = name_token
             .as_ref()
@@ -117,7 +117,7 @@ impl Ctx {
 
     /// Lower a function definition.
     fn lower_function(&mut self, func: &ast::FunctionDef) {
-        let name_token = func.name();
+        let name_token = func.name_or_keyword();
         let name = name_token.as_ref().map(|t| Name::new(t.text())).unwrap_or_else(Name::missing);
         let name_range = name_token
             .as_ref()

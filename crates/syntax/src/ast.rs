@@ -68,6 +68,22 @@ impl ProcedureDef {
             .find(|it| it.kind() == SyntaxKind::IDENT)
     }
 
+    /// Returns the name token, including keyword tokens accepted during error recovery.
+    pub fn name_or_keyword(&self) -> Option<SyntaxToken> {
+        self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|it| {
+            let k = it.kind();
+            k == SyntaxKind::IDENT
+                || (k.is_keyword()
+                    && !matches!(
+                        k,
+                        SyntaxKind::KW_PROCEDURE
+                            | SyntaxKind::KW_END_PROCEDURE
+                            | SyntaxKind::KW_ASYNC
+                            | SyntaxKind::KW_EXPORT
+                    ))
+        })
+    }
+
     pub fn export_keyword(&self) -> Option<SyntaxToken> {
         self.0
             .children_with_tokens()
@@ -117,6 +133,22 @@ impl FunctionDef {
             .children_with_tokens()
             .filter_map(|it| it.into_token())
             .find(|it| it.kind() == SyntaxKind::IDENT)
+    }
+
+    /// Returns the name token, including keyword tokens accepted during error recovery.
+    pub fn name_or_keyword(&self) -> Option<SyntaxToken> {
+        self.0.children_with_tokens().filter_map(|it| it.into_token()).find(|it| {
+            let k = it.kind();
+            k == SyntaxKind::IDENT
+                || (k.is_keyword()
+                    && !matches!(
+                        k,
+                        SyntaxKind::KW_FUNCTION
+                            | SyntaxKind::KW_END_FUNCTION
+                            | SyntaxKind::KW_ASYNC
+                            | SyntaxKind::KW_EXPORT
+                    ))
+        })
     }
 
     pub fn export_keyword(&self) -> Option<SyntaxToken> {
