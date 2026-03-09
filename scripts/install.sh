@@ -229,11 +229,10 @@ main() {
     esac
 
     # Download
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' EXIT
+    TMP_DIR=$(mktemp -d)
+    trap 'rm -rf "$TMP_DIR"' EXIT
 
-    local tmp_file="${tmp_dir}/${file_name}"
+    local tmp_file="${TMP_DIR}/${file_name}"
 
     info "Downloading ${file_name}..."
     if ! download_file "$url" "$tmp_file"; then
@@ -242,7 +241,7 @@ main() {
     fi
 
     # Verify checksum (if checksums available)
-    local checksums_file="${tmp_dir}/checksums.txt"
+    local checksums_file="${TMP_DIR}/checksums.txt"
     local checksums_url
     case "$INSTALL_SOURCE" in
         github)
