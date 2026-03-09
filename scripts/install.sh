@@ -144,6 +144,28 @@ verify_checksum() {
     fi
 }
 
+check_path() {
+    case ":$PATH:" in
+        *":${INSTALL_DIR}:"*)
+            ;;
+        *)
+            echo ""
+            warn "${INSTALL_DIR} is not in your PATH"
+            echo ""
+            echo "  Add it to your shell profile:"
+            echo ""
+            if [ "$OS" = "linux" ]; then
+                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc"
+                echo "    # or for zsh:"
+                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
+            else
+                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
+            fi
+            echo ""
+            ;;
+    esac
+}
+
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -215,6 +237,7 @@ main() {
         current=$("$existing" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
         if [ "$current" = "$VERSION" ]; then
             ok "bsl-analyzer ${VERSION} is already installed"
+            check_path
             exit 0
         fi
         info "Upgrading from ${current} to ${VERSION}"
@@ -276,26 +299,7 @@ main() {
 
     ok "Installed bsl-analyzer ${VERSION} to ${INSTALL_DIR}/${BINARY_NAME}"
 
-    # Check PATH
-    case ":$PATH:" in
-        *":${INSTALL_DIR}:"*)
-            ;;
-        *)
-            echo ""
-            warn "${INSTALL_DIR} is not in your PATH"
-            echo ""
-            echo "  Add it to your shell profile:"
-            echo ""
-            if [ "$OS" = "linux" ]; then
-                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc"
-                echo "    # or for zsh:"
-                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-            else
-                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-            fi
-            echo ""
-            ;;
-    esac
+    check_path
 
     # Verify installation
     if check_command "$BINARY_NAME"; then
