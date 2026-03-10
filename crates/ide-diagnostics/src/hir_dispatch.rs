@@ -55,6 +55,7 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::OneStatementPerLine,
     DiagnosticCode::OSUsersMethod,
     DiagnosticCode::ProcedureReturnsValue,
+    DiagnosticCode::ReservedWordAsMethodName,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::RewriteMethodParameter,
     DiagnosticCode::SelfAssign,
@@ -264,6 +265,9 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::OSUsersMethod { range } => handlers::os_users_method::from_hir(*range, ctx),
         BodyDiagnostic::ProcedureReturnsValue { range } => {
             handlers::procedure_returns_value::from_hir(*range, ctx)
+        }
+        BodyDiagnostic::ReservedWordAsMethodName { name, range } => {
+            handlers::reserved_word_as_method_name::from_hir(name, *range, ctx)
         }
         BodyDiagnostic::RedundantAccessToObject { kind, range } => {
             handlers::redundant_access_to_object::from_hir(kind, *range, ctx)

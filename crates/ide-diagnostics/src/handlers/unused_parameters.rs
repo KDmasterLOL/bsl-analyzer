@@ -43,6 +43,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
+    // Collect form event/command handler names — their signatures are fixed by the platform
+    let metadata = ctx.module_metadata();
+    let mut form_handlers: FxHashSet<String> = FxHashSet::default();
+    if let Some(ref form) = metadata.form {
+        for handler in form.event_handlers() {
+            form_handlers.insert(handler.to_lowercase());
+        }
+        for handler in form.command_handlers() {
+            form_handlers.insert(handler.to_lowercase());
+        }
+    }
+
     for (local_id, body) in module_bodies.iter_bodies() {
         let method_name = get_method_name(&item_tree, local_id);
 
@@ -51,6 +63,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             body,
             method_name.as_deref(),
             &module_bodies,
+            &form_handlers,
             code,
             ctx,
         ));
@@ -74,6 +87,7 @@ fn check_method(
     body: &hir::Body,
     method_name: Option<&str>,
     module_bodies: &hir::ModuleBodies,
+    form_handlers: &FxHashSet<String>,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
@@ -88,6 +102,11 @@ fn check_method(
     }
 
     if method_name.is_some_and(is_platform_event_handler) {
+        return diagnostics;
+    }
+
+    // Form event/command handlers have fixed signatures defined by the platform
+    if method_name.is_some_and(|name| form_handlers.contains(&name.to_lowercase())) {
         return diagnostics;
     }
 
@@ -295,5 +314,52 @@ mod tests {
 
         assert_diagnostic_range(code, unused[0], 0, 28, 30);
         assert_diagnostic_range(code, unused[1], 4, 36, 38);
+    }
+
+    #[test]
+    fn test_form_element_event_handler_no_diagnostic() {
+        use std::sync::Arc;
+
+        let code = r#"&НаКлиенте
+Процедура СписокПриАктивизацииСтроки(Элемент)
+    Если ЧтоТо Тогда
+    КонецЕсли;
+КонецПроцедуры
+"#;
+
+        let form_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <ChildItems>
+        <Table name="Список" id="1">
+            <Events>
+                <Event name="OnActivateRow">СписокПриАктивизацииСтроки</Event>
+            </Events>
+        </Table>
+    </ChildItems>
+</Form>"#;
+
+        let form = bsl_metadata::xml_parser::parse_form_xml(form_xml).unwrap();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: Some(Arc::new(form)),
+            http_service: None,
+            web_service: None,
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // СписокПриАктивизацииСтроки is a form element event handler — its parameter
+        // signature is fixed by the platform, so unused params should not be flagged
+        assert_eq!(unused.len(), 0);
     }
 }

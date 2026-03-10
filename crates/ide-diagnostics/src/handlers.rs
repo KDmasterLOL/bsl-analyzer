@@ -125,6 +125,7 @@ pub mod query_to_missing_metadata;
 pub mod redundant_access_to_object;
 pub mod ref_overuse;
 pub mod reserved_parameter_names;
+pub mod reserved_word_as_method_name;
 pub mod rewrite_method_parameter;
 pub mod same_metadata_object_and_child_names;
 pub mod scheduled_job_handler;
@@ -288,6 +289,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&missing_returned_value_description::METADATA)
         }
         DiagnosticCode::ReservedParameterNames => Some(&reserved_parameter_names::METADATA),
+        DiagnosticCode::ReservedWordAsMethodName => Some(&reserved_word_as_method_name::METADATA),
         DiagnosticCode::RewriteMethodParameter => Some(&rewrite_method_parameter::METADATA),
         DiagnosticCode::UnusedLocalMethod => Some(&unused_local_method::METADATA),
         DiagnosticCode::ExportVariables => Some(&export_variables::METADATA),

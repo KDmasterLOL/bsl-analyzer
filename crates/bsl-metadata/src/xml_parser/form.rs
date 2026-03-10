@@ -32,33 +32,9 @@ struct FormXmlElement {
     form_type: String,
     #[serde(default)]
     child_items: Option<ChildItems>,
-    /// Form events (OnCreateAtServer, OnOpen, etc.)
-    #[serde(default)]
-    events: Option<FormEvents>,
     /// Form commands with actions
     #[serde(default)]
     commands: Option<FormCommands>,
-}
-
-/// Container for form events
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-struct FormEvents {
-    #[serde(default)]
-    event: Vec<FormEvent>,
-}
-
-/// Single form event with handler name
-#[allow(dead_code)] // name needed for XML deserialization
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormEvent {
-    /// Event type (OnCreateAtServer, OnOpen, etc.)
-    #[serde(rename = "@name", default)]
-    name: String,
-    /// Handler method name (text content)
-    #[serde(rename = "$text", default)]
-    handler: String,
 }
 
 /// Container for form commands
@@ -217,6 +193,44 @@ impl FormControlWithChildren {
     }
 }
 
+/// Collect all `<Event>` handler names from the entire XML tree.
+///
+/// This uses a streaming XML reader to find every `<Event>` element regardless
+/// of nesting depth. Catches both form-level events (OnCreateAtServer, OnOpen)
+/// and element-level events (Table.OnActivateRow, InputField.OnChange, etc.).
+fn collect_all_event_handlers(xml: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut handlers = Vec::new();
+    let mut in_event = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"Event" => {
+                in_event = true;
+            }
+            Ok(Event::Text(ref e)) if in_event => {
+                if let Ok(text) = std::str::from_utf8(e.as_ref()) {
+                    let handler = text.trim();
+                    if !handler.is_empty() {
+                        handlers.push(handler.to_string());
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"Event" => {
+                in_event = false;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    handlers
+}
+
 /// Parse form XML to extract FormType and elements.
 ///
 /// Parses form metadata needed for diagnostics:
@@ -268,19 +282,11 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         child_items.collect_elements(&mut elements);
     }
 
-    // Collect event handlers
-    let event_handlers: Vec<String> = form_xml
-        .events
-        .as_ref()
-        .map(|events| {
-            events
-                .event
-                .iter()
-                .filter(|e| !e.handler.is_empty())
-                .map(|e| e.handler.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Collect ALL event handlers (form-level and element-level) via XML reader.
+    // Element-level events (e.g. Table/InputField/CheckBoxField events) are not
+    // captured by serde since they can appear on any element type. A single pass
+    // with quick_xml::Reader reliably collects every <Event> handler in the tree.
+    let event_handlers = collect_all_event_handlers(xml);
 
     // Collect command handlers
     let command_handlers: Vec<String> = form_xml
@@ -594,6 +600,42 @@ mod tests {
         assert!(form.is_handler("присозданиинасервере")); // case-insensitive
         assert!(form.is_handler("Ок"));
         assert!(!form.is_handler("НеСуществующийОбработчик"));
+    }
+
+    #[test]
+    fn test_parse_form_with_element_events() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <Events>
+        <Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>
+    </Events>
+    <ChildItems>
+        <Table name="Список" id="1">
+            <Events>
+                <Event name="OnActivateRow">СписокПриАктивизацииСтроки</Event>
+            </Events>
+        </Table>
+        <InputField name="Поле1" id="2">
+            <Events>
+                <Event name="OnChange">Поле1ПриИзменении</Event>
+            </Events>
+        </InputField>
+        <CheckBoxField name="Флаг" id="3">
+            <Events>
+                <Event name="OnChange">ФлагПриИзменении</Event>
+            </Events>
+        </CheckBoxField>
+    </ChildItems>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+
+        // All event handlers (form-level + element-level) should be collected
+        assert_eq!(form.event_handlers().len(), 4);
+        assert!(form.is_handler("ПриСозданииНаСервере"));
+        assert!(form.is_handler("СписокПриАктивизацииСтроки"));
+        assert!(form.is_handler("Поле1ПриИзменении"));
+        assert!(form.is_handler("ФлагПриИзменении"));
     }
 
     #[test]

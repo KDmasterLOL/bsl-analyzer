@@ -589,6 +589,10 @@ pub enum BodyDiagnostic {
     /// Only functions can return values, procedures must use `Return;` without value.
     ProcedureReturnsValue { range: TextRange },
 
+    /// Reserved keyword used as procedure/function name.
+    /// Platform will reject such names with a compilation error.
+    ReservedWordAsMethodName { name: String, range: TextRange },
+
     /// Redundant access to object via ЭтотОбъект/ThisObject or module name.
     ///
     /// Emitted during lowering as candidates - validation against module type/metadata
@@ -1062,6 +1066,7 @@ impl BodyDiagnostic {
             BodyDiagnostic::OneStatementPerLine { range } => *range,
             BodyDiagnostic::OSUsersMethod { range } => *range,
             BodyDiagnostic::ProcedureReturnsValue { range } => *range,
+            BodyDiagnostic::ReservedWordAsMethodName { range, .. } => *range,
             BodyDiagnostic::RedundantAccessToObject { range, .. } => *range,
             BodyDiagnostic::ServerCallsInFormEvents { range, .. } => *range,
             BodyDiagnostic::SetPrivilegedModeCall { range } => *range,

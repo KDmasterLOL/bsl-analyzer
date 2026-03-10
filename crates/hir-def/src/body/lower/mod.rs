@@ -665,15 +665,39 @@ pub fn lower_method_with_externals(
     ctx.is_instead_method = is_around_annotation_method(method_node);
     ctx.is_server_method = is_server_method(method_node);
 
-    // Extract method name once for all checks
-    let name_token = method_node
-        .children_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|tok| tok.kind() == SyntaxKind::IDENT);
+    // Extract method name once for all checks (accept keywords for error recovery)
+    let name_token =
+        method_node.children_with_tokens().filter_map(|el| el.into_token()).find(|tok| {
+            let k = tok.kind();
+            if k == SyntaxKind::IDENT {
+                return true;
+            }
+            // Accept non-structural keywords as names (error recovery)
+            k.is_keyword()
+                && !matches!(
+                    k,
+                    SyntaxKind::KW_PROCEDURE
+                        | SyntaxKind::KW_END_PROCEDURE
+                        | SyntaxKind::KW_FUNCTION
+                        | SyntaxKind::KW_END_FUNCTION
+                        | SyntaxKind::KW_ASYNC
+                        | SyntaxKind::KW_EXPORT
+                )
+        });
 
     // Set current method name for ServerCallsInFormEvents diagnostic
     if let Some(ref token) = name_token {
         ctx.current_method_name = Some(token.text().to_string());
+    }
+
+    // Check for ReservedWordAsMethodName diagnostic
+    if let Some(ref token) = name_token {
+        if token.kind().is_keyword() {
+            ctx.emit(BodyDiagnostic::ReservedWordAsMethodName {
+                name: token.text().to_string(),
+                range: token.text_range(),
+            });
+        }
     }
 
     // Check for FunctionNameStartsWithGet and GlobalContextMethodCollision8312 diagnostics
