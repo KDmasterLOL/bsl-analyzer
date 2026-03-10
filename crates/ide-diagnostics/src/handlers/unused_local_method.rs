@@ -617,6 +617,70 @@ mod tests {
     }
 
     #[test]
+    fn test_form_element_event_handler_not_flagged() {
+        use std::sync::Arc;
+
+        let code = r#"
+&НаКлиенте
+Процедура СписокПриАктивизацииСтроки(Элемент)
+КонецПроцедуры
+
+&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+КонецПроцедуры
+
+Процедура НеИспользуемая()
+КонецПроцедуры
+"#;
+
+        let form_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <Events>
+        <Event name="OnCreateAtServer">ПриСозданииНаСервере</Event>
+    </Events>
+    <ChildItems>
+        <Table name="Список" id="1">
+            <Events>
+                <Event name="OnActivateRow">СписокПриАктивизацииСтроки</Event>
+            </Events>
+        </Table>
+    </ChildItems>
+</Form>"#;
+
+        let form = bsl_metadata::xml_parser::parse_form_xml(form_xml).unwrap();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: Some(Arc::new(form)),
+            http_service: None,
+            web_service: None,
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+
+        // СписокПриАктивизацииСтроки — element event handler, should not be flagged
+        // ПриСозданииНаСервере — form event handler, should not be flagged
+        // НеИспользуемая — not a handler, should be flagged
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "Expected 1 diagnostic, got {}. Diagnostics: {:?}",
+            unused_diags.len(),
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(unused_diags[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
     fn test_case_insensitive_call() {
         let code = r#"
 Процедура МояПроцедура()
