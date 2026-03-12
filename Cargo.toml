@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.41"
+version = "0.1.42"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -73,7 +73,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Logging
-tracing = { version = "0.1.41", default-features = false, features = ["std"] }
+tracing = { version = "0.1.42", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "registry",
     "fmt",

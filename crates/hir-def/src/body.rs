@@ -885,6 +885,8 @@ pub enum MagicNumberContext {
     InMethodCall,
     /// Number in ternary operator branch (for exclusion check)
     InTernaryBranch,
+    /// Precision argument of Round/Окр: `Окр(Значение, 2)`
+    InRoundPrecision,
     /// Other context (not excluded)
     Other,
 }

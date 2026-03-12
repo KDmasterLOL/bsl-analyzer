@@ -2276,6 +2276,7 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
     // Track what contexts we've seen while walking up
     let mut in_binary_expr = false;
     let mut in_arg_list = false;
+    let mut arg_index: usize = 0;
     let mut in_ternary = false;
     let mut in_call = false;
     let mut in_assign = false;
@@ -2317,6 +2318,12 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
             }
             SyntaxKind::ARG_LIST => {
                 in_arg_list = true;
+                // Determine argument index by counting commas before our token
+                arg_index = current
+                    .children_with_tokens()
+                    .take_while(|child| !child.text_range().contains_range(token.text_range()))
+                    .filter(|child| child.as_token().is_some_and(|t| t.kind() == SyntaxKind::COMMA))
+                    .count();
             }
             SyntaxKind::TERNARY_EXPR => {
                 in_ternary = true;
@@ -2328,6 +2335,10 @@ fn determine_magic_number_context(token: &syntax::SyntaxToken) -> MagicNumberCon
                     let name = method_name.to_lowercase();
                     if name == "вставить" || name == "insert" {
                         return MagicNumberContext::InStructureInsert;
+                    }
+                    // Round/Окр: second argument is precision, self-documenting
+                    if (name == "окр" || name == "round") && arg_index == 1 {
+                        return MagicNumberContext::InRoundPrecision;
                     }
                 }
             }
@@ -2398,10 +2409,20 @@ fn find_method_name_for_magic_number(node: &SyntaxNode) -> Option<String> {
         }
     }
 
-    // For simple function calls without dot, find the first IDENT before ARG_LIST
-    for token in node.children_with_tokens().filter_map(|e| e.into_token()) {
-        if token.kind() == SyntaxKind::IDENT {
-            return Some(token.text().to_string());
+    // For simple function calls without dot, find the first IDENT node or token before ARG_LIST
+    for child in node.children_with_tokens() {
+        match child {
+            syntax::NodeOrToken::Token(t) if t.kind() == SyntaxKind::IDENT => {
+                return Some(t.text().to_string());
+            }
+            syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::IDENT => {
+                // IDENT node wrapping an IDENT token
+                if let Some(t) = n.first_token() {
+                    return Some(t.text().to_string());
+                }
+            }
+            syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::ARG_LIST => break,
+            _ => {}
         }
     }
 
