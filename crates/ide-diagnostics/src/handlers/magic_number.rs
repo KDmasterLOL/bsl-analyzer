@@ -99,6 +99,7 @@ pub fn from_hir(
         MagicNumberContext::InPropertyAssignment => return None,
         MagicNumberContext::InSimpleAssignment => return None,
         MagicNumberContext::InTernaryBranch => return None,
+        MagicNumberContext::InRoundPrecision => return None,
         MagicNumberContext::InArrayIndex => {
             if config.allow_magic_indexes {
                 return None;
@@ -706,6 +707,34 @@ mod tests {
             0,
             "Numbers inside КвалификаторыЧисла in column definitions should be excluded"
         );
+    }
+
+    #[test]
+    fn test_round_precision_excluded() {
+        let code = r"
+Процедура Тест()
+    Результат = Окр(Значение, 2);
+    Результат2 = Round(Value, 3);
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+
+        assert_eq!(diags.len(), 0, "Round/Окр precision argument should be excluded");
+    }
+
+    #[test]
+    fn test_round_first_arg_not_excluded() {
+        let code = r"
+Процедура Тест()
+    Результат = Окр(3.14, 2);
+КонецПроцедуры
+        ";
+        let all = check_hir_diagnostic(code);
+        let diags = filter(&all);
+
+        assert_eq!(diags.len(), 1, "Round/Окр first argument should NOT be excluded");
+        assert!(diags[0].message.contains("3.14"), "Should detect 3.14 as magic number");
     }
 
     #[test]
