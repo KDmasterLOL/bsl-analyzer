@@ -214,17 +214,21 @@ impl WhileLoopVertex {
 pub struct ForLoopVertex {
     /// Loop variable (HIR binding from Body)
     pub loop_var: BindingId,
+    /// Start expression (from)
+    pub from: ExprId,
+    /// End expression (to)
+    pub to: ExprId,
     /// Statement ID of the for loop (for getting full range in diagnostics)
     pub stmt_id: Option<StmtId>,
 }
 
 impl ForLoopVertex {
-    pub fn new(loop_var: BindingId) -> Self {
-        Self { loop_var, stmt_id: None }
+    pub fn new(loop_var: BindingId, from: ExprId, to: ExprId) -> Self {
+        Self { loop_var, from, to, stmt_id: None }
     }
 
-    pub fn with_stmt_id(loop_var: BindingId, stmt_id: StmtId) -> Self {
-        Self { loop_var, stmt_id: Some(stmt_id) }
+    pub fn with_stmt_id(loop_var: BindingId, from: ExprId, to: ExprId, stmt_id: StmtId) -> Self {
+        Self { loop_var, from, to, stmt_id: Some(stmt_id) }
     }
 }
 

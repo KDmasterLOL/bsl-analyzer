@@ -593,10 +593,12 @@ impl CfgBuilder {
     fn walk_for_statement_hir(&mut self, stmt_id: StmtIdx, body: &Body) {
         use crate::vertex::ForLoopVertex;
 
-        if let Stmt::For { var, from: _, to: _, body: loop_body } = body.stmt_idx(stmt_id) {
+        if let Stmt::For { var, from, to, body: loop_body } = body.stmt_idx(stmt_id) {
             // Create for loop vertex - convert typed to opaque
             let loop_vertex = self.cfg.add_vertex(CfgVertex::ForLoop(ForLoopVertex::with_stmt_id(
                 BindingId::from_idx(*var),
+                ExprId::from_idx(*from),
+                ExprId::from_idx(*to),
                 StmtId::from_idx(stmt_id),
             )));
 

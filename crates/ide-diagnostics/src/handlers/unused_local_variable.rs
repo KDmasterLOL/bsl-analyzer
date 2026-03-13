@@ -1083,6 +1083,47 @@ mod tests {
         assert_eq!(unused_diags.len(), 0, "No variables should be flagged as unused in this code");
     }
 
+    #[test]
+    fn test_for_loop_bound_variable_is_used() {
+        // Regression test: variable used as For loop upper bound
+        // should NOT trigger unused variable diagnostic
+        let code = r#"Процедура Тест()
+    КоличествоКолонок = 4;
+    Для Сч = 1 По КоличествоКолонок Цикл
+        Сообщить(Сч);
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert!(
+            !unused_diags.iter().any(|d| d.message.contains("КоличествоКолонок")),
+            "КоличествоКолонок is used in For loop bound and should not be flagged as unused"
+        );
+    }
+
+    #[test]
+    fn test_for_loop_from_bound_variable_is_used() {
+        // Variable used as For loop lower bound (from)
+        let code = r#"Процедура Тест()
+    Начало = 1;
+    Для Сч = Начало По 10 Цикл
+        Сообщить(Сч);
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert!(
+            !unused_diags.iter().any(|d| d.message.contains("Начало")),
+            "Начало is used in For loop from-bound and should not be flagged as unused"
+        );
+    }
+
     /// Helper to create ObjectModule metadata with given MDO.
     fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir::ModuleMetadata {
         hir::ModuleMetadata {

@@ -660,10 +660,12 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 state
             }
 
-            CfgVertex::ForLoop(_) => {
-                // ForLoop: from/to expressions are processed via transfer_stmt
-                // when the For statement itself is in a BasicBlock
-                in_state.clone()
+            CfgVertex::ForLoop(for_vertex) => {
+                // For loop: process from/to bound expressions
+                let mut state = in_state.clone();
+                self.transfer.transfer_expr_in_place(for_vertex.from, &mut state, &self.body);
+                self.transfer.transfer_expr_in_place(for_vertex.to, &mut state, &self.body);
+                state
             }
 
             CfgVertex::ForEachLoop(foreach_vertex) => {
