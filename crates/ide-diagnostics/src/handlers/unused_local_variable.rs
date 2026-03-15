@@ -101,12 +101,39 @@ fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> 
             names
         }
         bsl_metadata::ModuleType::FormModule => {
-            let form = match &metadata.form {
-                Some(form) => form,
-                None => return FxHashSet::default(),
-            };
+            // Standard managed form properties accessible as variables in form module.
+            // These are built-in properties of every managed form (ФормаКлиентскогоПриложения).
+            const STANDARD_FORM_PROPERTIES: &[&str] = &[
+                // Заголовок / Title
+                "заголовок",
+                "title",
+                // АвтоЗаголовок / AutoTitle
+                "автозаголовок",
+                "autotitle",
+                // Модифицированность / Modified
+                "модифицированность",
+                "modified",
+                // ТолькоПросмотр / ReadOnly
+                "толькопросмотр",
+                "readonly",
+                // КлючСохраненияПоложенияОкна / WindowOptionsKey
+                "ключсохраненияположенияокна",
+                "windowoptionskey",
+                // КлючНазначенияИспользования / PurposeUseKey
+                "ключназначенияиспользования",
+                "purposeusekey",
+            ];
 
-            form.attributes().iter().map(|name| name.to_lowercase()).collect()
+            let mut names: FxHashSet<String> =
+                STANDARD_FORM_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
+
+            if let Some(form) = &metadata.form {
+                for attr_name in form.attributes() {
+                    names.insert(attr_name.to_lowercase());
+                }
+            }
+
+            names
         }
         _ => FxHashSet::default(),
     }
@@ -1275,6 +1302,30 @@ mod tests {
             unused_diags.len(),
             0,
             "Form attributes should not be flagged as unused in FormModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_standard_form_property_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // Form with no custom attributes — only standard properties should be skipped
+        let metadata = make_form_module_metadata(vec![]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Заголовок = "Проверка описания — строка " + Параметры.НомерСтроки;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Standard form property 'Заголовок' should not be flagged as unused in FormModule, got: {:?}",
             unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
