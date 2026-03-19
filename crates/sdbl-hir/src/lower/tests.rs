@@ -1982,3 +1982,179 @@ fn test_leading_whitespace_in_sdbl() {
     let pkg = SdblQueryPackage::cast(parsed.syntax_node()).expect("Should have query package");
     assert_eq!(pkg.queries().count(), 1, "Should have 1 query");
 }
+
+// ===== RefOveruse Diagnostic Tests with Metadata =====
+
+/// Helper to create a config with a Catalog that has a Ref-typed attribute.
+fn create_config_with_ref_attribute() -> bsl_metadata::Configuration {
+    use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+
+    // Target catalog that will be referenced
+    let files_catalog = MetadataObject::new(MdoType::Catalog, "Файлы");
+    config.add_metadata_object(files_catalog);
+
+    // Catalog with a Ref-typed attribute "Файл" pointing to Catalog.Файлы
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "СлужебныеФайлы");
+    catalog.add_attribute(Attribute {
+        name: "Файл".to_string(),
+        name_en: None,
+        attr_type: AttributeType::Ref {
+            mdo_type: MdoType::Catalog, name: "Файлы".to_string()
+        },
+    });
+    config.add_metadata_object(catalog);
+
+    config
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_ref_at_end() {
+    // Т.Файл is Ref(Catalog.Файлы), so Т.Файл.Ссылка is redundant → 1 diagnostic
+    let config = create_config_with_ref_attribute();
+
+    let code = "ВЫБРАТЬ Т.Файл.Ссылка КАК Ссылка ИЗ Справочник.СлужебныеФайлы КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(ref_overuse_diags.len(), 1, "Expected 1 RefOveruse diagnostic: Файл is Ref type");
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_non_ref_field() {
+    // Т.ИНН is String, so Т.ИНН.Ссылка does NOT trigger RefOveruse → 0 diagnostics
+    use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "Контрагенты");
+    catalog.add_attribute(Attribute {
+        name: "ИНН".to_string(),
+        name_en: None,
+        attr_type: AttributeType::String { length: None },
+    });
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Т.ИНН.Ссылка КАК Ссылка ИЗ Справочник.Контрагенты КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        0,
+        "Expected 0 RefOveruse diagnostics: ИНН is String, not a Ref"
+    );
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_double_ref() {
+    // Т.Ссылка.Ссылка — Ссылка is at position 1 (standard field, not in metadata fields()),
+    // so resolve_nested_field_type returns Unknown → no diagnostic.
+    // Standard fields like Ссылка are not included in resolved table metadata.
+    use bsl_metadata::{MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let catalog = MetadataObject::new(MdoType::Catalog, "Контрагенты");
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Т.Ссылка.Ссылка КАК п1 ИЗ Справочник.Контрагенты КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        0,
+        "Ссылка is a standard field not in metadata fields() → type Unknown → no diagnostic"
+    );
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_ref_in_middle_not_at_end() {
+    // Т.Ссылка.ИНН — Ссылка is at position 1, not >=2, so NOT RefOveruse → 0 diagnostics
+    use bsl_metadata::{Attribute, AttributeType, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut catalog = MetadataObject::new(MdoType::Catalog, "Контрагенты");
+    catalog.add_attribute(Attribute {
+        name: "ИНН".to_string(),
+        name_en: None,
+        attr_type: AttributeType::String { length: None },
+    });
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Т.Ссылка.ИНН КАК ИНН ИЗ Справочник.Контрагенты КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        0,
+        "Expected 0 RefOveruse diagnostics: Ссылка is at position 1, not a redundant usage"
+    );
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_chain_ref_at_end() {
+    // Т.Файл.Ссылка.Дата — Ссылка at position 2, field before it (Файл) is Ref → 1 diagnostic
+    let config = create_config_with_ref_attribute();
+
+    let code = "ВЫБРАТЬ Т.Файл.Ссылка.Дата КАК Дата ИЗ Справочник.СлужебныеФайлы КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        1,
+        "Expected 1 RefOveruse diagnostic: Файл is Ref, so .Ссылка after it is redundant"
+    );
+}
+
+#[test]
+fn test_ref_overuse_with_metadata_simple_ref_no_error() {
+    // Т.Ссылка — just accessing the reference field of a table, NOT redundant → 0 diagnostics
+    use bsl_metadata::{MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let catalog = MetadataObject::new(MdoType::Catalog, "Контрагенты");
+    config.add_metadata_object(catalog);
+
+    let code = "ВЫБРАТЬ Т.Ссылка КАК Контрагент ИЗ Справочник.Контрагенты КАК Т";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let ref_overuse_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::RefOveruse { .. }))
+        .collect();
+
+    assert_eq!(
+        ref_overuse_diags.len(),
+        0,
+        "Expected 0 RefOveruse diagnostics: simple Alias.Ссылка is not redundant"
+    );
+}

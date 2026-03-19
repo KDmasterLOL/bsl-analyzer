@@ -66,40 +66,77 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-/// Build a set of lowercase object attribute and tabular section names from metadata.
+/// Build a set of lowercase attribute names that should not be flagged as unused.
 ///
 /// In ObjectModule, assignments to names like `Дата`, `Номер`, `Автор` set object
-/// attributes, not local variables. This function collects all such names so the
-/// diagnostic can skip them.
-fn build_object_attribute_names(ctx: &DiagnosticsContext) -> FxHashSet<String> {
+/// attributes, not local variables. In FormModule, assignments to form attribute names
+/// (e.g. `Замечание = Параметры.Замечание`) write to form attributes displayed in UI.
+/// This function collects all such names so the diagnostic can skip them.
+fn build_attribute_names_to_skip(ctx: &DiagnosticsContext) -> FxHashSet<String> {
     let metadata = ctx.module_metadata();
 
-    if metadata.module_type != bsl_metadata::ModuleType::ObjectModule {
-        return FxHashSet::default();
-    }
+    match metadata.module_type {
+        bsl_metadata::ModuleType::ObjectModule => {
+            let mdo = match &metadata.mdo {
+                Some(mdo) => mdo,
+                None => return FxHashSet::default(),
+            };
 
-    let mdo = match &metadata.mdo {
-        Some(mdo) => mdo,
-        None => return FxHashSet::default(),
-    };
+            let mut names = FxHashSet::default();
 
-    let mut names = FxHashSet::default();
+            for attr in &mdo.attributes {
+                names.insert(attr.name.to_lowercase());
+                if let Some(ref en) = attr.name_en {
+                    names.insert(en.to_lowercase());
+                }
+            }
 
-    for attr in &mdo.attributes {
-        names.insert(attr.name.to_lowercase());
-        if let Some(ref en) = attr.name_en {
-            names.insert(en.to_lowercase());
+            for ts in &mdo.tabular_sections {
+                names.insert(ts.name().to_lowercase());
+                if let Some(en) = ts.name_en() {
+                    names.insert(en.to_lowercase());
+                }
+            }
+
+            names
         }
-    }
+        bsl_metadata::ModuleType::FormModule => {
+            // Standard managed form properties accessible as variables in form module.
+            // These are built-in properties of every managed form (ФормаКлиентскогоПриложения).
+            const STANDARD_FORM_PROPERTIES: &[&str] = &[
+                // Заголовок / Title
+                "заголовок",
+                "title",
+                // АвтоЗаголовок / AutoTitle
+                "автозаголовок",
+                "autotitle",
+                // Модифицированность / Modified
+                "модифицированность",
+                "modified",
+                // ТолькоПросмотр / ReadOnly
+                "толькопросмотр",
+                "readonly",
+                // КлючСохраненияПоложенияОкна / WindowOptionsKey
+                "ключсохраненияположенияокна",
+                "windowoptionskey",
+                // КлючНазначенияИспользования / PurposeUseKey
+                "ключназначенияиспользования",
+                "purposeusekey",
+            ];
 
-    for ts in &mdo.tabular_sections {
-        names.insert(ts.name().to_lowercase());
-        if let Some(en) = ts.name_en() {
-            names.insert(en.to_lowercase());
+            let mut names: FxHashSet<String> =
+                STANDARD_FORM_PROPERTIES.iter().map(|s| (*s).to_string()).collect();
+
+            if let Some(form) = &metadata.form {
+                for attr_name in form.attributes() {
+                    names.insert(attr_name.to_lowercase());
+                }
+            }
+
+            names
         }
+        _ => FxHashSet::default(),
     }
-
-    names
 }
 
 /// Collect UnusedLocalVariable diagnostics using liveness analysis.
@@ -124,7 +161,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Build object attribute names set once for the entire module
-    let object_attr_names = build_object_attribute_names(ctx);
+    let skip_attr_names = build_attribute_names_to_skip(ctx);
 
     // Load module_bodies ONCE for the entire file
     let module_bodies = ctx.module_bodies();
@@ -144,7 +181,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &module_cfgs,
             code,
             ctx,
-            &object_attr_names,
+            &skip_attr_names,
         ));
     }
 
@@ -152,13 +189,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
     if ctx.provider.is_none() {
         let module_id = hir::ModuleId::new(ctx.file_id);
-        diagnostics.extend(check_module_level_code(
-            ctx.db,
-            module_id,
-            code,
-            ctx,
-            &object_attr_names,
-        ));
+        diagnostics.extend(check_module_level_code(ctx.db, module_id, code, ctx, &skip_attr_names));
     }
 
     // Check explicit module-level variable declarations (Перем X;)
@@ -172,7 +203,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// This function uses pre-loaded module-level liveness and CFG results (batch processed
 /// via Salsa), avoiding direct construction and leveraging Salsa caching.
-#[allow(clippy::too_many_arguments)] // object_attr_names needed to filter ObjectModule attributes
+#[allow(clippy::too_many_arguments)] // skip_attr_names needed to filter ObjectModule attributes
 fn check_method_with_module_liveness(
     local_id: u32,
     body: &hir::Body,
@@ -181,7 +212,7 @@ fn check_method_with_module_liveness(
     module_cfgs: &hir::cfg::ModuleCfgs,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
-    object_attr_names: &FxHashSet<String>,
+    skip_attr_names: &FxHashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -331,7 +362,7 @@ fn check_method_with_module_liveness(
 
                 // Skip if already declared, is a parameter, or is an object attribute
                 if !declared_vars.contains(&lowercase_name)
-                    && !object_attr_names.contains(&lowercase_name)
+                    && !skip_attr_names.contains(&lowercase_name)
                 {
                     // This is an implicit variable - save it with its first assignment location
                     if let std::collections::hash_map::Entry::Vacant(e) =
@@ -385,7 +416,7 @@ fn check_module_level_code(
     module_id: ModuleId,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
-    object_attr_names: &FxHashSet<String>,
+    skip_attr_names: &FxHashSet<String>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -423,7 +454,7 @@ fn check_module_level_code(
                 let lowercase_name = name.as_str().to_lowercase();
 
                 // Skip object attributes (in ObjectModule, these set object fields)
-                if object_attr_names.contains(&lowercase_name) {
+                if skip_attr_names.contains(&lowercase_name) {
                     continue;
                 }
 
@@ -1083,6 +1114,47 @@ mod tests {
         assert_eq!(unused_diags.len(), 0, "No variables should be flagged as unused in this code");
     }
 
+    #[test]
+    fn test_for_loop_bound_variable_is_used() {
+        // Regression test: variable used as For loop upper bound
+        // should NOT trigger unused variable diagnostic
+        let code = r#"Процедура Тест()
+    КоличествоКолонок = 4;
+    Для Сч = 1 По КоличествоКолонок Цикл
+        Сообщить(Сч);
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert!(
+            !unused_diags.iter().any(|d| d.message.contains("КоличествоКолонок")),
+            "КоличествоКолонок is used in For loop bound and should not be flagged as unused"
+        );
+    }
+
+    #[test]
+    fn test_for_loop_from_bound_variable_is_used() {
+        // Variable used as For loop lower bound (from)
+        let code = r#"Процедура Тест()
+    Начало = 1;
+    Для Сч = Начало По 10 Цикл
+        Сообщить(Сч);
+    КонецЦикла;
+КонецПроцедуры"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert!(
+            !unused_diags.iter().any(|d| d.message.contains("Начало")),
+            "Начало is used in For loop from-bound and should not be flagged as unused"
+        );
+    }
+
     /// Helper to create ObjectModule metadata with given MDO.
     fn make_object_module_metadata(mdo: bsl_metadata::MetadataObject) -> hir::ModuleMetadata {
         hir::ModuleMetadata {
@@ -1185,6 +1257,123 @@ mod tests {
             "True unused variable should still be flagged in ObjectModule"
         );
         assert!(unused_diags[0].message.contains("НеАтрибутОбъекта"));
+    }
+
+    /// Helper to create FormModule metadata with given form attributes.
+    fn make_form_module_metadata(attribute_names: Vec<&str>) -> hir::ModuleMetadata {
+        let mut form = bsl_metadata::Form::new(
+            "ТестоваяФорма".to_string(),
+            bsl_metadata::FormType::Managed,
+            uuid::Uuid::nil(),
+        );
+        form.attributes = attribute_names.into_iter().map(|s| s.to_string()).collect();
+
+        hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::FormModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            http_service: None,
+            web_service: None,
+            form: Some(std::sync::Arc::new(form)),
+        }
+    }
+
+    #[test]
+    fn test_form_attribute_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let metadata =
+            make_form_module_metadata(vec!["Замечание", "ТекущееОписание", "ИсправленноеОписание"]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Замечание = Параметры.Замечание;
+    ТекущееОписание = Параметры.ТекущееОписание;
+    ИсправленноеОписание = Параметры.Предложение;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Form attributes should not be flagged as unused in FormModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_standard_form_property_not_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        // Form with no custom attributes — only standard properties should be skipped
+        let metadata = make_form_module_metadata(vec![]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Заголовок = "Проверка описания — строка " + Параметры.НомерСтроки;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Standard form property 'Заголовок' should not be flagged as unused in FormModule, got: {:?}",
+            unused_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_true_unused_still_flagged_in_form_module() {
+        use crate::test_utils::check_metadata_diagnostic;
+
+        let metadata = make_form_module_metadata(vec!["Замечание"]);
+
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+    Замечание = Параметры.Замечание;
+    НеРеквизитФормы = 42;
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "True unused variable should still be flagged in FormModule"
+        );
+        assert!(unused_diags[0].message.contains("НеРеквизитФормы"));
+    }
+
+    #[test]
+    fn test_form_attribute_still_flagged_in_common_module() {
+        use crate::test_utils::{check_metadata_diagnostic, make_non_common_module_metadata};
+
+        let metadata = make_non_common_module_metadata(bsl_metadata::ModuleType::CommonModule);
+
+        let code = r#"Процедура Тест()
+    Замечание = "тест";
+КонецПроцедуры"#;
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            1,
+            "Form attribute name should be flagged in CommonModule (not a form context)"
+        );
+        assert!(unused_diags[0].message.contains("Замечание"));
     }
 
     #[test]

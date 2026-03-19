@@ -52,6 +52,12 @@ pub struct Form {
     ///
     /// These are methods called when form commands are executed.
     pub command_handlers: Vec<String>,
+    /// Form attribute names (from `<Attributes><Attribute name="...">`)
+    ///
+    /// In FormModule, assignments like `Замечание = Параметры.Замечание` write to
+    /// form attributes, not local variables. These names must be excluded from
+    /// UnusedLocalVariable diagnostic.
+    pub attributes: Vec<String>,
 }
 
 impl Form {
@@ -64,6 +70,7 @@ impl Form {
             elements: Vec::new(),
             event_handlers: Vec::new(),
             command_handlers: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
@@ -81,6 +88,7 @@ impl Form {
             elements,
             event_handlers: Vec::new(),
             command_handlers: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 
@@ -93,7 +101,15 @@ impl Form {
         event_handlers: Vec<String>,
         command_handlers: Vec<String>,
     ) -> Self {
-        Self { name, form_type, uuid, elements, event_handlers, command_handlers }
+        Self {
+            name,
+            form_type,
+            uuid,
+            elements,
+            event_handlers,
+            command_handlers,
+            attributes: Vec::new(),
+        }
     }
 
     /// Get form elements.
@@ -119,6 +135,13 @@ impl Form {
     /// Get form UUID.
     pub fn uuid(&self) -> Uuid {
         self.uuid
+    }
+
+    /// Get form attribute names.
+    ///
+    /// These are form-level attributes (реквизиты формы) defined in `<Attributes>` section.
+    pub fn attributes(&self) -> &[String] {
+        &self.attributes
     }
 
     /// Check if this is a managed form.

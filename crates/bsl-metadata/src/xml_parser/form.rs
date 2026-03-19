@@ -35,6 +35,25 @@ struct FormXmlElement {
     /// Form commands with actions
     #[serde(default)]
     commands: Option<FormCommands>,
+    /// Form attributes (реквизиты формы)
+    #[serde(default)]
+    attributes: Option<FormAttributes>,
+}
+
+/// Container for form attributes
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct FormAttributes {
+    #[serde(default)]
+    attribute: Vec<FormAttributeXml>,
+}
+
+/// Single form attribute
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FormAttributeXml {
+    #[serde(rename = "@name", default)]
+    name: String,
 }
 
 /// Container for form commands
@@ -302,8 +321,16 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         })
         .unwrap_or_default();
 
-    let form =
+    // Collect form attribute names
+    let attributes: Vec<String> = form_xml
+        .attributes
+        .as_ref()
+        .map(|attrs| attrs.attribute.iter().map(|a| a.name.clone()).collect())
+        .unwrap_or_default();
+
+    let mut form =
         Form::with_handlers(name, form_type, uuid, elements, event_handlers, command_handlers);
+    form.attributes = attributes;
 
     tracing::debug!(
         form_name = %form.name(),
@@ -312,6 +339,7 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         elements_count = form.elements().len(),
         event_handlers_count = form.event_handlers().len(),
         command_handlers_count = form.command_handlers().len(),
+        attributes_count = form.attributes().len(),
         "parsed form"
     );
 
@@ -636,6 +664,58 @@ mod tests {
         assert!(form.is_handler("СписокПриАктивизацииСтроки"));
         assert!(form.is_handler("Поле1ПриИзменении"));
         assert!(form.is_handler("ФлагПриИзменении"));
+    }
+
+    #[test]
+    fn test_parse_form_attributes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+    <ChildItems>
+        <InputField name="Замечание" id="1">
+            <DataPath>Замечание</DataPath>
+        </InputField>
+        <InputField name="ТекущееОписание" id="4">
+            <DataPath>ТекущееОписание</DataPath>
+        </InputField>
+    </ChildItems>
+    <Attributes>
+        <Attribute name="Замечание" id="1">
+            <Title>
+                <v8:item>
+                    <v8:lang>ru</v8:lang>
+                    <v8:content>Замечание</v8:content>
+                </v8:item>
+            </Title>
+        </Attribute>
+        <Attribute name="ТекущееОписание" id="2">
+            <Title>
+                <v8:item>
+                    <v8:lang>ru</v8:lang>
+                    <v8:content>Текущее описание</v8:content>
+                </v8:item>
+            </Title>
+        </Attribute>
+        <Attribute name="ИсправленноеОписание" id="3">
+            <Title>
+                <v8:item>
+                    <v8:lang>ru</v8:lang>
+                    <v8:content>Исправленное описание</v8:content>
+                </v8:item>
+            </Title>
+        </Attribute>
+    </Attributes>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+
+        // Check attributes parsed
+        assert_eq!(form.attributes().len(), 3);
+        assert!(form.attributes().contains(&"Замечание".to_string()));
+        assert!(form.attributes().contains(&"ТекущееОписание".to_string()));
+        assert!(form.attributes().contains(&"ИсправленноеОписание".to_string()));
+
+        // Check elements still parsed
+        assert_eq!(form.elements().len(), 2);
     }
 
     #[test]
