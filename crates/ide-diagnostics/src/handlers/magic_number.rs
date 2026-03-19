@@ -19,7 +19,7 @@
 //!
 //! ## What is EXCLUDED?
 //!
-//! 1. Authorized numbers (configurable, default: `"-1,0,1"`)
+//! 1. Authorized numbers (configurable, default: `"-1,0,1,24,60,3600,86400"`)
 //! 2. Default parameter values: `Функция Метод(Значение = 566)`
 //! 3. `Structure.Insert()`: `НоваяСтруктура.Вставить("Поле", 20)`
 //! 4. Structure constructors: `Новый Структура("Поле", 20)`
@@ -32,7 +32,7 @@
 //!
 //! ### `authorizedNumbers` (String)
 //! Comma-separated list of authorized numbers.
-//! Default: `"-1,0,1"`
+//! Default: `"-1,0,1,24,60,3600,86400"`
 //!
 //! ### `allowMagicIndexes` (Boolean)
 //! Allow magic numbers in array index access.
@@ -132,7 +132,7 @@ pub fn from_hir(
     })
 }
 
-const DEFAULT_AUTHORIZED_NUMBERS: &str = "-1,0,1";
+const DEFAULT_AUTHORIZED_NUMBERS: &str = "-1,0,1,24,60,3600,86400";
 const DEFAULT_ALLOW_MAGIC_INDEXES: bool = true;
 const DEFAULT_EXCLUDED_CONSTRUCTORS: &str =
     "КвалификаторыЧисла,КвалификаторыСтроки,NumberQualifiers,StringQualifiers,Цвет,Color";
@@ -262,18 +262,16 @@ mod tests {
         let all = check_hir_diagnostic(code);
         let diags = filter(&all);
 
-        assert_eq!(diags.len(), 10, "Expected 10 diagnostics");
+        assert_eq!(diags.len(), 8, "Expected 8 diagnostics");
 
-        assert_diagnostic_range(code, diags[0], 3, 18, 20); // 60
-        assert_diagnostic_range(code, diags[1], 3, 23, 25); // 60
-        assert_diagnostic_range(code, diags[2], 7, 31, 33); // 11
-        assert_diagnostic_range(code, diags[3], 11, 20, 21); // 4
-        assert_diagnostic_range(code, diags[4], 20, 21, 23); // 11
-        assert_diagnostic_range(code, diags[5], 23, 24, 26); // 14
-        assert_diagnostic_range(code, diags[6], 27, 34, 35); // 7
-        assert_diagnostic_range(code, diags[7], 33, 37, 38); // 2
-        assert_diagnostic_range(code, diags[8], 34, 37, 38); // 3
-        assert_diagnostic_range(code, diags[9], 44, 12, 14); // 12
+        assert_diagnostic_range(code, diags[0], 7, 31, 33); // 11
+        assert_diagnostic_range(code, diags[1], 11, 20, 21); // 4
+        assert_diagnostic_range(code, diags[2], 20, 21, 23); // 11
+        assert_diagnostic_range(code, diags[3], 23, 24, 26); // 14
+        assert_diagnostic_range(code, diags[4], 27, 34, 35); // 7
+        assert_diagnostic_range(code, diags[5], 33, 37, 38); // 2
+        assert_diagnostic_range(code, diags[6], 34, 37, 38); // 3
+        assert_diagnostic_range(code, diags[7], 44, 12, 14); // 12
     }
 
     #[test]
@@ -395,10 +393,10 @@ mod tests {
         let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
         let diags = filter(&all);
 
-        assert_eq!(diags.len(), 12, "Should find 12 diagnostics with allowMagicIndexes=false");
+        assert_eq!(diags.len(), 10, "Should find 10 diagnostics with allowMagicIndexes=false");
 
-        assert_diagnostic_range(code, diags[10], 49, 32, 34);
-        assert_diagnostic_range(code, diags[11], 50, 18, 20);
+        assert_diagnostic_range(code, diags[8], 49, 32, 34);
+        assert_diagnostic_range(code, diags[9], 50, 18, 20);
     }
 
     #[test]
@@ -568,7 +566,7 @@ mod tests {
         let diags = filter(&all);
 
         assert!(
-            diags.len() >= 4,
+            diags.len() >= 2,
             "Magic numbers in expressions should be detected, found {}",
             diags.len()
         );
