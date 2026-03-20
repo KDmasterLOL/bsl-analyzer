@@ -1,6 +1,6 @@
 //! XML parser for Designer format metadata
 //!
-//! Parses 1C:Enterprise metadata files in Designer format using quick-xml + serde.
+//! Parses 1C:Enterprise metadata files in Designer format using roxmltree.
 
 mod catalog;
 mod common_module;
@@ -9,12 +9,11 @@ mod defined_type;
 mod enum_parser;
 mod event_subscription;
 mod form;
-mod helpers;
+pub(crate) mod helpers;
 mod http_service;
 mod register;
 mod role;
 mod scheduled_job;
-mod serde_types;
 mod standard_attributes;
 mod type_parser;
 mod web_service;

@@ -2,11 +2,10 @@
 
 use crate::common_module::CommonModule;
 use crate::enums::ReturnValueReuse;
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::traits::MdObject;
 
-use super::helpers::parse_uuid;
-use super::serde_types::CommonModuleRoot;
+use super::helpers::{child_bool, child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
 /// Parse CommonModule XML from Designer format
 ///
@@ -29,26 +28,31 @@ use super::serde_types::CommonModuleRoot;
 pub fn parse_common_module_xml(xml: &str) -> Result<CommonModule> {
     let _span = tracing::debug_span!("parse_common_module_xml").entered();
 
-    let metadata: CommonModuleRoot = quick_xml::de::from_str(xml)?;
-    let uuid = parse_uuid(&metadata.common_module.uuid, "common module")?;
+    let doc = parse_xml(xml)?;
+    let mdo = find_mdo_element(&doc)
+        .ok_or_else(|| MetadataError::InvalidFormat("No CommonModule element found".to_string()))?;
 
-    let return_values_reuse =
-        ReturnValueReuse::from_name(&metadata.common_module.properties.return_values_reuse);
+    let uuid_str = mdo.attribute("uuid").unwrap_or("");
+    let uuid = parse_uuid(uuid_str, "common module")?;
+
+    let props = find_child(mdo, "Properties").ok_or_else(|| {
+        MetadataError::InvalidFormat("CommonModule missing Properties".to_string())
+    })?;
+
+    let name = child_text(props, "Name").unwrap_or("").to_string();
+    let return_values_reuse_str = child_text(props, "ReturnValuesReuse").unwrap_or("");
+    let return_values_reuse = ReturnValueReuse::from_name(return_values_reuse_str);
 
     let module = CommonModule::builder()
         .uuid(uuid)
-        .name(metadata.common_module.properties.name)
-        .server(metadata.common_module.properties.server.into())
-        .global(metadata.common_module.properties.global.into())
-        .client_managed_application(
-            metadata.common_module.properties.client_managed_application.into(),
-        )
-        .client_ordinary_application(
-            metadata.common_module.properties.client_ordinary_application.into(),
-        )
-        .external_connection(metadata.common_module.properties.external_connection.into())
-        .server_call(metadata.common_module.properties.server_call.into())
-        .privileged(metadata.common_module.properties.privileged.into())
+        .name(name)
+        .server(child_bool(props, "Server"))
+        .global(child_bool(props, "Global"))
+        .client_managed_application(child_bool(props, "ClientManagedApplication"))
+        .client_ordinary_application(child_bool(props, "ClientOrdinaryApplication"))
+        .external_connection(child_bool(props, "ExternalConnection"))
+        .server_call(child_bool(props, "ServerCall"))
+        .privileged(child_bool(props, "Privileged"))
         .return_values_reuse(return_values_reuse)
         .build();
 

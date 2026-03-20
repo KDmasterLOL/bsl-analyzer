@@ -1,35 +1,56 @@
 //! WebService XML parser
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::web_service::{
     WebService, WebServiceBuilder, WebServiceOperationBuilder, WebServiceParameter,
 };
 
-use super::serde_types::WebServiceRoot;
+use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
 
 /// Parse WebService XML from Designer format
 pub fn parse_web_service_xml(xml: &str, name: &str) -> Result<WebService> {
     let _span = tracing::debug_span!("parse_web_service_xml", name).entered();
 
-    let root: WebServiceRoot = quick_xml::de::from_str(xml)?;
-    let props = &root.web_service.properties;
+    let doc = parse_xml(xml)?;
+    let mdo = find_mdo_element(&doc)
+        .ok_or_else(|| MetadataError::InvalidFormat("No WebService element found".to_string()))?;
+
+    let props = find_child(mdo, "Properties")
+        .ok_or_else(|| MetadataError::InvalidFormat("WebService missing Properties".to_string()))?;
+
+    let svc_name = child_text(props, "Name").unwrap_or("").to_string();
+    let namespace = child_text(props, "Namespace").unwrap_or("").to_string();
 
     let mut builder = WebServiceBuilder::new()
-        .name(&props.name)
-        .namespace(&props.namespace)
+        .name(&svc_name)
+        .namespace(&namespace)
         .uri(format!("WebServices/{}/Ext/Module.bsl", name));
 
-    if let Some(child_objects) = &root.web_service.child_objects {
-        for operation_xml in &child_objects.operations {
-            let op_props = &operation_xml.properties;
+    if let Some(child_objects) = find_child(mdo, "ChildObjects") {
+        for operation_node in child_objects
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "Operation")
+        {
+            let op_props = find_child(operation_node, "Properties").ok_or_else(|| {
+                MetadataError::InvalidFormat("Operation missing Properties".to_string())
+            })?;
 
-            let mut op_builder = WebServiceOperationBuilder::new()
-                .name(&op_props.name)
-                .procedure_name(&op_props.procedure_name);
+            let op_name = child_text(op_props, "Name").unwrap_or("").to_string();
+            let procedure_name = child_text(op_props, "ProcedureName").unwrap_or("").to_string();
 
-            if let Some(op_children) = &operation_xml.child_objects {
-                for param_xml in &op_children.parameters {
-                    let param = WebServiceParameter::new(&param_xml.properties.name);
+            let mut op_builder =
+                WebServiceOperationBuilder::new().name(&op_name).procedure_name(&procedure_name);
+
+            if let Some(op_children) = find_child(operation_node, "ChildObjects") {
+                for param_node in op_children
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "Parameter")
+                {
+                    let param_props = find_child(param_node, "Properties").ok_or_else(|| {
+                        MetadataError::InvalidFormat("Parameter missing Properties".to_string())
+                    })?;
+                    let param_name = child_text(param_props, "Name").unwrap_or("").to_string();
+                    let param = WebServiceParameter::new(&param_name);
                     op_builder = op_builder.add_parameter(param);
                 }
             }
