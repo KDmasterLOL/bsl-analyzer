@@ -196,6 +196,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "mcp-server",
+ "onec-client",
  "parking_lot",
  "parser",
  "paths",
@@ -1777,6 +1778,7 @@ dependencies = [
  "bsl-metadata",
  "bsl-platform",
  "expect-test",
+ "onec-client",
  "parser",
  "rmcp",
  "schemars",
@@ -1880,6 +1882,18 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "onec-client"
+version = "0.1.48"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "oorandom"

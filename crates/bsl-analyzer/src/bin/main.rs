@@ -163,6 +163,18 @@ enum Commands {
         /// Source directory containing 1C configuration (with Configuration.xml)
         #[arg(short = 's', long = "source-dir", default_value = ".")]
         source_dir: PathBuf,
+
+        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/mcp)
+        #[arg(long)]
+        onec_url: Option<String>,
+
+        /// 1C username for HTTP service authentication
+        #[arg(long, default_value = "")]
+        onec_user: String,
+
+        /// 1C password for HTTP service authentication
+        #[arg(long, default_value = "")]
+        onec_password: String,
     },
 
     /// Export diagnostic rules metadata
@@ -270,7 +282,9 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
-        Some(Commands::Mcp { socket, source_dir }) => run_mcp_server(socket, source_dir),
+        Some(Commands::Mcp { socket, source_dir, onec_url, onec_user, onec_password }) => {
+            run_mcp_server(socket, source_dir, onec_url, &onec_user, &onec_password)
+        }
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -539,11 +553,20 @@ fn escape_html(s: &str) -> String {
 fn run_mcp_server(
     socket: PathBuf,
     source_dir: PathBuf,
+    onec_url: Option<String>,
+    onec_user: &str,
+    onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!(?socket, ?source_dir, "Starting MCP server");
+    tracing::info!(?socket, ?source_dir, ?onec_url, "Starting MCP server");
 
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-    let state = mcp_server::SharedState::standalone(source_dir);
+    let mut state = mcp_server::SharedState::standalone(source_dir);
+
+    if let Some(ref url) = onec_url {
+        tracing::info!(%url, "Configuring 1C HTTP client");
+        state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
+    }
+
     let server = mcp_server::McpServer::new(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

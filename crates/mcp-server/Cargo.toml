@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+onec-client.workspace = true
 parser.workspace = true
 syntax.workspace = true
 

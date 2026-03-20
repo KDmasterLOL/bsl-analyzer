@@ -61,6 +61,18 @@ struct ValidateQueryParams {
     query: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct ExecuteQueryParams {
+    /// Текст запроса на языке запросов 1С. Только ВЫБРАТЬ/SELECT.
+    /// Параметры указывай через &ИмяПараметра.
+    query: String,
+    /// Максимальное количество строк результата (по умолчанию 100, максимум 1000)
+    limit: Option<u32>,
+    /// Параметры запроса в виде пар ключ-значение.
+    /// Ключ — имя параметра без амперсанда.
+    parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
 /// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
@@ -146,6 +158,22 @@ impl McpServer {
         params: Parameters<ValidateQueryParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::query::validate_query(&self.state, &params.0.query)
+    }
+
+    /// Выполнить запрос на языке 1С (ВЫБРАТЬ/SELECT) и получить данные из базы.
+    /// Требует подключения к живой базе 1С (--onec-url).
+    #[tool(name = "execute_query", annotations(read_only_hint = true))]
+    async fn execute_query(
+        &self,
+        params: Parameters<ExecuteQueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::query::execute_query(
+            &self.state,
+            &params.0.query,
+            params.0.limit,
+            params.0.parameters,
+        )
+        .await
     }
 }
 
