@@ -168,12 +168,60 @@ impl Configuration {
 
     /// Parse configuration from XML string
     pub fn from_xml_str(xml: &str) -> Result<Self> {
-        let mut config: Configuration = quick_xml::de::from_str(xml)?;
-        config.build_caches();
+        let doc = roxmltree::Document::parse(xml).map_err(|e| {
+            crate::error::MetadataError::InvalidFormat(format!("XML parse error: {}", e))
+        })?;
+
+        let root = doc.root_element();
+        // First child element of root is the Configuration element
+        let config_node = root.children().find(|n| n.is_element()).ok_or_else(|| {
+            crate::error::MetadataError::InvalidFormat("No Configuration element".to_string())
+        })?;
+
+        let uuid_str = config_node.attribute("uuid").unwrap_or("");
+        let uuid = uuid_str.parse::<uuid::Uuid>().unwrap_or_else(|_| uuid::Uuid::new_v4());
+
+        let (
+            name,
+            use_managed_form_in_ordinary_application,
+            use_ordinary_form_in_managed_application,
+        ) = if let Some(props) =
+            config_node.children().find(|n| n.is_element() && n.tag_name().name() == "Properties")
+        {
+            let name = props
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "Name")
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .to_string();
+            let managed = props
+                .children()
+                .find(|n| {
+                    n.is_element() && n.tag_name().name() == "UseManagedFormInOrdinaryApplication"
+                })
+                .and_then(|n| n.text())
+                .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+            let ordinary = props
+                .children()
+                .find(|n| {
+                    n.is_element() && n.tag_name().name() == "UseOrdinaryFormInManagedApplication"
+                })
+                .and_then(|n| n.text())
+                .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+            (name, managed, ordinary)
+        } else {
+            (String::new(), false, false)
+        };
+
+        let mut config = Configuration::new(name);
+        config.uuid = uuid;
+        config.use_managed_form_in_ordinary_application = use_managed_form_in_ordinary_application;
+        config.use_ordinary_form_in_managed_application = use_ordinary_form_in_managed_application;
         Ok(config)
     }
 
-    /// Build internal caches for fast lookups
+    /// Build internal caches for fast lookups after bulk-loading objects
+    #[allow(dead_code)]
     fn build_caches(&mut self) {
         // Build URI -> Module mapping
         self.uri_to_module.clear();

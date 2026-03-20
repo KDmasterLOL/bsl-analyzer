@@ -235,7 +235,6 @@ dependencies = [
 name = "bsl-metadata"
 version = "0.1.47"
 dependencies = [
- "quick-xml",
  "rayon",
  "roxmltree",
  "rustc-hash 2.1.1",
@@ -2097,16 +2096,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.39.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2e3bf4aa9d243beeb01a7b3bc30b77cfe2c44e24ec02d751a7104a53c2c49a1"
-dependencies = [
- "memchr",
- "serde",
 ]
 
 [[package]]

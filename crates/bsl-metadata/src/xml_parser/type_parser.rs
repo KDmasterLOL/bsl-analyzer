@@ -3,8 +3,6 @@
 use crate::error::Result;
 use crate::metadata_object::{AttributeType, MdoType};
 
-use super::serde_types::TypeXml;
-
 /// Mapping from reference type prefix to MdoType
 static REF_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:CatalogRef", MdoType::Catalog),
@@ -62,21 +60,96 @@ static OBJECT_TYPE_MAP: &[(&str, MdoType)] = &[
     ("cfg:BusinessProcessRoutePointRef", MdoType::BusinessProcess),
 ];
 
-/// Parse Type XML into AttributeType
-pub(crate) fn parse_type_xml(type_xml: &TypeXml) -> Result<AttributeType> {
+/// Qualifiers extracted from a `<Type>` element
+struct TypeQualifiers {
+    string_length: Option<u32>,
+    number_digits: Option<u8>,
+    number_fraction_digits: Option<u8>,
+    date_fractions: Option<String>,
+}
+
+impl TypeQualifiers {
+    fn from_node(type_node: roxmltree::Node<'_, '_>) -> Self {
+        let string_length = type_node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "StringQualifiers")
+            .and_then(|sq| {
+                sq.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "Length")
+                    .and_then(|n| n.text())
+                    .and_then(|s| s.parse().ok())
+            });
+
+        let (number_digits, number_fraction_digits) = type_node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "NumberQualifiers")
+            .map(|nq| {
+                let digits = nq
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "Digits")
+                    .and_then(|n| n.text())
+                    .and_then(|s| s.parse().ok());
+                let frac = nq
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "FractionDigits")
+                    .and_then(|n| n.text())
+                    .and_then(|s| s.parse().ok());
+                (digits, frac)
+            })
+            .unwrap_or((None, None));
+
+        let date_fractions = type_node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "DateQualifiers")
+            .and_then(|dq| {
+                dq.children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "DateFractions")
+                    .and_then(|n| n.text())
+                    .map(|s| s.to_string())
+            });
+
+        TypeQualifiers { string_length, number_digits, number_fraction_digits, date_fractions }
+    }
+}
+
+/// Parse a `<Type>` element node into `AttributeType`.
+///
+/// The node is a `<Type>` element containing:
+/// - `<Type>xs:string</Type>` (may be multiple, ignoring namespace prefix)
+/// - `<TypeSet>cfg:DefinedType.Name</TypeSet>` (may be multiple)
+/// - `<StringQualifiers><Length>100</Length></StringQualifiers>`
+/// - `<NumberQualifiers><Digits>10</Digits><FractionDigits>2</FractionDigits></NumberQualifiers>`
+/// - `<DateQualifiers><DateFractions>DateTime</DateFractions></DateQualifiers>`
+pub(crate) fn parse_type_xml(type_node: roxmltree::Node<'_, '_>) -> Result<AttributeType> {
+    let qualifiers = TypeQualifiers::from_node(type_node);
+
+    // Collect all <Type> children text values
+    let type_strs: Vec<&str> = type_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Type")
+        .filter_map(|n| n.text())
+        .collect();
+
+    // Collect all <TypeSet> children text values
+    let type_set_strs: Vec<&str> = type_node
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "TypeSet")
+        .filter_map(|n| n.text())
+        .collect();
+
     let mut all_types = Vec::new();
 
-    // 1. Parse all concrete types from Type elements
-    for type_str in &type_xml.types {
-        let parsed_type = parse_single_type(type_str, type_xml)?;
+    // Parse all concrete types from Type elements
+    for type_str in &type_strs {
+        let parsed_type = parse_single_type(type_str, &qualifiers)?;
         all_types.push(parsed_type);
     }
 
-    // 2. Check for TypeSet and add to list if recognized
-    if let Some(type_set) = type_xml.type_sets.first() {
+    // Check for TypeSet and add to list if recognized
+    if let Some(type_set) = type_set_strs.first() {
         tracing::debug!(
             type_set = %type_set,
-            concrete_types_count = type_xml.types.len(),
+            concrete_types_count = type_strs.len(),
             "parse_type_xml: found TypeSet"
         );
 
@@ -86,12 +159,12 @@ pub(crate) fn parse_type_xml(type_xml: &TypeXml) -> Result<AttributeType> {
         }
     }
 
-    // 3. Return based on collected types
+    // Return based on collected types
     match all_types.len() {
         0 => {
             tracing::warn!(
-                types = ?type_xml.types,
-                type_sets = ?type_xml.type_sets,
+                types = ?type_strs,
+                type_sets = ?type_set_strs,
                 "parse_type_xml: no types collected, returning Unknown"
             );
             Ok(AttributeType::Unknown)
@@ -142,30 +215,24 @@ fn parse_type_set(type_set: &str) -> Option<AttributeType> {
 }
 
 /// Parse a single type string
-fn parse_single_type(type_str: &str, type_xml: &TypeXml) -> Result<AttributeType> {
+fn parse_single_type(type_str: &str, qualifiers: &TypeQualifiers) -> Result<AttributeType> {
     tracing::debug!(type_str = %type_str, "parse_single_type");
 
     match type_str {
         "xs:boolean" => Ok(AttributeType::Boolean),
 
-        "xs:string" => {
-            let length = type_xml.string_qualifiers.as_ref().and_then(|q| q.length);
-            Ok(AttributeType::String { length })
-        }
+        "xs:string" => Ok(AttributeType::String { length: qualifiers.string_length }),
 
         "xs:decimal" => {
-            let precision =
-                type_xml.number_qualifiers.as_ref().and_then(|q| q.digits).unwrap_or(10);
-            let scale =
-                type_xml.number_qualifiers.as_ref().and_then(|q| q.fraction_digits).unwrap_or(0);
+            let precision = qualifiers.number_digits.unwrap_or(10);
+            let scale = qualifiers.number_fraction_digits.unwrap_or(0);
             Ok(AttributeType::Number { precision, scale })
         }
 
         "xs:dateTime" => {
-            let is_datetime = type_xml
-                .date_qualifiers
-                .as_ref()
-                .and_then(|q| q.date_fractions.as_deref())
+            let is_datetime = qualifiers
+                .date_fractions
+                .as_deref()
                 .is_some_and(|df| df.eq_ignore_ascii_case("DateTime"));
 
             if is_datetime {
