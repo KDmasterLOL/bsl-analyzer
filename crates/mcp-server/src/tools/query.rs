@@ -80,6 +80,11 @@ pub async fn execute_query(
     Ok(CallToolResult::success(vec![Content::text(format_query_result(&result))]))
 }
 
+#[cfg(test)]
+fn test_shared_state() -> crate::SharedState {
+    crate::SharedState::shared()
+}
+
 fn format_query_result(result: &onec_client::QueryResult) -> String {
     if result.columns.is_empty() {
         return "Запрос выполнен, результат пуст.".to_string();
@@ -120,4 +125,66 @@ fn format_query_result(result: &onec_client::QueryResult) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_text(result: &CallToolResult) -> &str {
+        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn test_validate_query_valid() {
+        let state = test_shared_state();
+        let result = validate_query(&state, "ВЫБРАТЬ 1").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("✓"), "valid query should pass");
+    }
+
+    #[test]
+    fn test_validate_query_garbage_input() {
+        let state = test_shared_state();
+        // SDBL parser is error-recovering (IDE parser), so even garbage input
+        // produces a result. We just verify the tool doesn't panic.
+        let result = validate_query(&state, "}{}{}{").unwrap();
+        let text = extract_text(&result);
+        assert!(
+            text.contains("✓") || text.contains("✗"),
+            "should produce either success or error marker"
+        );
+    }
+
+    #[test]
+    fn test_validate_query_empty() {
+        let state = test_shared_state();
+        let result = validate_query(&state, "");
+        assert!(result.is_err(), "empty query should fail");
+    }
+
+    #[test]
+    fn test_validate_query_whitespace() {
+        let state = test_shared_state();
+        let result = validate_query(&state, "   ");
+        assert!(result.is_err(), "whitespace-only query should fail");
+    }
+
+    #[test]
+    fn test_validate_query_select_with_fields() {
+        let state = test_shared_state();
+        let result =
+            validate_query(&state, "ВЫБРАТЬ Ссылка, Наименование ИЗ Справочник.Номенклатура")
+                .unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("✓"), "select with fields should pass");
+    }
+
+    #[test]
+    fn test_validate_query_english() {
+        let state = test_shared_state();
+        let result = validate_query(&state, "SELECT 1").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("✓"), "English SELECT should pass");
+    }
 }

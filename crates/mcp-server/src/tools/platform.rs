@@ -297,3 +297,111 @@ fn format_docs(out: &mut String, docs: &bsl_platform::MethodDocs) {
         let _ = writeln!(out, "## Примечания\n\n{notes}\n");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_text(result: &CallToolResult) -> &str {
+        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn test_syntax_help_type_lookup() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_help("Массив", None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Массив"), "should find Array type");
+        assert!(text.contains("Array"), "should show english name");
+    }
+
+    #[test]
+    fn test_syntax_help_type_english() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_help("Array", None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Массив") || text.contains("Array"), "should find by english name");
+    }
+
+    #[test]
+    fn test_syntax_help_method_with_type() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_methods().is_empty() {
+            return;
+        }
+
+        // Find first available method to test with
+        let method = &platform.all_methods()[0];
+        let result = bsl_syntax_help(&method.name, Some(&method.type_name)).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains(method.name.as_str()), "should contain method name");
+        assert!(text.contains("```bsl"), "should have code block");
+    }
+
+    #[test]
+    fn test_syntax_help_global_function() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_global_functions().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_help("Сообщить", None).unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Сообщить") || text.contains("Message"), "should find global fn");
+    }
+
+    #[test]
+    fn test_syntax_help_not_found() {
+        let result = bsl_syntax_help("НесуществующийТипМетодФункция", None);
+        assert!(result.is_err(), "should return error for unknown name");
+    }
+
+    #[test]
+    fn test_syntax_help_method_not_found_on_type() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_help("НесуществующийМетод", Some("Массив"));
+        assert!(result.is_err(), "should return error for unknown method");
+    }
+
+    #[test]
+    fn test_syntax_search() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_search("сортировка").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Результаты поиска"), "should have search header");
+    }
+
+    #[test]
+    fn test_syntax_search_no_results() {
+        let result = bsl_syntax_search("кваркварккваркварк");
+        assert!(result.is_err(), "should return error for no matches");
+    }
+
+    #[test]
+    fn test_syntax_search_multi_word() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        let result = bsl_syntax_search("текущая дата").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("Результаты поиска"), "should have results");
+    }
+}

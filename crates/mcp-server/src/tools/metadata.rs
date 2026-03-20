@@ -476,6 +476,12 @@ fn format_form(form: &bsl_metadata::Form) -> String {
     out
 }
 
+#[cfg(test)]
+fn fixture_config() -> Configuration {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+    bsl_metadata::load_from_directory(path).expect("failed to load fixture configuration")
+}
+
 fn mdo_type_to_dir(object_type: &str) -> Option<&'static str> {
     match object_type.to_lowercase().as_str() {
         "catalog" | "справочник" => Some("Catalogs"),
@@ -491,5 +497,133 @@ fn mdo_type_to_dir(object_type: &str) -> Option<&'static str> {
         "businessprocess" | "бизнеспроцесс" => Some("BusinessProcesses"),
         "task" | "задача" => Some("Tasks"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_text(result: &CallToolResult) -> &str {
+        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn test_metadata_tree_summary() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, None).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("дерево метаданных"), "should have header");
+        assert!(text.contains("Всего объектов:"), "should have total");
+        assert!(text.contains("Справочник"), "should list catalogs");
+        assert!(text.contains("Документ"), "should list documents");
+    }
+
+    #[test]
+    fn test_metadata_tree_filter_catalogs() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, Some("Справочник".into())).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("Справочник"), "should have category name");
+        assert!(text.contains("Справочник1"), "should list Справочник1");
+    }
+
+    #[test]
+    fn test_metadata_tree_filter_common_modules() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, Some("ОбщиеМодули".into())).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("ОбщиеМодули"), "should have category name");
+    }
+
+    #[test]
+    fn test_metadata_tree_filter_invalid() {
+        let config = fixture_config();
+        let result = get_metadata_tree(&config, Some("НесуществующаяКатегория".into()));
+
+        assert!(result.is_err(), "should return error for unknown category");
+    }
+
+    #[test]
+    fn test_object_structure_catalog() {
+        let config = fixture_config();
+        let result = get_object_structure(&config, "Catalog", "Справочник1").unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("Справочник.Справочник1"), "should have object header");
+    }
+
+    #[test]
+    fn test_object_structure_not_found() {
+        let config = fixture_config();
+        let result = get_object_structure(&config, "Catalog", "НесуществующийОбъект");
+
+        assert!(result.is_err(), "should return error for missing object");
+    }
+
+    #[test]
+    fn test_object_structure_invalid_type() {
+        let config = fixture_config();
+        let result = get_object_structure(&config, "InvalidType", "Test");
+
+        assert!(result.is_err(), "should return error for invalid type");
+    }
+
+    #[test]
+    fn test_configuration_info() {
+        let config = fixture_config();
+        let result = get_configuration_info(&config).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("# Конфигурация:"), "should have config header");
+        assert!(text.contains("UUID:"), "should have UUID");
+        assert!(text.contains("Общие модули:"), "should have common modules count");
+        assert!(text.contains("Регистры:"), "should have registers count");
+    }
+
+    #[test]
+    fn test_form_structure_list_forms() {
+        let fixture_root =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+        let root = std::path::Path::new(fixture_root);
+        let result = get_form_structure(Some(root), "Document", "Документ1", None).unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("Формы Document.Документ1"), "should have forms header");
+        assert!(text.contains("ФормаДокумента"), "should list document form");
+        assert!(text.contains("ФормаСписка"), "should list list form");
+    }
+
+    #[test]
+    fn test_form_structure_specific_form() {
+        let fixture_root =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+        let root = std::path::Path::new(fixture_root);
+        let result =
+            get_form_structure(Some(root), "Document", "Документ1", Some("ФормаДокумента"))
+                .unwrap();
+        let text = extract_text(&result);
+
+        assert!(text.contains("# Форма:"), "should have form header");
+    }
+
+    #[test]
+    fn test_form_structure_no_workspace() {
+        let result = get_form_structure(None, "Catalog", "Test", None);
+        assert!(result.is_err(), "should fail without workspace root");
+    }
+
+    #[test]
+    fn test_form_structure_form_not_found() {
+        let fixture_root =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
+        let root = std::path::Path::new(fixture_root);
+        let result =
+            get_form_structure(Some(root), "Document", "Документ1", Some("НесуществующаяФорма"));
+
+        assert!(result.is_err(), "should fail for missing form");
     }
 }
