@@ -49,10 +49,15 @@ struct FormStructureParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct SyntaxHelpParams {
-    /// Имя типа, метода или глобальной функции платформы (русское или английское)
-    name: String,
+    /// Имя типа, метода или глобальной функции платформы (русское или английское).
+    /// Не используется при полнотекстовом поиске (query).
+    name: Option<String>,
     /// Имя типа для поиска метода в контексте типа (например type_name="Массив", name="Добавить")
     type_name: Option<String>,
+    /// Полнотекстовый поиск по описаниям, именам и параметрам.
+    /// Например: "сортировка массива", "текущая дата", "HTTP запрос".
+    /// Поддерживает морфологию русского языка.
+    query: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -142,13 +147,25 @@ impl McpServer {
     }
 
     /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Принимает имя типа (Массив, Строка), метода (Добавить, Найти) или глобальной функции (СтрДлина, Формат).
+    /// Два режима:
+    /// 1) Точный поиск: name="Массив" или name="Добавить", type_name="Массив"
+    /// 2) Полнотекстовый поиск: query="сортировка массива" — ищет по описаниям с морфологией
     #[tool(name = "bsl_syntax_help", annotations(read_only_hint = true))]
     async fn bsl_syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
+        if let Some(ref query) = params.0.query {
+            return tools::platform::bsl_syntax_search(query);
+        }
+        let name = params.0.name.as_deref().unwrap_or_default();
+        if name.is_empty() {
+            return Err(McpError::invalid_params(
+                "Укажите name для точного поиска или query для полнотекстового",
+                None,
+            ));
+        }
+        tools::platform::bsl_syntax_help(name, params.0.type_name.as_deref())
     }
 
     /// Проверить синтаксис запроса 1С (SDBL) без выполнения. Найдёт ошибки в ВЫБРАТЬ/SELECT.

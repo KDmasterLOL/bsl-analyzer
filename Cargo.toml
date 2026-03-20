@@ -120,6 +120,7 @@ ignore = "0.4"
 spellbook = "0.4"
 notify = "6.1"
 camino = "1.1"
+rust-stemmers = "1.2"
 
 # Testing
 expect-test = "1.4"

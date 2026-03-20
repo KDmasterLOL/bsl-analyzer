@@ -11,6 +11,7 @@ smol_str = { workspace = true }
 rustc-hash = { workspace = true }
 once_cell = { workspace = true }
 salsa = { workspace = true }
+rust-stemmers = { workspace = true }
 
 [build-dependencies]
 serde = { workspace = true }

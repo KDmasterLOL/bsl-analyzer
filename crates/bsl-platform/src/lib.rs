@@ -29,6 +29,7 @@
 //! ```
 
 mod db;
+pub mod search;
 mod types;
 
 // Include generated code from build.rs
@@ -44,6 +45,7 @@ pub use db::{
     global_function_query, platform_method_query, platform_type_query, type_methods_query,
     MethodLookupInput, PlatformData, PlatformDataInner, TypeNameInput,
 };
+pub use search::{DocKind, SearchResult};
 pub use types::*;
 
 #[cfg(test)]

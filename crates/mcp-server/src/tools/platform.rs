@@ -68,6 +68,102 @@ pub fn bsl_syntax_help(name: &str, type_name: Option<&str>) -> Result<CallToolRe
     ))
 }
 
+/// Full-text search across platform documentation.
+pub fn bsl_syntax_search(query: &str) -> Result<CallToolResult, McpError> {
+    let platform = PlatformDataInner::instance();
+    let results = platform.search(query);
+
+    if results.is_empty() {
+        return Err(McpError::invalid_params(
+            format!("По запросу '{query}' ничего не найдено"),
+            None,
+        ));
+    }
+
+    let mut out = format!("# Результаты поиска: \"{query}\"\n\n");
+
+    for (i, result) in results.iter().enumerate() {
+        match result.kind {
+            bsl_platform::DocKind::Type => {
+                if let Some(ty) = platform.all_types().get(result.index) {
+                    let _ =
+                        writeln!(out, "## {}. {} / {} (тип)\n", i + 1, ty.name, ty.english_name);
+                    let methods = platform.get_type_methods(&ty.name);
+                    if !methods.is_empty() {
+                        let names: Vec<&str> =
+                            methods.iter().take(5).map(|m| m.name.as_str()).collect();
+                        let _ = write!(out, "Методы: {}", names.join(", "));
+                        if methods.len() > 5 {
+                            let _ = write!(out, " и ещё {}", methods.len() - 5);
+                        }
+                        out.push_str("\n\n");
+                    }
+                }
+            }
+            bsl_platform::DocKind::Method => {
+                if let Some(method) = platform.all_methods().get(result.index) {
+                    let _ = writeln!(
+                        out,
+                        "## {}. {}.{} / {}.{}\n",
+                        i + 1,
+                        method.type_name,
+                        method.name,
+                        method.type_name,
+                        method.english_name
+                    );
+                    if let Some(docs) = platform.get_method_docs(method.id) {
+                        let desc = truncate_description(&docs.description, 150);
+                        if !desc.is_empty() {
+                            let _ = writeln!(out, "{desc}\n");
+                        }
+                    }
+                }
+            }
+            bsl_platform::DocKind::GlobalFunction => {
+                if let Some(func) = platform.all_global_functions().get(result.index) {
+                    let _ = writeln!(
+                        out,
+                        "## {}. {} / {} (глобальная функция)\n",
+                        i + 1,
+                        func.name,
+                        func.english_name
+                    );
+                    if let Some(docs) = platform.get_global_function_docs(func.id) {
+                        let desc = truncate_description(&docs.description, 150);
+                        if !desc.is_empty() {
+                            let _ = writeln!(out, "{desc}\n");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = writeln!(
+        out,
+        "---\nИспользуйте `bsl_syntax_help(name=\"ИмяМетода\", type_name=\"ИмяТипа\")` для подробной справки."
+    );
+
+    Ok(CallToolResult::success(vec![Content::text(out)]))
+}
+
+fn truncate_description(desc: &str, max_chars: usize) -> &str {
+    if desc.len() <= max_chars {
+        return desc;
+    }
+    // Find a safe char boundary near max_chars
+    let mut end = max_chars;
+    while end > 0 && !desc.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Try to break at last space
+    if let Some(space_pos) = desc[..end].rfind(' ') {
+        &desc[..space_pos]
+    } else {
+        &desc[..end]
+    }
+}
+
 fn search_method(
     platform: &PlatformDataInner,
     type_name: &str,
