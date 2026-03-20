@@ -122,6 +122,7 @@ impl McpServer {
         params: Parameters<FormStructureParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::metadata::get_form_structure(
+            self.state.workspace_root().map(|p| p.as_path()),
             &params.0.object_type,
             &params.0.object_name,
             params.0.form_name.as_deref(),

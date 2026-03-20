@@ -366,17 +366,130 @@ pub fn get_configuration_info(config: &Configuration) -> Result<CallToolResult, 
 }
 
 /// Returns form structure for a metadata object.
+///
+/// Loads forms on-demand from the configuration directory.
+/// Path convention: `{TypeDir}/{ObjectName}/Forms/{FormName}/Ext/Form.xml`
 pub fn get_form_structure(
-    _object_type: &str,
-    _object_name: &str,
-    _form_name: Option<&str>,
+    workspace_root: Option<&std::path::Path>,
+    object_type: &str,
+    object_name: &str,
+    form_name: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
-    // Forms require parsing individual Form.xml files from the configuration directory.
-    // Full implementation requires extending SharedState with form cache.
-    Err(McpError::invalid_params(
-        "get_form_structure пока не реализован: \
-         требуется кэш форм из файловой системы конфигурации. \
-         Будет доступен после интеграции с загрузчиком форм.",
-        None,
-    ))
+    let root = workspace_root.ok_or_else(|| {
+        McpError::invalid_params("Workspace root не задан, формы недоступны", None)
+    })?;
+
+    let type_dir = mdo_type_to_dir(object_type).ok_or_else(|| {
+        McpError::invalid_params(format!("Неизвестный тип объекта: {object_type}"), None)
+    })?;
+
+    let forms_dir = root.join(type_dir).join(object_name).join("Forms");
+    if !forms_dir.exists() {
+        return Err(McpError::invalid_params(
+            format!("Каталог форм не найден: {}", forms_dir.display()),
+            None,
+        ));
+    }
+
+    if let Some(fname) = form_name {
+        // Load specific form
+        let form_xml_path = forms_dir.join(fname).join("Ext").join("Form.xml");
+        if !form_xml_path.exists() {
+            return Err(McpError::invalid_params(
+                format!("Форма не найдена: {}", form_xml_path.display()),
+                None,
+            ));
+        }
+        let xml = std::fs::read_to_string(&form_xml_path)
+            .map_err(|e| McpError::internal_error(format!("Ошибка чтения формы: {e}"), None))?;
+        let form = bsl_metadata::xml_parser::parse_form_xml(&xml)
+            .map_err(|e| McpError::internal_error(format!("Ошибка разбора формы: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(format_form(&form))]))
+    } else {
+        // List available forms
+        let mut form_names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&forms_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        form_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        form_names.sort();
+
+        if form_names.is_empty() {
+            return Err(McpError::invalid_params(
+                format!("Формы не найдены для {object_type}.{object_name}"),
+                None,
+            ));
+        }
+
+        let mut out = format!("# Формы {object_type}.{object_name}\n\n");
+        for name in &form_names {
+            let _ = writeln!(out, "- {name}");
+        }
+        let _ =
+            writeln!(out, "\nИспользуйте `form_name` для получения структуры конкретной формы.");
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+}
+
+fn format_form(form: &bsl_metadata::Form) -> String {
+    let mut out = format!("# Форма: {}\n\n", form.name());
+    let _ = writeln!(out, "- Тип: {:?}", form.form_type());
+    let _ = writeln!(out, "- UUID: {}", form.uuid());
+
+    if !form.attributes.is_empty() {
+        let _ = writeln!(out, "\n## Реквизиты формы ({})\n", form.attributes.len());
+        for attr in &form.attributes {
+            let _ = writeln!(out, "- {attr}");
+        }
+    }
+
+    let elements = form.elements();
+    if !elements.is_empty() {
+        let _ = writeln!(out, "\n## Элементы ({})\n", elements.len());
+        let _ = writeln!(out, "| Имя | DataPath |");
+        let _ = writeln!(out, "|-----|----------|");
+        for el in elements {
+            let dp = el.data_path.as_deref().unwrap_or("—");
+            let _ = writeln!(out, "| {} | {dp} |", el.name);
+        }
+    }
+
+    if !form.event_handlers.is_empty() {
+        let _ = writeln!(out, "\n## Обработчики событий ({})\n", form.event_handlers.len());
+        for h in &form.event_handlers {
+            let _ = writeln!(out, "- {h}");
+        }
+    }
+
+    if !form.command_handlers.is_empty() {
+        let _ = writeln!(out, "\n## Обработчики команд ({})\n", form.command_handlers.len());
+        for h in &form.command_handlers {
+            let _ = writeln!(out, "- {h}");
+        }
+    }
+
+    out
+}
+
+fn mdo_type_to_dir(object_type: &str) -> Option<&'static str> {
+    match object_type.to_lowercase().as_str() {
+        "catalog" | "справочник" => Some("Catalogs"),
+        "document" | "документ" => Some("Documents"),
+        "dataprocessor" | "обработка" => Some("DataProcessors"),
+        "report" | "отчет" | "отчёт" => Some("Reports"),
+        "enum" | "перечисление" => Some("Enums"),
+        "chartofcharacteristictypes" | "планвидовхарактеристик" => {
+            Some("ChartsOfCharacteristicTypes")
+        }
+        "chartofaccounts" | "плансчетов" => Some("ChartsOfAccounts"),
+        "exchangeplan" | "планобмена" => Some("ExchangePlans"),
+        "businessprocess" | "бизнеспроцесс" => Some("BusinessProcesses"),
+        "task" | "задача" => Some("Tasks"),
+        _ => None,
+    }
 }
