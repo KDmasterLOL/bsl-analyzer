@@ -1,0 +1,227 @@
+//! Search engine — ties chunker, embedder, store, and index together.
+//!
+//! Provides the high-level API for indexing BSL files and searching
+//! through them using semantic similarity.
+
+use crate::chunker::Chunker;
+use crate::context::{enrich_chunk_text, file_path_to_module_path};
+use crate::embedder::{Embedder, EmbedderConfig};
+use crate::error::SearchError;
+use crate::index::VectorIndex;
+use crate::store::Store;
+use rayon::prelude::*;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::{debug, info, warn};
+
+/// Configuration for the search engine.
+pub struct SearchConfig {
+    /// Embedding API configuration.
+    pub embedder: EmbedderConfig,
+    /// Maximum batch size for embedding generation.
+    pub batch_size: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self { embedder: EmbedderConfig::default(), batch_size: 32 }
+    }
+}
+
+/// A search result with chunk metadata and similarity score.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    /// File path (relative to workspace root).
+    pub file_path: String,
+    /// Symbol name (procedure/function name).
+    pub symbol_name: String,
+    /// Chunk kind: "procedure", "function", or "header".
+    pub kind: String,
+    /// Source code of the chunk.
+    pub text: String,
+    /// Line range in the original file.
+    pub line_start: u32,
+    pub line_end: u32,
+    /// Cosine similarity score (0..1, higher is better).
+    pub score: f32,
+}
+
+/// The search engine: indexes BSL files and performs semantic search.
+pub struct SearchEngine {
+    store: Store,
+    embedder: Embedder,
+    index: VectorIndex,
+    dim: usize,
+    batch_size: usize,
+}
+
+impl SearchEngine {
+    /// Create a new search engine.
+    ///
+    /// - `db_path`: path to the SQLite database file
+    /// - `config`: search configuration
+    pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
+        let store = Store::open(db_path)?;
+        let dim = config.embedder.dim.unwrap_or(1024);
+        let embedder = Embedder::new(config.embedder);
+
+        // Load existing embeddings from store into HNSW index.
+        let data = store.load_all_embeddings(dim)?;
+        let index = VectorIndex::build(dim, &data)?;
+        info!(vectors = index.len(), dim, "search index loaded");
+
+        Ok(Self { store, embedder, index, dim, batch_size: config.batch_size })
+    }
+
+    /// Index all BSL files in a directory.
+    ///
+    /// Walks the directory tree, skips files whose hash hasn't changed,
+    /// and generates embeddings for new/modified files.
+    ///
+    /// Returns the number of files indexed (new or updated).
+    pub fn index_directory(&mut self, root: &Path) -> Result<usize, SearchError> {
+        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .map(|e| e.into_path())
+            .collect();
+
+        info!(total_files = bsl_files.len(), "scanning BSL files");
+
+        let mut pending_texts = Vec::new();
+        let mut pending_chunks_count = Vec::new();
+        let mut pending_meta: Vec<(String, Vec<u8>, Vec<crate::chunker::Chunk>)> = Vec::new();
+
+        for file_path in &bsl_files {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?file_path, "failed to read file: {e}");
+                    continue;
+                }
+            };
+
+            let hash = blake3::hash(content.as_bytes());
+            let rel_path =
+                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+
+            // Skip if hash unchanged.
+            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+                if stored_hash == hash.as_bytes() {
+                    continue;
+                }
+            }
+
+            let chunks = Chunker::chunk(&content);
+            if chunks.is_empty() {
+                continue;
+            }
+
+            let module_path = file_path_to_module_path(&rel_path);
+            for chunk in &chunks {
+                pending_texts.push(enrich_chunk_text(chunk, &module_path));
+            }
+            pending_chunks_count.push(chunks.len());
+            pending_meta.push((rel_path, hash.as_bytes().to_vec(), chunks));
+        }
+
+        if pending_texts.is_empty() {
+            info!("no files need reindexing");
+            return Ok(0);
+        }
+
+        info!(files = pending_meta.len(), chunks = pending_texts.len(), "generating embeddings");
+
+        // Generate embeddings in parallel batches.
+        let total_texts = pending_texts.len();
+        let batch_size = self.batch_size;
+        let batches: Vec<Vec<String>> =
+            pending_texts.chunks(batch_size).map(|c| c.to_vec()).collect();
+
+        let completed = AtomicUsize::new(0);
+        let embedder = &self.embedder;
+
+        let batch_results: Vec<Result<Vec<Vec<f32>>, SearchError>> = batches
+            .par_iter()
+            .map(|batch| {
+                let texts: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                let result = embedder.embed_batch(&texts);
+                let done = completed.fetch_add(texts.len(), Ordering::Relaxed) + texts.len();
+                debug!(progress = done, total = total_texts, "embedding batch done");
+                result
+            })
+            .collect();
+
+        let mut all_embeddings = Vec::with_capacity(total_texts);
+        for result in batch_results {
+            all_embeddings.extend(result?);
+        }
+
+        // Store chunks with embeddings.
+        let mut emb_offset = 0;
+        for (i, (rel_path, hash, chunks)) in pending_meta.iter().enumerate() {
+            let chunk_count = pending_chunks_count[i];
+            let chunk_embeddings: Vec<Vec<f32>> =
+                all_embeddings[emb_offset..emb_offset + chunk_count].to_vec();
+
+            self.store.reindex_file(rel_path, hash, chunks, Some(&chunk_embeddings))?;
+
+            emb_offset += chunk_count;
+        }
+
+        // Rebuild HNSW index from all embeddings.
+        let data = self.store.load_all_embeddings(self.dim)?;
+        self.index = VectorIndex::build(self.dim, &data)?;
+
+        let indexed = pending_meta.len();
+        info!(indexed, total_vectors = self.index.len(), "indexing complete");
+        Ok(indexed)
+    }
+
+    /// Search for code chunks semantically similar to the query.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, SearchError> {
+        let query_embedding = self.embedder.embed(query)?;
+        let results = self.index.search(&query_embedding, limit)?;
+
+        let mut hits = Vec::with_capacity(results.len());
+        for result in results {
+            if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
+                hits.push(SearchHit {
+                    file_path: info.file_path,
+                    symbol_name: info.symbol_name,
+                    kind: info.kind,
+                    text: info.text,
+                    line_start: info.line_start,
+                    line_end: info.line_end,
+                    score: result.score,
+                });
+            }
+        }
+
+        Ok(hits)
+    }
+
+    /// Number of indexed chunks.
+    pub fn chunk_count(&self) -> Result<usize, SearchError> {
+        self.store.chunk_count()
+    }
+
+    /// Number of indexed files.
+    pub fn file_count(&self) -> Result<usize, SearchError> {
+        self.store.file_count()
+    }
+
+    /// Number of vectors in the HNSW index.
+    pub fn vector_count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Remove a file from the index.
+    pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
+        self.store.remove_file(rel_path)?;
+        let data = self.store.load_all_embeddings(self.dim)?;
+        self.index = VectorIndex::build(self.dim, &data)?;
+        Ok(())
+    }
+}

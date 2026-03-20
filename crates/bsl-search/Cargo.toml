@@ -1,0 +1,48 @@
+[package]
+name = "bsl-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+# Internal crates
+syntax.workspace = true
+parser.workspace = true
+lexer.workspace = true
+
+# Storage
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# Hashing
+blake3 = "1.8"
+
+# HTTP client for embedding API
+ureq = { version = "3.2", features = ["json"] }
+
+# Vector search
+usearch = "2.24"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Parallelism
+rayon.workspace = true
+
+# Utilities
+walkdir.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
