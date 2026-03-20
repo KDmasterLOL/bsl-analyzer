@@ -78,6 +78,67 @@ struct ExecuteQueryParams {
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct DebugAttachParams {
+    /// Хост сервера отладки 1С
+    host: String,
+    /// Порт сервера отладки (по умолчанию 1550)
+    #[serde(default = "default_debug_port")]
+    port: u16,
+    /// Имя информационной базы
+    infobase: String,
+    /// Корневой каталог конфигурации (для маппинга модулей на файлы)
+    config_root: Option<String>,
+}
+
+fn default_debug_port() -> u16 {
+    1550
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugBreakpointParams {
+    /// Имя модуля (например "ОбщийМодуль.МойМодуль" или "Справочник.Номенклатура.МодульОбъекта")
+    module: String,
+    /// Номер строки
+    line: u32,
+    /// Условие остановки (BSL-выражение)
+    condition: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugRemoveBreakpointParams {
+    /// Имя модуля
+    module: String,
+    /// Номер строки
+    line: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugStepParams {
+    /// Действие: "next" (шаг через), "in" (шаг внутрь), "out" (шаг наружу)
+    action: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugWaitStopParams {
+    /// Таймаут ожидания в секундах (по умолчанию 30)
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugLocalsParams {
+    /// Уровень стека (0 = текущий фрейм, по умолчанию 0)
+    stack_level: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DebugEvalParams {
+    /// BSL-выражение для вычисления
+    expression: String,
+    /// Уровень стека (0 = текущий фрейм)
+    stack_level: Option<u32>,
+}
+
 /// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
@@ -191,6 +252,139 @@ impl McpServer {
             params.0.parameters,
         )
         .await
+    }
+
+    /// Подключиться к серверу отладки 1С. Начинает сеанс отладки.
+    #[tool(name = "debug_attach")]
+    async fn debug_attach(
+        &self,
+        params: Parameters<DebugAttachParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || {
+            tools::debug::debug_attach(
+                &session,
+                &p.host,
+                p.port,
+                &p.infobase,
+                p.config_root.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Отключиться от сервера отладки 1С. Завершает сеанс отладки.
+    #[tool(name = "debug_disconnect")]
+    async fn debug_disconnect(&self) -> Result<CallToolResult, McpError> {
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_disconnect(&session))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Установить точку останова в модуле 1С.
+    #[tool(name = "debug_set_breakpoint")]
+    async fn debug_set_breakpoint(
+        &self,
+        params: Parameters<DebugBreakpointParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || {
+            tools::debug::debug_set_breakpoint(&session, &p.module, p.line, p.condition.as_deref())
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Удалить точку останова.
+    #[tool(name = "debug_remove_breakpoint")]
+    async fn debug_remove_breakpoint(
+        &self,
+        params: Parameters<DebugRemoveBreakpointParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || {
+            tools::debug::debug_remove_breakpoint(&session, &p.module, p.line)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Продолжить выполнение программы после остановки.
+    #[tool(name = "debug_continue")]
+    async fn debug_continue(&self) -> Result<CallToolResult, McpError> {
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_continue(&session))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Пошаговое выполнение: next (через), in (внутрь), out (наружу).
+    #[tool(name = "debug_step")]
+    async fn debug_step(
+        &self,
+        params: Parameters<DebugStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_step(&session, &p.action))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Ожидать остановку программы (точка останова, исключение, шаг).
+    /// Блокирует до наступления события или таймаута.
+    #[tool(name = "debug_wait_stop")]
+    async fn debug_wait_stop(
+        &self,
+        params: Parameters<DebugWaitStopParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_wait_stop(&session, p.timeout_secs))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Получить стек вызовов остановленной программы.
+    #[tool(name = "debug_stack_trace", annotations(read_only_hint = true))]
+    async fn debug_stack_trace(&self) -> Result<CallToolResult, McpError> {
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_stack_trace(&session))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Получить локальные переменные на указанном уровне стека.
+    #[tool(name = "debug_locals", annotations(read_only_hint = true))]
+    async fn debug_locals(
+        &self,
+        params: Parameters<DebugLocalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || tools::debug::debug_locals(&session, p.stack_level))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Вычислить BSL-выражение в контексте остановленной программы.
+    #[tool(name = "debug_eval", annotations(read_only_hint = true))]
+    async fn debug_eval(
+        &self,
+        params: Parameters<DebugEvalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let session = self.state.debug_session().clone();
+        tokio::task::spawn_blocking(move || {
+            tools::debug::debug_eval(&session, &p.expression, p.stack_level)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 }
 

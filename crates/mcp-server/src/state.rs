@@ -3,7 +3,7 @@
 use bsl_metadata::Configuration;
 use onec_client::Client as OnecClient;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 /// State shared between all MCP tool handlers.
@@ -19,6 +19,7 @@ pub struct SharedState {
     configuration: Arc<RwLock<Option<Configuration>>>,
     workspace_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
+    debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
 }
 
 impl SharedState {
@@ -35,6 +36,7 @@ impl SharedState {
             configuration: Arc::new(RwLock::new(configuration)),
             workspace_root: Some(source_dir),
             onec_client: None,
+            debug_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -42,7 +44,12 @@ impl SharedState {
     ///
     /// Configuration will be set later via `update_configuration`.
     pub fn shared() -> Self {
-        Self { configuration: Arc::new(RwLock::new(None)), workspace_root: None, onec_client: None }
+        Self {
+            configuration: Arc::new(RwLock::new(None)),
+            workspace_root: None,
+            onec_client: None,
+            debug_session: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Set the 1C HTTP client for live database access.
@@ -88,5 +95,10 @@ impl SharedState {
     /// Workspace root directory.
     pub fn workspace_root(&self) -> Option<&PathBuf> {
         self.workspace_root.as_ref()
+    }
+
+    /// Access the debug session mutex.
+    pub fn debug_session(&self) -> &Arc<Mutex<Option<bsl_debug::session::DebugSession>>> {
+        &self.debug_session
     }
 }

@@ -1907,6 +1907,7 @@ name = "mcp-server"
 version = "0.1.48"
 dependencies = [
  "anyhow",
+ "bsl-debug",
  "bsl-metadata",
  "bsl-platform",
  "expect-test",
