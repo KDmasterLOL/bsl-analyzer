@@ -82,7 +82,12 @@ impl McpServer {
         &self,
         params: Parameters<MetadataTreeParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::metadata::get_metadata_tree(&self.state, params.0.filter)
+        let config = self
+            .state
+            .configuration()
+            .await
+            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
+        tools::metadata::get_metadata_tree(&config, params.0.filter)
     }
 
     /// Получить реквизиты, табличные части, измерения, ресурсы и типы полей объекта метаданных 1С.
@@ -91,17 +96,23 @@ impl McpServer {
         &self,
         params: Parameters<ObjectStructureParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::metadata::get_object_structure(
-            &self.state,
-            &params.0.object_type,
-            &params.0.object_name,
-        )
+        let config = self
+            .state
+            .configuration()
+            .await
+            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
+        tools::metadata::get_object_structure(&config, &params.0.object_type, &params.0.object_name)
     }
 
     /// Получить общую информацию о конфигурации 1С: название, UUID, количество объектов.
     #[tool(name = "get_configuration_info", annotations(read_only_hint = true))]
     async fn get_configuration_info(&self) -> Result<CallToolResult, McpError> {
-        tools::metadata::get_configuration_info(&self.state)
+        let config = self
+            .state
+            .configuration()
+            .await
+            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
+        tools::metadata::get_configuration_info(&config)
     }
 
     /// Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, обработчики событий.
@@ -111,7 +122,6 @@ impl McpServer {
         params: Parameters<FormStructureParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::metadata::get_form_structure(
-            &self.state,
             &params.0.object_type,
             &params.0.object_name,
             params.0.form_name.as_deref(),
