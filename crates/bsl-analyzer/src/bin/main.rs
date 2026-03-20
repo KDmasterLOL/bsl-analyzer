@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long)]
     stdio: bool,
 
+    /// Unix socket path for co-serving MCP alongside LSP
+    #[arg(long)]
+    mcp_socket: Option<PathBuf>,
+
     /// Enable hierarchical profiling (filter syntax: pattern@depth>threshold_ms)
     /// Example: '*>10' profiles all operations taking >10ms
     #[arg(long, global = true)]
@@ -286,7 +290,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             run_mcp_server(socket, source_dir, onec_url, &onec_user, &onec_password)
         }
         Some(Commands::Rules { command }) => run_rules_command(command),
-        Some(Commands::Lsp) | None => run_lsp_server(),
+        Some(Commands::Lsp) | None => run_lsp_server(cli.mcp_socket),
     }
 }
 
@@ -581,7 +585,7 @@ fn run_mcp_server(
     Ok(())
 }
 
-fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_lsp_server(mcp_socket: Option<PathBuf>) -> Result<(), Box<dyn Error + Send + Sync>> {
     use lsp_server::Connection;
 
     tracing::info!("Starting BSL Analyzer LSP server");
@@ -592,7 +596,7 @@ fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Run the main loop
     tracing::info!("Entering main loop");
-    if let Err(e) = bsl_analyzer::main_loop(connection) {
+    if let Err(e) = bsl_analyzer::main_loop(connection, mcp_socket) {
         tracing::error!("Main loop error: {}", e);
         tracing::error!("Error chain: {:?}", e);
         return Err(e.into());

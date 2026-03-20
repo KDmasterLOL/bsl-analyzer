@@ -60,6 +60,12 @@ impl SharedState {
         *self.configuration.write().await = Some(config);
     }
 
+    /// Update configuration from a sync context (LSP main thread).
+    /// Panics if called from an async context.
+    pub fn update_configuration_blocking(&self, config: Configuration) {
+        *self.configuration.blocking_write() = Some(config);
+    }
+
     /// Set workspace root.
     pub fn set_workspace_root(&mut self, root: PathBuf) {
         self.workspace_root = Some(root);
