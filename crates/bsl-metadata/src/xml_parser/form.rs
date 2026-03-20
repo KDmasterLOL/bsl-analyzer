@@ -4,251 +4,11 @@
 //! - Form type (Managed/Ordinary)
 //! - ChildItems with DataPath bindings
 
-use serde::Deserialize;
-
 use crate::enums::FormType;
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::form::{Form, FormElement};
 
 use super::helpers::parse_uuid;
-
-/// Root element for form XML (FormRoot wrapper or direct Form)
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormRoot {
-    #[serde(alias = "Form")]
-    form: FormXmlElement,
-}
-
-/// Form XML element (renamed to avoid conflict with Form struct)
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormXmlElement {
-    #[serde(rename = "@uuid", default)]
-    uuid: String,
-    #[serde(default)]
-    properties: Option<FormProperties>,
-    #[serde(default)]
-    form_type: String,
-    #[serde(default)]
-    child_items: Option<ChildItems>,
-    /// Form commands with actions
-    #[serde(default)]
-    commands: Option<FormCommands>,
-    /// Form attributes (реквизиты формы)
-    #[serde(default)]
-    attributes: Option<FormAttributes>,
-}
-
-/// Container for form attributes
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-struct FormAttributes {
-    #[serde(default)]
-    attribute: Vec<FormAttributeXml>,
-}
-
-/// Single form attribute
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormAttributeXml {
-    #[serde(rename = "@name", default)]
-    name: String,
-}
-
-/// Container for form commands
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-struct FormCommands {
-    #[serde(default)]
-    command: Vec<FormCommand>,
-}
-
-/// Single form command with action handler
-#[allow(dead_code)] // name needed for XML deserialization
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormCommand {
-    /// Command name
-    #[serde(rename = "@name", default)]
-    name: String,
-    /// Action handler method name
-    #[serde(default)]
-    action: String,
-}
-
-/// Form properties
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormProperties {
-    name: String,
-}
-
-/// Container for child items (form controls)
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-struct ChildItems {
-    #[serde(default)]
-    input_field: Vec<FormControl>,
-    #[serde(default)]
-    label_field: Vec<FormControl>,
-    #[serde(default)]
-    check_box_field: Vec<FormControl>,
-    #[serde(default)]
-    radio_button_field: Vec<FormControl>,
-    #[serde(default)]
-    text_document_field: Vec<FormControl>,
-    #[serde(default)]
-    spreadsheet_document_field: Vec<FormControl>,
-    #[serde(default)]
-    graphical_schema_field: Vec<FormControl>,
-    #[serde(default)]
-    formatted_document_field: Vec<FormControl>,
-    #[serde(default)]
-    picture_field: Vec<FormControl>,
-    #[serde(default)]
-    table: Vec<FormControlWithChildren>,
-    #[serde(default)]
-    usual_group: Vec<FormControlWithChildren>,
-    #[serde(default)]
-    pages: Vec<FormControlWithChildren>,
-    #[serde(default)]
-    page: Vec<FormControlWithChildren>,
-}
-
-/// Form control with name, id, and DataPath
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormControl {
-    #[serde(rename = "@name", default)]
-    name: String,
-    #[serde(rename = "@id", default)]
-    id: u32,
-    #[serde(default)]
-    data_path: Option<String>,
-}
-
-/// Form control that can contain nested ChildItems
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormControlWithChildren {
-    #[serde(rename = "@name", default)]
-    name: String,
-    #[serde(rename = "@id", default)]
-    id: u32,
-    #[serde(default)]
-    data_path: Option<String>,
-    #[serde(default)]
-    child_items: Option<ChildItems>,
-}
-
-impl ChildItems {
-    /// Collect all form elements recursively.
-    fn collect_elements(&self, elements: &mut Vec<FormElement>) {
-        for ctrl in &self.input_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.label_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.check_box_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.radio_button_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.text_document_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.spreadsheet_document_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.graphical_schema_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.formatted_document_field {
-            elements.push(ctrl.to_form_element());
-        }
-        for ctrl in &self.picture_field {
-            elements.push(ctrl.to_form_element());
-        }
-
-        for ctrl in &self.table {
-            elements.push(ctrl.to_form_element());
-            if let Some(ref children) = ctrl.child_items {
-                children.collect_elements(elements);
-            }
-        }
-        for ctrl in &self.usual_group {
-            elements.push(ctrl.to_form_element());
-            if let Some(ref children) = ctrl.child_items {
-                children.collect_elements(elements);
-            }
-        }
-        for ctrl in &self.pages {
-            elements.push(ctrl.to_form_element());
-            if let Some(ref children) = ctrl.child_items {
-                children.collect_elements(elements);
-            }
-        }
-        for ctrl in &self.page {
-            elements.push(ctrl.to_form_element());
-            if let Some(ref children) = ctrl.child_items {
-                children.collect_elements(elements);
-            }
-        }
-    }
-}
-
-impl FormControl {
-    fn to_form_element(&self) -> FormElement {
-        FormElement { name: self.name.clone(), id: self.id, data_path: self.data_path.clone() }
-    }
-}
-
-impl FormControlWithChildren {
-    fn to_form_element(&self) -> FormElement {
-        FormElement { name: self.name.clone(), id: self.id, data_path: self.data_path.clone() }
-    }
-}
-
-/// Collect all `<Event>` handler names from the entire XML tree.
-///
-/// This uses a streaming XML reader to find every `<Event>` element regardless
-/// of nesting depth. Catches both form-level events (OnCreateAtServer, OnOpen)
-/// and element-level events (Table.OnActivateRow, InputField.OnChange, etc.).
-fn collect_all_event_handlers(xml: &str) -> Vec<String> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-
-    let mut reader = Reader::from_str(xml);
-    let mut handlers = Vec::new();
-    let mut in_event = false;
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"Event" => {
-                in_event = true;
-            }
-            Ok(Event::Text(ref e)) if in_event => {
-                if let Ok(text) = std::str::from_utf8(e.as_ref()) {
-                    let handler = text.trim();
-                    if !handler.is_empty() {
-                        handlers.push(handler.to_string());
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) if e.local_name().as_ref() == b"Event" => {
-                in_event = false;
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-    }
-
-    handlers
-}
 
 /// Parse form XML to extract FormType and elements.
 ///
@@ -275,57 +35,83 @@ fn collect_all_event_handlers(xml: &str) -> Vec<String> {
 pub fn parse_form_xml(xml: &str) -> Result<Form> {
     let _span = tracing::debug_span!("parse_form_xml").entered();
 
-    // Try parsing with FormRoot wrapper first, then try direct Form element
-    let form_xml = if let Ok(root) = quick_xml::de::from_str::<FormRoot>(xml) {
-        root.form
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| MetadataError::InvalidFormat(format!("Invalid form XML: {}", e)))?;
+
+    let root = doc.root_element();
+
+    // Support both <Form ...> root and <FormRoot><Form ...></FormRoot> wrapper
+    let form_node = if root.tag_name().name() == "Form" {
+        root
     } else {
-        quick_xml::de::from_str::<FormXmlElement>(xml)?
+        root.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "Form")
+            .ok_or_else(|| MetadataError::InvalidFormat("No <Form> element found".to_string()))?
     };
 
-    let uuid = if form_xml.uuid.is_empty() {
-        uuid::Uuid::nil()
-    } else {
-        parse_uuid(&form_xml.uuid, "form")?
-    };
+    let uuid_str = form_node.attribute("uuid").unwrap_or("");
+    let uuid = if uuid_str.is_empty() { uuid::Uuid::nil() } else { parse_uuid(uuid_str, "form")? };
 
-    let form_type = if form_xml.form_type.is_empty() {
-        FormType::Managed // Default
-    } else {
-        FormType::from_name(&form_xml.form_type)
-    };
+    let name = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Properties")
+        .and_then(|props| {
+            props.children().find(|n| n.is_element() && n.tag_name().name() == "Name")
+        })
+        .and_then(|n| n.text())
+        .unwrap_or("")
+        .to_string();
 
-    let name = form_xml.properties.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+    let form_type_str = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "FormType")
+        .and_then(|n| n.text())
+        .unwrap_or("");
+    let form_type = if form_type_str.is_empty() {
+        FormType::Managed
+    } else {
+        FormType::from_name(form_type_str)
+    };
 
     let mut elements = Vec::new();
-    if let Some(ref child_items) = form_xml.child_items {
-        child_items.collect_elements(&mut elements);
+    if let Some(child_items) =
+        form_node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
+    {
+        collect_child_items(child_items, &mut elements);
     }
 
-    // Collect ALL event handlers (form-level and element-level) via XML reader.
-    // Element-level events (e.g. Table/InputField/CheckBoxField events) are not
-    // captured by serde since they can appear on any element type. A single pass
-    // with quick_xml::Reader reliably collects every <Event> handler in the tree.
-    let event_handlers = collect_all_event_handlers(xml);
+    let event_handlers = collect_all_events(form_node);
 
-    // Collect command handlers
-    let command_handlers: Vec<String> = form_xml
-        .commands
-        .as_ref()
+    let command_handlers: Vec<String> = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Commands")
         .map(|commands| {
             commands
-                .command
-                .iter()
-                .filter(|c| !c.action.is_empty())
-                .map(|c| c.action.clone())
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "Command")
+                .filter_map(|cmd| {
+                    cmd.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "Action")
+                        .and_then(|n| n.text())
+                        .filter(|t| !t.trim().is_empty())
+                        .map(|t| t.trim().to_string())
+                })
                 .collect()
         })
         .unwrap_or_default();
 
-    // Collect form attribute names
-    let attributes: Vec<String> = form_xml
-        .attributes
-        .as_ref()
-        .map(|attrs| attrs.attribute.iter().map(|a| a.name.clone()).collect())
+    let attributes: Vec<String> = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Attributes")
+        .map(|attrs| {
+            attrs
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "Attribute")
+                .filter_map(|attr| attr.attribute("name"))
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_string())
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut form =
@@ -344,6 +130,58 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     );
 
     Ok(form)
+}
+
+/// Recursively collect `<Event>` handler text from an element and all its descendants.
+fn collect_all_events(node: roxmltree::Node<'_, '_>) -> Vec<String> {
+    let mut handlers = Vec::new();
+    collect_events_recursive(node, &mut handlers);
+    handlers
+}
+
+fn collect_events_recursive(node: roxmltree::Node<'_, '_>, handlers: &mut Vec<String>) {
+    for child in node.children().filter(|n| n.is_element()) {
+        if child.tag_name().name() == "Event" {
+            if let Some(text) = child.text() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    handlers.push(trimmed.to_string());
+                }
+            }
+        } else {
+            collect_events_recursive(child, handlers);
+        }
+    }
+}
+
+/// Recursively collect `FormElement`s from a `<ChildItems>` node.
+///
+/// Any element with both `name` and `id` attributes is collected.
+/// Elements with a `<ChildItems>` child are recursed into.
+fn collect_child_items(child_items: roxmltree::Node<'_, '_>, elements: &mut Vec<FormElement>) {
+    for node in child_items.children().filter(|n| n.is_element()) {
+        let name = match node.attribute("name") {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+        let id: u32 = match node.attribute("id").and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let data_path = node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "DataPath")
+            .and_then(|n| n.text())
+            .map(|t| t.to_string());
+
+        elements.push(FormElement { name, id, data_path });
+
+        if let Some(nested) =
+            node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
+        {
+            collect_child_items(nested, elements);
+        }
+    }
 }
 
 /// Parse form XML from file path.
@@ -446,44 +284,39 @@ struct FormMetadataInfo {
 /// </MetaDataObject>
 /// ```
 fn parse_form_metadata_xml(xml: &str) -> Result<FormMetadataInfo> {
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "PascalCase")]
-    struct MetaDataObjectRoot {
-        form: FormMetadataElement,
-    }
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| MetadataError::InvalidFormat(format!("Invalid form metadata XML: {}", e)))?;
 
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "PascalCase")]
-    struct FormMetadataElement {
-        #[serde(rename = "@uuid", default)]
-        uuid: String,
-        #[serde(default)]
-        properties: Option<FormMetadataProperties>,
-        #[serde(default)]
-        form_type: String,
-    }
+    let root = doc.root_element();
 
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "PascalCase")]
-    struct FormMetadataProperties {
-        name: String,
-    }
+    let form_node =
+        root.children().find(|n| n.is_element() && n.tag_name().name() == "Form").ok_or_else(
+            || MetadataError::InvalidFormat("No <Form> element in MetaDataObject".to_string()),
+        )?;
 
-    let root: MetaDataObjectRoot = quick_xml::de::from_str(xml)?;
+    let uuid_str = form_node.attribute("uuid").unwrap_or("");
+    let uuid = if uuid_str.is_empty() { uuid::Uuid::nil() } else { parse_uuid(uuid_str, "form")? };
 
-    let uuid = if root.form.uuid.is_empty() {
-        uuid::Uuid::nil()
-    } else {
-        parse_uuid(&root.form.uuid, "form")?
-    };
-
-    let form_type = if root.form.form_type.is_empty() {
+    let form_type_str = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "FormType")
+        .and_then(|n| n.text())
+        .unwrap_or("");
+    let form_type = if form_type_str.is_empty() {
         FormType::Managed
     } else {
-        FormType::from_name(&root.form.form_type)
+        FormType::from_name(form_type_str)
     };
 
-    let name = root.form.properties.map(|p| p.name).unwrap_or_default();
+    let name = form_node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Properties")
+        .and_then(|props| {
+            props.children().find(|n| n.is_element() && n.tag_name().name() == "Name")
+        })
+        .and_then(|n| n.text())
+        .unwrap_or("")
+        .to_string();
 
     Ok(FormMetadataInfo { name, form_type, uuid })
 }
@@ -669,7 +502,7 @@ mod tests {
     #[test]
     fn test_parse_form_attributes() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
     <ChildItems>
         <InputField name="Замечание" id="1">
             <DataPath>Замечание</DataPath>
@@ -735,6 +568,45 @@ mod tests {
         // Form has one event handler
         assert_eq!(form.event_handlers().len(), 1);
         assert!(form.is_handler("ПриСозданииНаСервере"));
+    }
+
+    #[test]
+    fn test_parse_real_large_form_with_attributes() {
+        let xml = include_str!(
+            "../../fixtures/designer/Catalogs/рдт_Рецептура/Forms/ФормаЭлемента/Ext/Form.xml"
+        );
+        let result = parse_form_xml(xml);
+        assert!(result.is_ok(), "Form XML parsing failed: {:?}", result.err());
+
+        let form = result.unwrap();
+
+        // Form must have attributes parsed from <Attributes> section
+        assert!(
+            !form.attributes().is_empty(),
+            "Form attributes must not be empty, got 0 attributes"
+        );
+
+        // Verify specific attribute that caused false positive in UnusedLocalVariable
+        let attr_names: Vec<String> = form.attributes().iter().map(|a| a.to_lowercase()).collect();
+        assert!(
+            attr_names.contains(&"рольтекущегопользователявrnd".to_string()),
+            "Form must contain 'РольТекущегоПользователяВRnD' attribute, got: {:?}",
+            form.attributes()
+        );
+
+        // Verify total attribute count (22 attributes in the real form)
+        assert_eq!(
+            form.attributes().len(),
+            22,
+            "Expected 22 form attributes, got: {:?}",
+            form.attributes()
+        );
+
+        // Verify a few more known attributes
+        assert!(attr_names.contains(&"объект".to_string()));
+        assert!(attr_names.contains(&"дереводанных".to_string()));
+        assert!(attr_names.contains(&"новыйобъект".to_string()));
+        assert!(attr_names.contains(&"пересчитать".to_string()));
     }
 
     #[test]
