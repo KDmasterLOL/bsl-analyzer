@@ -154,6 +154,17 @@ enum Commands {
     /// Start LSP server (default)
     Lsp,
 
+    /// Start MCP server (Model Context Protocol for AI agents)
+    Mcp {
+        /// Unix socket path for MCP server
+        #[arg(long, default_value = "/tmp/bsl-analyzer-mcp.sock")]
+        socket: PathBuf,
+
+        /// Source directory containing 1C configuration (with Configuration.xml)
+        #[arg(short = 's', long = "source-dir", default_value = ".")]
+        source_dir: PathBuf,
+    },
+
     /// Export diagnostic rules metadata
     Rules {
         #[command(subcommand)]
@@ -259,6 +270,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
+        Some(Commands::Mcp { socket, source_dir }) => run_mcp_server(socket, source_dir),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -522,6 +534,28 @@ fn flush_paragraph(html: &mut String, paragraph: &mut String) {
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn run_mcp_server(
+    socket: PathBuf,
+    source_dir: PathBuf,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing::info!(?socket, ?source_dir, "Starting MCP server");
+
+    let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
+    let state = mcp_server::SharedState::standalone(source_dir);
+    let server = mcp_server::McpServer::new(state);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+
+    rt.block_on(async {
+        mcp_server::serve_unix_socket(&socket, server).await.map_err(|e| {
+            tracing::error!("MCP server error: {e}");
+            e
+        })
+    })?;
+
+    Ok(())
 }
 
 fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {

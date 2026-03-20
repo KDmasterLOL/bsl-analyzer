@@ -25,6 +25,7 @@ paths.workspace = true
 line-index.workspace = true
 stdx.workspace = true
 profile.workspace = true
+mcp-server.workspace = true
 
 # LSP
 lsp-types.workspace = true

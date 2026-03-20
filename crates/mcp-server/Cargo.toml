@@ -11,6 +11,8 @@ doctest = false
 [dependencies]
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+parser.workspace = true
+syntax.workspace = true
 
 rmcp = { version = "1.2", features = ["server", "macros"] }
 schemars = "1.2"
