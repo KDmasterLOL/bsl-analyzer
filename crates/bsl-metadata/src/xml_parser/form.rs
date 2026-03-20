@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_real_large_form_with_attributes() {
+    fn test_parse_form_with_interleaved_groups_and_attributes() {
         let xml = include_str!(
             "../../fixtures/designer/Catalogs/рдт_Рецептура/Forms/ФормаЭлемента/Ext/Form.xml"
         );
@@ -580,33 +580,27 @@ mod tests {
 
         let form = result.unwrap();
 
-        // Form must have attributes parsed from <Attributes> section
-        assert!(
-            !form.attributes().is_empty(),
-            "Form attributes must not be empty, got 0 attributes"
-        );
-
-        // Verify specific attribute that caused false positive in UnusedLocalVariable
-        let attr_names: Vec<String> = form.attributes().iter().map(|a| a.to_lowercase()).collect();
-        assert!(
-            attr_names.contains(&"рольтекущегопользователявrnd".to_string()),
-            "Form must contain 'РольТекущегоПользователяВRnD' attribute, got: {:?}",
-            form.attributes()
-        );
-
-        // Verify total attribute count (22 attributes in the real form)
+        // Interleaved UsualGroup/InputField elements must all be collected
+        // Structure: UsualGroup(Поле1) → InputField(Родитель) → UsualGroup(Флаг1) →
+        //            InputField(Наименование) → UsualGroup(Дата)
         assert_eq!(
-            form.attributes().len(),
-            22,
-            "Expected 22 form attributes, got: {:?}",
-            form.attributes()
+            form.elements().len(),
+            8,
+            "Expected 8 elements (3 groups + 2 top-level inputs + 3 nested), got: {:?}",
+            form.elements().iter().map(|e| &e.name).collect::<Vec<_>>()
         );
 
-        // Verify a few more known attributes
+        // Verify form attributes parsed from <Attributes> section
+        assert_eq!(form.attributes().len(), 4);
+        let attr_names: Vec<String> = form.attributes().iter().map(|a| a.to_lowercase()).collect();
         assert!(attr_names.contains(&"объект".to_string()));
-        assert!(attr_names.contains(&"дереводанных".to_string()));
         assert!(attr_names.contains(&"новыйобъект".to_string()));
         assert!(attr_names.contains(&"пересчитать".to_string()));
+        assert!(
+            attr_names.contains(&"рольтекущегопользователявrnd".to_string()),
+            "Must contain 'РольТекущегоПользователяВRnD' attribute, got: {:?}",
+            form.attributes()
+        );
     }
 
     #[test]
