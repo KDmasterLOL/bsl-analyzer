@@ -26,6 +26,7 @@ line-index.workspace = true
 stdx.workspace = true
 profile.workspace = true
 mcp-server.workspace = true
+bsl-debug.workspace = true
 onec-client.workspace = true
 
 # LSP

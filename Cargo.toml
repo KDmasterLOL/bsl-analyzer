@@ -44,6 +44,7 @@ line-index = { path = "crates/line-index" }
 paths = { path = "crates/paths" }
 vfs-notify = { path = "crates/vfs-notify" }
 bsl-launcher = { path = "crates/bsl-launcher" }
+bsl-debug = { path = "crates/bsl-debug" }
 mcp-server = { path = "crates/mcp-server" }
 onec-client = { path = "crates/onec-client" }
 

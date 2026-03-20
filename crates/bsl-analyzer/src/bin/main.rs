@@ -181,6 +181,9 @@ enum Commands {
         onec_password: String,
     },
 
+    /// Start DAP debug adapter (Debug Adapter Protocol via stdio)
+    Dap,
+
     /// Export diagnostic rules metadata
     Rules {
         #[command(subcommand)]
@@ -289,6 +292,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Mcp { socket, source_dir, onec_url, onec_user, onec_password }) => {
             run_mcp_server(socket, source_dir, onec_url, &onec_user, &onec_password)
         }
+        Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(cli.mcp_socket),
     }
@@ -582,6 +586,12 @@ fn run_mcp_server(
         })
     })?;
 
+    Ok(())
+}
+
+fn run_dap_server() -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing::info!("Starting DAP debug adapter");
+    bsl_debug::dap::run_dap_stdio();
     Ok(())
 }
 

@@ -207,6 +207,7 @@ version = "0.1.48"
 dependencies = [
  "anyhow",
  "base-db",
+ "bsl-debug",
  "bsl-metadata",
  "clap",
  "crossbeam-channel",
@@ -243,6 +244,7 @@ dependencies = [
 name = "bsl-debug"
 version = "0.1.48"
 dependencies = [
+ "dap",
  "quick-xml",
  "reqwest 0.13.2",
  "serde",
@@ -663,6 +665,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dap"
+version = "0.4.1-alpha1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35c7fc89d334ab745ba679f94c7314c9b17ecdcd923c111df6206e9fd7729fa9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
