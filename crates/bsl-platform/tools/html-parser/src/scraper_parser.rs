@@ -964,6 +964,45 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_see_also() {
+        let html = r#"
+            <p class="V8SH_chapter">См. также:</p>
+            <a href="v8help://SyntaxHelperContext/objects/catalog234/catalog236/ValueTable.html">ТаблицаЗначений</a>, метод <a href="v8help://SyntaxHelperContext/objects/catalog234/catalog236/ValueTable/methods/Insert582.html">Вставить</a><br>
+            <a href="v8help://SyntaxHelperContext/objects/catalog234/catalog236/ValueTable.html">ТаблицаЗначений</a>, метод <a href="v8help://SyntaxHelperContext/objects/catalog234/catalog236/ValueTable/methods/Find602.html">Найти</a><br>
+            <p class="V8SH_chapter">Использование в версии:</p>
+        "#;
+
+        let see_also = extract_see_also(html);
+        assert_eq!(see_also.len(), 2);
+        assert_eq!(see_also[0], "ТаблицаЗначений, метод Вставить");
+        assert_eq!(see_also[1], "ТаблицаЗначений, метод Найти");
+    }
+
+    #[test]
+    fn test_extract_see_also_with_property() {
+        let html = r#"
+            <p class="V8SH_chapter">См. также:</p>
+            <a href="v8help://...">ПолеСводнойТаблицы</a>, свойство <a href="v8help://...">Имя</a><br>
+            <p class="V8SH_chapter">Использование в версии:</p>
+        "#;
+
+        let see_also = extract_see_also(html);
+        assert_eq!(see_also.len(), 1);
+        assert_eq!(see_also[0], "ПолеСводнойТаблицы, свойство Имя");
+    }
+
+    #[test]
+    fn test_extract_see_also_empty() {
+        let html = r#"
+            <p class="V8SH_chapter">Описание:</p>
+            <p>Просто описание без см. также.</p>
+        "#;
+
+        let see_also = extract_see_also(html);
+        assert!(see_also.is_empty());
+    }
+
+    #[test]
     fn test_extract_default_value() {
         // Colon variant
         let text = "Тип: Число. Значение по умолчанию: 10. Описание...";
@@ -1021,6 +1060,70 @@ mod tests {
         assert!(examples[0].code.contains("НачатьТранзакцию"));
         assert!(examples[0].code.contains("ЗафиксироватьТранзакцию"));
     }
+}
+
+/// Extracts "See also" references from HTML content.
+/// Looks for: `<p class="V8SH_chapter">См. также:</p>` followed by links.
+///
+/// Returns references as strings like "ТаблицаЗначений, метод Вставить".
+pub fn extract_see_also(html_content: &str) -> Vec<String> {
+    let html = Html::parse_fragment(html_content);
+    let chapter_sel = Selector::parse(CHAPTER_SELECTOR).unwrap();
+
+    for chapter in html.select(&chapter_sel) {
+        let text = chapter.text().collect::<String>();
+        if !text.contains("См. также") {
+            continue;
+        }
+
+        let mut references = Vec::new();
+        let mut current_ref = String::new();
+        let mut node = chapter.next_sibling();
+
+        while let Some(n) = node {
+            // Stop at next chapter section
+            if let Some(elem) = n.value().as_element() {
+                if elem.name() == "p" && elem.attr("class") == Some("V8SH_chapter") {
+                    break;
+                }
+            }
+
+            if let Some(text_node) = n.value().as_text() {
+                // Trim start, preserve trailing space (e.g. ", метод ")
+                let t = text_node.text.trim_start();
+                if !t.is_empty() {
+                    current_ref.push_str(t);
+                }
+            } else if let Some(elem_ref) = ElementRef::wrap(n) {
+                if elem_ref.value().name() == "a" {
+                    let link_text = elem_ref.text().collect::<String>();
+                    let trimmed = link_text.trim();
+                    if !trimmed.is_empty() {
+                        current_ref.push_str(trimmed);
+                    }
+                } else if elem_ref.value().name() == "br" {
+                    // <br> ends current reference
+                    let trimmed = current_ref.trim().trim_end_matches(',').trim().to_string();
+                    if !trimmed.is_empty() {
+                        references.push(trimmed);
+                    }
+                    current_ref.clear();
+                }
+            }
+
+            node = n.next_sibling();
+        }
+
+        // Don't forget last reference (if no trailing <br>)
+        let trimmed = current_ref.trim().trim_end_matches(',').trim().to_string();
+        if !trimmed.is_empty() {
+            references.push(trimmed);
+        }
+
+        return references;
+    }
+
+    Vec::new()
 }
 
 /// Keyword documentation structure (intermediate format for JSON)
