@@ -146,9 +146,9 @@ fn main() {
 
         let start = Instant::now();
         let result = if mode == "FTS" {
-            engine.text_search(actual_query, 10)
+            engine.text_search(actual_query, 10, None)
         } else {
-            engine.search(actual_query, 10)
+            engine.search(actual_query, 10, None)
         };
 
         match result {

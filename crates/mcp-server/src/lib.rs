@@ -50,14 +50,29 @@ struct FormStructureParams {
 #[derive(Deserialize, JsonSchema)]
 struct SyntaxHelpParams {
     /// Имя типа, метода или глобальной функции платформы (русское или английское).
-    /// Не используется при полнотекстовом поиске (query).
-    name: Option<String>,
+    name: String,
     /// Имя типа для поиска метода в контексте типа (например type_name="Массив", name="Добавить")
     type_name: Option<String>,
-    /// Полнотекстовый поиск по описаниям, именам и параметрам.
-    /// Например: "сортировка массива", "текущая дата", "HTTP запрос".
-    /// Поддерживает морфологию русского языка.
-    query: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct FindDocsParams {
+    /// Текст для поиска по справке платформы 1С: имена типов, методов, функций.
+    /// Используйте точные имена и токены из справочной документации.
+    /// Примеры: "Массив", "HTTPСоединение", "НачатьТранзакцию"
+    query: String,
+    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchDocsParams {
+    /// Описание искомой функциональности платформы на естественном языке.
+    /// Примеры: "как записать файл на диск", "работа с HTTP запросами",
+    /// "сортировка массива", "текущая дата и время"
+    query: String,
+    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -228,25 +243,14 @@ impl McpServer {
     }
 
     /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Два режима:
-    /// 1) Точный поиск: name="Массив" или name="Добавить", type_name="Массив"
-    /// 2) Полнотекстовый поиск: query="сортировка массива" — ищет по описаниям с морфологией
+    /// Точный поиск по имени: name="Массив" или name="Добавить", type_name="Массив".
+    /// Для полнотекстового поиска используй find_docs, для семантического — search_docs.
     #[tool(name = "bsl_syntax_help", annotations(read_only_hint = true))]
     async fn bsl_syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(ref query) = params.0.query {
-            return tools::platform::bsl_syntax_search(query);
-        }
-        let name = params.0.name.as_deref().unwrap_or_default();
-        if name.is_empty() {
-            return Err(McpError::invalid_params(
-                "Укажите name для точного поиска или query для полнотекстового",
-                None,
-            ));
-        }
-        tools::platform::bsl_syntax_help(name, params.0.type_name.as_deref())
+        tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
     /// Проверить синтаксис запроса 1С (SDBL) без выполнения. Найдёт ошибки в ВЫБРАТЬ/SELECT.
@@ -314,6 +318,39 @@ impl McpServer {
         let query = params.0.query;
         let limit = params.0.limit.unwrap_or(10).min(50);
         tokio::task::spawn_blocking(move || tools::search::search_code(&engine, &query, limit))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Поиск по справке платформы 1С по точному тексту: имена типов, методов, функций.
+    /// Быстрый лексический поиск по документации встроенных типов и глобальных функций.
+    /// Используй когда знаешь точное имя из справки.
+    #[tool(name = "find_docs", annotations(read_only_hint = true))]
+    async fn find_docs(
+        &self,
+        params: Parameters<FindDocsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.search_engine().clone();
+        let query = params.0.query;
+        let limit = params.0.limit.unwrap_or(10).min(50);
+        tokio::task::spawn_blocking(move || tools::search::find_docs(&engine, &query, limit))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Семантический поиск по справке платформы 1С — поиск по смыслу.
+    /// Опиши что ищешь на естественном языке: "как записать файл", "работа с HTTP".
+    /// Используй когда не знаешь точных имён, а знаешь только что нужно.
+    /// Требует работающий сервис эмбеддингов (EMBEDDING_URL).
+    #[tool(name = "search_docs", annotations(read_only_hint = true))]
+    async fn search_docs(
+        &self,
+        params: Parameters<SearchDocsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.search_engine().clone();
+        let query = params.0.query;
+        let limit = params.0.limit.unwrap_or(10).min(50);
+        tokio::task::spawn_blocking(move || tools::search::search_docs(&engine, &query, limit))
             .await
             .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }

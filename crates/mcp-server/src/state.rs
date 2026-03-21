@@ -1,7 +1,8 @@
 //! Shared state for MCP server tools.
 
 use bsl_metadata::Configuration;
-use bsl_search::{IndexProgress, SearchEngine};
+use bsl_platform::PlatformDataInner;
+use bsl_search::{Document, IndexProgress, SearchEngine};
 use onec_client::Client as OnecClient;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -196,7 +197,125 @@ impl SharedState {
             }
         }
 
+        // Index platform reference documentation.
+        Self::index_platform_docs(&mut engine);
+
         Some(engine)
+    }
+
+    /// Index platform reference documentation into the search engine.
+    ///
+    /// Converts all platform types, methods, and global functions into
+    /// searchable documents. Uses a version hash to skip re-indexing
+    /// if data hasn't changed.
+    fn index_platform_docs(engine: &mut SearchEngine) {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            tracing::debug!("no platform data available, skipping docs indexing");
+            return;
+        }
+
+        let mut documents = Vec::new();
+
+        // Index platform types.
+        for ty in platform.all_types() {
+            let methods = platform.get_type_methods(&ty.name);
+            let method_list: String = methods
+                .iter()
+                .map(|m| format!("{} / {}", m.name, m.english_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let body = format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name,);
+            documents.push(Document {
+                title: format!("{} / {}", ty.name, ty.english_name),
+                body,
+                kind: "type".to_owned(),
+            });
+        }
+
+        // Index platform methods with documentation.
+        for method in platform.all_methods() {
+            let mut body = format!(
+                "Тип: {}\nМетод: {} / {}\n",
+                method.type_name, method.name, method.english_name,
+            );
+            if let Some(ref ret) = method.return_type {
+                body.push_str(&format!("Возвращает: {ret}\n"));
+            }
+            // Add documentation if available.
+            if let Some(docs) = platform.get_method_docs(method.id) {
+                if !docs.syntax.is_empty() {
+                    body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+                }
+                if !docs.description.is_empty() {
+                    body.push_str(&format!("Описание: {}\n", docs.description));
+                }
+                for p in &docs.params {
+                    body.push_str(&format!("Параметр {}: {}\n", p.name, p.description));
+                }
+                for ex in &docs.examples {
+                    body.push_str(&format!("Пример: {}\n", ex.code));
+                }
+            }
+            documents.push(Document {
+                title: format!(
+                    "{}.{} / {}.{}",
+                    method.type_name, method.name, method.type_name, method.english_name
+                ),
+                body,
+                kind: "method".to_owned(),
+            });
+        }
+
+        // Index global functions.
+        for func in platform.all_global_functions() {
+            let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name,);
+            if let Some(ref ret) = func.return_type {
+                body.push_str(&format!("Возвращает: {ret}\n"));
+            }
+            if let Some(docs) = platform.get_global_function_docs(func.id) {
+                if !docs.syntax.is_empty() {
+                    body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+                }
+                if !docs.description.is_empty() {
+                    body.push_str(&format!("Описание: {}\n", docs.description));
+                }
+                for p in &docs.params {
+                    body.push_str(&format!("Параметр {}: {}\n", p.name, p.description));
+                }
+            }
+            documents.push(Document {
+                title: format!("{} / {}", func.name, func.english_name),
+                body,
+                kind: "global_function".to_owned(),
+            });
+        }
+
+        // Use package version as hash — platform data changes only with new releases.
+        let version_bytes = env!("CARGO_PKG_VERSION").as_bytes();
+
+        tracing::info!(
+            types = platform.all_types().len(),
+            methods = platform.all_methods().len(),
+            global_functions = platform.all_global_functions().len(),
+            total_documents = documents.len(),
+            "indexing platform reference documentation"
+        );
+
+        match engine.index_documents("platform", "platform://docs", version_bytes, &documents, None)
+        {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(count, "platform docs indexed");
+                } else {
+                    tracing::info!("platform docs unchanged, skipped");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to index platform docs: {e}");
+            }
+        }
     }
 
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).

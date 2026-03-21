@@ -1,10 +1,12 @@
 //! Search engine — ties chunker, embedder, store, and index together.
 //!
-//! Provides the high-level API for indexing BSL files and searching
-//! through them using semantic similarity.
+//! Provides the high-level API for indexing BSL files and platform
+//! documentation, and searching through them using FTS5 or semantic
+//! similarity. Supports multiple collections within a single database.
 
 use crate::chunker::Chunker;
 use crate::context::{enrich_chunk_text, file_path_to_module_path};
+use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
 use crate::index::VectorIndex;
@@ -83,22 +85,24 @@ impl Default for SearchConfig {
 /// A search result with chunk metadata and similarity score.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
-    /// File path (relative to workspace root).
+    /// Collection this result belongs to ("code", "platform").
+    pub collection: String,
+    /// File path (relative to workspace root, or virtual path for docs).
     pub file_path: String,
-    /// Symbol name (procedure/function name).
+    /// Symbol name (procedure/function name, type/method name).
     pub symbol_name: String,
-    /// Chunk kind: "procedure", "function", or "header".
+    /// Chunk kind: "procedure", "function", "header", "type", "method", etc.
     pub kind: String,
-    /// Source code of the chunk.
+    /// Source code or documentation text.
     pub text: String,
-    /// Line range in the original file.
+    /// Line range in the original file (0 for non-file documents).
     pub line_start: u32,
     pub line_end: u32,
-    /// Cosine similarity score (0..1, higher is better).
+    /// Similarity score (0..1, higher is better).
     pub score: f32,
 }
 
-/// The search engine: indexes BSL files and performs semantic search.
+/// The search engine: indexes BSL files and documents, performs search.
 pub struct SearchEngine {
     store: Store,
     embedder: Option<Embedder>,
@@ -338,25 +342,133 @@ impl SearchEngine {
         Ok(indexed)
     }
 
+    /// Index documents in a named collection (e.g. platform reference).
+    ///
+    /// Documents are stored under a virtual file path. Hash-based
+    /// deduplication prevents re-indexing unchanged data.
+    /// If embedder is configured, generates embeddings for semantic search.
+    ///
+    /// Returns the number of documents indexed (0 if hash unchanged).
+    pub fn index_documents(
+        &mut self,
+        collection: &str,
+        virtual_path: &str,
+        version_hash: &[u8],
+        documents: &[Document],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
+        // Skip if hash unchanged.
+        if let Some(stored_hash) = self.store.file_hash(virtual_path)? {
+            if stored_hash == version_hash {
+                info!(collection, documents = documents.len(), "documents unchanged, skipping");
+                return Ok(0);
+            }
+        }
+
+        info!(collection, documents = documents.len(), "indexing documents");
+
+        if let Some(embedder) = &self.embedder {
+            // Generate embeddings for all document bodies.
+            let texts: Vec<&str> = documents.iter().map(|d| d.body.as_str()).collect();
+            let total_texts = texts.len();
+            let batch_size = self.batch_size;
+            let batches: Vec<Vec<&str>> = texts.chunks(batch_size).map(|c| c.to_vec()).collect();
+
+            if let Some(p) = progress {
+                p.active.store(true, Ordering::Relaxed);
+                p.total_files.store(1, Ordering::Relaxed);
+                p.total_chunks.store(total_texts, Ordering::Relaxed);
+                p.total_batches.store(batches.len(), Ordering::Relaxed);
+                p.done_batches.store(0, Ordering::Relaxed);
+                p.done_chunks.store(0, Ordering::Relaxed);
+            }
+
+            let batch_results: Vec<Result<Vec<Vec<f32>>, SearchError>> = batches
+                .par_iter()
+                .map(|batch| {
+                    let result = embedder.embed_batch(batch);
+                    if let Some(p) = progress {
+                        p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                        p.done_batches.fetch_add(1, Ordering::Relaxed);
+                    }
+                    result
+                })
+                .collect();
+
+            if let Some(p) = progress {
+                p.active.store(false, Ordering::Relaxed);
+            }
+
+            let mut all_embeddings = Vec::with_capacity(total_texts);
+            for result in batch_results {
+                all_embeddings.extend(result?);
+            }
+
+            self.store.reindex_documents(
+                collection,
+                virtual_path,
+                version_hash,
+                documents,
+                Some(&all_embeddings),
+            )?;
+
+            // Rebuild HNSW index.
+            let data = self.store.load_all_embeddings(self.dim)?;
+            self.index = VectorIndex::build(self.dim, &data)?;
+        } else {
+            // FTS-only: store documents without embeddings.
+            self.store.reindex_documents(
+                collection,
+                virtual_path,
+                version_hash,
+                documents,
+                None,
+            )?;
+        }
+
+        let count = documents.len();
+        info!(collection, count, "document indexing complete");
+        Ok(count)
+    }
+
     /// Whether semantic search is available (embedder configured).
     pub fn has_semantic(&self) -> bool {
         self.embedder.is_some()
     }
 
-    /// Search for code chunks semantically similar to the query.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, SearchError> {
+    /// Semantic search, optionally filtered by collection.
+    ///
+    /// If `collection` is `None`, searches across all collections.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
         let embedder = self.embedder.as_ref().ok_or_else(|| {
             SearchError::Embedder(
                 "Semantic search not configured. Set EMBEDDING_URL to enable.".into(),
             )
         })?;
         let query_embedding = embedder.embed(query)?;
-        let results = self.index.search(&query_embedding, limit)?;
 
-        let mut hits = Vec::with_capacity(results.len());
+        // Request extra results to account for collection filtering.
+        let fetch_limit = if collection.is_some() { limit * 3 } else { limit };
+        let results = self.index.search(&query_embedding, fetch_limit)?;
+
+        let mut hits = Vec::with_capacity(limit);
         for result in results {
+            if hits.len() >= limit {
+                break;
+            }
             if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
+                if let Some(coll) = collection {
+                    if info.collection != coll {
+                        continue;
+                    }
+                }
                 hits.push(SearchHit {
+                    collection: info.collection,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,
@@ -371,12 +483,17 @@ impl SearchEngine {
         Ok(hits)
     }
 
-    /// Full-text search for code chunks matching the query.
+    /// Full-text search, optionally filtered by collection.
     ///
     /// Uses SQLite FTS5 for lexical matching — good for exact names,
     /// variable references, API calls, and string literals.
-    pub fn text_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, SearchError> {
-        let results = self.store.text_search(query, limit)?;
+    pub fn text_search(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        let results = self.store.text_search(query, limit, collection)?;
 
         let mut hits = Vec::with_capacity(results.len());
         for result in results {
@@ -384,6 +501,7 @@ impl SearchEngine {
                 // Normalize FTS5 rank (negative, lower = better) to 0..1 score.
                 let score = 1.0 / (1.0 - result.rank as f32);
                 hits.push(SearchHit {
+                    collection: info.collection,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,

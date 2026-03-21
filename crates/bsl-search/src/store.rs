@@ -1,9 +1,12 @@
 //! SQLite-backed persistent storage for search index.
 //!
-//! Stores file hashes, code chunks, and embedding vectors.
-//! Survives process restarts and supports incremental updates.
+//! Stores file hashes, code chunks, embedding vectors, and platform
+//! documentation. Supports multiple collections (e.g. "code", "platform")
+//! within a single database. Survives process restarts and supports
+//! incremental updates.
 
 use crate::chunker::Chunk;
+use crate::document::Document;
 use crate::error::SearchError;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -42,7 +45,8 @@ impl Store {
                 id         INTEGER PRIMARY KEY,
                 path       TEXT    NOT NULL UNIQUE,
                 hash       BLOB   NOT NULL,
-                indexed_at INTEGER NOT NULL
+                indexed_at INTEGER NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code'
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
@@ -68,6 +72,12 @@ impl Store {
             );
             ",
         )?;
+
+        // Migration: add collection column to existing databases.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE files ADD COLUMN collection TEXT NOT NULL DEFAULT 'code'", []);
+
         Ok(())
     }
 
@@ -84,17 +94,22 @@ impl Store {
 
     /// Insert or update a file record.
     /// Returns the file id.
-    pub fn upsert_file(&self, path: &str, hash: &[u8]) -> Result<i64, SearchError> {
+    pub fn upsert_file(
+        &self,
+        path: &str,
+        hash: &[u8],
+        collection: &str,
+    ) -> Result<i64, SearchError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
         self.conn.execute(
-            "INSERT INTO files (path, hash, indexed_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3",
-            params![path, hash, now],
+            "INSERT INTO files (path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+            params![path, hash, now, collection],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -165,6 +180,18 @@ impl Store {
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
+        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings)
+    }
+
+    /// Reindex a file within a specific collection.
+    pub fn reindex_file_in_collection(
+        &mut self,
+        path: &str,
+        hash: &[u8],
+        collection: &str,
+        chunks: &[Chunk],
+        embeddings: Option<&[Vec<f32>]>,
+    ) -> Result<i64, SearchError> {
         let tx = self.conn.transaction()?;
 
         // Upsert file.
@@ -174,10 +201,10 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3",
-            params![path, hash, now],
+            "INSERT INTO files (path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+            params![path, hash, now, collection],
         )?;
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
@@ -237,6 +264,69 @@ impl Store {
         Ok(file_id)
     }
 
+    /// Reindex documents in a collection (e.g. platform reference).
+    ///
+    /// Documents are stored as chunks under a virtual file path.
+    /// Uses the same FTS and embedding infrastructure as code chunks.
+    pub fn reindex_documents(
+        &mut self,
+        collection: &str,
+        virtual_path: &str,
+        hash: &[u8],
+        documents: &[Document],
+        embeddings: Option<&[Vec<f32>]>,
+    ) -> Result<i64, SearchError> {
+        let tx = self.conn.transaction()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "INSERT INTO files (path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+            params![virtual_path, hash, now, collection],
+        )?;
+        let file_id: i64 =
+            tx.query_row("SELECT id FROM files WHERE path = ?1", params![virtual_path], |row| {
+                row.get(0)
+            })?;
+
+        // Delete old FTS entries.
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+
+        // Insert documents as chunks.
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding)
+                 VALUES (?1, ?2, ?3, 0, NULL, 0, 0, ?4, ?5)",
+            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+
+            for (i, doc) in documents.iter().enumerate() {
+                let embedding_blob: Option<Vec<u8>> = embeddings
+                    .and_then(|embs| embs.get(i))
+                    .map(|e| e.iter().flat_map(|f| f.to_le_bytes()).collect());
+
+                stmt.execute(params![file_id, doc.kind, doc.title, doc.body, embedding_blob])?;
+
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, doc.title, doc.body])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(file_id)
+    }
+
     /// Load all embeddings with their chunk ids for building the HNSW index.
     /// Returns (chunk_id, embedding) pairs.
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {
@@ -269,7 +359,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                        c.annotations, c.is_export, f.path
+                        c.annotations, c.is_export, f.path, f.collection
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.id = ?1",
@@ -277,6 +367,7 @@ impl Store {
                 |row| {
                     Ok(ChunkInfo {
                         file_path: row.get(7)?,
+                        collection: row.get(8)?,
                         kind: row.get(0)?,
                         symbol_name: row.get(1)?,
                         line_start: row.get(2)?,
@@ -313,28 +404,41 @@ impl Store {
 
     /// Full-text search across chunk symbol names and text.
     ///
+    /// If `collection` is `Some`, only searches within that collection.
     /// Returns chunk ids with FTS5 rank scores, ordered by relevance.
     pub fn text_search(
         &self,
         query: &str,
         limit: usize,
+        collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT rowid, rank
-             FROM chunks_fts
-             WHERE chunks_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )?;
-
-        let rows = stmt.query_map(params![query, limit as i64], |row| {
-            Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
-        })?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
+        let results = if let Some(coll) = collection {
+            let mut stmt = self.conn.prepare(
+                "SELECT chunks_fts.rowid, chunks_fts.rank
+                 FROM chunks_fts
+                 JOIN chunks c ON c.id = chunks_fts.rowid
+                 JOIN files f ON f.id = c.file_id
+                 WHERE chunks_fts MATCH ?1 AND f.collection = ?2
+                 ORDER BY chunks_fts.rank
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![query, coll, limit as i64], |row| {
+                Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT rowid, rank
+                 FROM chunks_fts
+                 WHERE chunks_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![query, limit as i64], |row| {
+                Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         Ok(results)
     }
 
@@ -381,6 +485,7 @@ pub struct TextSearchResult {
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
     pub file_path: String,
+    pub collection: String,
     pub kind: String,
     pub symbol_name: String,
     pub line_start: u32,
@@ -529,7 +634,7 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.text_search("ОбработкаПроведения", 10).unwrap();
+        let results = store.text_search("ОбработкаПроведения", 10, None).unwrap();
         assert_eq!(results.len(), 1);
 
         let info = store.chunk_by_id(results[0].chunk_id).unwrap().unwrap();
@@ -547,7 +652,7 @@ mod tests {
 
         store.reindex_file("test.bsl", hash.as_bytes(), &[chunk], None).unwrap();
 
-        let results = store.text_search("СообщитьПользователю", 10).unwrap();
+        let results = store.text_search("СообщитьПользователю", 10, None).unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -558,13 +663,13 @@ mod tests {
         let hash2 = blake3::hash(b"v2");
 
         store.reindex_file("test.bsl", hash1.as_bytes(), &[sample_chunk("Старая")], None).unwrap();
-        assert_eq!(store.text_search("Старая", 10).unwrap().len(), 1);
+        assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 1);
 
         store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
 
         // Old name gone, new name found.
-        assert_eq!(store.text_search("Старая", 10).unwrap().len(), 0);
-        assert_eq!(store.text_search("Новая", 10).unwrap().len(), 1);
+        assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 0);
+        assert_eq!(store.text_search("Новая", 10, None).unwrap().len(), 1);
     }
 
     #[test]
@@ -574,9 +679,9 @@ mod tests {
         store
             .reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Удаляемая")], None)
             .unwrap();
-        assert_eq!(store.text_search("Удаляемая", 10).unwrap().len(), 1);
+        assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 1);
 
         store.remove_file("test.bsl").unwrap();
-        assert_eq!(store.text_search("Удаляемая", 10).unwrap().len(), 0);
+        assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
     }
 }

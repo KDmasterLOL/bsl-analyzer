@@ -1,4 +1,4 @@
-//! Search tools: full-text and semantic code search.
+//! Search tools: full-text and semantic search across code and documentation.
 
 use bsl_search::{IndexProgress, SearchEngine};
 use rmcp::model::{CallToolResult, Content};
@@ -20,14 +20,14 @@ pub fn find_code(
     })?;
 
     let hits = engine
-        .text_search(query, limit)
+        .text_search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_hits(&hits))]))
+    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
 }
 
 /// Semantic search across indexed BSL code.
@@ -51,14 +51,68 @@ pub fn search_code(
     }
 
     let hits = engine
-        .search(query, limit)
+        .search(query, limit, Some("code"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
     }
 
-    Ok(CallToolResult::success(vec![Content::text(format_hits(&hits))]))
+    Ok(CallToolResult::success(vec![Content::text(format_code_hits(&hits))]))
+}
+
+/// Full-text search across platform documentation (types, methods, global functions).
+pub fn find_docs(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    query: &str,
+    limit: usize,
+) -> Result<CallToolResult, McpError> {
+    let guard =
+        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    let engine = guard.as_ref().ok_or_else(|| {
+        McpError::invalid_params("Search index not built. Run indexing first.", None)
+    })?;
+
+    let hits = engine
+        .text_search(query, limit, Some("platform"))
+        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+
+    if hits.is_empty() {
+        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
+}
+
+/// Semantic search across platform documentation.
+pub fn search_docs(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    query: &str,
+    limit: usize,
+) -> Result<CallToolResult, McpError> {
+    let guard =
+        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    let engine = guard
+        .as_ref()
+        .ok_or_else(|| McpError::invalid_params("Search index not initialized.", None))?;
+
+    if !engine.has_semantic() {
+        return Err(McpError::invalid_params(
+            "Semantic search not available. Set EMBEDDING_URL environment variable \
+             and restart. Use find_docs for text search instead.",
+            None,
+        ));
+    }
+
+    let hits = engine
+        .search(query, limit, Some("platform"))
+        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+
+    if hits.is_empty() {
+        return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
+    }
+
+    Ok(CallToolResult::success(vec![Content::text(format_doc_hits(&hits))]))
 }
 
 /// Search index status and indexing progress.
@@ -87,6 +141,7 @@ pub fn search_status(
             if semantic { "available" } else { "not configured (set EMBEDDING_URL)" }
         );
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
+        let _ = writeln!(out, "  Collections: code, platform");
     } else {
         let _ = writeln!(out, "Search index: not initialized");
     }
@@ -107,7 +162,7 @@ pub fn search_status(
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
 
-fn format_hits(hits: &[bsl_search::SearchHit]) -> String {
+fn format_code_hits(hits: &[bsl_search::SearchHit]) -> String {
     let mut out = String::new();
 
     for (i, hit) in hits.iter().enumerate() {
@@ -125,6 +180,26 @@ fn format_hits(hits: &[bsl_search::SearchHit]) -> String {
         );
 
         // Show first 5 lines of code.
+        for line in hit.text.lines().take(5) {
+            let _ = writeln!(out, "  │ {line}");
+        }
+        let total_lines = hit.text.lines().count();
+        if total_lines > 5 {
+            let _ = writeln!(out, "  │ ... ({} more lines)", total_lines - 5);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
+    let mut out = String::new();
+
+    for (i, hit) in hits.iter().enumerate() {
+        let _ = writeln!(out, "#{} [{:.3}] {} ({})", i + 1, hit.score, hit.symbol_name, hit.kind,);
+
+        // Show first 5 lines of documentation.
         for line in hit.text.lines().take(5) {
             let _ = writeln!(out, "  │ {line}");
         }

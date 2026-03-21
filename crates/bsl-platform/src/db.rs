@@ -4,7 +4,6 @@
 //! - Salsa tracked queries for IDE integration with caching
 //! - A singleton for standalone usage
 
-use crate::search::SearchIndex;
 use crate::types::{GlobalFunction, PlatformMethod, PlatformType};
 use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
@@ -35,8 +34,6 @@ pub struct PlatformDataInner {
     method_docs_by_id: FxHashMap<u32, usize>,
     /// Global function documentation indexed by function ID
     global_function_docs_by_id: FxHashMap<u32, usize>,
-    /// Full-text search index over descriptions, names, and parameters
-    search_index: SearchIndex,
 }
 
 impl PlatformDataInner {
@@ -108,8 +105,6 @@ impl PlatformDataInner {
             global_function_docs_by_id.insert(docs.method_id, idx);
         }
 
-        let search_index = SearchIndex::new(&types, &methods, &global_functions);
-
         Self {
             types,
             types_by_name,
@@ -119,7 +114,6 @@ impl PlatformDataInner {
             global_functions_by_name,
             method_docs_by_id,
             global_function_docs_by_id,
-            search_index,
         }
     }
 
@@ -178,11 +172,6 @@ impl PlatformDataInner {
         let idx = *self.global_function_docs_by_id.get(&function_id)?;
         let raw_docs = crate::generated::GLOBAL_FUNCTION_DOCS.get(idx)?;
         Some(crate::types::MethodDocs::from(raw_docs))
-    }
-
-    /// Full-text search across platform documentation.
-    pub fn search(&self, query: &str) -> Vec<crate::search::SearchResult> {
-        self.search_index.search(query)
     }
 
     /// Returns keyword documentation by name (case-insensitive).
