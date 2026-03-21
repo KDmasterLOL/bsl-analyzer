@@ -37,7 +37,7 @@ tracing.workspace = true
 thiserror.workspace = true
 
 # Parallelism
-rayon.workspace = true
+crossbeam-channel.workspace = true
 
 # Utilities
 walkdir.workspace = true

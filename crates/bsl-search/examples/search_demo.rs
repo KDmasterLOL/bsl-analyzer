@@ -63,6 +63,9 @@ fn main() {
 
     let api_key = std::env::var("EMBEDDING_API_KEY").ok();
 
+    let concurrency: usize =
+        std::env::var("EMBEDDING_CONCURRENCY").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+
     let config = SearchConfig {
         embedder: EmbedderConfig {
             base_url,
@@ -71,6 +74,7 @@ fn main() {
             api_key: api_key.clone(),
         },
         batch_size,
+        concurrency,
     };
 
     // Database stored in .build/ (typically gitignored).

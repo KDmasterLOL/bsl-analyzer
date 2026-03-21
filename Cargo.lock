@@ -345,11 +345,11 @@ name = "bsl-search"
 version = "0.1.49"
 dependencies = [
  "blake3",
+ "crossbeam-channel",
  "expect-test",
  "lexer",
  "parser",
  "project-model",
- "rayon",
  "rusqlite",
  "serde",
  "serde_json",

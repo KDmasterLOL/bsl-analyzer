@@ -140,6 +140,11 @@ impl SharedState {
             let dim: usize =
                 std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
 
+            let concurrency: usize = std::env::var("EMBEDDING_CONCURRENCY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
+
             let config = bsl_search::SearchConfig {
                 embedder: bsl_search::EmbedderConfig {
                     base_url,
@@ -148,6 +153,7 @@ impl SharedState {
                     api_key: std::env::var("EMBEDDING_API_KEY").ok(),
                 },
                 batch_size: 32,
+                concurrency,
             };
 
             match SearchEngine::new(&db_path, config) {

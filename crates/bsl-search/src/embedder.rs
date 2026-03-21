@@ -31,14 +31,29 @@ impl Default for EmbedderConfig {
 }
 
 /// Embedding model client via OpenAI-compatible HTTP API.
+///
+/// Clone creates a new instance with its own HTTP connection pool
+/// (separate `ureq::Agent`), sharing only the configuration.
+/// This is intentional for concurrent workers — each gets independent connections.
 pub struct Embedder {
     config: EmbedderConfig,
+    agent: ureq::Agent,
+}
+
+impl Clone for Embedder {
+    fn clone(&self) -> Self {
+        Self::new(self.config.clone())
+    }
 }
 
 impl Embedder {
     /// Create a new embedder with the given configuration.
     pub fn new(config: EmbedderConfig) -> Self {
-        Self { config }
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .build()
+            .new_agent();
+        Self { config, agent }
     }
 
     /// Configured embedding dimension.
@@ -51,10 +66,36 @@ impl Embedder {
         &self.config.model
     }
 
-    /// Generate embeddings for a batch of texts.
+    /// Maximum number of retry attempts for failed embedding requests.
+    const MAX_RETRIES: u32 = 10;
+
+    /// Generate embeddings for a batch of texts with retry logic.
     ///
-    /// Sends a single request with all texts. The API handles batching internally.
+    /// Retries up to 10 times with exponential backoff on failure.
+    /// Sends a single request with all texts per attempt.
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {
+        let mut last_err = None;
+        for attempt in 0..Self::MAX_RETRIES {
+            match self.embed_batch_once(texts) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt.min(6)));
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = Self::MAX_RETRIES,
+                        delay_ms = delay.as_millis() as u64,
+                        "embedding batch failed, retrying: {e}"
+                    );
+                    std::thread::sleep(delay);
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| SearchError::Embedder("all retries exhausted".into())))
+    }
+
+    /// Single attempt to generate embeddings for a batch.
+    fn embed_batch_once(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SearchError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -67,7 +108,7 @@ impl Embedder {
             dimensions: self.config.dim,
         };
 
-        let mut req = ureq::post(&url);
+        let mut req = self.agent.post(&url);
         if let Some(ref key) = self.config.api_key {
             req = req.header("Authorization", &format!("Bearer {key}"));
         }
@@ -122,7 +163,9 @@ impl Embedder {
         // Try /health (TEI) first, then /v1/models (Ollama/OpenAI).
         let health_url = format!("{}/health", self.config.base_url);
         let models_url = format!("{}/v1/models", self.config.base_url);
-        if ureq::get(&health_url).call().is_err() && ureq::get(&models_url).call().is_err() {
+        if self.agent.get(&health_url).call().is_err()
+            && self.agent.get(&models_url).call().is_err()
+        {
             return Err(SearchError::Embedder(format!(
                 "embedding service not available at {}",
                 self.config.base_url

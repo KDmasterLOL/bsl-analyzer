@@ -3,6 +3,9 @@
 //! Provides the high-level API for indexing BSL files and platform
 //! documentation, and searching through them using FTS5 or semantic
 //! similarity. Supports multiple collections within a single database.
+//!
+//! Embedding generation uses a pool of N concurrent HTTP connections
+//! (default 10) to maximize throughput against remote APIs.
 
 use crate::chunker::Chunker;
 use crate::context::{enrich_chunk_text, file_path_to_module_path};
@@ -11,11 +14,13 @@ use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
 use crate::index::VectorIndex;
 use crate::store::Store;
-use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Default number of concurrent embedding connections.
+const DEFAULT_CONCURRENCY: usize = 10;
 
 /// Progress tracker for indexing operations.
 ///
@@ -74,11 +79,17 @@ pub struct SearchConfig {
     pub embedder: EmbedderConfig,
     /// Maximum batch size for embedding generation.
     pub batch_size: usize,
+    /// Number of concurrent embedding connections (default 10).
+    pub concurrency: usize,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        Self { embedder: EmbedderConfig::default(), batch_size: 32 }
+        Self {
+            embedder: EmbedderConfig::default(),
+            batch_size: 32,
+            concurrency: DEFAULT_CONCURRENCY,
+        }
     }
 }
 
@@ -109,13 +120,14 @@ pub struct SearchEngine {
     index: VectorIndex,
     dim: usize,
     batch_size: usize,
+    concurrency: usize,
 }
 
 impl SearchEngine {
     /// Create a search engine with full capabilities (FTS + semantic).
     ///
     /// - `db_path`: path to the SQLite database file
-    /// - `config`: search configuration (embedder + batch size)
+    /// - `config`: search configuration (embedder + batch size + concurrency)
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
         let store = Store::open(db_path)?;
         let dim = config.embedder.dim.unwrap_or(1024);
@@ -128,7 +140,14 @@ impl SearchEngine {
 
         Self::ensure_fts(&store)?;
 
-        Ok(Self { store, embedder: Some(embedder), index, dim, batch_size: config.batch_size })
+        Ok(Self {
+            store,
+            embedder: Some(embedder),
+            index,
+            dim,
+            batch_size: config.batch_size,
+            concurrency: config.concurrency,
+        })
     }
 
     /// Create a FTS-only search engine (no embedder, no semantic search).
@@ -142,7 +161,14 @@ impl SearchEngine {
 
         Self::ensure_fts(&store)?;
 
-        Ok(Self { store, embedder: None, index, dim, batch_size: 32 })
+        Ok(Self {
+            store,
+            embedder: None,
+            index,
+            dim,
+            batch_size: 32,
+            concurrency: DEFAULT_CONCURRENCY,
+        })
     }
 
     /// Auto-populate FTS index from existing chunk data if needed.
@@ -158,10 +184,12 @@ impl SearchEngine {
 
     /// Index all BSL files in a directory with embeddings.
     ///
-    /// Walks the directory tree, skips files whose hash hasn't changed,
-    /// and generates embeddings for new/modified files.
+    /// Uses a pool of N concurrent workers for embedding generation.
+    /// Each worker has its own HTTP connection to the embedding API.
+    /// The main thread acts as writer — receives completed files and
+    /// writes them to SQLite immediately (resumable on interruption).
     ///
-    /// If `progress` is provided, updates it with batching stats.
+    /// If `progress` is provided, workers update it atomically.
     /// Returns the number of files indexed (new or updated).
     pub fn index_directory(
         &mut self,
@@ -177,9 +205,15 @@ impl SearchEngine {
 
         info!(total_files = bsl_files.len(), "scanning BSL files");
 
-        let mut pending_texts = Vec::new();
-        let mut pending_chunks_count = Vec::new();
-        let mut pending_meta: Vec<(String, Vec<u8>, Vec<crate::chunker::Chunk>)> = Vec::new();
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Embedder(
+                "Cannot generate embeddings: embedder not configured. Set EMBEDDING_URL.".into(),
+            )
+        })?;
+
+        // First pass: collect files that need reindexing.
+        let mut tasks: Vec<FileTask> = Vec::new();
+        let mut total_chunks = 0usize;
 
         for file_path in &bsl_files {
             let content = match std::fs::read_to_string(file_path) {
@@ -194,7 +228,6 @@ impl SearchEngine {
             let rel_path =
                 file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            // Skip if hash unchanged.
             if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
@@ -207,89 +240,148 @@ impl SearchEngine {
             }
 
             let module_path = file_path_to_module_path(&rel_path);
-            for chunk in &chunks {
-                pending_texts.push(enrich_chunk_text(chunk, &module_path));
-            }
-            pending_chunks_count.push(chunks.len());
-            pending_meta.push((rel_path, hash.as_bytes().to_vec(), chunks));
+            let texts: Vec<String> =
+                chunks.iter().map(|c| enrich_chunk_text(c, &module_path)).collect();
+
+            total_chunks += chunks.len();
+            tasks.push(FileTask { rel_path, hash: hash.as_bytes().to_vec(), chunks, texts });
         }
 
-        if pending_texts.is_empty() {
+        if tasks.is_empty() {
             info!("no files need reindexing");
             return Ok(0);
         }
 
-        let embedder = self.embedder.as_ref().ok_or_else(|| {
-            SearchError::Embedder(
-                "Cannot generate embeddings: embedder not configured. Set EMBEDDING_URL.".into(),
-            )
-        })?;
-
-        // Generate embeddings in parallel batches.
-        let total_texts = pending_texts.len();
         let batch_size = self.batch_size;
-        let batches: Vec<Vec<String>> =
-            pending_texts.chunks(batch_size).map(|c| c.to_vec()).collect();
+        let total_batches: usize = tasks.iter().map(|t| t.texts.len().div_ceil(batch_size)).sum();
 
-        // Update progress tracker.
         if let Some(p) = &progress {
             p.active.store(true, Ordering::Relaxed);
-            p.total_files.store(pending_meta.len(), Ordering::Relaxed);
-            p.total_chunks.store(total_texts, Ordering::Relaxed);
-            p.total_batches.store(batches.len(), Ordering::Relaxed);
+            p.total_files.store(tasks.len(), Ordering::Relaxed);
+            p.total_chunks.store(total_chunks, Ordering::Relaxed);
+            p.total_batches.store(total_batches, Ordering::Relaxed);
             p.done_batches.store(0, Ordering::Relaxed);
             p.done_chunks.store(0, Ordering::Relaxed);
         }
 
+        let concurrency = self.concurrency.min(tasks.len());
         info!(
-            files = pending_meta.len(),
-            chunks = total_texts,
-            batches = batches.len(),
+            files = tasks.len(),
+            chunks = total_chunks,
+            batches = total_batches,
+            concurrency,
             "generating embeddings"
         );
 
-        let batch_results: Vec<Result<Vec<Vec<f32>>, SearchError>> = batches
-            .par_iter()
-            .map(|batch| {
-                let texts: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-                let result = embedder.embed_batch(&texts);
-                if let Some(p) = &progress {
-                    let done =
-                        p.done_chunks.fetch_add(texts.len(), Ordering::Relaxed) + texts.len();
-                    p.done_batches.fetch_add(1, Ordering::Relaxed);
-                    debug!(progress = done, total = total_texts, "embedding batch done");
-                }
-                result
+        // Set up worker pool.
+        let (task_tx, task_rx) = crossbeam_channel::bounded::<FileTask>(concurrency * 2);
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<FileResult>(concurrency * 2);
+
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+            .map(|_| {
+                let rx = task_rx.clone();
+                let tx = result_tx.clone();
+                let emb = embedder.clone();
+                let bs = batch_size;
+                let prog = progress.cloned();
+
+                std::thread::spawn(move || {
+                    while let Ok(task) = rx.recv() {
+                        let mut embeddings = Vec::with_capacity(task.texts.len());
+                        let mut error = None;
+
+                        for batch in task.texts.chunks(bs) {
+                            let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                            match emb.embed_batch(&refs) {
+                                Ok(embs) => {
+                                    embeddings.extend(embs);
+                                    if let Some(p) = &prog {
+                                        p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                                        p.done_batches.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(e) => {
+                                    error = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        let _ = tx.send(FileResult {
+                            rel_path: task.rel_path,
+                            hash: task.hash,
+                            chunks: task.chunks,
+                            embeddings: match error {
+                                None => Ok(embeddings),
+                                Some(e) => Err(e),
+                            },
+                        });
+                    }
+                })
             })
             .collect();
 
+        // Drop our copies — workers hold theirs.
+        drop(task_rx);
+        drop(result_tx);
+
+        // Producer thread sends tasks while main thread reads results.
+        // Both channels are bounded, so producer and workers apply
+        // backpressure to each other — no deadlock.
+        let producer = std::thread::spawn(move || {
+            for task in tasks {
+                if task_tx.send(task).is_err() {
+                    break;
+                }
+            }
+            // task_tx dropped here, closing the channel.
+        });
+
+        // Main thread = writer: receive completed files and write to DB.
+        let mut indexed = 0usize;
+        let mut errors = 0usize;
+        while let Ok(result) = result_rx.recv() {
+            match result.embeddings {
+                Ok(embeddings) => {
+                    self.store.reindex_file(
+                        &result.rel_path,
+                        &result.hash,
+                        &result.chunks,
+                        Some(&embeddings),
+                    )?;
+                    indexed += 1;
+                    debug!(file = %result.rel_path, chunks = result.chunks.len(), "file indexed");
+                }
+                Err(e) => {
+                    warn!(file = %result.rel_path, "embedding failed after retries, skipping: {e}");
+                    errors += 1;
+                }
+            }
+        }
+
+        let _ = producer.join();
+        for w in workers {
+            let _ = w.join();
+        }
+
         if let Some(p) = &progress {
             p.active.store(false, Ordering::Relaxed);
-        }
-
-        let mut all_embeddings = Vec::with_capacity(total_texts);
-        for result in batch_results {
-            all_embeddings.extend(result?);
-        }
-
-        // Store chunks with embeddings.
-        let mut emb_offset = 0;
-        for (i, (rel_path, hash, chunks)) in pending_meta.iter().enumerate() {
-            let chunk_count = pending_chunks_count[i];
-            let chunk_embeddings: Vec<Vec<f32>> =
-                all_embeddings[emb_offset..emb_offset + chunk_count].to_vec();
-
-            self.store.reindex_file(rel_path, hash, chunks, Some(&chunk_embeddings))?;
-
-            emb_offset += chunk_count;
         }
 
         // Rebuild HNSW index from all embeddings.
         let data = self.store.load_all_embeddings(self.dim)?;
         self.index = VectorIndex::build(self.dim, &data)?;
 
-        let indexed = pending_meta.len();
-        info!(indexed, total_vectors = self.index.len(), "indexing complete");
+        if errors > 0 {
+            info!(
+                indexed,
+                errors,
+                total_vectors = self.index.len(),
+                "indexing complete with errors"
+            );
+        } else {
+            info!(indexed, total_vectors = self.index.len(), "indexing complete");
+        }
         Ok(indexed)
     }
 
@@ -346,7 +438,9 @@ impl SearchEngine {
     ///
     /// Documents are stored under a virtual file path. Hash-based
     /// deduplication prevents re-indexing unchanged data.
-    /// If embedder is configured, generates embeddings for semantic search.
+    ///
+    /// If embedder is configured, generates embeddings using a pool of
+    /// concurrent workers for parallel API calls.
     ///
     /// Returns the number of documents indexed (0 if hash unchanged).
     pub fn index_documents(
@@ -368,41 +462,83 @@ impl SearchEngine {
         info!(collection, documents = documents.len(), "indexing documents");
 
         if let Some(embedder) = &self.embedder {
-            // Generate embeddings for all document bodies.
-            let texts: Vec<&str> = documents.iter().map(|d| d.body.as_str()).collect();
-            let total_texts = texts.len();
+            let texts: Vec<String> = documents.iter().map(|d| d.body.clone()).collect();
             let batch_size = self.batch_size;
-            let batches: Vec<Vec<&str>> = texts.chunks(batch_size).map(|c| c.to_vec()).collect();
+            let total_batches = texts.len().div_ceil(batch_size);
 
             if let Some(p) = progress {
                 p.active.store(true, Ordering::Relaxed);
                 p.total_files.store(1, Ordering::Relaxed);
-                p.total_chunks.store(total_texts, Ordering::Relaxed);
-                p.total_batches.store(batches.len(), Ordering::Relaxed);
+                p.total_chunks.store(texts.len(), Ordering::Relaxed);
+                p.total_batches.store(total_batches, Ordering::Relaxed);
                 p.done_batches.store(0, Ordering::Relaxed);
                 p.done_chunks.store(0, Ordering::Relaxed);
             }
 
-            let batch_results: Vec<Result<Vec<Vec<f32>>, SearchError>> = batches
-                .par_iter()
-                .map(|batch| {
-                    let result = embedder.embed_batch(batch);
-                    if let Some(p) = progress {
-                        p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
-                        p.done_batches.fetch_add(1, Ordering::Relaxed);
-                    }
-                    result
+            let concurrency = self.concurrency.min(total_batches.max(1));
+
+            // Split texts into owned batches with indices for ordered reassembly.
+            let indexed_batches: Vec<(usize, Vec<String>)> =
+                texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
+
+            let (task_tx, task_rx) =
+                crossbeam_channel::bounded::<(usize, Vec<String>)>(concurrency * 2);
+            let (result_tx, result_rx) = crossbeam_channel::bounded::<(
+                usize,
+                Result<Vec<Vec<f32>>, SearchError>,
+            )>(concurrency * 2);
+
+            let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+                .map(|_| {
+                    let rx = task_rx.clone();
+                    let tx = result_tx.clone();
+                    let emb = embedder.clone();
+                    let prog = progress.cloned();
+
+                    std::thread::spawn(move || {
+                        while let Ok((idx, batch)) = rx.recv() {
+                            let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                            let result = emb.embed_batch(&refs);
+                            if let (Ok(_), Some(p)) = (&result, &prog) {
+                                p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                                p.done_batches.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let _ = tx.send((idx, result));
+                        }
+                    })
                 })
                 .collect();
+
+            drop(task_rx);
+            drop(result_tx);
+
+            // Producer thread sends batches while main thread reads results.
+            let producer = std::thread::spawn(move || {
+                for (idx, batch) in indexed_batches {
+                    if task_tx.send((idx, batch)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Collect results and reassemble in order.
+            let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
+            while let Ok((idx, result)) = result_rx.recv() {
+                results.push((idx, result?));
+            }
+
+            let _ = producer.join();
+            for w in workers {
+                let _ = w.join();
+            }
 
             if let Some(p) = progress {
                 p.active.store(false, Ordering::Relaxed);
             }
 
-            let mut all_embeddings = Vec::with_capacity(total_texts);
-            for result in batch_results {
-                all_embeddings.extend(result?);
-            }
+            results.sort_by_key(|(i, _)| *i);
+            let all_embeddings: Vec<Vec<f32>> =
+                results.into_iter().flat_map(|(_, embs)| embs).collect();
 
             self.store.reindex_documents(
                 collection,
@@ -538,4 +674,22 @@ impl SearchEngine {
         self.index = VectorIndex::build(self.dim, &data)?;
         Ok(())
     }
+}
+
+// -- Internal types for worker pool communication --
+
+/// Task sent to an embedding worker (one file).
+struct FileTask {
+    rel_path: String,
+    hash: Vec<u8>,
+    chunks: Vec<crate::chunker::Chunk>,
+    texts: Vec<String>,
+}
+
+/// Result from an embedding worker (one file).
+struct FileResult {
+    rel_path: String,
+    hash: Vec<u8>,
+    chunks: Vec<crate::chunker::Chunk>,
+    embeddings: Result<Vec<Vec<f32>>, SearchError>,
 }
