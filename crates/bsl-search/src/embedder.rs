@@ -15,6 +15,8 @@ pub struct EmbedderConfig {
     pub model: String,
     /// Embedding dimension to truncate to (Matryoshka). None = use full dimension.
     pub dim: Option<usize>,
+    /// API key for authenticated providers (OpenRouter, OpenAI, etc.)
+    pub api_key: Option<String>,
 }
 
 impl Default for EmbedderConfig {
@@ -23,6 +25,7 @@ impl Default for EmbedderConfig {
             base_url: "http://localhost:11434".to_owned(),
             model: "qwen3-embedding".to_owned(),
             dim: Some(1024),
+            api_key: None,
         }
     }
 }
@@ -64,7 +67,11 @@ impl Embedder {
             dimensions: self.config.dim,
         };
 
-        let mut resp = match ureq::post(&url).send_json(&request) {
+        let mut req = ureq::post(&url);
+        if let Some(ref key) = self.config.api_key {
+            req = req.header("Authorization", &format!("Bearer {key}"));
+        }
+        let mut resp = match req.send_json(&request) {
             Ok(r) => r,
             Err(e) => {
                 // Try to extract response body for better error messages.

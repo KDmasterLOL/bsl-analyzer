@@ -181,6 +181,12 @@ enum Commands {
         onec_password: String,
     },
 
+    /// Export built-in 1C extension (BSL_Analyzer) to a directory
+    Extension {
+        #[command(subcommand)]
+        command: ExtensionCommands,
+    },
+
     /// Start DAP debug adapter (Debug Adapter Protocol via stdio)
     Dap,
 
@@ -188,6 +194,16 @@ enum Commands {
     Rules {
         #[command(subcommand)]
         command: RulesCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommands {
+    /// Export extension XML files to a directory for loading into 1C infobase
+    Export {
+        /// Output directory (will be created if it doesn't exist)
+        #[arg(short, long)]
+        output: PathBuf,
     },
 }
 
@@ -292,6 +308,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Mcp { socket, source_dir, onec_url, onec_user, onec_password }) => {
             run_mcp_server(socket, source_dir, onec_url, &onec_user, &onec_password)
         }
+        Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(cli.mcp_socket),
@@ -333,6 +350,45 @@ fn run_rules_command(command: RulesCommands) -> Result<(), Box<dyn Error + Send 
                 };
                 println!("  {:40} [{}] {}", format!("{:?}", code), status, name);
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_extension_command(command: ExtensionCommands) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command {
+        ExtensionCommands::Export { output } => {
+            static EXTENSION_ZIP: &[u8] =
+                include_bytes!(concat!(env!("OUT_DIR"), "/extension.zip"));
+
+            let cursor = std::io::Cursor::new(EXTENSION_ZIP);
+            let mut archive = zip::ZipArchive::new(cursor)?;
+
+            let mut count = 0;
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i)?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let dest = output.join(entry.name());
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut out_file = fs::File::create(&dest)?;
+                std::io::copy(&mut entry, &mut out_file)?;
+                count += 1;
+            }
+
+            eprintln!("Extension exported to: {}", output.display());
+            eprintln!("Files: {count}");
+            eprintln!();
+            eprintln!("To install into 1C infobase:");
+            eprintln!(
+                "  rtools config extension import -d <database> -e BSL_Analyzer -i {}",
+                output.display()
+            );
+            eprintln!("  rtools config extension apply -d <database> -e BSL_Analyzer");
         }
     }
 

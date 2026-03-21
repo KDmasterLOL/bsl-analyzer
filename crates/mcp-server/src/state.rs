@@ -145,6 +145,7 @@ impl SharedState {
                     base_url,
                     model: model.clone(),
                     dim: Some(dim),
+                    api_key: std::env::var("EMBEDDING_API_KEY").ok(),
                 },
                 batch_size: 32,
             };

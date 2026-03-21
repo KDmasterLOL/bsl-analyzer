@@ -61,8 +61,15 @@ fn main() {
     let batch_size: usize =
         std::env::var("BATCH_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
 
+    let api_key = std::env::var("EMBEDDING_API_KEY").ok();
+
     let config = SearchConfig {
-        embedder: EmbedderConfig { base_url, model: model.clone(), dim: Some(dim) },
+        embedder: EmbedderConfig {
+            base_url,
+            model: model.clone(),
+            dim: Some(dim),
+            api_key: api_key.clone(),
+        },
         batch_size,
     };
 
@@ -84,6 +91,7 @@ fn main() {
         base_url: config.embedder.base_url.clone(),
         model: config.embedder.model.clone(),
         dim: config.embedder.dim,
+        api_key: api_key.clone(),
     });
     if let Err(e) = embedder.health_check() {
         eprintln!("Error: embedding service not available: {e}");
