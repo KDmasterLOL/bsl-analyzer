@@ -33,15 +33,18 @@ use serde::Deserialize;
 
 #[derive(Deserialize, JsonSchema)]
 struct MetadataTreeParams {
-    /// Категория метаданных для фильтрации: Справочники, Документы, Перечисления,
+    /// Категория метаданных для фильтрации (на русском): Справочники, Документы, Перечисления,
     /// Обработки, Отчеты, РегистрыСведений, РегистрыНакопления, ОбщиеМодули и др.
     /// Если не указан — возвращаются все категории с количеством объектов.
+    /// Примечание: здесь фильтр на русском, а в get_object_structure тип на английском (Document, Catalog...).
     filter: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ObjectStructureParams {
-    /// Тип объекта метаданных: Document, Catalog, InformationRegister, AccumulationRegister, Enum и др.
+    /// Тип объекта метаданных на английском: Document (Документ), Catalog (Справочник),
+    /// InformationRegister (РегистрСведений), AccumulationRegister (РегистрНакопления),
+    /// Enum (Перечисление), DataProcessor (Обработка), Report (Отчет), CommonModule (ОбщийМодуль) и др.
     object_type: String,
     /// Имя объекта метаданных, например РеализацияТоваровУслуг
     object_name: String,
@@ -49,7 +52,8 @@ struct ObjectStructureParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct FormStructureParams {
-    /// Тип объекта: Document, Catalog, DataProcessor, Report и т.д.
+    /// Тип объекта на английском: Document (Документ), Catalog (Справочник),
+    /// DataProcessor (Обработка), Report (Отчет) и т.д.
     object_type: String,
     /// Имя объекта метаданных
     object_name: String,
@@ -87,7 +91,9 @@ struct SearchDocsParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct ValidateQueryParams {
-    /// Текст запроса на языке запросов 1С для проверки
+    /// Текст запроса на языке запросов 1С (SDBL) для проверки.
+    /// Проверяет через СхемаЗапроса платформы 1С (если доступен --onec-url),
+    /// иначе локально парсером (находит только синтаксические ошибки).
     query: String,
 }
 
@@ -159,7 +165,8 @@ fn default_debug_port() -> u16 {
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugBreakpointParams {
-    /// Имя модуля (например "ОбщийМодуль.МойМодуль" или "Справочник.Номенклатура.МодульОбъекта")
+    /// Имя модуля, например "ОбщийМодуль.ОбщегоНазначения" или "Справочник.Номенклатура.МодульОбъекта".
+    /// Поддерживается сокращённый формат — суффикс .Модуль/.МодульОбъекта добавляется автоматически.
     module: String,
     /// Номер строки
     line: u32,
@@ -177,7 +184,8 @@ struct DebugRemoveBreakpointParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugStepParams {
-    /// Действие: "next" (шаг через), "in" (шаг внутрь), "out" (шаг наружу)
+    /// Действие: "next" (шаг через), "in" (шаг внутрь), "out" (шаг наружу).
+    /// Допустимые значения: next, in, out.
     action: String,
 }
 
@@ -195,7 +203,8 @@ struct DebugLocalsParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct DebugEvalParams {
-    /// BSL-выражение для вычисления
+    /// BSL-выражение для вычисления в контексте остановленного на breakpoint сеанса отладки.
+    /// Для вычисления без отладчика (в новом серверном сеансе) используй eval_expression.
     expression: String,
     /// Уровень стека (0 = текущий фрейм)
     stack_level: Option<u32>,
@@ -347,10 +356,11 @@ impl McpServer {
         tools::execution::execute_code(&self.state, &params.0.code).await
     }
 
-    /// Вычислить BSL-выражение в реальной базе 1С и получить результат. Выражение вычисляется
-    /// через Вычислить(). Используй для получения значений: ТекущаяДата(), 1+1,
-    /// Справочники.Номенклатура.НайтиПоНаименованию("Товар"). Требует подключения (--onec-url).
-    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только выражения.
+    /// Вычислить BSL-выражение в реальной базе 1С и получить результат.
+    /// Без отладчика — выполняет в новом серверном сеансе через Вычислить().
+    /// Для вычисления в контексте остановленного на breakpoint сеанса используй debug_eval.
+    /// Примеры: ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар").
+    /// Требует подключения (--onec-url). Нельзя объявлять Функция/Процедура — только выражения.
     #[tool(name = "eval_expression")]
     async fn eval_expression(
         &self,
@@ -360,7 +370,7 @@ impl McpServer {
     }
 
     /// Статус поискового индекса: количество файлов, чанков, режим (FTS/семантика),
-    /// прогресс текущей индексации (процент, батчи).
+    /// количество векторов по коллекциям (code, platform), прогресс текущей индексации.
     #[tool(name = "search_status", annotations(read_only_hint = true))]
     async fn search_status(&self) -> Result<CallToolResult, McpError> {
         let engine = self.state.search_engine().clone();
@@ -527,6 +537,9 @@ impl McpServer {
 
     /// Ожидать остановку программы (точка останова, исключение, шаг).
     /// Блокирует до наступления события или таймаута.
+    /// ВАЖНО: если код запущен через execute_code и остановился на breakpoint,
+    /// execute_code зависнет до вызова debug_continue. Запускай код через curl
+    /// или в фоновом режиме, а не через execute_code, если планируешь отладку.
     #[tool(name = "debug_wait_stop")]
     async fn debug_wait_stop(
         &self,
