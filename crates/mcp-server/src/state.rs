@@ -4,7 +4,7 @@ use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{Document, IndexProgress, SearchEngine};
 use onec_client::Client as OnecClient;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -32,9 +32,13 @@ impl SharedState {
     /// Returns immediately. Metadata loading is synchronous (~1-2s).
     /// Search engine initialization (FTS indexing) runs in a background thread.
     pub fn standalone(source_dir: PathBuf) -> Self {
-        let configuration = bsl_metadata::load_from_directory(&source_dir)
+        // Use Project to discover configuration path (configurationRoot,
+        // recursive Configuration.xml search, common patterns).
+        let project = project_model::Project::new(&source_dir);
+        let config_path = project.source_path();
+        let configuration = bsl_metadata::load_from_directory(config_path)
             .map_err(|e| {
-                tracing::warn!(?source_dir, "failed to load configuration: {e}");
+                tracing::warn!(?config_path, "failed to load configuration: {e}");
                 e
             })
             .ok();
@@ -52,8 +56,7 @@ impl SharedState {
                 .name("bsl-search-init".to_owned())
                 .spawn(move || {
                     tracing::info!("search engine initialization started in background");
-                    let _ = progress_arc; // keep progress alive in thread
-                    let engine = Self::init_search_engine(&root);
+                    let engine = Self::init_search_engine(&root, &progress_arc);
                     if let Ok(mut guard) = engine_arc.lock() {
                         *guard = engine;
                     }
@@ -146,41 +149,33 @@ impl SharedState {
         &self.index_progress
     }
 
-    /// Initialize search engine from workspace root.
-    ///
-    /// If a DB exists, opens it. Otherwise builds a FTS-only index from source files.
-    /// If EMBEDDING_URL is set, enables semantic search too.
-    fn init_search_engine(workspace_root: &std::path::Path) -> Option<SearchEngine> {
-        let build_dir = workspace_root.join(".build");
-        std::fs::create_dir_all(&build_dir).ok();
-        let db_path = build_dir.join("bsl-search.db");
+    /// Read embedding configuration from environment variables.
+    fn embedding_config() -> Option<bsl_search::SearchConfig> {
+        let base_url = std::env::var("EMBEDDING_URL").ok()?;
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+        let dim: usize =
+            std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+        let concurrency: usize =
+            std::env::var("EMBEDDING_CONCURRENCY").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
 
-        let has_embedder = std::env::var("EMBEDDING_URL").is_ok();
+        Some(bsl_search::SearchConfig {
+            embedder: bsl_search::EmbedderConfig {
+                base_url,
+                model,
+                dim: Some(dim),
+                api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+            },
+            batch_size: 32,
+            concurrency,
+        })
+    }
 
-        let mut engine = if has_embedder {
-            let base_url = std::env::var("EMBEDDING_URL").unwrap();
-            let model = std::env::var("EMBEDDING_MODEL")
-                .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
-            let dim: usize =
-                std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
-
-            let concurrency: usize = std::env::var("EMBEDDING_CONCURRENCY")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
-
-            let config = bsl_search::SearchConfig {
-                embedder: bsl_search::EmbedderConfig {
-                    base_url,
-                    model: model.clone(),
-                    dim: Some(dim),
-                    api_key: std::env::var("EMBEDDING_API_KEY").ok(),
-                },
-                batch_size: 32,
-                concurrency,
-            };
-
-            match SearchEngine::new(&db_path, config) {
+    /// Open search engine from DB, creating it if needed.
+    fn open_search_engine(db_path: &Path) -> Option<SearchEngine> {
+        if let Some(config) = Self::embedding_config() {
+            let model = config.embedder.model.clone();
+            match SearchEngine::new(db_path, config) {
                 Ok(engine) => {
                     tracing::info!(
                         files = engine.file_count().unwrap_or(0),
@@ -189,47 +184,95 @@ impl SharedState {
                         model,
                         "search engine loaded (FTS + semantic)"
                     );
-                    engine
+                    Some(engine)
                 }
                 Err(e) => {
                     tracing::warn!("failed to init search engine with embedder: {e}");
-                    return None;
+                    None
                 }
             }
         } else {
-            match SearchEngine::fts_only(&db_path) {
+            match SearchEngine::fts_only(db_path) {
                 Ok(engine) => {
                     tracing::info!(
                         files = engine.file_count().unwrap_or(0),
                         chunks = engine.chunk_count().unwrap_or(0),
                         "search engine loaded (FTS-only)"
                     );
-                    engine
+                    Some(engine)
                 }
                 Err(e) => {
                     tracing::warn!("failed to init FTS-only search engine: {e}");
-                    return None;
+                    None
                 }
             }
-        };
+        }
+    }
 
-        // Auto-build FTS index if DB is empty.
+    /// Initialize search engine from workspace root.
+    ///
+    /// If a DB exists, opens it. Otherwise builds index from source files.
+    /// If EMBEDDING_URL is set, enables semantic search too.
+    /// If DB has FTS data but no embeddings, rebuilds for semantic upgrade.
+    fn init_search_engine(
+        workspace_root: &std::path::Path,
+        progress: &Arc<IndexProgress>,
+    ) -> Option<SearchEngine> {
+        let build_dir = workspace_root.join(".build");
+        std::fs::create_dir_all(&build_dir).ok();
+        let db_path = build_dir.join("bsl-search.db");
+
+        let mut engine = Self::open_search_engine(&db_path)?;
+
+        // If DB was built in FTS-only mode previously but embedder is now available,
+        // drop the old DB and recreate — index_directory skips files by hash.
+        let chunks = engine.chunk_count().unwrap_or(0);
+        let vectors = engine.vector_count();
+        if chunks > 0 && vectors == 0 && engine.has_semantic() {
+            tracing::info!(
+                chunks,
+                "FTS index exists but no embeddings — rebuilding DB for semantic upgrade"
+            );
+            drop(engine);
+            let _ = std::fs::remove_file(&db_path);
+            engine = Self::open_search_engine(&db_path)?;
+        }
+
         if engine.chunk_count().unwrap_or(0) == 0 {
             let project = project_model::Project::new(workspace_root);
             let source_path = project.source_path();
-            tracing::info!(?source_path, "building FTS index from source files");
-            match engine.index_directory_fts(source_path) {
-                Ok(indexed) => {
-                    tracing::info!(indexed, "FTS index built");
+
+            if engine.has_semantic() {
+                tracing::info!(?source_path, "building FTS + semantic index from source files");
+                match engine.index_directory(source_path, Some(progress)) {
+                    Ok(indexed) => {
+                        tracing::info!(indexed, "FTS + semantic index built");
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to build semantic index, falling back to FTS: {e}");
+                        match engine.index_directory_fts(source_path) {
+                            Ok(indexed) => {
+                                tracing::info!(indexed, "FTS index built (fallback)")
+                            }
+                            Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("failed to build FTS index: {e}");
+            } else {
+                tracing::info!(?source_path, "building FTS index from source files");
+                match engine.index_directory_fts(source_path) {
+                    Ok(indexed) => {
+                        tracing::info!(indexed, "FTS index built");
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to build FTS index: {e}");
+                    }
                 }
             }
         }
 
         // Index platform reference documentation.
-        Self::index_platform_docs(&mut engine);
+        Self::index_platform_docs(&mut engine, progress);
 
         Some(engine)
     }
@@ -239,7 +282,7 @@ impl SharedState {
     /// Converts all platform types, methods, and global functions into
     /// searchable documents. Uses a version hash to skip re-indexing
     /// if data hasn't changed.
-    fn index_platform_docs(engine: &mut SearchEngine) {
+    fn index_platform_docs(engine: &mut SearchEngine, progress: &Arc<IndexProgress>) {
         let platform = PlatformDataInner::instance();
         if platform.all_types().is_empty() {
             tracing::debug!("no platform data available, skipping docs indexing");
@@ -334,8 +377,13 @@ impl SharedState {
             "indexing platform reference documentation"
         );
 
-        match engine.index_documents("platform", "platform://docs", version_bytes, &documents, None)
-        {
+        match engine.index_documents(
+            "platform",
+            "platform://docs",
+            version_bytes,
+            &documents,
+            Some(progress),
+        ) {
             Ok(count) => {
                 if count > 0 {
                     tracing::info!(count, "platform docs indexed");
@@ -352,7 +400,7 @@ impl SharedState {
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
     pub fn init_search(&self) {
         if let Some(ref root) = self.workspace_root {
-            let engine = Self::init_search_engine(root);
+            let engine = Self::init_search_engine(root, &self.index_progress);
             if let Ok(mut guard) = self.search_engine.lock() {
                 *guard = engine;
             }

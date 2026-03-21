@@ -35,7 +35,7 @@ pub struct Client {
 impl Client {
     /// Create a new client for a 1C HTTP service.
     ///
-    /// - `base_url`: URL of the HTTP service (e.g., `http://localhost/base/hs/mcp`)
+    /// - `base_url`: URL of the HTTP service (e.g., `http://localhost/base/hs/bsl-analyzer`)
     /// - `user`: 1C username (empty string for anonymous)
     /// - `password`: 1C password
     pub fn new(base_url: &str, user: &str, password: &str) -> Self {

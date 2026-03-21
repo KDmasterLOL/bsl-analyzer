@@ -160,7 +160,7 @@ enum Commands {
         #[arg(short = 's', long = "source-dir", default_value = ".")]
         source_dir: PathBuf,
 
-        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/mcp)
+        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
         #[arg(long)]
         onec_url: Option<String>,
 
