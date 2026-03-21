@@ -176,7 +176,8 @@ enum Commands {
         #[arg(long, default_value = "")]
         onec_user: String,
 
-        /// 1C password for HTTP service authentication
+        /// 1C password for HTTP service authentication.
+        /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
         #[arg(long, default_value = "")]
         onec_password: String,
     },
@@ -306,7 +307,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             run_format(file, write, spaces, indent_size)
         }
         Some(Commands::Mcp { socket, source_dir, onec_url, onec_user, onec_password }) => {
-            run_mcp_server(socket, source_dir, onec_url, &onec_user, &onec_password)
+            let password = decode_password(&onec_password);
+            run_mcp_server(socket, source_dir, onec_url, &onec_user, &password)
         }
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
@@ -393,6 +395,40 @@ fn run_extension_command(command: ExtensionCommands) -> Result<(), Box<dyn Error
     }
 
     Ok(())
+}
+
+/// Decode password: if prefixed with "base64:", decode from base64.
+/// Otherwise return as-is. Not encryption — just obfuscation for .mcp.json.
+fn decode_password(password: &str) -> String {
+    if let Some(encoded) = password.strip_prefix("base64:") {
+        if let Some(decoded) = base64_decode(encoded) {
+            if let Ok(s) = String::from_utf8(decoded) {
+                return s;
+            }
+        }
+    }
+    password.to_owned()
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in input.as_bytes() {
+        if b == b'=' || b == b'\n' || b == b'\r' {
+            continue;
+        }
+        let val = TABLE.iter().position(|&c| c == b)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 fn lang_is_russian() -> bool {
