@@ -113,9 +113,6 @@ pub struct GlobalState {
     /// Buffer for VFS files during initial loading.
     /// Files are accumulated here and processed all at once after VFS Finished.
     pub pending_vfs_files: Vec<(paths::AbsPathBuf, Option<Vec<u8>>)>,
-
-    /// MCP co-server state (set when --mcp-socket is used).
-    pub mcp_state: Option<mcp_server::SharedState>,
 }
 
 impl GlobalState {
@@ -145,7 +142,6 @@ impl GlobalState {
             pending_diagnostics_uri: None,
             last_progress_report: std::time::Instant::now(),
             pending_vfs_files: Vec::new(),
-            mcp_state: None,
         }
     }
 
@@ -555,12 +551,6 @@ impl GlobalState {
             registers = config.registers().len(),
             "metadata cache warmed"
         );
-
-        // Update MCP co-server with loaded configuration
-        if let Some(ref mcp_state) = self.mcp_state {
-            mcp_state.update_configuration_blocking((*config).clone());
-            tracing::info!("MCP co-server configuration updated");
-        }
     }
 
     /// Creates an immutable snapshot for thread-safe access.

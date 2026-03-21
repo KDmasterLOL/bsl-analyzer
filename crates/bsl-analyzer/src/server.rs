@@ -29,7 +29,7 @@ use crate::{
 /// 2. Creates the GlobalState
 /// 3. Runs the event loop
 /// 4. Handles shutdown
-pub fn main_loop(connection: Connection, mcp_socket: Option<PathBuf>) -> Result<()> {
+pub fn main_loop(connection: Connection) -> Result<()> {
     tracing::info!("BSL Analyzer LSP server starting");
 
     // Perform initialize handshake
@@ -76,33 +76,6 @@ pub fn main_loop(connection: Connection, mcp_socket: Option<PathBuf>) -> Result<
         state.set_workspace_root(root.clone());
     } else {
         tracing::warn!("No workspace root provided by client");
-    }
-
-    // Start MCP co-server if requested
-    if let Some(socket) = mcp_socket {
-        let mut mcp_state = mcp_server::SharedState::shared();
-        if let Some(ref root) = workspace_root {
-            mcp_state.set_workspace_root(root.clone());
-        }
-        state.mcp_state = Some(mcp_state.clone());
-
-        std::thread::Builder::new()
-            .name("mcp-server".into())
-            .spawn(move || {
-                let server = mcp_server::McpServer::new(mcp_state);
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to build MCP tokio runtime");
-                rt.block_on(async {
-                    if let Err(e) = mcp_server::serve_unix_socket(&socket, server).await {
-                        tracing::error!("MCP server error: {e}");
-                    }
-                });
-            })
-            .expect("failed to spawn MCP server thread");
-
-        tracing::info!("MCP co-server started");
     }
 
     // Run event loop

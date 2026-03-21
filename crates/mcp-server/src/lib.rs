@@ -7,10 +7,20 @@
 
 mod state;
 mod tools;
-mod transport;
 
 pub use state::SharedState;
-pub use transport::serve_unix_socket;
+
+/// Start MCP server on stdio (stdin/stdout).
+///
+/// This is the standard MCP transport — the host IDE spawns the process
+/// and communicates via JSON-RPC over stdin/stdout.
+pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
+    use rmcp::ServiceExt;
+    let stdio = rmcp::transport::stdio();
+    let session = server.serve(stdio).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    session.waiting().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;

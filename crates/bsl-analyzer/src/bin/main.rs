@@ -30,10 +30,6 @@ struct Cli {
     #[arg(long)]
     stdio: bool,
 
-    /// Unix socket path for co-serving MCP alongside LSP
-    #[arg(long)]
-    mcp_socket: Option<PathBuf>,
-
     /// Enable hierarchical profiling (filter syntax: pattern@depth>threshold_ms)
     /// Example: '*>10' profiles all operations taking >10ms
     #[arg(long, global = true)]
@@ -160,10 +156,6 @@ enum Commands {
 
     /// Start MCP server (Model Context Protocol for AI agents)
     Mcp {
-        /// Unix socket path for MCP server
-        #[arg(long, default_value = "/tmp/bsl-analyzer-mcp.sock")]
-        socket: PathBuf,
-
         /// Source directory containing 1C configuration (with Configuration.xml)
         #[arg(short = 's', long = "source-dir", default_value = ".")]
         source_dir: PathBuf,
@@ -306,14 +298,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
-        Some(Commands::Mcp { socket, source_dir, onec_url, onec_user, onec_password }) => {
+        Some(Commands::Mcp { source_dir, onec_url, onec_user, onec_password }) => {
             let password = decode_password(&onec_password);
-            run_mcp_server(socket, source_dir, onec_url, &onec_user, &password)
+            run_mcp_server(source_dir, onec_url, &onec_user, &password)
         }
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
-        Some(Commands::Lsp) | None => run_lsp_server(cli.mcp_socket),
+        Some(Commands::Lsp) | None => run_lsp_server(),
     }
 }
 
@@ -651,13 +643,12 @@ fn escape_html(s: &str) -> String {
 }
 
 fn run_mcp_server(
-    socket: PathBuf,
     source_dir: PathBuf,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!(?socket, ?source_dir, ?onec_url, "Starting MCP server");
+    tracing::info!(?source_dir, ?onec_url, "Starting MCP server (stdio)");
 
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
     let mut state = mcp_server::SharedState::standalone(source_dir);
@@ -670,13 +661,7 @@ fn run_mcp_server(
     let server = mcp_server::McpServer::new(state);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-
-    rt.block_on(async {
-        mcp_server::serve_unix_socket(&socket, server).await.map_err(|e| {
-            tracing::error!("MCP server error: {e}");
-            e
-        })
-    })?;
+    rt.block_on(mcp_server::serve_stdio(server))?;
 
     Ok(())
 }
@@ -687,7 +672,7 @@ fn run_dap_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-fn run_lsp_server(mcp_socket: Option<PathBuf>) -> Result<(), Box<dyn Error + Send + Sync>> {
+fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
     use lsp_server::Connection;
 
     tracing::info!("Starting BSL Analyzer LSP server");
@@ -698,7 +683,7 @@ fn run_lsp_server(mcp_socket: Option<PathBuf>) -> Result<(), Box<dyn Error + Sen
 
     // Run the main loop
     tracing::info!("Entering main loop");
-    if let Err(e) = bsl_analyzer::main_loop(connection, mcp_socket) {
+    if let Err(e) = bsl_analyzer::main_loop(connection) {
         tracing::error!("Main loop error: {}", e);
         tracing::error!("Error chain: {:?}", e);
         return Err(e.into());
