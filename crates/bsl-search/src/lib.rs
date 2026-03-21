@@ -14,7 +14,7 @@ mod store;
 pub use chunker::{Chunk, ChunkKind, Chunker};
 pub use context::{enrich_chunk_text, file_path_to_module_path};
 pub use embedder::{Embedder, EmbedderConfig};
-pub use engine::{SearchConfig, SearchEngine, SearchHit};
+pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
 pub use index::{SearchResult, VectorIndex};
 pub use store::{ChunkInfo, Store, TextSearchResult};

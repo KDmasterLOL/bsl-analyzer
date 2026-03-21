@@ -11,8 +11,60 @@ use crate::index::VectorIndex;
 use crate::store::Store;
 use rayon::prelude::*;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+/// Progress tracker for indexing operations.
+///
+/// Thread-safe, can be shared between the indexing thread and status queries.
+#[derive(Debug, Default)]
+pub struct IndexProgress {
+    /// Whether indexing is currently in progress.
+    pub active: AtomicBool,
+    /// Total number of files to process.
+    pub total_files: AtomicUsize,
+    /// Total number of chunks to embed.
+    pub total_chunks: AtomicUsize,
+    /// Total number of batches.
+    pub total_batches: AtomicUsize,
+    /// Number of completed batches.
+    pub done_batches: AtomicUsize,
+    /// Number of embedded chunks so far.
+    pub done_chunks: AtomicUsize,
+}
+
+impl IndexProgress {
+    /// Create a new progress tracker.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Reset all counters.
+    pub fn reset(&self) {
+        self.active.store(false, Ordering::Relaxed);
+        self.total_files.store(0, Ordering::Relaxed);
+        self.total_chunks.store(0, Ordering::Relaxed);
+        self.total_batches.store(0, Ordering::Relaxed);
+        self.done_batches.store(0, Ordering::Relaxed);
+        self.done_chunks.store(0, Ordering::Relaxed);
+    }
+
+    /// Completion percentage (0-100).
+    pub fn percent(&self) -> usize {
+        let total = self.total_chunks.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0;
+        }
+        let done = self.done_chunks.load(Ordering::Relaxed);
+        (done * 100) / total
+    }
+
+    /// Whether indexing is active.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+}
 
 /// Configuration for the search engine.
 pub struct SearchConfig {
@@ -49,17 +101,17 @@ pub struct SearchHit {
 /// The search engine: indexes BSL files and performs semantic search.
 pub struct SearchEngine {
     store: Store,
-    embedder: Embedder,
+    embedder: Option<Embedder>,
     index: VectorIndex,
     dim: usize,
     batch_size: usize,
 }
 
 impl SearchEngine {
-    /// Create a new search engine.
+    /// Create a search engine with full capabilities (FTS + semantic).
     ///
     /// - `db_path`: path to the SQLite database file
-    /// - `config`: search configuration
+    /// - `config`: search configuration (embedder + batch size)
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
         let store = Store::open(db_path)?;
         let dim = config.embedder.dim.unwrap_or(1024);
@@ -70,24 +122,48 @@ impl SearchEngine {
         let index = VectorIndex::build(dim, &data)?;
         info!(vectors = index.len(), dim, "search index loaded");
 
-        // Auto-populate FTS index if chunks exist but FTS is empty (migration).
+        Self::ensure_fts(&store)?;
+
+        Ok(Self { store, embedder: Some(embedder), index, dim, batch_size: config.batch_size })
+    }
+
+    /// Create a FTS-only search engine (no embedder, no semantic search).
+    ///
+    /// Suitable for environments without GPU or embedding service.
+    /// `find_code` works, `search_code` returns an error.
+    pub fn fts_only(db_path: &Path) -> Result<Self, SearchError> {
+        let store = Store::open(db_path)?;
+        let dim = 1024;
+        let index = VectorIndex::new(dim)?;
+
+        Self::ensure_fts(&store)?;
+
+        Ok(Self { store, embedder: None, index, dim, batch_size: 32 })
+    }
+
+    /// Auto-populate FTS index from existing chunk data if needed.
+    fn ensure_fts(store: &Store) -> Result<(), SearchError> {
         let chunk_count = store.chunk_count()?;
         let fts_count = store.fts_count()?;
         if chunk_count > 0 && fts_count == 0 {
             info!(chunks = chunk_count, "populating FTS index from existing data");
             store.rebuild_fts()?;
         }
-
-        Ok(Self { store, embedder, index, dim, batch_size: config.batch_size })
+        Ok(())
     }
 
-    /// Index all BSL files in a directory.
+    /// Index all BSL files in a directory with embeddings.
     ///
     /// Walks the directory tree, skips files whose hash hasn't changed,
     /// and generates embeddings for new/modified files.
     ///
+    /// If `progress` is provided, updates it with batching stats.
     /// Returns the number of files indexed (new or updated).
-    pub fn index_directory(&mut self, root: &Path) -> Result<usize, SearchError> {
+    pub fn index_directory(
+        &mut self,
+        root: &Path,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
         let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -139,7 +215,11 @@ impl SearchEngine {
             return Ok(0);
         }
 
-        info!(files = pending_meta.len(), chunks = pending_texts.len(), "generating embeddings");
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Embedder(
+                "Cannot generate embeddings: embedder not configured. Set EMBEDDING_URL.".into(),
+            )
+        })?;
 
         // Generate embeddings in parallel batches.
         let total_texts = pending_texts.len();
@@ -147,19 +227,41 @@ impl SearchEngine {
         let batches: Vec<Vec<String>> =
             pending_texts.chunks(batch_size).map(|c| c.to_vec()).collect();
 
-        let completed = AtomicUsize::new(0);
-        let embedder = &self.embedder;
+        // Update progress tracker.
+        if let Some(p) = &progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(pending_meta.len(), Ordering::Relaxed);
+            p.total_chunks.store(total_texts, Ordering::Relaxed);
+            p.total_batches.store(batches.len(), Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        info!(
+            files = pending_meta.len(),
+            chunks = total_texts,
+            batches = batches.len(),
+            "generating embeddings"
+        );
 
         let batch_results: Vec<Result<Vec<Vec<f32>>, SearchError>> = batches
             .par_iter()
             .map(|batch| {
                 let texts: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
                 let result = embedder.embed_batch(&texts);
-                let done = completed.fetch_add(texts.len(), Ordering::Relaxed) + texts.len();
-                debug!(progress = done, total = total_texts, "embedding batch done");
+                if let Some(p) = &progress {
+                    let done =
+                        p.done_chunks.fetch_add(texts.len(), Ordering::Relaxed) + texts.len();
+                    p.done_batches.fetch_add(1, Ordering::Relaxed);
+                    debug!(progress = done, total = total_texts, "embedding batch done");
+                }
                 result
             })
             .collect();
+
+        if let Some(p) = &progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
 
         let mut all_embeddings = Vec::with_capacity(total_texts);
         for result in batch_results {
@@ -187,9 +289,68 @@ impl SearchEngine {
         Ok(indexed)
     }
 
+    /// Index BSL files for FTS only (no embeddings).
+    ///
+    /// Much faster than full indexing — only parses and chunks code.
+    /// Returns the number of files indexed (new or updated).
+    pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
+        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+            .map(|e| e.into_path())
+            .collect();
+
+        info!(total_files = bsl_files.len(), "scanning BSL files (FTS-only)");
+
+        let mut indexed = 0;
+        for file_path in &bsl_files {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?file_path, "failed to read file: {e}");
+                    continue;
+                }
+            };
+
+            let hash = blake3::hash(content.as_bytes());
+            let rel_path =
+                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+
+            // Skip if hash unchanged.
+            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+                if stored_hash == hash.as_bytes() {
+                    continue;
+                }
+            }
+
+            let chunks = Chunker::chunk(&content);
+            if chunks.is_empty() {
+                continue;
+            }
+
+            // Store chunks without embeddings.
+            self.store.reindex_file(&rel_path, hash.as_bytes(), &chunks, None)?;
+            indexed += 1;
+        }
+
+        info!(indexed, total_chunks = self.store.chunk_count()?, "FTS indexing complete");
+        Ok(indexed)
+    }
+
+    /// Whether semantic search is available (embedder configured).
+    pub fn has_semantic(&self) -> bool {
+        self.embedder.is_some()
+    }
+
     /// Search for code chunks semantically similar to the query.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, SearchError> {
-        let query_embedding = self.embedder.embed(query)?;
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            SearchError::Embedder(
+                "Semantic search not configured. Set EMBEDDING_URL to enable.".into(),
+            )
+        })?;
+        let query_embedding = embedder.embed(query)?;
         let results = self.index.search(&query_embedding, limit)?;
 
         let mut hits = Vec::with_capacity(results.len());

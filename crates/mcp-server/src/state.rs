@@ -1,7 +1,7 @@
 //! Shared state for MCP server tools.
 
 use bsl_metadata::Configuration;
-use bsl_search::SearchEngine;
+use bsl_search::{IndexProgress, SearchEngine};
 use onec_client::Client as OnecClient;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ pub struct SharedState {
     onec_client: Option<OnecClient>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
+    index_progress: Arc<IndexProgress>,
 }
 
 impl SharedState {
@@ -42,6 +43,7 @@ impl SharedState {
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(search_engine)),
+            index_progress: IndexProgress::new(),
         }
     }
 
@@ -55,6 +57,7 @@ impl SharedState {
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(None)),
+            index_progress: IndexProgress::new(),
         }
     }
 
@@ -113,42 +116,87 @@ impl SharedState {
         &self.search_engine
     }
 
-    /// Initialize search engine from workspace root if DB exists.
+    /// Access the indexing progress tracker.
+    pub fn index_progress(&self) -> &Arc<IndexProgress> {
+        &self.index_progress
+    }
+
+    /// Initialize search engine from workspace root.
+    ///
+    /// If a DB exists, opens it. Otherwise builds a FTS-only index from source files.
+    /// If EMBEDDING_URL is set, enables semantic search too.
     fn init_search_engine(workspace_root: &std::path::Path) -> Option<SearchEngine> {
-        let db_path = workspace_root.join(".build/bsl-search.db");
-        if !db_path.exists() {
-            tracing::info!("search index not found at {}", db_path.display());
-            return None;
-        }
+        let build_dir = workspace_root.join(".build");
+        std::fs::create_dir_all(&build_dir).ok();
+        let db_path = build_dir.join("bsl-search.db");
 
-        let base_url =
-            std::env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://localhost:8090".to_owned());
-        let model = std::env::var("EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
-        let dim: usize =
-            std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+        let has_embedder = std::env::var("EMBEDDING_URL").is_ok();
 
-        let config = bsl_search::SearchConfig {
-            embedder: bsl_search::EmbedderConfig { base_url, model: model.clone(), dim: Some(dim) },
-            batch_size: 32,
+        let mut engine = if has_embedder {
+            let base_url = std::env::var("EMBEDDING_URL").unwrap();
+            let model = std::env::var("EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+            let dim: usize =
+                std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+
+            let config = bsl_search::SearchConfig {
+                embedder: bsl_search::EmbedderConfig {
+                    base_url,
+                    model: model.clone(),
+                    dim: Some(dim),
+                },
+                batch_size: 32,
+            };
+
+            match SearchEngine::new(&db_path, config) {
+                Ok(engine) => {
+                    tracing::info!(
+                        files = engine.file_count().unwrap_or(0),
+                        chunks = engine.chunk_count().unwrap_or(0),
+                        vectors = engine.vector_count(),
+                        model,
+                        "search engine loaded (FTS + semantic)"
+                    );
+                    engine
+                }
+                Err(e) => {
+                    tracing::warn!("failed to init search engine with embedder: {e}");
+                    return None;
+                }
+            }
+        } else {
+            match SearchEngine::fts_only(&db_path) {
+                Ok(engine) => {
+                    tracing::info!(
+                        files = engine.file_count().unwrap_or(0),
+                        chunks = engine.chunk_count().unwrap_or(0),
+                        "search engine loaded (FTS-only)"
+                    );
+                    engine
+                }
+                Err(e) => {
+                    tracing::warn!("failed to init FTS-only search engine: {e}");
+                    return None;
+                }
+            }
         };
 
-        match SearchEngine::new(&db_path, config) {
-            Ok(engine) => {
-                tracing::info!(
-                    files = engine.file_count().unwrap_or(0),
-                    chunks = engine.chunk_count().unwrap_or(0),
-                    vectors = engine.vector_count(),
-                    model,
-                    "search engine loaded"
-                );
-                Some(engine)
-            }
-            Err(e) => {
-                tracing::warn!("failed to initialize search engine: {e}");
-                None
+        // Auto-build FTS index if DB is empty.
+        if engine.chunk_count().unwrap_or(0) == 0 {
+            let project = project_model::Project::new(workspace_root);
+            let source_path = project.source_path();
+            tracing::info!(?source_path, "building FTS index from source files");
+            match engine.index_directory_fts(source_path) {
+                Ok(indexed) => {
+                    tracing::info!(indexed, "FTS index built");
+                }
+                Err(e) => {
+                    tracing::warn!("failed to build FTS index: {e}");
+                }
             }
         }
+
+        Some(engine)
     }
 
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).

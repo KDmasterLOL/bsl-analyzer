@@ -115,7 +115,7 @@ fn main() {
     // Index.
     println!("Indexing...");
     let start = Instant::now();
-    match engine.index_directory(&config_dir) {
+    match engine.index_directory(&config_dir, None) {
         Ok(indexed) => {
             let elapsed = start.elapsed();
             println!(

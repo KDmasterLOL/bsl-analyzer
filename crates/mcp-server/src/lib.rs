@@ -274,6 +274,17 @@ impl McpServer {
         .await
     }
 
+    /// Статус поискового индекса: количество файлов, чанков, режим (FTS/семантика),
+    /// прогресс текущей индексации (процент, батчи).
+    #[tool(name = "search_status", annotations(read_only_hint = true))]
+    async fn search_status(&self) -> Result<CallToolResult, McpError> {
+        let engine = self.state.search_engine().clone();
+        let progress = self.state.index_progress().clone();
+        tokio::task::spawn_blocking(move || tools::search::search_status(&engine, &progress))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
     /// Поиск кода 1С по точному тексту: имена процедур, вызовы API, переменные, строковые литералы.
     /// Быстрый лексический поиск по всем проиндексированным BSL файлам конфигурации.
     /// Используй когда знаешь точное имя или токен из кода.
