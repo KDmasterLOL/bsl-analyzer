@@ -139,6 +139,26 @@ struct DebugEvalParams {
     stack_level: Option<u32>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct FindCodeParams {
+    /// Текст для поиска: имя процедуры, вызов API, переменная, строковый литерал.
+    /// Используйте точные имена и токены из кода.
+    /// Примеры: "ОбработкаПроведения", "СообщитьПользователю", "ТекущаяДата"
+    query: String,
+    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchCodeParams {
+    /// Описание искомого кода на естественном языке.
+    /// Примеры: "обработка проведения документа", "получение остатков товаров",
+    /// "проверка прав доступа пользователя", "отправка HTTP запроса"
+    query: String,
+    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
+    limit: Option<usize>,
+}
+
 /// MCP server exposing bsl-analyzer capabilities as tools.
 #[derive(Clone)]
 pub struct McpServer {
@@ -252,6 +272,39 @@ impl McpServer {
             params.0.parameters,
         )
         .await
+    }
+
+    /// Поиск кода 1С по точному тексту: имена процедур, вызовы API, переменные, строковые литералы.
+    /// Быстрый лексический поиск по всем проиндексированным BSL файлам конфигурации.
+    /// Используй когда знаешь точное имя или токен из кода.
+    #[tool(name = "find_code", annotations(read_only_hint = true))]
+    async fn find_code(
+        &self,
+        params: Parameters<FindCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.search_engine().clone();
+        let query = params.0.query;
+        let limit = params.0.limit.unwrap_or(10).min(50);
+        tokio::task::spawn_blocking(move || tools::search::find_code(&engine, &query, limit))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
+    /// Семантический поиск кода 1С — поиск по смыслу на естественном языке.
+    /// Опиши что делает искомый код, не нужно знать точные имена.
+    /// Используй когда не знаешь точных имён, а знаешь только назначение кода.
+    /// Требует работающий сервис эмбеддингов (EMBEDDING_URL).
+    #[tool(name = "search_code", annotations(read_only_hint = true))]
+    async fn search_code(
+        &self,
+        params: Parameters<SearchCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = self.state.search_engine().clone();
+        let query = params.0.query;
+        let limit = params.0.limit.unwrap_or(10).min(50);
+        tokio::task::spawn_blocking(move || tools::search::search_code(&engine, &query, limit))
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
     /// Подключиться к серверу отладки 1С. Начинает сеанс отладки.
@@ -394,7 +447,8 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "BSL Analyzer MCP server. Provides 1C:Enterprise metadata browsing, \
-             platform API reference, and SDBL query validation."
+             platform API reference, SDBL query validation, and code search \
+             (full-text and semantic)."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

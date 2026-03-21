@@ -1,6 +1,7 @@
 //! Shared state for MCP server tools.
 
 use bsl_metadata::Configuration;
+use bsl_search::SearchEngine;
 use onec_client::Client as OnecClient;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,7 @@ pub struct SharedState {
     workspace_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
+    search_engine: Arc<Mutex<Option<SearchEngine>>>,
 }
 
 impl SharedState {
@@ -32,11 +34,14 @@ impl SharedState {
             })
             .ok();
 
+        let search_engine = Self::init_search_engine(&source_dir);
+
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
             workspace_root: Some(source_dir),
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
+            search_engine: Arc::new(Mutex::new(search_engine)),
         }
     }
 
@@ -49,6 +54,7 @@ impl SharedState {
             workspace_root: None,
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
+            search_engine: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -100,5 +106,58 @@ impl SharedState {
     /// Access the debug session mutex.
     pub fn debug_session(&self) -> &Arc<Mutex<Option<bsl_debug::session::DebugSession>>> {
         &self.debug_session
+    }
+
+    /// Access the search engine mutex.
+    pub fn search_engine(&self) -> &Arc<Mutex<Option<SearchEngine>>> {
+        &self.search_engine
+    }
+
+    /// Initialize search engine from workspace root if DB exists.
+    fn init_search_engine(workspace_root: &std::path::Path) -> Option<SearchEngine> {
+        let db_path = workspace_root.join(".build/bsl-search.db");
+        if !db_path.exists() {
+            tracing::info!("search index not found at {}", db_path.display());
+            return None;
+        }
+
+        let base_url =
+            std::env::var("EMBEDDING_URL").unwrap_or_else(|_| "http://localhost:8090".to_owned());
+        let model = std::env::var("EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+        let dim: usize =
+            std::env::var("EMBEDDING_DIM").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+
+        let config = bsl_search::SearchConfig {
+            embedder: bsl_search::EmbedderConfig { base_url, model: model.clone(), dim: Some(dim) },
+            batch_size: 32,
+        };
+
+        match SearchEngine::new(&db_path, config) {
+            Ok(engine) => {
+                tracing::info!(
+                    files = engine.file_count().unwrap_or(0),
+                    chunks = engine.chunk_count().unwrap_or(0),
+                    vectors = engine.vector_count(),
+                    model,
+                    "search engine loaded"
+                );
+                Some(engine)
+            }
+            Err(e) => {
+                tracing::warn!("failed to initialize search engine: {e}");
+                None
+            }
+        }
+    }
+
+    /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
+    pub fn init_search(&self) {
+        if let Some(ref root) = self.workspace_root {
+            let engine = Self::init_search_engine(root);
+            if let Ok(mut guard) = self.search_engine.lock() {
+                *guard = engine;
+            }
+        }
     }
 }

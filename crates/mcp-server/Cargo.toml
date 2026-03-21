@@ -12,8 +12,10 @@ doctest = false
 bsl-debug.workspace = true
 bsl-metadata.workspace = true
 bsl-platform.workspace = true
+bsl-search.workspace = true
 onec-client.workspace = true
 parser.workspace = true
+project-model.workspace = true
 syntax.workspace = true
 
 rmcp = { version = "1.2", features = ["server", "macros"] }
