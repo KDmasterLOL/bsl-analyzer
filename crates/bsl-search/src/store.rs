@@ -470,6 +470,27 @@ impl Store {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    /// Count chunks with embeddings in a specific collection.
+    pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE c.embedding IS NOT NULL AND f.collection = ?1",
+            params![collection],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Clear file hashes for a collection so they get re-indexed.
+    pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
+        let count = self.conn.execute(
+            "UPDATE files SET hash = zeroblob(0) WHERE collection = ?1",
+            params![collection],
+        )?;
+        Ok(count)
+    }
 }
 
 /// Full-text search result with chunk id and relevance rank.

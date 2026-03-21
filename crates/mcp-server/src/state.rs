@@ -224,21 +224,26 @@ impl SharedState {
 
         let mut engine = Self::open_search_engine(&db_path)?;
 
-        // If DB was built in FTS-only mode previously but embedder is now available,
-        // drop the old DB and recreate — index_directory skips files by hash.
-        let chunks = engine.chunk_count().unwrap_or(0);
-        let vectors = engine.vector_count();
-        if chunks > 0 && vectors == 0 && engine.has_semantic() {
-            tracing::info!(
-                chunks,
-                "FTS index exists but no embeddings — rebuilding DB for semantic upgrade"
-            );
-            drop(engine);
-            let _ = std::fs::remove_file(&db_path);
-            engine = Self::open_search_engine(&db_path)?;
+        // If DB has code chunks but no code embeddings and embedder is available,
+        // clear file hashes so index_directory will re-process them with embeddings.
+        if engine.has_semantic() {
+            let code_embeddings = engine.embedding_count_by_collection("code").unwrap_or(0);
+            let code_chunks = engine.chunk_count().unwrap_or(0);
+            if code_chunks > 0 && code_embeddings == 0 {
+                tracing::info!(
+                    code_chunks,
+                    "code chunks exist but no embeddings — clearing hashes for semantic upgrade"
+                );
+                let cleared = engine.clear_file_hashes("code").unwrap_or(0);
+                tracing::info!(cleared, "file hashes cleared for re-indexing");
+            }
         }
 
-        if engine.chunk_count().unwrap_or(0) == 0 {
+        if engine.chunk_count().unwrap_or(0) == 0
+            || (engine.has_semantic()
+                && engine.embedding_count_by_collection("code").unwrap_or(0) == 0
+                && engine.chunk_count().unwrap_or(0) > 0)
+        {
             let project = project_model::Project::new(workspace_root);
             let source_path = project.source_path();
 

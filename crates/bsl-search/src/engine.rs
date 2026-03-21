@@ -667,6 +667,16 @@ impl SearchEngine {
         self.index.len()
     }
 
+    /// Count embeddings in a specific collection.
+    pub fn embedding_count_by_collection(&self, collection: &str) -> Result<usize, SearchError> {
+        self.store.embedding_count_by_collection(collection)
+    }
+
+    /// Clear file hashes for a collection (forces re-indexing).
+    pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
+        self.store.clear_file_hashes(collection)
+    }
+
     /// Remove a file from the index.
     pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
         self.store.remove_file(rel_path)?;

@@ -143,10 +143,16 @@ pub fn search_status(
         let vectors = engine.vector_count();
         let semantic = engine.has_semantic();
 
+        let code_vectors = engine.embedding_count_by_collection("code").unwrap_or(0);
+        let platform_vectors = engine.embedding_count_by_collection("platform").unwrap_or(0);
+
         let _ = writeln!(out, "Search index: ready");
         let _ = writeln!(out, "  Files:    {files}");
         let _ = writeln!(out, "  Chunks:   {chunks}");
-        let _ = writeln!(out, "  Vectors:  {vectors}");
+        let _ = writeln!(
+            out,
+            "  Vectors:  {vectors} (code: {code_vectors}, platform: {platform_vectors})"
+        );
         let _ = writeln!(
             out,
             "  Semantic: {}",
