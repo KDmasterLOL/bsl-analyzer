@@ -225,7 +225,6 @@ pub fn build_set_auto_attach_request(
     target_types: &[&str],
 ) -> Vec<u8> {
     let mut b = XmlRequestBuilder::new("RDBGSetAutoAttachSettingsRequest", debugger_id, infobase);
-    // autoAttachSettings wrapper is in request ns, children in debugAutoAttach ns
     b.start("autoAttachSettings");
     for tt in target_types {
         write_text_element_ns(&mut b.writer, "targetType", tt, NS_AUTO);
@@ -464,4 +463,28 @@ pub struct BreakpointDef {
     pub property_id: String,
     pub line: u32,
     pub condition: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_attach_xml() {
+        let xml = build_set_auto_attach_request(
+            "test-id",
+            "test-db",
+            &["Client", "Server", "HTTPService"],
+        );
+        let s = String::from_utf8(xml).unwrap();
+        // 1C debug server expects xmlns on each targetType element (XDTO format)
+        assert!(
+            s.contains("<autoAttachSettings>"),
+            "autoAttachSettings must NOT have xmlns (1C XDTO). Got: {s}"
+        );
+        assert!(s.contains(r#"<targetType xmlns="http://v8.1c.ru/8.3/debugger/debugAutoAttach">HTTPService</targetType>"#),
+            "targetType must have xmlns. Got: {s}");
+        assert!(s.contains(r#"<targetType xmlns="http://v8.1c.ru/8.3/debugger/debugAutoAttach">Client</targetType>"#),
+            "all targetType elements must have xmlns. Got: {s}");
+    }
 }

@@ -106,8 +106,32 @@ impl ModuleIndex {
 
     /// Resolves human-readable name like "Справочник.Товары.МодульОбъекта"
     /// or "Catalog.Товары.ObjectModule" to module ID and path.
+    ///
+    /// If exact match fails, tries appending common module kind suffixes:
+    /// "ОбщийМодуль.Foo" → "ОбщийМодуль.Foo.Модуль",
+    /// "Справочник.Foo" → "Справочник.Foo.МодульОбъекта", etc.
     pub fn resolve_name(&self, name: &str) -> Option<&(ModuleId, PathBuf)> {
-        self.by_name.get(name)
+        if let Some(result) = self.by_name.get(name) {
+            return Some(result);
+        }
+
+        // Fallback: try appending common module kind suffixes
+        const SUFFIXES: &[&str] = &[
+            "Модуль",
+            "МодульОбъекта",
+            "МодульМенеджера",
+            "МодульНабораЗаписей",
+            "МодульМенеджераЗначения",
+            "МодульФормы",
+        ];
+        for suffix in SUFFIXES {
+            let expanded = format!("{name}.{suffix}");
+            if let Some(result) = self.by_name.get(&expanded) {
+                return Some(result);
+            }
+        }
+
+        None
     }
 
     /// Returns all indexed modules.
@@ -122,6 +146,13 @@ impl ModuleIndex {
 
     pub fn is_empty(&self) -> bool {
         self.by_path.is_empty()
+    }
+
+    /// Returns all registered human-readable module names.
+    pub fn all_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.by_name.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
     }
 
     fn scan_root(&mut self, extension: &str, root: &Path) -> Result<(), DebugError> {

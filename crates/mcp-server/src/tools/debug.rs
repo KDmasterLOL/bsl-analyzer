@@ -9,12 +9,23 @@ use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 
+/// Default auto-attach target types: Client, Server, HTTPService.
+const DEFAULT_AUTO_ATTACH: &[&str] = &["Client", "Server", "HTTPService"];
+
+/// Parameters for `debug_attach` (avoids clippy::too_many_arguments).
+pub struct AttachParams<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub infobase: &'a str,
+    pub config_root: Option<&'a str>,
+    pub workspace_root: Option<&'a std::path::Path>,
+    pub extensions: &'a [[String; 2]],
+    pub auto_attach: &'a [String],
+}
+
 pub fn debug_attach(
     session_mutex: &Arc<Mutex<Option<DebugSession>>>,
-    host: &str,
-    port: u16,
-    infobase: &str,
-    config_root: Option<&str>,
+    params: AttachParams<'_>,
 ) -> Result<CallToolResult, McpError> {
     let mut guard = session_mutex.lock().unwrap();
     if guard.is_some() {
@@ -23,24 +34,52 @@ pub fn debug_attach(
             None,
         ));
     }
-    let root =
-        config_root.map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let AttachParams { host, port, infobase, config_root, workspace_root, extensions, auto_attach } =
+        params;
+
+    // Resolve config_root: explicit param > workspace_root > "."
+    let root = if let Some(cr) = config_root {
+        std::path::PathBuf::from(cr)
+    } else if let Some(wr) = workspace_root {
+        wr.to_path_buf()
+    } else {
+        std::path::PathBuf::from(".")
+    };
+
+    // Convert extensions from [name, path] pairs
+    let ext_pairs: Vec<(String, std::path::PathBuf)> =
+        extensions.iter().map(|e| (e[0].clone(), std::path::PathBuf::from(&e[1]))).collect();
+
+    // Use provided auto_attach or defaults (including HTTPService)
+    let attach_types: Vec<String> = if auto_attach.is_empty() {
+        DEFAULT_AUTO_ATTACH.iter().map(|s| s.to_string()).collect()
+    } else {
+        auto_attach.to_vec()
+    };
+
     let config = DebugConfig {
         host: host.to_string(),
         port,
         infobase: infobase.to_string(),
-        config_root: root,
-        extensions: Vec::new(),
-        auto_attach: vec!["Client".to_string(), "Server".to_string()],
+        config_root: root.clone(),
+        extensions: ext_pairs,
+        auto_attach: attach_types.clone(),
     };
     let session = DebugSession::connect(config)
         .map_err(|e| McpError::internal_error(format!("Failed to connect: {e}"), None))?;
     let targets = session.targets().map_err(|e| {
         McpError::internal_error(format!("Connected but failed to get targets: {e}"), None)
     })?;
-    let mut out = format!("Connected to debug server {host}:{port}, infobase: {infobase}\n\n");
+    let mut out = format!("Connected to debug server {host}:{port}, infobase: {infobase}\n");
+    let _ = writeln!(out, "Config root: {}", root.display());
+    let _ = writeln!(out, "Modules indexed: {}", session.module_count());
+    let _ = writeln!(out, "Auto-attach: {}\n", attach_types.join(", "));
     if targets.is_empty() {
-        out.push_str("No debug targets available yet. Start a 1C client to begin debugging.\n");
+        out.push_str(
+            "No debug targets available yet. \
+             Start a 1C client or trigger an HTTP service request to begin debugging.\n",
+        );
     } else {
         let _ = writeln!(out, "Available targets: {}", targets.len());
         for t in &targets {
@@ -71,9 +110,22 @@ pub fn debug_set_breakpoint(
     let session = guard.as_mut().ok_or_else(|| {
         McpError::invalid_params("No active debug session. Call debug_attach first.", None)
     })?;
-    session
-        .set_breakpoint(module, line, condition)
-        .map_err(|e| McpError::internal_error(format!("Failed to set breakpoint: {e}"), None))?;
+    if let Err(e) = session.set_breakpoint(module, line, condition) {
+        let mut msg = format!("Failed to set breakpoint: {e}");
+        let names = session.module_names();
+        if names.is_empty() {
+            msg.push_str("\n\nModule index is empty — check config_root in debug_attach.");
+        } else {
+            msg.push_str(&format!("\n\nAvailable modules ({}):", names.len()));
+            for name in names.iter().take(20) {
+                msg.push_str(&format!("\n  - {name}"));
+            }
+            if names.len() > 20 {
+                msg.push_str(&format!("\n  ... and {} more", names.len() - 20));
+            }
+        }
+        return Err(McpError::internal_error(msg, None));
+    }
     let msg = if let Some(cond) = condition {
         format!("Breakpoint set: {module}:{line} (condition: {cond})")
     } else {
@@ -185,14 +237,39 @@ pub fn debug_stack_trace(
     let mut guard = session_mutex.lock().unwrap();
     let session =
         guard.as_mut().ok_or_else(|| McpError::invalid_params("No active debug session", None))?;
-    let frames = session
-        .call_stack()
-        .map_err(|e| McpError::internal_error(format!("Failed to get call stack: {e}"), None))?;
-    if frames.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Call stack is empty (not stopped)",
-        )]));
-    }
+
+    // Try live call stack first, fall back to cached last_stop stack
+    let call_stack_result = session.call_stack();
+    let frames = match call_stack_result {
+        Ok(ref f) if !f.is_empty() => f.clone(),
+        _ => {
+            let err_info = match &call_stack_result {
+                Ok(f) => format!("call_stack returned {} frames", f.len()),
+                Err(e) => format!("call_stack error: {e}"),
+            };
+            let has_stopped = session.stopped_target().is_some();
+            let has_last_stop = session.last_stop().is_some();
+            let last_stop_stack_len = session.last_stop().map(|s| s.stack.len()).unwrap_or(0);
+
+            // Fall back to stack from last stop event
+            if let Some(stop) = session.last_stop() {
+                if !stop.stack.is_empty() {
+                    stop.stack.clone()
+                } else {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Call stack is empty.\nDiag: {err_info}, stopped_target={has_stopped}, \
+                         last_stop={has_last_stop}, last_stop_stack={last_stop_stack_len}"
+                    ))]));
+                }
+            } else {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Call stack is empty.\nDiag: {err_info}, stopped_target={has_stopped}, \
+                     last_stop={has_last_stop}"
+                ))]));
+            }
+        }
+    };
+
     let mut out = format!("# Call Stack ({} frames)\n\n", frames.len());
     for (i, frame) in frames.iter().enumerate() {
         let _ = writeln!(out, "{}. {} (line {})", i, frame.presentation, frame.line);

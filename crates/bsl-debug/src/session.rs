@@ -296,6 +296,16 @@ impl DebugSession {
         self.client.set_break_on_error(false, None)
     }
 
+    /// Number of modules in the index.
+    pub fn module_count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// All registered human-readable module names.
+    pub fn module_names(&self) -> Vec<&str> {
+        self.index.all_names()
+    }
+
     /// Lists all available debug targets.
     pub fn targets(&self) -> Result<Vec<TargetInfo>, ClientError> {
         let targets = self.client.get_targets()?;
@@ -345,10 +355,7 @@ impl DebugSession {
 
     /// Steps execution (next line).
     pub fn step(&self, action: StepAction) -> Result<(), ClientError> {
-        let target_id = self
-            .stopped_target
-            .as_ref()
-            .ok_or_else(|| ClientError::AttachFailed("no stopped target".to_string()))?;
+        let target_id = self.require_stopped_target()?;
 
         let action_str = match action {
             StepAction::Next => "Step",
@@ -366,11 +373,19 @@ impl DebugSession {
     }
 
     /// Gets the call stack of the currently stopped target.
+    /// Returns the target ID of the stopped target, falling back to the last stop event.
+    fn require_stopped_target(&self) -> Result<&str, ClientError> {
+        if let Some(ref id) = self.stopped_target {
+            return Ok(id);
+        }
+        if let Some(ref stop) = self.last_stop {
+            return Ok(&stop.target_id);
+        }
+        Err(ClientError::AttachFailed("no stopped target".to_string()))
+    }
+
     pub fn call_stack(&self) -> Result<Vec<FrameInfo>, ClientError> {
-        let target_id = self
-            .stopped_target
-            .as_ref()
-            .ok_or_else(|| ClientError::AttachFailed("no stopped target".to_string()))?;
+        let target_id = self.require_stopped_target()?;
 
         let frames = self.client.get_call_stack(target_id)?;
 
@@ -399,14 +414,18 @@ impl DebugSession {
     }
 
     /// Gets local variables at the given stack level.
-    pub fn locals(&self, stack_level: u32) -> Result<Vec<Variable>, ClientError> {
-        let target_id = self
-            .stopped_target
-            .as_ref()
-            .ok_or_else(|| ClientError::AttachFailed("no stopped target".to_string()))?;
+    pub fn locals(&mut self, stack_level: u32) -> Result<Vec<Variable>, ClientError> {
+        let target_id = self.require_stopped_target()?.to_string();
 
         let result_id = Uuid::new_v4().to_string();
-        let vars = self.client.eval_local_vars(target_id, stack_level as i64, &result_id)?;
+        let vars = self.client.eval_local_vars(&target_id, stack_level as i64, &result_id)?;
+
+        // evalLocalVariables results typically arrive async via ExprEvaluated event
+        let vars = if vars.is_empty() {
+            self.wait_for_eval_result(&result_id, Duration::from_secs(5))
+        } else {
+            vars
+        };
 
         Ok(vars
             .into_iter()
@@ -454,10 +473,7 @@ impl DebugSession {
     /// The result may arrive synchronously in the HTTP response or asynchronously
     /// via the ExprEvaluated event from the ping loop.
     pub fn eval(&mut self, expression: &str, stack_level: u32) -> Result<EvalResult, ClientError> {
-        let target_id = self
-            .stopped_target
-            .clone()
-            .ok_or_else(|| ClientError::AttachFailed("no stopped target".to_string()))?;
+        let target_id = self.require_stopped_target()?.to_string();
 
         let result_id = Uuid::new_v4().to_string();
         let vars = self.client.eval_expr(&target_id, expression, stack_level as i64, &result_id)?;
@@ -490,10 +506,7 @@ impl DebugSession {
         view: ViewInterface,
         stack_level: u32,
     ) -> Result<Vec<Variable>, ClientError> {
-        let target_id = self
-            .stopped_target
-            .clone()
-            .ok_or_else(|| ClientError::AttachFailed("no stopped target".to_string()))?;
+        let target_id = self.require_stopped_target()?.to_string();
 
         let result_id = Uuid::new_v4().to_string();
         let vars =

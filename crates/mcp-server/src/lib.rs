@@ -138,8 +138,19 @@ struct DebugAttachParams {
     port: u16,
     /// Имя информационной базы
     infobase: String,
-    /// Корневой каталог конфигурации (для маппинга модулей на файлы)
+    /// Корневой каталог конфигурации (для маппинга модулей на файлы).
+    /// Если не указан, используется workspace_root.
     config_root: Option<String>,
+    /// Расширения: список пар ["имя", "путь_к_каталогу_расширения"].
+    /// Нужно для маппинга модулей расширений на файлы.
+    #[serde(default)]
+    extensions: Vec<[String; 2]>,
+    /// Типы целей автоподключения. По умолчанию: Client, Server, HTTPService.
+    /// Допустимые значения: Client, ManagedClient, WEBClient, COMConnector,
+    /// Server, ServerEmulation, WEBService, HTTPService, OData, JOB, JobFileMode,
+    /// MobileClient, MobileServer, MobileManagedClient.
+    #[serde(default)]
+    auto_attach: Vec<String>,
 }
 
 fn default_debug_port() -> u16 {
@@ -426,6 +437,7 @@ impl McpServer {
     }
 
     /// Подключиться к серверу отладки 1С. Начинает сеанс отладки.
+    /// По умолчанию автоподключается к Client, Server и HTTPService.
     #[tool(name = "debug_attach")]
     async fn debug_attach(
         &self,
@@ -433,13 +445,19 @@ impl McpServer {
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let session = self.state.debug_session().clone();
+        let workspace_root = self.state.workspace_root().cloned();
         tokio::task::spawn_blocking(move || {
             tools::debug::debug_attach(
                 &session,
-                &p.host,
-                p.port,
-                &p.infobase,
-                p.config_root.as_deref(),
+                tools::debug::AttachParams {
+                    host: &p.host,
+                    port: p.port,
+                    infobase: &p.infobase,
+                    config_root: p.config_root.as_deref(),
+                    workspace_root: workspace_root.as_deref(),
+                    extensions: &p.extensions,
+                    auto_attach: &p.auto_attach,
+                },
             )
         })
         .await
