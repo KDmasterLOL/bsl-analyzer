@@ -511,6 +511,38 @@ mod tests {
         );
     }
 
+    /// Function with If (no Else) followed by TryExcept followed by Return should not trigger.
+    ///
+    /// Bug: the false branch of Если without Иначе goes to merge block.
+    /// If the next statement after КонецЕсли is a Попытка block, the checker
+    /// was incorrectly flagging the merge block as "missing return" because it
+    /// saw it had a FalseBranch incoming edge.
+    #[test]
+    fn test_no_diagnostic_if_no_else_then_try_except_then_return() {
+        let code = r#"Функция Тест(Запрос)
+    Если Не Запрос.Свойство("code") Тогда
+        Возврат "error";
+    КонецЕсли;
+    Результат = Новый Структура;
+    Попытка
+        Результат.Вставить("success", Истина);
+    Исключение
+        Результат.Вставить("success", Ложь);
+    КонецПопытки;
+    Возврат Результат;
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+                .count(),
+            0,
+            "If (no Else) + TryExcept + Return at end should not trigger diagnostic"
+        );
+    }
+
     /// Test procedure (not function) doesn't trigger diagnostic
     #[test]
     fn test_procedure_not_checked() {

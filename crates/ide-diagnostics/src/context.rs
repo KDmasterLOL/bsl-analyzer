@@ -99,7 +99,11 @@ impl<'a> DiagnosticsContext<'a> {
             "load_configuration: creating ad-hoc ConfigurationPathInput (breaks Salsa caching)"
         );
         let config_path_str = config_path.to_string_lossy().to_string();
-        let path_input = ide_db::metadata::ConfigurationPathInput::new(self.db, config_path_str);
+        let path_input = ide_db::metadata::ConfigurationPathInput::new(
+            self.db,
+            config_path_str,
+            self.db.metadata_version(),
+        );
         Some(ide_db::metadata::load_configuration(self.db, path_input))
     }
 

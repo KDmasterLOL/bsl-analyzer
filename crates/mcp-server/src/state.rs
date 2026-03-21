@@ -129,6 +129,12 @@ impl SharedState {
         guard.as_ref().map(f)
     }
 
+    /// Get configuration as Arc for SDBL HIR lowering (sync, blocking).
+    pub fn configuration_arc(&self) -> Option<std::sync::Arc<Configuration>> {
+        let guard = self.configuration.blocking_read();
+        guard.as_ref().map(|c| std::sync::Arc::new(c.clone()))
+    }
+
     /// Workspace root directory.
     pub fn workspace_root(&self) -> Option<&PathBuf> {
         self.workspace_root.as_ref()

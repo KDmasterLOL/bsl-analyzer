@@ -62,6 +62,32 @@ impl Client {
         self.post("/query", request).await
     }
 
+    /// Validate SDBL query syntax via СхемаЗапроса.
+    pub async fn validate_query(
+        &self,
+        request: &ValidateQueryRequest,
+    ) -> Result<ValidateQueryResult, Error> {
+        self.post("/validate-query", request).await
+    }
+
+    /// Check BSL code syntax without execution.
+    pub async fn check_syntax(
+        &self,
+        request: &CheckSyntaxRequest,
+    ) -> Result<CheckSyntaxResult, Error> {
+        self.post("/check-syntax", request).await
+    }
+
+    /// Execute BSL code (statements) in the 1C database.
+    pub async fn execute_code(&self, request: &ExecuteRequest) -> Result<ExecuteResult, Error> {
+        self.post("/execute", request).await
+    }
+
+    /// Evaluate a BSL expression and return the result.
+    pub async fn eval_expression(&self, request: &EvalRequest) -> Result<EvalResult, Error> {
+        self.post("/eval", request).await
+    }
+
     async fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         endpoint: &str,
@@ -109,4 +135,78 @@ pub struct QueryResult {
     pub total: u32,
     /// Whether the result was truncated by the limit.
     pub truncated: bool,
+}
+
+/// Request body for the validate-query endpoint.
+#[derive(Debug, Serialize)]
+pub struct ValidateQueryRequest {
+    /// Query text to validate.
+    pub query: String,
+}
+
+/// Response from the validate-query endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ValidateQueryResult {
+    /// Whether the query is valid.
+    pub valid: bool,
+    /// Error descriptions if query is invalid.
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+/// Request body for the check-syntax endpoint.
+#[derive(Debug, Serialize)]
+pub struct CheckSyntaxRequest {
+    /// BSL code to check.
+    pub code: String,
+}
+
+/// Response from the check-syntax endpoint.
+#[derive(Debug, Deserialize)]
+pub struct CheckSyntaxResult {
+    /// Whether the code is syntactically valid.
+    pub valid: bool,
+    /// Error description if syntax is invalid.
+    pub error: Option<String>,
+}
+
+/// Request body for the execute endpoint.
+#[derive(Debug, Serialize)]
+pub struct ExecuteRequest {
+    /// BSL code (statements) to execute.
+    pub code: String,
+}
+
+/// Response from the execute endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ExecuteResult {
+    /// Whether execution succeeded.
+    pub success: bool,
+    /// Error description if execution failed.
+    pub error: Option<String>,
+    /// Context structure populated by the executed code.
+    pub context: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Execution duration in milliseconds.
+    pub duration_ms: Option<u64>,
+}
+
+/// Request body for the eval endpoint.
+#[derive(Debug, Serialize)]
+pub struct EvalRequest {
+    /// BSL expression to evaluate.
+    pub expression: String,
+}
+
+/// Response from the eval endpoint.
+#[derive(Debug, Deserialize)]
+pub struct EvalResult {
+    /// Whether evaluation succeeded.
+    pub success: bool,
+    /// Evaluated result (serialized to JSON).
+    pub result: Option<serde_json::Value>,
+    /// 1C type name of the result.
+    #[serde(rename = "type")]
+    pub type_name: Option<String>,
+    /// Error description if evaluation failed.
+    pub error: Option<String>,
 }

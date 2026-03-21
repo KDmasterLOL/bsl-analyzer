@@ -104,6 +104,32 @@ struct ExecuteQueryParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct CheckSyntaxParams {
+    /// BSL-код для проверки синтаксиса.
+    /// Нельзя объявлять Функция/Процедура — только операторы, выражения, условия, циклы.
+    code: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ExecuteCodeParams {
+    /// BSL-код для выполнения (операторы). Код выполняется через Выполнить().
+    /// Для возврата данных пиши в переменную Контекст: Контекст.Вставить("ключ", значение).
+    /// Типы значений Контекст, сохраняющие структуру в JSON: Строка, Число, Булево, Дата,
+    /// Неопределено, Структура, Массив, Соответствие (и Фиксированные варианты).
+    /// Ссылки, объекты, ТаблицаЗначений и др. будут приведены к строке через Строка().
+    /// Нельзя объявлять Функция/Процедура — только операторы: присваивания, вызовы, циклы, условия.
+    code: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct EvalExpressionParams {
+    /// BSL-выражение для вычисления. Выражение вычисляется через Вычислить() и возвращает результат.
+    /// Нельзя объявлять Функция/Процедура. Только выражения, возвращающие значение:
+    /// ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар")
+    expression: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DebugAttachParams {
     /// Хост сервера отладки 1С
     host: String,
@@ -269,7 +295,7 @@ impl McpServer {
         &self,
         params: Parameters<ValidateQueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::query::validate_query(&self.state, &params.0.query)
+        tools::query::validate_query(&self.state, &params.0.query).await
     }
 
     /// Выполнить запрос на языке 1С (ВЫБРАТЬ/SELECT) и получить данные из базы.
@@ -286,6 +312,40 @@ impl McpServer {
             params.0.parameters,
         )
         .await
+    }
+
+    /// Проверить синтаксис BSL-кода без выполнения. Код компилируется платформой 1С, но не запускается.
+    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы, условия, циклы, присваивания.
+    #[tool(name = "check_syntax", annotations(read_only_hint = true))]
+    async fn check_syntax(
+        &self,
+        params: Parameters<CheckSyntaxParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::execution::check_syntax(&self.state, &params.0.code).await
+    }
+
+    /// Выполнить BSL-код (операторы) в реальной базе 1С. Код выполняется через Выполнить().
+    /// Для возврата данных используй переменную Контекст: Контекст.Вставить("ключ", значение).
+    /// Содержимое Контекст возвращается в ответе. Требует подключения (--onec-url).
+    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы.
+    #[tool(name = "execute_code")]
+    async fn execute_code(
+        &self,
+        params: Parameters<ExecuteCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::execution::execute_code(&self.state, &params.0.code).await
+    }
+
+    /// Вычислить BSL-выражение в реальной базе 1С и получить результат. Выражение вычисляется
+    /// через Вычислить(). Используй для получения значений: ТекущаяДата(), 1+1,
+    /// Справочники.Номенклатура.НайтиПоНаименованию("Товар"). Требует подключения (--onec-url).
+    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только выражения.
+    #[tool(name = "eval_expression")]
+    async fn eval_expression(
+        &self,
+        params: Parameters<EvalExpressionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::execution::eval_expression(&self.state, &params.0.expression).await
     }
 
     /// Статус поискового индекса: количество файлов, чанков, режим (FTS/семантика),
@@ -505,8 +565,8 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "BSL Analyzer MCP server. Provides 1C:Enterprise metadata browsing, \
-             platform API reference, SDBL query validation, and code search \
-             (full-text and semantic)."
+             platform API reference, SDBL query validation, code execution, \
+             and code search (full-text and semantic)."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

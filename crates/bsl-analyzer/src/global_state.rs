@@ -335,7 +335,7 @@ impl GlobalState {
                 .collect();
 
         let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
-            extensions: vec!["bsl".to_string(), "os".to_string()],
+            extensions: vec!["bsl".to_string(), "os".to_string(), "xml".to_string()],
             include: vec![paths::AbsPathBuf::assert_utf8(source_path)],
             exclude: vec![
                 paths::AbsPathBuf::assert_utf8(root.join(".git")),
@@ -387,6 +387,7 @@ impl GlobalState {
         let mut file_set = source_root.file_set().clone();
         let mut file_set_modified = false;
         let mut config_file_changed = false;
+        let mut metadata_xml_changed = false;
 
         for file in changed_files {
             let text = match file.change {
@@ -407,6 +408,10 @@ impl GlobalState {
                 {
                     tracing::info!(path = %path_str, "config file changed");
                     config_file_changed = true;
+                }
+                if !metadata_xml_changed && path_str.ends_with(".xml") {
+                    tracing::info!(path = %path_str, "metadata XML file changed");
+                    metadata_xml_changed = true;
                 }
             }
 
@@ -455,6 +460,14 @@ impl GlobalState {
                 self.project = Some(project);
                 self.update_diagnostics_config();
             }
+        }
+
+        // Bump metadata version if XML files changed.
+        // This invalidates Salsa cache for load_configuration by producing a new
+        // ConfigurationPathInput interned key with an incremented version field.
+        if metadata_xml_changed {
+            tracing::info!("bumping metadata version after XML change");
+            self.analysis_host.raw_database().bump_metadata_version();
         }
 
         (true, config_file_changed)
@@ -540,6 +553,7 @@ impl GlobalState {
         let path_input = ide_db::metadata::ConfigurationPathInput::new(
             db,
             config_path.to_string_lossy().into_owned(),
+            db.metadata_version(),
         );
 
         // This call warms the Salsa cache - subsequent calls will be instant

@@ -73,6 +73,122 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="a9b0c1d2-3e4f-5a6b-7c8d-9e0f1a2b3c4d">
+				<Properties>
+					<Name>ПроверкаЗапроса</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Проверка запроса</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/validate-query</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="b0c1d2e3-4f5a-6b7c-8d9e-0f1a2b3c4d5e">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>POST</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>ПроверкаЗапросаPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
+			<URLTemplate uuid="b3a1f5c2-7d8e-4a6b-9c0d-2e3f4a5b6c7d">
+				<Properties>
+					<Name>ПроверкаСинтаксиса</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Проверка синтаксиса</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/check-syntax</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="c4b2f6d3-8e9f-4b7c-ad1e-3f4a5b6c7d8e">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>POST</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>ПроверкаСинтаксисаPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
+			<URLTemplate uuid="d5c3a7e4-9f0a-4c8d-be2f-4a5b6c7d8e9f">
+				<Properties>
+					<Name>Выполнить</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Выполнить код</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/execute</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="e6d4b8f5-0a1b-4d9e-cf3a-5b6c7d8e9f0a">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>POST</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>ВыполнитьPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
+			<URLTemplate uuid="f7e5c9a6-1b2c-4e0f-da4b-6c7d8e9f0a1b">
+				<Properties>
+					<Name>Вычислить</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Вычислить выражение</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/eval</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="a8f6d0b7-2c3d-4f1a-eb5c-7d8e9f0a1b2c">
+						<Properties>
+							<Name>POST</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>POST</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>POST</HTTPMethod>
+							<Handler>ВычислитьPOST</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
 		</ChildObjects>
 	</HTTPService>
 </MetaDataObject>

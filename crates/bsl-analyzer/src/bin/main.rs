@@ -947,7 +947,7 @@ fn analyze_salsa(
     // If we create a new input for each diagnostic, Salsa won't cache the metadata load
     let config_path_input = configuration_path.as_ref().map(|path| {
         let path_str = path.to_string_lossy().to_string();
-        metadata::ConfigurationPathInput::new(&db, path_str)
+        metadata::ConfigurationPathInput::new(&db, path_str, 0)
     });
 
     // Parallel diagnostics execution WITHOUT Mutex!

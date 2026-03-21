@@ -2181,6 +2181,7 @@ dependencies = [
  "project-model",
  "rmcp",
  "schemars",
+ "sdbl-hir",
  "serde",
  "serde_json",
  "syntax",

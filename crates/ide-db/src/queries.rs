@@ -78,7 +78,7 @@ pub fn module_metadata_query<'db>(
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path);
     let configuration = config_root.map(|root| {
         let config_path_str = root.to_string_lossy().to_string();
-        let path_input = ConfigurationPathInput::new(db, config_path_str);
+        let path_input = ConfigurationPathInput::new(db, config_path_str, db.metadata_version());
         load_configuration(db, path_input)
     });
 
@@ -190,7 +190,8 @@ pub fn sdbl_hir_in_file_query<'db>(
         let config_root_opt = crate::vfs_helpers::find_configuration_root(db, &file_path);
         config_root_opt.map(|config_root| {
             let config_path_str = config_root.to_string_lossy().to_string();
-            let path_input = ConfigurationPathInput::new(db, config_path_str);
+            let path_input =
+                ConfigurationPathInput::new(db, config_path_str, db.metadata_version());
             // Salsa dependency tracked automatically!
             load_configuration(db, path_input)
         })

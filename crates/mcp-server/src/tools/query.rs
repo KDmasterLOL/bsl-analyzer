@@ -6,32 +6,73 @@ use rmcp::ErrorData as McpError;
 use std::collections::HashMap;
 use std::fmt::Write;
 
-/// Validates SDBL query syntax without execution.
-pub fn validate_query(_state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
+/// Validates SDBL query syntax.
+///
+/// If 1C HTTP client is configured (--onec-url), validates via СхемаЗапроса on the 1C platform.
+/// Otherwise falls back to local parser ERROR node detection.
+pub async fn validate_query(state: &SharedState, query: &str) -> Result<CallToolResult, McpError> {
     if query.trim().is_empty() {
         return Err(McpError::invalid_params("Пустой запрос", None));
     }
 
-    let parse = parser::parse_sdbl(query);
-    let errors = parse.errors();
+    // If 1C client available, validate via platform (most accurate)
+    if let Some(client) = state.onec_client() {
+        return validate_query_remote(client, query).await;
+    }
 
-    if errors.is_empty() {
+    // Fallback: local parser ERROR node detection
+    validate_query_local(query)
+}
+
+/// Validate query via 1C platform using СхемаЗапроса.
+async fn validate_query_remote(
+    client: &onec_client::Client,
+    query: &str,
+) -> Result<CallToolResult, McpError> {
+    let request = onec_client::ValidateQueryRequest { query: query.to_string() };
+
+    let result = client.validate_query(&request).await.map_err(|e| {
+        McpError::internal_error(format!("Ошибка проверки запроса в 1С: {e}"), None)
+    })?;
+
+    if result.valid {
         Ok(CallToolResult::success(vec![Content::text("✓ Запрос синтаксически корректен")]))
     } else {
-        let mut out = format!("✗ Найдено ошибок: {}\n\n", errors.len());
-        for err in errors {
-            let range = err.range();
+        let mut out = "✗ Ошибки в запросе:\n\n".to_string();
+        for err in &result.errors {
+            let _ = writeln!(out, "- {err}");
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+}
+
+/// Validate query locally using parser ERROR nodes (offline fallback).
+fn validate_query_local(query: &str) -> Result<CallToolResult, McpError> {
+    let parse = parser::parse_sdbl(query);
+    let root = parse.syntax_node();
+
+    let error_nodes: Vec<_> = root
+        .descendants()
+        .filter(|node| {
+            matches!(node.kind(), syntax::SyntaxKind::ERROR | syntax::SyntaxKind::SDBL_ERROR)
+        })
+        .collect();
+
+    if error_nodes.is_empty() {
+        Ok(CallToolResult::success(vec![Content::text("✓ Запрос синтаксически корректен")]))
+    } else {
+        let mut out = format!("✗ Найдено ошибок: {}\n\n", error_nodes.len());
+        for node in &error_nodes {
+            let range = node.text_range();
             let start = u32::from(range.start()) as usize;
             let end = u32::from(range.end()) as usize;
             let fragment = query.get(start..end).unwrap_or("…");
-            let _ = writeln!(
-                out,
-                "- [{}..{}] {}: `{}`",
-                u32::from(range.start()),
-                u32::from(range.end()),
-                err.message(),
-                fragment,
-            );
+            if fragment.trim().is_empty() {
+                let _ = writeln!(out, "- [{}] неожиданный конец выражения", start);
+            } else {
+                let _ =
+                    writeln!(out, "- [{}..{}] неожиданный фрагмент: `{}`", start, end, fragment);
+            }
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
@@ -135,46 +176,58 @@ mod tests {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
     }
 
+    // Tests use local validation (no 1C client in test state)
+
     #[test]
     fn test_validate_query_valid() {
-        let state = test_shared_state();
-        let result = validate_query(&state, "ВЫБРАТЬ 1").unwrap();
+        let _state = test_shared_state();
+        let result = validate_query_local("ВЫБРАТЬ 1").unwrap();
         let text = extract_text(&result);
         assert!(text.contains("✓"), "valid query should pass");
     }
 
     #[test]
     fn test_validate_query_garbage_input() {
-        let state = test_shared_state();
-        // SDBL parser is error-recovering (IDE parser), so even garbage input
-        // produces a result. We just verify the tool doesn't panic.
-        let result = validate_query(&state, "}{}{}{").unwrap();
+        let result = validate_query_local("}{}{}{").unwrap();
         let text = extract_text(&result);
-        assert!(
-            text.contains("✓") || text.contains("✗"),
-            "should produce either success or error marker"
-        );
+        assert!(text.contains("✗"), "garbage input should produce errors");
+    }
+
+    #[test]
+    fn test_validate_query_not_a_query() {
+        let result = validate_query_local("это вообще не запрос").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("✗"), "arbitrary text should produce errors");
+    }
+
+    #[test]
+    fn test_validate_query_incomplete_where() {
+        let result =
+            validate_query_local("ВЫБРАТЬ Наименование ИЗ Справочник.Номенклатура ГДЕ").unwrap();
+        let text = extract_text(&result);
+        assert!(text.contains("✗"), "incomplete WHERE should produce errors");
     }
 
     #[test]
     fn test_validate_query_empty() {
         let state = test_shared_state();
-        let result = validate_query(&state, "");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(validate_query(&state, ""));
         assert!(result.is_err(), "empty query should fail");
     }
 
     #[test]
     fn test_validate_query_whitespace() {
         let state = test_shared_state();
-        let result = validate_query(&state, "   ");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(validate_query(&state, "   "));
         assert!(result.is_err(), "whitespace-only query should fail");
     }
 
     #[test]
     fn test_validate_query_select_with_fields() {
-        let state = test_shared_state();
         let result =
-            validate_query(&state, "ВЫБРАТЬ Ссылка, Наименование ИЗ Справочник.Номенклатура")
+            validate_query_local("ВЫБРАТЬ Ссылка, Наименование ИЗ Справочник.Номенклатура")
                 .unwrap();
         let text = extract_text(&result);
         assert!(text.contains("✓"), "select with fields should pass");
@@ -182,8 +235,7 @@ mod tests {
 
     #[test]
     fn test_validate_query_english() {
-        let state = test_shared_state();
-        let result = validate_query(&state, "SELECT 1").unwrap();
+        let result = validate_query_local("SELECT 1").unwrap();
         let text = extract_text(&result);
         assert!(text.contains("✓"), "English SELECT should pass");
     }

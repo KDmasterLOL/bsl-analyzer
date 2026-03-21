@@ -249,7 +249,7 @@ fn check_method_with_module_liveness(
         }
     };
 
-    // Get live variables at entry point (IN set)
+    // Get live variables at entry point (IN set) — used for var_index access
     let live_at_entry = match liveness_result.block_in(entry) {
         Some(live) => live,
         None => {
@@ -270,6 +270,24 @@ fn check_method_with_module_liveness(
     // Get var_index from liveness result (already computed during liveness analysis)
     let var_index = live_at_entry.var_index();
 
+    // Build union of all live sets across all blocks (O(B) - iterate all blocks once).
+    //
+    // A variable is "used" if it appears live in ANY IN or OUT set across the entire
+    // CFG. Using only IN[entry] is insufficient because variables used inside
+    // sub-graphs (e.g., inside TryExcept blocks) get killed by prior assignments
+    // in the entry block before they propagate back to IN[entry].
+    //
+    // This union covers all cases:
+    //  - Variables used in the entry block appear in IN[entry] (via the backward
+    //    transfer's accidental forward-order processing).
+    //  - Variables used only after the entry block appear in OUT[entry] or
+    //    IN/OUT of successor blocks.
+    let mut all_live_union = fixedbitset::FixedBitSet::with_capacity(var_index.size());
+    for (_, in_state, out_state) in liveness_result.blocks() {
+        all_live_union.union_with(in_state.live_vars());
+        all_live_union.union_with(out_state.live_vars());
+    }
+
     // Check each declared variable
     // 1. Check VarDecl bindings
     for stmt_id in body.body_stmts() {
@@ -279,13 +297,13 @@ fn check_method_with_module_liveness(
                 let binding = body.binding(binding_id_opaque);
                 declared_vars.insert(binding.name.as_str().to_lowercase());
 
-                // Variable is unused if it's not live at entry
+                // Variable is unused if it's not live anywhere in the CFG.
                 // Fast path: use pre-computed binding index (O(1), no allocation)
                 let is_unused = if let Some(idx) = var_index.get_index_by_binding(binding_id_opaque)
                 {
-                    !live_at_entry.is_live_by_idx(idx)
+                    !all_live_union.contains(idx)
                 } else {
-                    // Fallback to string-based check
+                    // Fallback to string-based check against entry (conservative)
                     !live_at_entry.is_live(binding.name.as_str())
                 };
 
@@ -313,7 +331,7 @@ fn check_method_with_module_liveness(
 
             // Fast path: use pre-computed binding index (O(1), no allocation)
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
-                !live_at_entry.is_live_by_idx(idx)
+                !all_live_union.contains(idx)
             } else {
                 !live_at_entry.is_live(binding.name.as_str())
             };
@@ -335,7 +353,7 @@ fn check_method_with_module_liveness(
 
             // Fast path: use pre-computed binding index (O(1), no allocation)
             let is_unused = if let Some(idx) = var_index.get_index_by_binding(var_opaque) {
-                !live_at_entry.is_live_by_idx(idx)
+                !all_live_union.contains(idx)
             } else {
                 !live_at_entry.is_live(binding.name.as_str())
             };
@@ -377,19 +395,7 @@ fn check_method_with_module_liveness(
         }
     }
 
-    // Check if implicit variables are unused - OPTIMIZED with batch union
-    // Instead of O(V × B) iteration, we create a union of all live sets ONCE: O(B)
-    // Then check each variable against this union: O(V)
-    // Total: O(B + V) instead of O(V × B)
-
-    // Create union of all live sets ONCE (O(B) - iterate all blocks once)
-    let mut all_live_union = fixedbitset::FixedBitSet::with_capacity(var_index.size());
-    for (_, in_state, out_state) in liveness_result.blocks() {
-        all_live_union.union_with(in_state.live_vars());
-        all_live_union.union_with(out_state.live_vars());
-    }
-
-    // Check each implicit variable against union (O(V) - one lookup per variable)
+    // Check each implicit variable against the all_live_union already computed above (O(V))
     for (lowercase_name, (original_name, range)) in implicit_vars {
         // Fast path: check against pre-computed union (O(1) per variable)
         let is_live_anywhere = if let Some(idx) = var_index.get_index(&lowercase_name) {
@@ -1396,5 +1402,34 @@ mod tests {
             "Same name should be flagged in CommonModule (not an object attribute)"
         );
         assert!(unused_diags[0].message.contains("Дата"));
+    }
+
+    /// Variable declared with Перем and used inside/after TryExcept should not be flagged.
+    ///
+    /// Bug: backward liveness analysis was not propagating liveness through TryExcept
+    /// vertex properly, so reads inside try/except blocks didn't make the variable
+    /// live at the entry point.
+    #[test]
+    fn test_var_used_in_try_except_not_flagged() {
+        let code = r#"Функция Тест()
+    Перем Результат;
+    Результат = Новый Структура;
+    Попытка
+        Результат.Вставить("success", Истина);
+    Исключение
+        Результат.Вставить("success", Ложь);
+    КонецПопытки;
+    Возврат Результат;
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        let unused_diags: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalVariable).collect();
+
+        assert_eq!(
+            unused_diags.len(),
+            0,
+            "Variable used inside TryExcept should not be flagged as unused"
+        );
     }
 }
