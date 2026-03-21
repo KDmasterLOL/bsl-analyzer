@@ -677,6 +677,14 @@ impl SearchEngine {
         self.store.clear_file_hashes(collection)
     }
 
+    /// Clear file hashes only for files without embeddings.
+    pub fn clear_file_hashes_without_embeddings(
+        &self,
+        collection: &str,
+    ) -> Result<usize, SearchError> {
+        self.store.clear_file_hashes_without_embeddings(collection)
+    }
+
     /// Remove a file from the index.
     pub fn remove_file(&mut self, rel_path: &str) -> Result<(), SearchError> {
         self.store.remove_file(rel_path)?;

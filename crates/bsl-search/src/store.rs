@@ -491,6 +491,25 @@ impl Store {
         )?;
         Ok(count)
     }
+
+    /// Clear file hashes only for files that have no embeddings in their chunks.
+    ///
+    /// This allows `index_directory` to re-process only files that lack
+    /// embeddings, without touching files already fully indexed.
+    pub fn clear_file_hashes_without_embeddings(
+        &self,
+        collection: &str,
+    ) -> Result<usize, SearchError> {
+        let count = self.conn.execute(
+            "UPDATE files SET hash = zeroblob(0)
+             WHERE collection = ?1
+               AND id NOT IN (
+                   SELECT DISTINCT file_id FROM chunks WHERE embedding IS NOT NULL
+               )",
+            params![collection],
+        )?;
+        Ok(count)
+    }
 }
 
 /// Full-text search result with chunk id and relevance rank.

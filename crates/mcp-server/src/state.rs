@@ -224,46 +224,53 @@ impl SharedState {
 
         let mut engine = Self::open_search_engine(&db_path)?;
 
-        // If DB has code chunks but no code embeddings and embedder is available,
-        // clear file hashes so index_directory will re-process them with embeddings.
+        // If DB has code chunks without embeddings and embedder is available,
+        // clear their file hashes so index_directory will re-process them.
         if engine.has_semantic() {
             let code_embeddings = engine.embedding_count_by_collection("code").unwrap_or(0);
             let code_chunks = engine.chunk_count().unwrap_or(0);
-            if code_chunks > 0 && code_embeddings == 0 {
-                tracing::info!(
-                    code_chunks,
-                    "code chunks exist but no embeddings — clearing hashes for semantic upgrade"
-                );
-                let cleared = engine.clear_file_hashes("code").unwrap_or(0);
-                tracing::info!(cleared, "file hashes cleared for re-indexing");
+            if code_chunks > 0 && code_embeddings < code_chunks {
+                // Some or all code files lack embeddings — clear hashes for unembedded files.
+                // index_directory will skip files whose hash matches (already indexed with
+                // embeddings) and re-process the rest.
+                let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
+                if cleared > 0 {
+                    tracing::info!(
+                        code_embeddings,
+                        code_chunks,
+                        cleared,
+                        "cleared hashes for code files without embeddings"
+                    );
+                }
             }
         }
 
-        if engine.chunk_count().unwrap_or(0) == 0
-            || (engine.has_semantic()
-                && engine.embedding_count_by_collection("code").unwrap_or(0) == 0
-                && engine.chunk_count().unwrap_or(0) > 0)
         {
             let project = project_model::Project::new(workspace_root);
             let source_path = project.source_path();
 
             if engine.has_semantic() {
-                tracing::info!(?source_path, "building FTS + semantic index from source files");
+                // Always call index_directory — it skips files by hash.
+                // Files without embeddings had their hashes cleared above.
                 match engine.index_directory(source_path, Some(progress)) {
                     Ok(indexed) => {
-                        tracing::info!(indexed, "FTS + semantic index built");
+                        if indexed > 0 {
+                            tracing::info!(indexed, "FTS + semantic index updated");
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("failed to build semantic index, falling back to FTS: {e}");
-                        match engine.index_directory_fts(source_path) {
-                            Ok(indexed) => {
-                                tracing::info!(indexed, "FTS index built (fallback)")
+                        if engine.chunk_count().unwrap_or(0) == 0 {
+                            match engine.index_directory_fts(source_path) {
+                                Ok(indexed) => {
+                                    tracing::info!(indexed, "FTS index built (fallback)")
+                                }
+                                Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
                             }
-                            Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
                         }
                     }
                 }
-            } else {
+            } else if engine.chunk_count().unwrap_or(0) == 0 {
                 tracing::info!(?source_path, "building FTS index from source files");
                 match engine.index_directory_fts(source_path) {
                     Ok(indexed) => {
