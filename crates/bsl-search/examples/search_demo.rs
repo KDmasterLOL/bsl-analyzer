@@ -22,6 +22,7 @@
 //!   BATCH_SIZE      - batch size for embedding (default: 32)
 
 use bsl_search::{EmbedderConfig, SearchConfig, SearchEngine};
+use project_model::Project;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -39,13 +40,17 @@ fn main() {
         std::process::exit(1);
     }
 
-    let config_dir = PathBuf::from(&args[1]);
+    let project_dir = PathBuf::from(&args[1]);
     let query = args.get(2).map(|s| s.as_str());
 
-    if !config_dir.is_dir() {
-        eprintln!("Error: {} is not a directory", config_dir.display());
+    if !project_dir.is_dir() {
+        eprintln!("Error: {} is not a directory", project_dir.display());
         std::process::exit(1);
     }
+
+    // Use project-model to discover the configuration source path.
+    let project = Project::new(&project_dir);
+    let config_dir = project.source_path().to_path_buf();
 
     // Configure embedding API.
     let base_url =
@@ -61,8 +66,10 @@ fn main() {
         batch_size,
     };
 
-    // Database stored next to the config directory.
-    let db_path = config_dir.join(".bsl-search.db");
+    // Database stored in .build/ (typically gitignored).
+    let build_dir = project_dir.join(".build");
+    std::fs::create_dir_all(&build_dir).ok();
+    let db_path = build_dir.join("bsl-search.db");
 
     println!("=== BSL Search Demo ===");
     println!("Config dir:  {}", config_dir.display());
@@ -127,11 +134,24 @@ fn main() {
 
     // Search.
     if let Some(query) = query {
-        println!("Searching: \"{query}\"");
+        // Prefix "fts:" uses full-text search, otherwise semantic search.
+        let (mode, actual_query) = if let Some(q) = query.strip_prefix("fts:") {
+            ("FTS", q.trim())
+        } else {
+            ("semantic", query)
+        };
+
+        println!("Searching ({mode}): \"{actual_query}\"");
         println!("{}", "─".repeat(60));
 
         let start = Instant::now();
-        match engine.search(query, 10) {
+        let result = if mode == "FTS" {
+            engine.text_search(actual_query, 10)
+        } else {
+            engine.search(actual_query, 10)
+        };
+
+        match result {
             Ok(hits) => {
                 let elapsed = start.elapsed();
                 println!(
@@ -171,6 +191,11 @@ fn main() {
         println!("No query provided. Run with a query argument to search:");
         println!(
             "  cargo run -p bsl-search --example search_demo -- {} \"your query\"",
+            config_dir.display()
+        );
+        println!("  # Prefix 'fts:' for full-text search:");
+        println!(
+            "  cargo run -p bsl-search --example search_demo -- {} \"fts:ОбработкаПроведения\"",
             config_dir.display()
         );
     }

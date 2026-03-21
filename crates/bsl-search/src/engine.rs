@@ -70,6 +70,14 @@ impl SearchEngine {
         let index = VectorIndex::build(dim, &data)?;
         info!(vectors = index.len(), dim, "search index loaded");
 
+        // Auto-populate FTS index if chunks exist but FTS is empty (migration).
+        let chunk_count = store.chunk_count()?;
+        let fts_count = store.fts_count()?;
+        if chunk_count > 0 && fts_count == 0 {
+            info!(chunks = chunk_count, "populating FTS index from existing data");
+            store.rebuild_fts()?;
+        }
+
         Ok(Self { store, embedder, index, dim, batch_size: config.batch_size })
     }
 
@@ -195,6 +203,33 @@ impl SearchEngine {
                     line_start: info.line_start,
                     line_end: info.line_end,
                     score: result.score,
+                });
+            }
+        }
+
+        Ok(hits)
+    }
+
+    /// Full-text search for code chunks matching the query.
+    ///
+    /// Uses SQLite FTS5 for lexical matching — good for exact names,
+    /// variable references, API calls, and string literals.
+    pub fn text_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>, SearchError> {
+        let results = self.store.text_search(query, limit)?;
+
+        let mut hits = Vec::with_capacity(results.len());
+        for result in results {
+            if let Some(info) = self.store.chunk_by_id(result.chunk_id)? {
+                // Normalize FTS5 rank (negative, lower = better) to 0..1 score.
+                let score = 1.0 / (1.0 - result.rank as f32);
+                hits.push(SearchHit {
+                    file_path: info.file_path,
+                    symbol_name: info.symbol_name,
+                    kind: info.kind,
+                    text: info.text,
+                    line_start: info.line_start,
+                    line_end: info.line_end,
+                    score,
                 });
             }
         }

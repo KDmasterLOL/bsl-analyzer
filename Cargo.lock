@@ -339,6 +339,7 @@ dependencies = [
  "expect-test",
  "lexer",
  "parser",
+ "project-model",
  "rayon",
  "rusqlite",
  "serde",

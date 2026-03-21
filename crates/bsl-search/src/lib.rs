@@ -17,4 +17,4 @@ pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{SearchConfig, SearchEngine, SearchHit};
 pub use error::SearchError;
 pub use index::{SearchResult, VectorIndex};
-pub use store::{ChunkInfo, Store};
+pub use store::{ChunkInfo, Store, TextSearchResult};

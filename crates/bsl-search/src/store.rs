@@ -60,6 +60,12 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_chunks_file
                 ON chunks(file_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                symbol_name,
+                text,
+                tokenize='unicode61'
+            );
             ",
         )?;
         Ok(())
@@ -93,8 +99,17 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Remove a file and all its chunks (CASCADE).
+    /// Remove a file and all its chunks (CASCADE) and FTS entries.
     pub fn remove_file(&self, path: &str) -> Result<(), SearchError> {
+        // Clean FTS entries before CASCADE deletes chunks.
+        self.conn.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (
+                 SELECT c.id FROM chunks c
+                 JOIN files f ON f.id = c.file_id
+                 WHERE f.path = ?1
+             )",
+            params![path],
+        )?;
         self.conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
         Ok(())
     }
@@ -167,16 +182,24 @@ impl Store {
         let file_id: i64 =
             tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
 
+        // Delete old FTS entries for this file's chunks.
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+
         // Delete old chunks.
         tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
 
-        // Insert new chunks.
+        // Insert new chunks and sync FTS index.
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
                                      line_start, line_end, text, embedding)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
 
             for (i, chunk) in chunks.iter().enumerate() {
                 let kind_str = match chunk.kind {
@@ -204,6 +227,9 @@ impl Store {
                     chunk.text,
                     embedding_blob,
                 ])?;
+
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, chunk.name, chunk.text])?;
             }
         }
 
@@ -285,11 +311,70 @@ impl Store {
         Ok(count as usize)
     }
 
+    /// Full-text search across chunk symbol names and text.
+    ///
+    /// Returns chunk ids with FTS5 rank scores, ordered by relevance.
+    pub fn text_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TextSearchResult>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid, rank
+             FROM chunks_fts
+             WHERE chunks_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![query, limit as i64], |row| {
+            Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Rebuild the FTS5 index from existing chunk data.
+    ///
+    /// Clears and repopulates the standalone FTS5 table from chunks.
+    /// Useful after schema migration or if the index gets out of sync.
+    pub fn rebuild_fts(&self) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM chunks_fts", [])?;
+        tx.execute(
+            "INSERT INTO chunks_fts(rowid, symbol_name, text)
+             SELECT id, symbol_name, text FROM chunks",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Check if the FTS index is populated.
+    pub fn fts_count(&self) -> Result<usize, SearchError> {
+        let count: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     /// Total number of indexed files.
     pub fn file_count(&self) -> Result<usize, SearchError> {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+}
+
+/// Full-text search result with chunk id and relevance rank.
+#[derive(Debug, Clone)]
+pub struct TextSearchResult {
+    /// Chunk id (matches the SQLite chunks.id).
+    pub chunk_id: i64,
+    /// FTS5 rank score (lower is more relevant).
+    pub rank: f64,
 }
 
 /// Chunk metadata returned from search results.
@@ -429,5 +514,69 @@ mod tests {
         store.remove_file("test.bsl").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
         assert_eq!(store.chunk_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn fts_search_by_symbol_name() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"test");
+        store
+            .reindex_file(
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("ОбработкаПроведения"), sample_chunk("ПриСозданииНаСервере")],
+                None,
+            )
+            .unwrap();
+
+        let results = store.text_search("ОбработкаПроведения", 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let info = store.chunk_by_id(results[0].chunk_id).unwrap().unwrap();
+        assert_eq!(info.symbol_name, "ОбработкаПроведения");
+    }
+
+    #[test]
+    fn fts_search_by_text_content() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"test");
+
+        let mut chunk = sample_chunk("Тест");
+        chunk.text =
+            "Процедура Тест()\n    СообщитьПользователю(\"Привет\");\nКонецПроцедуры".to_owned();
+
+        store.reindex_file("test.bsl", hash.as_bytes(), &[chunk], None).unwrap();
+
+        let results = store.text_search("СообщитьПользователю", 10).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn fts_reindex_updates_index() {
+        let mut store = Store::in_memory().unwrap();
+        let hash1 = blake3::hash(b"v1");
+        let hash2 = blake3::hash(b"v2");
+
+        store.reindex_file("test.bsl", hash1.as_bytes(), &[sample_chunk("Старая")], None).unwrap();
+        assert_eq!(store.text_search("Старая", 10).unwrap().len(), 1);
+
+        store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
+
+        // Old name gone, new name found.
+        assert_eq!(store.text_search("Старая", 10).unwrap().len(), 0);
+        assert_eq!(store.text_search("Новая", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fts_remove_file_cleans_index() {
+        let mut store = Store::in_memory().unwrap();
+        let hash = blake3::hash(b"test");
+        store
+            .reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Удаляемая")], None)
+            .unwrap();
+        assert_eq!(store.text_search("Удаляемая", 10).unwrap().len(), 1);
+
+        store.remove_file("test.bsl").unwrap();
+        assert_eq!(store.text_search("Удаляемая", 10).unwrap().len(), 0);
     }
 }
