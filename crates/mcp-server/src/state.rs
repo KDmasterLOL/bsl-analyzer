@@ -28,6 +28,9 @@ pub struct SharedState {
 
 impl SharedState {
     /// Create state for standalone MCP mode (loads configuration from directory).
+    ///
+    /// Returns immediately. Metadata loading is synchronous (~1-2s).
+    /// Search engine initialization (FTS indexing) runs in a background thread.
     pub fn standalone(source_dir: PathBuf) -> Self {
         let configuration = bsl_metadata::load_from_directory(&source_dir)
             .map_err(|e| {
@@ -36,15 +39,36 @@ impl SharedState {
             })
             .ok();
 
-        let search_engine = Self::init_search_engine(&source_dir);
+        let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
+        let index_progress = IndexProgress::new();
+
+        // Spawn background thread so standalone() returns immediately.
+        // MCP tools check engine readiness and return a friendly message while init is in progress.
+        {
+            let engine_arc = Arc::clone(&search_engine);
+            let progress_arc = Arc::clone(&index_progress);
+            let root = source_dir.clone();
+            std::thread::Builder::new()
+                .name("bsl-search-init".to_owned())
+                .spawn(move || {
+                    tracing::info!("search engine initialization started in background");
+                    let _ = progress_arc; // keep progress alive in thread
+                    let engine = Self::init_search_engine(&root);
+                    if let Ok(mut guard) = engine_arc.lock() {
+                        *guard = engine;
+                    }
+                    tracing::info!("search engine initialization complete");
+                })
+                .ok();
+        }
 
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
             workspace_root: Some(source_dir),
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
-            search_engine: Arc::new(Mutex::new(search_engine)),
-            index_progress: IndexProgress::new(),
+            search_engine,
+            index_progress,
         }
     }
 

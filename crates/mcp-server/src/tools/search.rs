@@ -15,9 +15,12 @@ pub fn find_code(
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    let engine = guard.as_ref().ok_or_else(|| {
-        McpError::invalid_params("Search index not built. Run indexing first.", None)
-    })?;
+    if guard.is_none() {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Search index is being built, please try again in a moment.",
+        )]));
+    }
+    let engine = guard.as_ref().expect("checked above");
 
     let hits = engine
         .text_search(query, limit, Some("code"))
@@ -38,9 +41,12 @@ pub fn search_code(
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| McpError::invalid_params("Search index not initialized.", None))?;
+    if guard.is_none() {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Search index is being built, please try again in a moment.",
+        )]));
+    }
+    let engine = guard.as_ref().expect("checked above");
 
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
@@ -69,9 +75,12 @@ pub fn find_docs(
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    let engine = guard.as_ref().ok_or_else(|| {
-        McpError::invalid_params("Search index not built. Run indexing first.", None)
-    })?;
+    if guard.is_none() {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Search index is being built, please try again in a moment.",
+        )]));
+    }
+    let engine = guard.as_ref().expect("checked above");
 
     let hits = engine
         .text_search(query, limit, Some("platform"))
@@ -92,9 +101,12 @@ pub fn search_docs(
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    let engine = guard
-        .as_ref()
-        .ok_or_else(|| McpError::invalid_params("Search index not initialized.", None))?;
+    if guard.is_none() {
+        return Ok(CallToolResult::success(vec![Content::text(
+            "Search index is being built, please try again in a moment.",
+        )]));
+    }
+    let engine = guard.as_ref().expect("checked above");
 
     if !engine.has_semantic() {
         return Err(McpError::invalid_params(
@@ -143,7 +155,7 @@ pub fn search_status(
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
     } else {
-        let _ = writeln!(out, "Search index: not initialized");
+        let _ = writeln!(out, "Search index: building (background initialization in progress)");
     }
 
     if progress.is_active() {
