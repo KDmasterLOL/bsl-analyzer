@@ -294,6 +294,13 @@ pub trait RootDatabase:
     /// Used by helper functions to access VFS and file system operations
     /// that are not part of the trait interface.
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Get metadata version for cache invalidation.
+    ///
+    /// Incremented each time VFS detects .xml file changes in the configuration
+    /// directory. Passed as `version` to `ConfigurationPathInput::new` so Salsa
+    /// creates a distinct interned key and re-runs `load_configuration`.
+    fn metadata_version(&self) -> u32;
 }
 
 // Note: All Salsa query implementations have been moved to the `queries` module.
@@ -304,13 +311,16 @@ pub trait RootDatabase:
 /// All HIR queries are now managed by Salsa for automatic caching and invalidation!
 /// No manual DashMap caches needed for HIR - Salsa handles everything.
 #[salsa::db]
-#[derive(Clone)]
 pub struct RootDatabaseImpl {
     /// Salsa storage for incremental computation
     storage: salsa::Storage<Self>,
 
     /// Base file storage
     files: Files,
+
+    /// Generation counter for metadata cache invalidation.
+    /// Bumped when VFS detects .xml file changes in the configuration directory.
+    metadata_version: std::sync::atomic::AtomicU32,
     // ✅ ALL HIR queries migrated to Salsa! (Phase 1-6 complete)
     // - item_tree, region_tree, conditional_tree, module_data, symbol_tree
     // - infer_types, module_bodies, module_metadata
@@ -325,10 +335,37 @@ impl Default for RootDatabaseImpl {
     }
 }
 
+impl Clone for RootDatabaseImpl {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            files: self.files.clone(),
+            metadata_version: std::sync::atomic::AtomicU32::new(
+                self.metadata_version.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
 impl RootDatabaseImpl {
     /// Create a new empty database.
     pub fn new() -> Self {
-        Self { storage: salsa::Storage::default(), files: Files::new() }
+        Self {
+            storage: salsa::Storage::default(),
+            files: Files::new(),
+            metadata_version: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Get the current metadata version (for configuration cache invalidation).
+    pub fn metadata_version(&self) -> u32 {
+        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bump metadata version to invalidate configuration cache.
+    /// Call this when .xml metadata files change.
+    pub fn bump_metadata_version(&self) {
+        self.metadata_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get file path from FileId by traversing SourceRoot.
@@ -554,7 +591,8 @@ impl RootDatabase for RootDatabaseImpl {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
         let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
         let config_path_str = config_root.to_string_lossy().to_string();
-        let path_input = metadata::ConfigurationPathInput::new(self, config_path_str);
+        let path_input =
+            metadata::ConfigurationPathInput::new(self, config_path_str, self.metadata_version());
         // Salsa-cached via load_configuration
         Some(metadata::load_configuration(self, path_input))
     }
@@ -645,6 +683,10 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn metadata_version(&self) -> u32 {
+        self.metadata_version.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

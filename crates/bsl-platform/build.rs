@@ -729,7 +729,23 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 }
 
                 // see_also
-                code.push_str("        see_also: &[],\n");
+                if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
+                    if see_also.is_empty() {
+                        code.push_str("        see_also: &[],\n");
+                    } else {
+                        code.push_str("        see_also: &[");
+                        for (i, item) in see_also.iter().enumerate() {
+                            if i > 0 {
+                                code.push_str(", ");
+                            }
+                            let s = item.as_str().unwrap_or("");
+                            code.push_str(&format!("{:?}", s));
+                        }
+                        code.push_str("],\n");
+                    }
+                } else {
+                    code.push_str("        see_also: &[],\n");
+                }
 
                 code.push_str("    },\n");
                 docs_idx += 1;
@@ -860,7 +876,23 @@ fn generate_code_from_json(json_path: &Path, output_path: &Path, _with_docs: boo
                 }
 
                 // see_also
-                code.push_str("        see_also: &[],\n");
+                if let Some(see_also) = docs.get("see_also").and_then(|v| v.as_array()) {
+                    if see_also.is_empty() {
+                        code.push_str("        see_also: &[],\n");
+                    } else {
+                        code.push_str("        see_also: &[");
+                        for (i, item) in see_also.iter().enumerate() {
+                            if i > 0 {
+                                code.push_str(", ");
+                            }
+                            let s = item.as_str().unwrap_or("");
+                            code.push_str(&format!("{:?}", s));
+                        }
+                        code.push_str("],\n");
+                    }
+                } else {
+                    code.push_str("        see_also: &[],\n");
+                }
 
                 code.push_str("    },\n");
                 docs_idx += 1;

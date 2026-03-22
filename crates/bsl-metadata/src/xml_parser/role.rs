@@ -1,10 +1,9 @@
 //! Role XML parser
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::role::{Role, RoleData};
 
-use super::helpers::parse_uuid;
-use super::serde_types::{RightsXml, RoleRoot};
+use super::helpers::{child_bool, child_text, find_child, find_mdo_element, parse_uuid, parse_xml};
 
 /// Parse Role XML from Designer format
 ///
@@ -18,10 +17,19 @@ use super::serde_types::{RightsXml, RoleRoot};
 pub fn parse_role_xml(xml: &str) -> Result<Role> {
     let _span = tracing::debug_span!("parse_role_xml").entered();
 
-    let root: RoleRoot = quick_xml::de::from_str(xml)?;
-    let uuid = parse_uuid(&root.role.uuid, "role")?;
+    let doc = parse_xml(xml)?;
+    let mdo = find_mdo_element(&doc)
+        .ok_or_else(|| MetadataError::InvalidFormat("No Role element found".to_string()))?;
 
-    let role = Role::with_data(uuid, root.role.properties.name.clone(), RoleData::default());
+    let uuid_str = mdo.attribute("uuid").unwrap_or("");
+    let uuid = parse_uuid(uuid_str, "role")?;
+
+    let props = find_child(mdo, "Properties")
+        .ok_or_else(|| MetadataError::InvalidFormat("Role missing Properties".to_string()))?;
+
+    let name = child_text(props, "Name").unwrap_or("").to_string();
+
+    let role = Role::with_data(uuid, name.clone(), RoleData::default());
 
     tracing::debug!(
         role_name = %role.name(),
@@ -44,12 +52,19 @@ pub fn parse_role_xml(xml: &str) -> Result<Role> {
 pub fn parse_rights_xml(xml: &str) -> Result<RoleData> {
     let _span = tracing::debug_span!("parse_rights_xml").entered();
 
-    let rights: RightsXml = quick_xml::de::from_str(xml)?;
+    let doc = parse_xml(xml)?;
+    // The root element IS the <Rights> element
+    let rights_node = doc.root_element();
+
+    let set_for_new_objects = child_bool(rights_node, "setForNewObjects");
+    let set_for_attributes_by_default = child_bool(rights_node, "setForAttributesByDefault");
+    let independent_rights_of_child_objects =
+        child_bool(rights_node, "independentRightsOfChildObjects");
 
     let data = RoleData::new(
-        rights.set_for_new_objects.into(),
-        rights.set_for_attributes_by_default.into(),
-        rights.independent_rights_of_child_objects.into(),
+        set_for_new_objects,
+        set_for_attributes_by_default,
+        independent_rights_of_child_objects,
     );
 
     tracing::debug!(

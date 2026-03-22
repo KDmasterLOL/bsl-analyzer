@@ -191,6 +191,7 @@ mod tests {
         let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
             &db,
             workspace_root.to_string_lossy().to_string(),
+            0,
         );
 
         let config = DiagnosticsConfig::default();
@@ -307,6 +308,7 @@ mod tests {
         let configuration_path_input = ide_db::metadata::ConfigurationPathInput::new(
             &db,
             workspace_root.to_string_lossy().to_string(),
+            0,
         );
 
         // Custom config: only Роль2 is allowed (not ПолныеПрава)

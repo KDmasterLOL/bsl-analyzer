@@ -41,6 +41,9 @@ use std::sync::Arc;
 pub struct ConfigurationPathInput {
     /// Path to configuration root directory (stored as String for Salsa)
     pub path: String,
+    /// Generation counter for cache invalidation when XML metadata files change on disk.
+    /// Bumped when VFS detects changes to .xml files in the configuration directory.
+    pub version: u32,
 }
 
 /// Load configuration from directory.
@@ -98,7 +101,7 @@ pub fn load_configuration<'db>(
 /// use ide_db::{RootDatabaseImpl, metadata::*};
 ///
 /// let mut db = RootDatabaseImpl::new();
-/// let path_input = ConfigurationPathInput::new(&db, "/path/to/configuration".to_string());
+/// let path_input = ConfigurationPathInput::new(&db, "/path/to/configuration".to_string(), 0);
 /// let config = db.load_configuration(path_input);
 ///
 /// println!("Loaded {} common modules", config.common_modules().len());
@@ -327,7 +330,7 @@ fn mdo_type_from_plural(type_plural: &str) -> Option<bsl_metadata::MdoType> {
 /// # use ide_db::{RootDatabaseImpl, metadata::*};
 /// # use bsl_metadata::MdoType;
 /// # let db = RootDatabaseImpl::new();
-/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string());
+/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string(), 0);
 /// let catalog = find_metadata_object(&db, path_input, MdoType::Catalog, "Products");
 /// ```
 pub fn find_metadata_object<DB: MetadataDb>(
@@ -386,7 +389,7 @@ pub fn find_metadata_object<DB: MetadataDb>(
 /// ```no_run
 /// # use ide_db::{RootDatabaseImpl, metadata::*};
 /// # let db = RootDatabaseImpl::new();
-/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string());
+/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string(), 0);
 /// let module = find_common_module(&db, path_input, "ОбщегоНазначения");
 /// ```
 pub fn find_common_module<DB: MetadataDb>(
@@ -421,7 +424,7 @@ pub fn find_common_module<DB: MetadataDb>(
 /// ```no_run
 /// # use ide_db::{RootDatabaseImpl, metadata::*};
 /// # let db = RootDatabaseImpl::new();
-/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string());
+/// # let path_input = ConfigurationPathInput::new(&db, "/path/to/config".to_string(), 0);
 /// let owner = get_module_owner(&db, path_input, "Catalogs/Products/Ext/ObjectModule.bsl");
 /// ```
 pub fn get_module_owner<DB: MetadataDb>(
@@ -732,7 +735,7 @@ mod tests {
         // Create input with test fixtures path
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // Load configuration twice
         let config1 = db.load_configuration(path_input);
@@ -749,8 +752,8 @@ mod tests {
     fn test_load_configuration_different_paths() {
         let db = TestDatabase::default();
 
-        let input1 = ConfigurationPathInput::new(&db, "/path/to/config1".to_string());
-        let input2 = ConfigurationPathInput::new(&db, "/path/to/config2".to_string());
+        let input1 = ConfigurationPathInput::new(&db, "/path/to/config1".to_string(), 0);
+        let input2 = ConfigurationPathInput::new(&db, "/path/to/config2".to_string(), 0);
 
         // Different inputs should be different
         assert_ne!(input1, input2, "Different paths should create different inputs");
@@ -762,7 +765,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // Find existing catalog
         let catalog =
@@ -782,7 +785,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // Find existing common module
         let module = find_common_module(&db, path_input, "ГлобальныйСерверныйМодуль");
@@ -802,7 +805,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // CommonModules path
         let owner = get_module_owner(
@@ -831,7 +834,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // Catalogs path (English)
         let owner = get_module_owner(&db, path_input, "Catalogs/Справочник1/Ext/ObjectModule.bsl");
@@ -856,7 +859,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // Catalogs path (Russian plural)
         let owner =
@@ -872,7 +875,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // InformationRegisters path
         let owner = get_module_owner(
@@ -899,7 +902,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         // URI too short
         let owner = get_module_owner(&db, path_input, "CommonModules/Module.bsl");
@@ -920,7 +923,7 @@ mod tests {
 
         let path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer").to_string();
-        let path_input = ConfigurationPathInput::new(&db, path);
+        let path_input = ConfigurationPathInput::new(&db, path, 0);
 
         let owner1 = get_module_owner(
             &db,

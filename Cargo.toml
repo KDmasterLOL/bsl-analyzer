@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.47"
+version = "0.1.58"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -44,6 +44,10 @@ line-index = { path = "crates/line-index" }
 paths = { path = "crates/paths" }
 vfs-notify = { path = "crates/vfs-notify" }
 bsl-launcher = { path = "crates/bsl-launcher" }
+bsl-debug = { path = "crates/bsl-debug" }
+mcp-server = { path = "crates/mcp-server" }
+onec-client = { path = "crates/onec-client" }
+bsl-search = { path = "crates/bsl-search" }
 
 # Salsa for incremental computation
 salsa = { version = "0.25.2", features = ["rayon", "macros"] }
@@ -118,6 +122,7 @@ ignore = "0.4"
 spellbook = "0.4"
 notify = "6.1"
 camino = "1.1"
+rust-stemmers = "1.2"
 
 # Testing
 expect-test = "1.4"

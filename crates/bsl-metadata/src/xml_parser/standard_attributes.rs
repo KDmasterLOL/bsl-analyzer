@@ -3,8 +3,66 @@
 use crate::metadata_object::{Attribute, AttributeType, MdoType, StandardAttributeKind};
 use crate::register::RegisterAttribute;
 
-use super::helpers::{create_register_standard_attribute, create_standard_attribute};
-use super::serde_types::{MetadataObjectProperties, OwnerItemXml};
+use super::helpers::{
+    child_bool, child_text, child_u32, create_register_standard_attribute,
+    create_standard_attribute, find_child,
+};
+
+// ============================================================================
+// MdoProperties - extracted properties from MDO XML
+// ============================================================================
+
+/// Extracted properties from MDO XML, used for standard attribute generation
+pub(crate) struct MdoProperties {
+    pub name: String,
+    pub code_length: Option<u32>,
+    pub number_length: Option<u32>,
+    pub description_length: Option<u32>,
+    pub hierarchical: bool,
+    pub owners: Vec<String>,
+    pub periodicity: Option<String>,
+    pub check_unique: bool,
+    pub code_series: Option<String>,
+}
+
+impl MdoProperties {
+    /// Extract properties from a `<Properties>` roxmltree node
+    pub(crate) fn from_node(props_node: roxmltree::Node<'_, '_>) -> Self {
+        let name = child_text(props_node, "Name").unwrap_or("").to_string();
+        let code_length = child_u32(props_node, "CodeLength");
+        let number_length = child_u32(props_node, "NumberLength");
+        let description_length = child_u32(props_node, "DescriptionLength");
+        let hierarchical = child_bool(props_node, "Hierarchical");
+        let check_unique = child_bool(props_node, "CheckUnique");
+        let periodicity =
+            child_text(props_node, "InformationRegisterPeriodicity").map(|s| s.to_string());
+        let code_series = child_text(props_node, "CodeSeries").map(|s| s.to_string());
+
+        // Collect <Owners><Item>text</Item></Owners>
+        let owners = find_child(props_node, "Owners")
+            .map(|owners_node| {
+                owners_node
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "Item")
+                    .filter_map(|n| n.text())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        MdoProperties {
+            name,
+            code_length,
+            number_length,
+            description_length,
+            hierarchical,
+            owners,
+            periodicity,
+            check_unique,
+            code_series,
+        }
+    }
+}
 
 // ============================================================================
 // Register standard attributes
@@ -90,7 +148,7 @@ pub(crate) fn add_accumulation_register_standard_attrs(
 /// Add standard attributes for Catalog/Document objects
 pub(crate) fn add_catalog_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     let object_name = &properties.name;
@@ -106,21 +164,19 @@ pub(crate) fn add_catalog_standard_attributes(
     ));
 
     // Code - only if CodeLength > 0
-    if let Some(length) = properties.code_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0) {
+    if let Some(length) = properties.code_length.filter(|&l| l > 0) {
         let kind = StandardAttributeKind::Code { length };
         attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
     }
 
     // Description - only if DescriptionLength > 0
-    if let Some(length) =
-        properties.description_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
-    {
+    if let Some(length) = properties.description_length.filter(|&l| l > 0) {
         let kind = StandardAttributeKind::Description { length };
         attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
     }
 
     // IsFolder/Parent - only if Hierarchical
-    if bool::from(properties.hierarchical.clone()) {
+    if properties.hierarchical {
         attributes.push(create_standard_attribute(
             &StandardAttributeKind::IsFolder,
             mdo_type,
@@ -134,22 +190,20 @@ pub(crate) fn add_catalog_standard_attributes(
         ));
     }
 
-    // Owner - only if Owners is not empty
-    if let Some(owners_xml) = &properties.owners {
-        if !owners_xml.items.is_empty() {
-            let owner_types = parse_owner_types(&owners_xml.items);
-            let owner_attr_type = match owner_types.len() {
-                0 => AttributeType::Unknown,
-                1 => owner_types.into_iter().next().unwrap(),
-                _ => AttributeType::Composite { types: owner_types },
-            };
+    // Owner - only if owners is not empty
+    if !properties.owners.is_empty() {
+        let owner_types = parse_owner_types(&properties.owners);
+        let owner_attr_type = match owner_types.len() {
+            0 => AttributeType::Unknown,
+            1 => owner_types.into_iter().next().unwrap(),
+            _ => AttributeType::Composite { types: owner_types },
+        };
 
-            attributes.push(Attribute {
-                name: StandardAttributeKind::Owner.russian_name().to_string(),
-                name_en: Some(StandardAttributeKind::Owner.english_name().to_string()),
-                attr_type: owner_attr_type,
-            });
-        }
+        attributes.push(Attribute {
+            name: StandardAttributeKind::Owner.russian_name().to_string(),
+            name_en: Some(StandardAttributeKind::Owner.english_name().to_string()),
+            attr_type: owner_attr_type,
+        });
     }
 
     // Predefined - always present
@@ -172,7 +226,7 @@ pub(crate) fn add_catalog_standard_attributes(
 /// Documents have: Ref, DeletionMark, Number (if NumberLength > 0), Date, Posted
 pub(crate) fn add_document_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     let object_name = &properties.name;
@@ -188,8 +242,7 @@ pub(crate) fn add_document_standard_attributes(
     ));
 
     // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
-    {
+    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
         let kind = StandardAttributeKind::Number { length };
         attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
     }
@@ -211,7 +264,7 @@ pub(crate) fn add_document_standard_attributes(
 /// Started, Completed, HeadTask
 pub(crate) fn add_business_process_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     let object_name = &properties.name;
@@ -227,8 +280,7 @@ pub(crate) fn add_business_process_standard_attributes(
     ));
 
     // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
-    {
+    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
         let kind = StandardAttributeKind::Number { length };
         attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
     }
@@ -264,7 +316,7 @@ pub(crate) fn add_business_process_standard_attributes(
 /// Executed, TaskBusinessProcess, RoutePoint
 pub(crate) fn add_task_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     let object_name = &properties.name;
@@ -280,8 +332,7 @@ pub(crate) fn add_task_standard_attributes(
     ));
 
     // Number - only if NumberLength > 0
-    if let Some(length) = properties.number_length.as_ref().and_then(|v| v.value).filter(|&l| l > 0)
-    {
+    if let Some(length) = properties.number_length.filter(|&l| l > 0) {
         let kind = StandardAttributeKind::Number { length };
         attributes.push(create_standard_attribute(&kind, mdo_type, object_name));
     }
@@ -316,7 +367,7 @@ pub(crate) fn add_task_standard_attributes(
 /// ExchangePlans have: same as Catalog + ThisNode
 pub(crate) fn add_exchange_plan_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     add_catalog_standard_attributes(attributes, properties, mdo_type);
@@ -335,7 +386,7 @@ pub(crate) fn add_exchange_plan_standard_attributes(
 /// ChartOfCharacteristicTypes have: same as Catalog + ValueType
 pub(crate) fn add_chart_of_characteristic_types_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     add_catalog_standard_attributes(attributes, properties, mdo_type);
@@ -354,7 +405,7 @@ pub(crate) fn add_chart_of_characteristic_types_standard_attributes(
 /// ChartOfAccounts have: same as Catalog + Order
 pub(crate) fn add_chart_of_accounts_standard_attributes(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     add_catalog_standard_attributes(attributes, properties, mdo_type);
@@ -371,7 +422,7 @@ pub(crate) fn add_chart_of_accounts_standard_attributes(
 /// Add standard attributes for InformationRegister (Attribute variant)
 pub(crate) fn add_information_register_standard_attributes_as_attrs(
     attributes: &mut Vec<Attribute>,
-    properties: &MetadataObjectProperties,
+    properties: &MdoProperties,
     mdo_type: MdoType,
 ) {
     let object_name = &properties.name;
@@ -408,15 +459,15 @@ pub(crate) fn add_information_register_standard_attributes_as_attrs(
     }
 }
 
-/// Parse owner types from Owners XML items
-fn parse_owner_types(items: &[OwnerItemXml]) -> Vec<AttributeType> {
+/// Parse owner types from owner string values
+fn parse_owner_types(items: &[String]) -> Vec<AttributeType> {
     items
         .iter()
         .filter_map(|item| {
             // Parse format: "Catalog.Контрагенты" or "ChartOfCharacteristicTypes.Свойства"
-            let parts: Vec<&str> = item.value.split('.').collect();
+            let parts: Vec<&str> = item.split('.').collect();
             if parts.len() != 2 {
-                tracing::warn!(value = %item.value, "Invalid owner format, expected Type.Name");
+                tracing::warn!(value = %item, "Invalid owner format, expected Type.Name");
                 return None;
             }
 

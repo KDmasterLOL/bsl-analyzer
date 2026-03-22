@@ -25,6 +25,9 @@ paths.workspace = true
 line-index.workspace = true
 stdx.workspace = true
 profile.workspace = true
+mcp-server.workspace = true
+bsl-debug.workspace = true
+onec-client.workspace = true
 
 # LSP
 lsp-types.workspace = true
@@ -57,10 +60,15 @@ anyhow.workspace = true
 
 # Utilities
 walkdir.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator.workspace = true
+
+[build-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+walkdir = "2.4"
 
 [dev-dependencies]
 expect-test.workspace = true

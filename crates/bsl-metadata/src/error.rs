@@ -7,7 +7,7 @@ use thiserror::Error;
 pub enum MetadataError {
     /// XML parsing error
     #[error("XML parsing error: {0}")]
-    XmlError(#[from] quick_xml::DeError),
+    XmlError(String),
 
     /// IO error when reading metadata files
     #[error("IO error: {0}")]

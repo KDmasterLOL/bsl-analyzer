@@ -154,10 +154,49 @@ enum Commands {
     /// Start LSP server (default)
     Lsp,
 
+    /// Start MCP server (Model Context Protocol for AI agents)
+    Mcp {
+        /// Source directory containing 1C configuration (with Configuration.xml)
+        #[arg(short = 's', long = "source-dir", default_value = ".")]
+        source_dir: PathBuf,
+
+        /// URL of 1C HTTP service for live database queries (e.g., http://localhost/base/hs/bsl-analyzer)
+        #[arg(long)]
+        onec_url: Option<String>,
+
+        /// 1C username for HTTP service authentication
+        #[arg(long, default_value = "")]
+        onec_user: String,
+
+        /// 1C password for HTTP service authentication.
+        /// Supports base64 encoding: prefix with "base64:" (e.g. "base64:cGFzc3dvcmQ=")
+        #[arg(long, default_value = "")]
+        onec_password: String,
+    },
+
+    /// Export built-in 1C extension (BSL_Analyzer) to a directory
+    Extension {
+        #[command(subcommand)]
+        command: ExtensionCommands,
+    },
+
+    /// Start DAP debug adapter (Debug Adapter Protocol via stdio)
+    Dap,
+
     /// Export diagnostic rules metadata
     Rules {
         #[command(subcommand)]
         command: RulesCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommands {
+    /// Export extension XML files to a directory for loading into 1C infobase
+    Export {
+        /// Output directory (will be created if it doesn't exist)
+        #[arg(short, long)]
+        output: PathBuf,
     },
 }
 
@@ -259,6 +298,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Format { file, write, spaces, indent_size }) => {
             run_format(file, write, spaces, indent_size)
         }
+        Some(Commands::Mcp { source_dir, onec_url, onec_user, onec_password }) => {
+            let password = decode_password(&onec_password);
+            run_mcp_server(source_dir, onec_url, &onec_user, &password)
+        }
+        Some(Commands::Extension { command }) => run_extension_command(command),
+        Some(Commands::Dap) => run_dap_server(),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -303,6 +348,79 @@ fn run_rules_command(command: RulesCommands) -> Result<(), Box<dyn Error + Send 
     }
 
     Ok(())
+}
+
+fn run_extension_command(command: ExtensionCommands) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command {
+        ExtensionCommands::Export { output } => {
+            static EXTENSION_ZIP: &[u8] =
+                include_bytes!(concat!(env!("OUT_DIR"), "/extension.zip"));
+
+            let cursor = std::io::Cursor::new(EXTENSION_ZIP);
+            let mut archive = zip::ZipArchive::new(cursor)?;
+
+            let mut count = 0;
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i)?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let dest = output.join(entry.name());
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut out_file = fs::File::create(&dest)?;
+                std::io::copy(&mut entry, &mut out_file)?;
+                count += 1;
+            }
+
+            eprintln!("Extension exported to: {}", output.display());
+            eprintln!("Files: {count}");
+            eprintln!();
+            eprintln!("To install into 1C infobase:");
+            eprintln!(
+                "  rtools config extension import -d <database> -e BSL_Analyzer -i {}",
+                output.display()
+            );
+            eprintln!("  rtools config extension apply -d <database> -e BSL_Analyzer");
+        }
+    }
+
+    Ok(())
+}
+
+/// Decode password: if prefixed with "base64:", decode from base64.
+/// Otherwise return as-is. Not encryption — just obfuscation for .mcp.json.
+fn decode_password(password: &str) -> String {
+    if let Some(encoded) = password.strip_prefix("base64:") {
+        if let Some(decoded) = base64_decode(encoded) {
+            if let Ok(s) = String::from_utf8(decoded) {
+                return s;
+            }
+        }
+    }
+    password.to_owned()
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in input.as_bytes() {
+        if b == b'=' || b == b'\n' || b == b'\r' {
+            continue;
+        }
+        let val = TABLE.iter().position(|&c| c == b)? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 fn lang_is_russian() -> bool {
@@ -522,6 +640,36 @@ fn flush_paragraph(html: &mut String, paragraph: &mut String) {
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn run_mcp_server(
+    source_dir: PathBuf,
+    onec_url: Option<String>,
+    onec_user: &str,
+    onec_password: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing::info!(?source_dir, ?onec_url, "Starting MCP server (stdio)");
+
+    let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
+    let mut state = mcp_server::SharedState::standalone(source_dir);
+
+    if let Some(ref url) = onec_url {
+        tracing::info!(%url, "Configuring 1C HTTP client");
+        state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
+    }
+
+    let server = mcp_server::McpServer::new(state);
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(mcp_server::serve_stdio(server))?;
+
+    Ok(())
+}
+
+fn run_dap_server() -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing::info!("Starting DAP debug adapter");
+    bsl_debug::dap::run_dap_stdio();
+    Ok(())
 }
 
 fn run_lsp_server() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -799,7 +947,7 @@ fn analyze_salsa(
     // If we create a new input for each diagnostic, Salsa won't cache the metadata load
     let config_path_input = configuration_path.as_ref().map(|path| {
         let path_str = path.to_string_lossy().to_string();
-        metadata::ConfigurationPathInput::new(&db, path_str)
+        metadata::ConfigurationPathInput::new(&db, path_str, 0)
     });
 
     // Parallel diagnostics execution WITHOUT Mutex!

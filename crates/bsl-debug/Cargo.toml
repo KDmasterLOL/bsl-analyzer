@@ -1,0 +1,24 @@
+[package]
+name = "bsl-debug"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+quick-xml = "0.39"
+reqwest = { version = "0.13", features = ["rustls", "blocking"], default-features = false }
+tokio = { version = "1", features = ["sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+dap = "0.4.1-alpha1"
+
+[dev-dependencies]
+tempfile.workspace = true

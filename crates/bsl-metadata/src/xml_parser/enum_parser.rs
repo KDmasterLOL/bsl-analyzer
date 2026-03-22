@@ -1,9 +1,9 @@
 //! Enum XML parser
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::metadata_object::{EnumValue, MdoType, MetadataObject};
 
-use super::serde_types::EnumRoot;
+use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
 
 /// Parse Enum XML from Designer format
 ///
@@ -26,32 +26,47 @@ use super::serde_types::EnumRoot;
 pub fn parse_enum_xml(xml: &str) -> Result<MetadataObject> {
     let _span = tracing::debug_span!("parse_enum_xml").entered();
 
-    let root: EnumRoot = quick_xml::de::from_str(xml)?;
-    let enum_xml = root.enum_xml;
+    let doc = parse_xml(xml)?;
+    let mdo = find_mdo_element(&doc)
+        .ok_or_else(|| MetadataError::InvalidFormat("No Enum element found".to_string()))?;
+
+    let props = find_child(mdo, "Properties")
+        .ok_or_else(|| MetadataError::InvalidFormat("Enum missing Properties".to_string()))?;
+
+    let name = child_text(props, "Name").unwrap_or("").to_string();
 
     let mut enum_values = Vec::new();
 
-    // Parse EnumValue elements if present
-    if let Some(child_objects) = enum_xml.child_objects {
-        for ev_xml in child_objects.enum_values {
+    if let Some(child_objects) = find_child(mdo, "ChildObjects") {
+        for ev_node in child_objects
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "EnumValue")
+        {
+            let uuid = ev_node.attribute("uuid").unwrap_or("").to_string();
+
+            let ev_props = find_child(ev_node, "Properties").ok_or_else(|| {
+                MetadataError::InvalidFormat("EnumValue missing Properties".to_string())
+            })?;
+            let ev_name = child_text(ev_props, "Name").unwrap_or("").to_string();
+
             enum_values.push(EnumValue {
-                name: ev_xml.properties.name,
+                name: ev_name,
                 name_en: None, // MVP: only Russian names
-                uuid: ev_xml.uuid,
+                uuid,
             });
         }
     }
 
-    let mut mdo = MetadataObject::new(MdoType::Enum, enum_xml.properties.name);
-    mdo.enum_values = enum_values;
+    let mut mdo_obj = MetadataObject::new(MdoType::Enum, name);
+    mdo_obj.enum_values = enum_values;
 
     tracing::debug!(
-        enum_name = %mdo.name,
-        enum_values_count = mdo.enum_values.len(),
+        enum_name = %mdo_obj.name,
+        enum_values_count = mdo_obj.enum_values.len(),
         "parsed enum"
     );
 
-    Ok(mdo)
+    Ok(mdo_obj)
 }
 
 #[cfg(test)]

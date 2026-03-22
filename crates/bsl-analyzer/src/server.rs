@@ -2,6 +2,8 @@
 //!
 //! This module implements the core event loop for the LSP server.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use crossbeam_channel::{select, Receiver};
 use lsp_server::{Connection, Message, Notification, Request};
@@ -66,16 +68,12 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     // are opened via LSP before VFS loader finishes
     state.init_empty_source_root();
 
-    // Set workspace root from initialize params
-    #[allow(deprecated)]
-    if let Some(root_uri) = initialize_params.root_uri {
-        if let Ok(root_path) = root_uri.to_file_path() {
-            state.set_workspace_root(root_path);
-        } else {
-            tracing::warn!("Failed to convert root_uri to path: {}", root_uri);
-        }
-    } else if let Some(root_path) = initialize_params.root_path {
-        state.set_workspace_root(root_path.into());
+    // Extract workspace root from initialize params
+    let workspace_root = extract_workspace_root(&initialize_params);
+
+    // Set workspace root in LSP state
+    if let Some(ref root) = workspace_root {
+        state.set_workspace_root(root.clone());
     } else {
         tracing::warn!("No workspace root provided by client");
     }
@@ -85,6 +83,20 @@ pub fn main_loop(connection: Connection) -> Result<()> {
 
     tracing::info!("LSP server shutting down");
     Ok(())
+}
+
+/// Extracts the workspace root path from LSP initialize params.
+fn extract_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
+    #[allow(deprecated)]
+    if let Some(ref root_uri) = params.root_uri {
+        if let Ok(path) = root_uri.to_file_path() {
+            return Some(path);
+        }
+        tracing::warn!("Failed to convert root_uri to path: {}", root_uri);
+        None
+    } else {
+        params.root_path.as_ref().map(PathBuf::from)
+    }
 }
 
 /// Runs the main event loop.

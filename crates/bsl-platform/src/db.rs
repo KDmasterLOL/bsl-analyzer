@@ -64,16 +64,31 @@ impl PlatformDataInner {
 
         let mut methods_by_name = FxHashMap::default();
 
-        // Index platform methods by (type_name, method_name)
-        for (idx, method) in methods.iter().enumerate() {
-            let type_key: SmolStr = method.type_name.to_lowercase().into();
-            let ru_key: SmolStr = method.name.to_lowercase().into();
-            let en_key: SmolStr = method.english_name.to_lowercase().into();
+        // Build English→Russian type name mapping for bilingual method lookup.
+        let mut type_en_to_ru: FxHashMap<SmolStr, SmolStr> = FxHashMap::default();
+        for ty in &types {
+            let en_key: SmolStr = ty.english_name.to_lowercase().into();
+            let ru_key: SmolStr = ty.name.to_lowercase().into();
+            type_en_to_ru.insert(en_key, ru_key);
+        }
 
-            // Index by Russian name: (type, method_ru)
-            methods_by_name.insert((type_key.clone(), ru_key), idx);
-            // Index by English name: (type, method_en)
-            methods_by_name.insert((type_key, en_key), idx);
+        // Index platform methods by (type_name, method_name).
+        // method.type_name is English (e.g. "Array"), so we also index by
+        // the Russian type name (e.g. "Массив") for bilingual lookup.
+        for (idx, method) in methods.iter().enumerate() {
+            let en_type_key: SmolStr = method.type_name.to_lowercase().into();
+            let ru_method_key: SmolStr = method.name.to_lowercase().into();
+            let en_method_key: SmolStr = method.english_name.to_lowercase().into();
+
+            // (english_type, russian_method) and (english_type, english_method)
+            methods_by_name.insert((en_type_key.clone(), ru_method_key.clone()), idx);
+            methods_by_name.insert((en_type_key.clone(), en_method_key.clone()), idx);
+
+            // (russian_type, russian_method) and (russian_type, english_method)
+            if let Some(ru_type_key) = type_en_to_ru.get(&en_type_key) {
+                methods_by_name.insert((ru_type_key.clone(), ru_method_key), idx);
+                methods_by_name.insert((ru_type_key.clone(), en_method_key), idx);
+            }
         }
 
         // Convert raw global functions to SmolStr-based functions
@@ -143,9 +158,17 @@ impl PlatformDataInner {
     }
 
     /// Get all methods for a specific type (case-insensitive, bilingual).
+    ///
+    /// Accepts both Russian and English type names (e.g. "Массив" or "Array").
     pub fn get_type_methods(&self, type_name: &str) -> Vec<&PlatformMethod> {
+        // Resolve to the English type name used in method.type_name.
         let type_key: SmolStr = type_name.to_lowercase().into();
-        self.methods.iter().filter(|m| m.type_name.to_lowercase() == type_key.as_str()).collect()
+        let en_type_key = if let Some(idx) = self.types_by_name.get(&type_key) {
+            self.types[*idx].english_name.to_lowercase().into()
+        } else {
+            type_key
+        };
+        self.methods.iter().filter(|m| m.type_name.to_lowercase() == en_type_key.as_str()).collect()
     }
 
     /// Get global function by name (case-insensitive, bilingual).

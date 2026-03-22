@@ -1,39 +1,65 @@
 //! HTTPService XML parser
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::http_service::{
     HTTPService, HTTPServiceBuilder, HTTPServiceMethodBuilder, HTTPServiceURLTemplateBuilder,
 };
 
-use super::serde_types::HTTPServiceRoot;
+use super::helpers::{child_text, find_child, find_mdo_element, parse_xml};
 
 /// Parse HTTPService XML from Designer format
 pub fn parse_http_service_xml(xml: &str, name: &str) -> Result<HTTPService> {
     let _span = tracing::debug_span!("parse_http_service_xml", name).entered();
 
-    let root: HTTPServiceRoot = quick_xml::de::from_str(xml)?;
-    let props = &root.http_service.properties;
+    let doc = parse_xml(xml)?;
+    let mdo = find_mdo_element(&doc)
+        .ok_or_else(|| MetadataError::InvalidFormat("No HTTPService element found".to_string()))?;
+
+    let props = find_child(mdo, "Properties").ok_or_else(|| {
+        MetadataError::InvalidFormat("HTTPService missing Properties".to_string())
+    })?;
+
+    let svc_name = child_text(props, "Name").unwrap_or("").to_string();
+    let root_url = child_text(props, "RootURL").unwrap_or("").to_string();
 
     let mut builder = HTTPServiceBuilder::new()
-        .name(&props.name)
-        .root_url(&props.root_url)
+        .name(&svc_name)
+        .root_url(&root_url)
         .uri(format!("HTTPServices/{}/Ext/Module.bsl", name));
 
-    if let Some(child_objects) = &root.http_service.child_objects {
-        for url_template_xml in &child_objects.url_templates {
-            let url_props = &url_template_xml.properties;
+    if let Some(child_objects) = find_child(mdo, "ChildObjects") {
+        for url_template_node in child_objects
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "URLTemplate")
+        {
+            let tpl_props = find_child(url_template_node, "Properties").ok_or_else(|| {
+                MetadataError::InvalidFormat("URLTemplate missing Properties".to_string())
+            })?;
 
-            let mut template_builder = HTTPServiceURLTemplateBuilder::new()
-                .name(&url_props.name)
-                .template(&url_props.template);
+            let tpl_name = child_text(tpl_props, "Name").unwrap_or("").to_string();
+            let template = child_text(tpl_props, "Template").unwrap_or("").to_string();
 
-            if let Some(template_children) = &url_template_xml.child_objects {
-                for method_xml in &template_children.methods {
-                    let method_props = &method_xml.properties;
+            let mut template_builder =
+                HTTPServiceURLTemplateBuilder::new().name(&tpl_name).template(&template);
+
+            if let Some(tpl_children) = find_child(url_template_node, "ChildObjects") {
+                for method_node in tpl_children
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "Method")
+                {
+                    let method_props = find_child(method_node, "Properties").ok_or_else(|| {
+                        MetadataError::InvalidFormat("Method missing Properties".to_string())
+                    })?;
+
+                    let method_name = child_text(method_props, "Name").unwrap_or("").to_string();
+                    let http_method =
+                        child_text(method_props, "HTTPMethod").unwrap_or("").to_string();
+                    let handler = child_text(method_props, "Handler").unwrap_or("").to_string();
+
                     let method = HTTPServiceMethodBuilder::new()
-                        .name(&method_props.name)
-                        .http_method(&method_props.http_method)
-                        .handler(&method_props.handler)
+                        .name(&method_name)
+                        .http_method(&http_method)
+                        .handler(&handler)
                         .build();
                     template_builder = template_builder.add_method(method);
                 }

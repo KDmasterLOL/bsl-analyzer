@@ -8,6 +8,8 @@
 //!
 //! - Empty methods (no code in body)
 //! - Platform event handlers (fixed signature defined by 1C platform)
+//! - Form element event/command handlers
+//! - HTTP service handlers
 
 use crate::define_metadata;
 use crate::metadata::*;
@@ -43,15 +45,22 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let item_tree = ctx.item_tree();
 
-    // Collect form event/command handler names — their signatures are fixed by the platform
+    // Collect handler names with fixed signatures defined by the platform
     let metadata = ctx.module_metadata();
-    let mut form_handlers: FxHashSet<String> = FxHashSet::default();
+    let mut fixed_signature_handlers: FxHashSet<String> = FxHashSet::default();
     if let Some(ref form) = metadata.form {
         for handler in form.event_handlers() {
-            form_handlers.insert(handler.to_lowercase());
+            fixed_signature_handlers.insert(handler.to_lowercase());
         }
         for handler in form.command_handlers() {
-            form_handlers.insert(handler.to_lowercase());
+            fixed_signature_handlers.insert(handler.to_lowercase());
+        }
+    }
+    if let Some(ref http_service) = metadata.http_service {
+        for (_, method) in http_service.all_methods() {
+            if !method.is_handler_empty() {
+                fixed_signature_handlers.insert(method.handler().to_lowercase());
+            }
         }
     }
 
@@ -63,7 +72,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             body,
             method_name.as_deref(),
             &module_bodies,
-            &form_handlers,
+            &fixed_signature_handlers,
             code,
             ctx,
         ));
@@ -87,7 +96,7 @@ fn check_method(
     body: &hir::Body,
     method_name: Option<&str>,
     module_bodies: &hir::ModuleBodies,
-    form_handlers: &FxHashSet<String>,
+    fixed_signature_handlers: &FxHashSet<String>,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
@@ -105,8 +114,8 @@ fn check_method(
         return diagnostics;
     }
 
-    // Form event/command handlers have fixed signatures defined by the platform
-    if method_name.is_some_and(|name| form_handlers.contains(&name.to_lowercase())) {
+    // Form/HTTP service handlers have fixed signatures defined by the platform
+    if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.to_lowercase())) {
         return diagnostics;
     }
 
@@ -359,6 +368,56 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
         // СписокПриАктивизацииСтроки is a form element event handler — its parameter
+        // signature is fixed by the platform, so unused params should not be flagged
+        assert_eq!(unused.len(), 0);
+    }
+
+    #[test]
+    fn test_http_service_handler_no_diagnostic() {
+        use std::sync::Arc;
+
+        let code = r#"Функция ЗапросPOST(Запрос)
+    Возврат Новый HTTPСервисОтвет(200);
+КонецФункции
+"#;
+
+        let http_service = bsl_metadata::HTTPServiceBuilder::new()
+            .name("TestService")
+            .root_url("test")
+            .add_url_template(
+                bsl_metadata::HTTPServiceURLTemplateBuilder::new()
+                    .name("Запрос")
+                    .template("/query")
+                    .add_method(
+                        bsl_metadata::HTTPServiceMethodBuilder::new()
+                            .name("POST")
+                            .http_method("POST")
+                            .handler("ЗапросPOST")
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+
+        let metadata = hir::ModuleMetadata {
+            module_type: bsl_metadata::ModuleType::HTTPServiceModule,
+            execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            form: None,
+            http_service: Some(Arc::new(http_service)),
+            web_service: None,
+        };
+
+        let diagnostics =
+            crate::test_utils::check_metadata_diagnostic(metadata, code, |_metadata, ctx| {
+                super::check(ctx)
+            });
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
+
+        // ЗапросPOST is an HTTP service handler — its parameter
         // signature is fixed by the platform, so unused params should not be flagged
         assert_eq!(unused.len(), 0);
     }

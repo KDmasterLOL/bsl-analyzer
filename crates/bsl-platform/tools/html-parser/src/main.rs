@@ -497,7 +497,7 @@ fn extract_method_documentation(html_content: &str) -> Option<MethodDocumentatio
         param_descriptions,
         examples,
         notes,
-        see_also: Vec::new(), // TODO: extract "См. также"
+        see_also: scraper_parser::extract_see_also(html_content),
     })
 }
 
