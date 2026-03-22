@@ -412,6 +412,10 @@ impl Store {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<TextSearchResult>, SearchError> {
+        // Wrap query in double quotes for FTS5 to treat it as a literal phrase.
+        // This prevents FTS5 syntax errors on dots, parentheses, and other special chars
+        // (e.g. "БонусныеБаллы.Остатки" or "СообщитьПользователю()").
+        let escaped = format!("\"{}\"", query.replace('"', "\"\""));
         let results = if let Some(coll) = collection {
             let mut stmt = self.conn.prepare(
                 "SELECT chunks_fts.rowid, chunks_fts.rank
@@ -422,7 +426,7 @@ impl Store {
                  ORDER BY chunks_fts.rank
                  LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![query, coll, limit as i64], |row| {
+            let rows = stmt.query_map(params![escaped, coll, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -434,7 +438,7 @@ impl Store {
                  ORDER BY rank
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![query, limit as i64], |row| {
+            let rows = stmt.query_map(params![escaped, limit as i64], |row| {
                 Ok(TextSearchResult { chunk_id: row.get(0)?, rank: row.get(1)? })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
