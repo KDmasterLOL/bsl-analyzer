@@ -25,6 +25,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             platform: windows-amd64
             ext: ".exe"
+            cxxflags: "/DMAP_FAILED=((void*)-1)"
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: darwin-arm64
@@ -40,6 +41,8 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CXXFLAGS: ${{ matrix.cxxflags || '' }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
