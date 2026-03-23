@@ -78,6 +78,7 @@ impl SdblCompletionItem {
             insert_text: self.label.clone(), // Default: insert same as label
             sort_text: self.sort_text,
             filter_text: self.filter_text,
+            source: None,
         }
     }
 }

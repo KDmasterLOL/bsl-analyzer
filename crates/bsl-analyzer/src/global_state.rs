@@ -309,15 +309,29 @@ impl GlobalState {
 
         // Get source path (configuration directory or project root)
         let source_path = project.source_path().to_path_buf();
+        let extensions: Vec<(String, PathBuf)> = project.extension_paths().to_vec();
 
         tracing::info!(
             ?source_path,
+            extensions = extensions.len(),
             configuration_found = project.configuration_path().is_some(),
             "loaded project, scanning source path"
         );
 
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
+
+        // Register all configuration paths (main + extensions) in the database
+        {
+            let mut all_paths: Vec<(Option<String>, std::path::PathBuf)> = Vec::new();
+            // Main configuration
+            all_paths.push((None, source_path.clone()));
+            // Extensions
+            for (name, ext_path) in &extensions {
+                all_paths.push((Some(name.clone()), ext_path.clone()));
+            }
+            self.analysis_host.raw_database().set_all_config_paths(all_paths);
+        }
 
         // Update diagnostics config from project settings
         self.update_diagnostics_config();
@@ -334,9 +348,17 @@ impl GlobalState {
                 .map(paths::AbsPathBuf::assert_utf8)
                 .collect();
 
+        let mut include = vec![paths::AbsPathBuf::assert_utf8(source_path)];
+
+        // Add extension directories to VFS scan
+        for (name, ext_path) in &extensions {
+            tracing::info!(name = %name, path = %ext_path.display(), "adding extension to VFS scan");
+            include.push(paths::AbsPathBuf::assert_utf8(ext_path.clone()));
+        }
+
         let mut load_entries = vec![loader::Entry::Directories(loader::Directories {
             extensions: vec!["bsl".to_string(), "os".to_string(), "xml".to_string()],
-            include: vec![paths::AbsPathBuf::assert_utf8(source_path)],
+            include,
             exclude: vec![
                 paths::AbsPathBuf::assert_utf8(root.join(".git")),
                 paths::AbsPathBuf::assert_utf8(root.join("build")),
@@ -565,6 +587,23 @@ impl GlobalState {
             registers = config.registers().len(),
             "metadata cache warmed"
         );
+
+        // Warm extension metadata caches
+        let extension_paths: Vec<_> = project.extension_paths().to_vec();
+        for (name, ext_path) in &extension_paths {
+            let ext_path_input = ide_db::metadata::ConfigurationPathInput::new(
+                db,
+                ext_path.to_string_lossy().into_owned(),
+                db.metadata_version(),
+            );
+            let ext_config = ide_db::metadata::load_configuration(db, ext_path_input);
+            tracing::info!(
+                extension = %name,
+                common_modules = ext_config.common_modules().len(),
+                metadata_objects = ext_config.metadata_objects().len(),
+                "extension metadata cache warmed"
+            );
+        }
     }
 
     /// Creates an immutable snapshot for thread-safe access.

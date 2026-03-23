@@ -198,14 +198,16 @@ impl McpServer {
                     self.state.configuration().await.ok_or_else(|| {
                         McpError::invalid_params("Configuration not loaded", None)
                     })?;
-                tools::metadata::get_configuration_info(&config)
+                let extensions = self.state.extensions().await;
+                tools::metadata::get_configuration_info(&config, &extensions)
             }
             "tree" => {
                 let config =
                     self.state.configuration().await.ok_or_else(|| {
                         McpError::invalid_params("Configuration not loaded", None)
                     })?;
-                tools::metadata::get_metadata_tree(&config, p.filter)
+                let extensions = self.state.extensions().await;
+                tools::metadata::get_metadata_tree(&config, &extensions, p.filter)
             }
             "object" => {
                 let config =

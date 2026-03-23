@@ -112,6 +112,7 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
                 documentation: Some(documentation),
                 sort_text: None,
                 filter_text: None,
+                source: None,
             };
             completions.push(keyword_item);
         }
@@ -199,6 +200,7 @@ fn complete_local_symbols<DB: RootDatabase>(
             documentation: None,
             sort_text: None,
             filter_text: None,
+            source: None,
         });
     }
 
@@ -325,12 +327,13 @@ fn complete_mdo_symbols<DB: RootDatabase>(
                 )),
                 sort_text: None,
                 filter_text: None,
+                source: None,
             });
         }
     }
 
-    // 2. Add MDO instances from configuration
-    if let Some(config) = db.get_configuration(file_id) {
+    // 2. Add MDO instances from all configurations (main + extensions)
+    for (ext_name, config) in db.get_all_configurations(file_id) {
         for mdo in config.metadata_objects() {
             let name = &mdo.name;
 
@@ -353,6 +356,7 @@ fn complete_mdo_symbols<DB: RootDatabase>(
                 )),
                 sort_text: None,
                 filter_text: None,
+                source: ext_name.clone(),
             });
         }
     }
@@ -409,6 +413,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
             documentation: None,
             sort_text: None,
             filter_text: None,
+            source: None,
         });
     }
 
@@ -433,6 +438,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
             documentation: None,
             sort_text: None,
             filter_text: None,
+            source: None,
         });
     }
 
@@ -527,6 +533,7 @@ fn render_global_function(function: &GlobalFunction) -> CompletionItem {
         documentation,
         sort_text: None,
         filter_text: None,
+        source: None,
     }
 }
 

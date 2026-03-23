@@ -19,6 +19,8 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct SharedState {
     configuration: Arc<RwLock<Option<Configuration>>>,
+    /// Extension configurations: (name, Configuration).
+    extensions: Arc<RwLock<Vec<(String, Configuration)>>>,
     workspace_root: Option<PathBuf>,
     onec_client: Option<OnecClient>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
@@ -65,8 +67,27 @@ impl SharedState {
                 .ok();
         }
 
+        // Load extension configurations
+        let mut extensions = Vec::new();
+        for (name, ext_path) in project.extension_paths() {
+            match bsl_metadata::load_from_directory(ext_path) {
+                Ok(ext_config) => {
+                    tracing::info!(
+                        name = %name,
+                        common_modules = ext_config.common_modules().len(),
+                        "loaded extension metadata"
+                    );
+                    extensions.push((name.clone(), ext_config));
+                }
+                Err(e) => {
+                    tracing::warn!(name = %name, ?ext_path, "failed to load extension: {e}");
+                }
+            }
+        }
+
         Self {
             configuration: Arc::new(RwLock::new(configuration)),
+            extensions: Arc::new(RwLock::new(extensions)),
             workspace_root: Some(source_dir),
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
@@ -81,6 +102,7 @@ impl SharedState {
     pub fn shared() -> Self {
         Self {
             configuration: Arc::new(RwLock::new(None)),
+            extensions: Arc::new(RwLock::new(Vec::new())),
             workspace_root: None,
             onec_client: None,
             debug_session: Arc::new(Mutex::new(None)),
@@ -133,6 +155,20 @@ impl SharedState {
     pub fn configuration_arc(&self) -> Option<std::sync::Arc<Configuration>> {
         let guard = self.configuration.blocking_read();
         guard.as_ref().map(|c| std::sync::Arc::new(c.clone()))
+    }
+
+    /// Get extension configurations.
+    pub async fn extensions(&self) -> Vec<(String, Configuration)> {
+        self.extensions.read().await.clone()
+    }
+
+    /// Access extensions with a closure (avoids clone).
+    pub async fn with_extensions<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&[(String, Configuration)]) -> R,
+    {
+        let guard = self.extensions.read().await;
+        f(&guard)
     }
 
     /// Workspace root directory.

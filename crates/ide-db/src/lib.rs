@@ -73,6 +73,15 @@ pub trait RootDatabase:
     /// - `None` if file path not found or configuration root not found
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>>;
 
+    /// Get all configurations visible from a file: file's own config + all registered extensions.
+    ///
+    /// Returns pairs of (extension_name, configuration). The file's own configuration
+    /// has `None` as name; extensions have `Some(name)`.
+    fn get_all_configurations(
+        &self,
+        file_id: FileId,
+    ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
+
     /// Get all SDBL queries in a file with their SdblExprId.
     ///
     /// Reuses BSL HIR lowering - no separate AST traversal!
@@ -321,6 +330,11 @@ pub struct RootDatabaseImpl {
     /// Generation counter for metadata cache invalidation.
     /// Bumped when VFS detects .xml file changes in the configuration directory.
     metadata_version: std::sync::atomic::AtomicU32,
+
+    /// All configuration paths: main config + extensions.
+    /// Each entry: (name or None for main, path).
+    /// Set by the LSP server when workspace root is configured.
+    all_config_paths: parking_lot::RwLock<Vec<(Option<String>, std::path::PathBuf)>>,
     // ✅ ALL HIR queries migrated to Salsa! (Phase 1-6 complete)
     // - item_tree, region_tree, conditional_tree, module_data, symbol_tree
     // - infer_types, module_bodies, module_metadata
@@ -343,6 +357,7 @@ impl Clone for RootDatabaseImpl {
             metadata_version: std::sync::atomic::AtomicU32::new(
                 self.metadata_version.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            all_config_paths: parking_lot::RwLock::new(self.all_config_paths.read().clone()),
         }
     }
 }
@@ -354,6 +369,7 @@ impl RootDatabaseImpl {
             storage: salsa::Storage::default(),
             files: Files::new(),
             metadata_version: std::sync::atomic::AtomicU32::new(0),
+            all_config_paths: parking_lot::RwLock::new(Vec::new()),
         }
     }
 
@@ -366,6 +382,17 @@ impl RootDatabaseImpl {
     /// Call this when .xml metadata files change.
     pub fn bump_metadata_version(&self) {
         self.metadata_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set all configuration paths: main + extensions.
+    /// Called from LSP when workspace root is set.
+    pub fn set_all_config_paths(&self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
+        *self.all_config_paths.write() = paths;
+    }
+
+    /// Get all registered configuration paths.
+    pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
+        self.all_config_paths.read().clone()
     }
 
     /// Get file path from FileId by traversing SourceRoot.
@@ -595,6 +622,30 @@ impl RootDatabase for RootDatabaseImpl {
             metadata::ConfigurationPathInput::new(self, config_path_str, self.metadata_version());
         // Salsa-cached via load_configuration
         Some(metadata::load_configuration(self, path_input))
+    }
+
+    fn get_all_configurations(
+        &self,
+        file_id: FileId,
+    ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
+        let version = self.metadata_version();
+        let all_paths = self.all_config_paths();
+
+        if all_paths.is_empty() {
+            // Fallback: no paths registered, use file's own configuration
+            return self.get_configuration(file_id).into_iter().map(|c| (None, c)).collect();
+        }
+
+        // Load all registered configurations (main + extensions), Salsa-cached
+        all_paths
+            .into_iter()
+            .map(|(name, path)| {
+                let path_str = path.to_string_lossy().to_string();
+                let path_input = metadata::ConfigurationPathInput::new(self, path_str, version);
+                let config = metadata::load_configuration(self, path_input);
+                (name, config)
+            })
+            .collect()
     }
 
     fn all_sdbl_in_file(

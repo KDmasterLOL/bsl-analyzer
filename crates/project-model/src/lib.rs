@@ -23,6 +23,9 @@ pub struct Project {
     /// Path to 1C configuration directory (containing Configuration.xml).
     /// This is computed automatically using multiple discovery strategies.
     source_path: Option<PathBuf>,
+    /// Resolved extension paths: (name, absolute_path).
+    /// Each extension must contain Configuration.xml.
+    extension_paths: Vec<(String, PathBuf)>,
 }
 
 impl Project {
@@ -30,7 +33,8 @@ impl Project {
         let root = root.into();
         let config = ProjectConfig::load(&root).unwrap_or_default();
         let source_path = Self::discover_source_path(&root, &config);
-        Self { root, config, source_path }
+        let extension_paths = Self::resolve_extensions(&root, &config);
+        Self { root, config, source_path, extension_paths }
     }
 
     /// Returns the path to scan for BSL/OS source files.
@@ -82,6 +86,41 @@ impl Project {
 
         tracing::debug!(?root, "no 1C configuration found, will use project root");
         None
+    }
+
+    /// Returns resolved extension paths as (name, path) pairs.
+    pub fn extension_paths(&self) -> &[(String, PathBuf)] {
+        &self.extension_paths
+    }
+
+    /// Resolves extension paths from config, filtering to those that exist
+    /// and contain Configuration.xml.
+    fn resolve_extensions(root: &Path, config: &ProjectConfig) -> Vec<(String, PathBuf)> {
+        config
+            .extensions
+            .iter()
+            .filter_map(|ext_path_str| {
+                let path = root.join(ext_path_str);
+                if !path.exists() {
+                    tracing::warn!(path = %path.display(), "extension path not found, skipping");
+                    return None;
+                }
+                if !path.join("Configuration.xml").exists() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "extension has no Configuration.xml, skipping"
+                    );
+                    return None;
+                }
+                // Derive name from last path component
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| ext_path_str.clone());
+                tracing::info!(name = %name, path = %path.display(), "resolved extension");
+                Some((name, path))
+            })
+            .collect()
     }
 }
 
@@ -174,6 +213,17 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub language: Option<String>,
+
+    /// Extension paths relative to project root.
+    ///
+    /// Each path should point to an extension directory containing Configuration.xml.
+    /// Extensions are loaded as separate configurations visible in the shared context.
+    ///
+    /// ```json
+    /// { "extensions": ["src/cfe/BMS_RU_UT", "src/cfe/YAxUnit"] }
+    /// ```
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 impl ProjectConfig {
