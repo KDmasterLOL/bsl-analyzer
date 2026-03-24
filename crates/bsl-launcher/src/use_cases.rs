@@ -7,7 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use crate::cache::{
-    compute_sha256, get_cache_dir, get_current_version, update_current_link, verify_file_checksum,
+    compute_sha256, get_cache_dir, get_current_version, read_current_link, update_current_link,
+    verify_file_checksum,
 };
 use crate::entities::{get_platform_binary, FileInfo};
 use crate::messages::messages;
@@ -66,29 +67,26 @@ fn try_fetch_latest_version_fast(provider: &dyn ReleaseProvider) -> Result<Strin
 
 pub fn ensure_analyzer(provider: &dyn ReleaseProvider, sync_update: bool) -> Result<PathBuf> {
     let cache_dir = get_cache_dir()?;
-    let current_link = cache_dir.join("current");
 
-    if current_link.exists() {
-        if let Ok(target) = fs::read_link(&current_link) {
-            let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
+    if let Some(target) = read_current_link(&cache_dir) {
+        let full_path = if target.is_absolute() { target } else { cache_dir.join(&target) };
 
-            if full_path.exists() {
-                check_updates_if_needed(provider, &cache_dir, sync_update)?;
-                // После синхронного обновления current мог измениться
-                if sync_update {
-                    if let Ok(new_target) = fs::read_link(&current_link) {
-                        let new_path = if new_target.is_absolute() {
-                            new_target
-                        } else {
-                            cache_dir.join(&new_target)
-                        };
-                        if new_path.exists() {
-                            return Ok(new_path);
-                        }
+        if full_path.exists() {
+            check_updates_if_needed(provider, &cache_dir, sync_update)?;
+            // После синхронного обновления current мог измениться
+            if sync_update {
+                if let Some(new_target) = read_current_link(&cache_dir) {
+                    let new_path = if new_target.is_absolute() {
+                        new_target
+                    } else {
+                        cache_dir.join(&new_target)
+                    };
+                    if new_path.exists() {
+                        return Ok(new_path);
                     }
                 }
-                return Ok(full_path);
             }
+            return Ok(full_path);
         }
     }
 
@@ -171,14 +169,12 @@ pub fn update_analyzer(provider: &dyn ReleaseProvider) -> Result<()> {
 
 pub fn verify_installation(provider: &dyn ReleaseProvider) -> Result<()> {
     let cache_dir = get_cache_dir()?;
-    let current_link = cache_dir.join("current");
 
     let m = messages();
-    if !current_link.exists() {
-        bail!("{}", m.no_installation);
-    }
-
-    let target = fs::read_link(&current_link)?;
+    let target = match read_current_link(&cache_dir) {
+        Some(t) => t,
+        None => bail!("{}", m.no_installation),
+    };
     let version = target
         .file_name()
         .and_then(|n| n.to_str())
@@ -342,6 +338,9 @@ fn download_version(
 
     let m = messages();
     eprintln!("{}", m.installed.replace("{}", version));
+
+    auto_cleanup(cache_dir);
+
     Ok(path)
 }
 
@@ -355,6 +354,38 @@ fn download_version_without_linking(
     let m = messages();
     eprintln!("{}", m.installed.replace("{}", version));
     Ok(path)
+}
+
+fn auto_cleanup(cache_dir: &Path) {
+    let current_version = get_current_version(cache_dir);
+
+    let mut versions: Vec<(String, PathBuf)> = Vec::new();
+    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if let Some(version) = name.to_str().and_then(|n| n.strip_prefix("bsl-analyzer-")) {
+            versions.push((version.to_string(), entry.path()));
+        }
+    }
+
+    versions.sort_by(|a, b| {
+        let time_a = fs::metadata(&a.1).and_then(|m| m.modified()).ok();
+        let time_b = fs::metadata(&b.1).and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a)
+    });
+
+    // Оставляем текущую + 1 предыдущую
+    let mut kept = 0;
+    for (version, path) in &versions {
+        let is_current = current_version.as_ref() == Some(version);
+        if is_current || kept < 1 {
+            if !is_current {
+                kept += 1;
+            }
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn do_download(provider: &dyn ReleaseProvider, cache_dir: &Path, version: &str) -> Result<PathBuf> {

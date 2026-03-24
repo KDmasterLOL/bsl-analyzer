@@ -12,9 +12,28 @@ pub fn get_cache_dir() -> Result<PathBuf> {
     Ok(cache_dir)
 }
 
+pub fn read_current_link(cache_dir: &Path) -> Option<PathBuf> {
+    let link_path = cache_dir.join("current");
+
+    #[cfg(unix)]
+    {
+        fs::read_link(&link_path).ok()
+    }
+
+    #[cfg(windows)]
+    {
+        let content = fs::read_to_string(&link_path).ok()?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    }
+}
+
 pub fn get_current_version(cache_dir: &Path) -> Option<String> {
-    let current_link = cache_dir.join("current");
-    let target = fs::read_link(&current_link).ok()?;
+    let target = read_current_link(cache_dir)?;
     let file_name = target.file_name()?.to_str()?;
 
     file_name.strip_prefix("bsl-analyzer-").map(|s| s.to_string())
@@ -22,16 +41,18 @@ pub fn get_current_version(cache_dir: &Path) -> Option<String> {
 
 pub fn update_current_link(cache_dir: &Path, target: &Path) -> Result<()> {
     let link_path = cache_dir.join("current");
-
-    let _ = fs::remove_file(&link_path);
-
     let target_name = target.file_name().context("Target has no filename")?;
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(target_name, &link_path)?;
+    {
+        let _ = fs::remove_file(&link_path);
+        std::os::unix::fs::symlink(target_name, &link_path)?;
+    }
 
     #[cfg(windows)]
-    std::os::windows::fs::symlink_file(target_name, &link_path)?;
+    {
+        fs::write(&link_path, target_name.to_str().context("Invalid filename")?)?;
+    }
 
     Ok(())
 }
