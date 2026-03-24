@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:cmi="http://v8.1c.ru/8.2/managed-application/cmi" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:pal="http://v8.1c.ru/8.1/data/ui/colors/palette" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xpr="http://v8.1c.ru/8.3/xcf/predef" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
-	<HTTPService uuid="a1b2c3d4-e5f6-4a7b-8c9d-1e2f3a4b5c6d">
+	<HTTPService uuid="2096b252-74b5-4e71-a3d1-21b1a3345fea">
 		<Properties>
 			<Name>BSLAnalyzerService</Name>
 			<Synonym>
@@ -73,7 +73,7 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
-			<URLTemplate uuid="a9b0c1d2-3e4f-5a6b-7c8d-9e0f1a2b3c4d">
+			<URLTemplate uuid="7d5ae42e-c6f9-493b-85f9-230b5789a5f8">
 				<Properties>
 					<Name>ПроверкаЗапроса</Name>
 					<Synonym>
@@ -86,7 +86,7 @@
 					<Template>/validate-query</Template>
 				</Properties>
 				<ChildObjects>
-					<Method uuid="b0c1d2e3-4f5a-6b7c-8d9e-0f1a2b3c4d5e">
+					<Method uuid="39eac946-62f1-476c-834d-592ef5059ee5">
 						<Properties>
 							<Name>POST</Name>
 							<Synonym>
@@ -102,7 +102,7 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
-			<URLTemplate uuid="b3a1f5c2-7d8e-4a6b-9c0d-2e3f4a5b6c7d">
+			<URLTemplate uuid="058d8185-8d75-49e0-941c-37601de8b8d5">
 				<Properties>
 					<Name>ПроверкаСинтаксиса</Name>
 					<Synonym>
@@ -115,7 +115,7 @@
 					<Template>/check-syntax</Template>
 				</Properties>
 				<ChildObjects>
-					<Method uuid="c4b2f6d3-8e9f-4b7c-ad1e-3f4a5b6c7d8e">
+					<Method uuid="ae5f69b2-4f02-4246-b51d-92a6e5e91d06">
 						<Properties>
 							<Name>POST</Name>
 							<Synonym>
@@ -131,7 +131,7 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
-			<URLTemplate uuid="d5c3a7e4-9f0a-4c8d-be2f-4a5b6c7d8e9f">
+			<URLTemplate uuid="868bcbda-2992-4af2-be09-f5d2e9fe8a9d">
 				<Properties>
 					<Name>Выполнить</Name>
 					<Synonym>
@@ -144,7 +144,7 @@
 					<Template>/execute</Template>
 				</Properties>
 				<ChildObjects>
-					<Method uuid="e6d4b8f5-0a1b-4d9e-cf3a-5b6c7d8e9f0a">
+					<Method uuid="b3f85aac-5014-4b1c-9b85-a8f3f245ec43">
 						<Properties>
 							<Name>POST</Name>
 							<Synonym>
@@ -160,7 +160,7 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
-			<URLTemplate uuid="f7e5c9a6-1b2c-4e0f-da4b-6c7d8e9f0a1b">
+			<URLTemplate uuid="631ada14-fcea-4a26-a9c1-0dd4c1fb971a">
 				<Properties>
 					<Name>Вычислить</Name>
 					<Synonym>
@@ -173,7 +173,7 @@
 					<Template>/eval</Template>
 				</Properties>
 				<ChildObjects>
-					<Method uuid="a8f6d0b7-2c3d-4f1a-eb5c-7d8e9f0a1b2c">
+					<Method uuid="8945d69e-c0e1-4f97-8f08-41fbe7863b6f">
 						<Properties>
 							<Name>POST</Name>
 							<Synonym>
