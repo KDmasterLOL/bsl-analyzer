@@ -65,6 +65,7 @@ test:
     RUST_TARGET: x86_64-pc-windows-gnu
     PLATFORM_SUFFIX: windows-amd64
     BINARY_EXT: ".exe"
+    RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
 
 # Linux AMD64 (glibc 2.35, compatible with Ubuntu 22.04+)
 build:linux-amd64:
