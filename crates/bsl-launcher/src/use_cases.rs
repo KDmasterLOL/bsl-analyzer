@@ -18,9 +18,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_millis(300);
 
 const LAUNCHER_MAPPINGS: &[(&str, &str)] = &[
-    ("bsl-analyzer", "bsl-launcher-linux-amd64"),
-    ("bsl-analyzer.exe", "bsl-launcher-windows-amd64.exe"),
-    ("bsl-analyzer-mac", "bsl-launcher-darwin-arm64"),
+    ("bsl-analyzer", "bsl-analyzer-linux-amd64"),
+    ("bsl-analyzer.exe", "bsl-analyzer-windows-amd64.exe"),
+    ("bsl-analyzer-mac", "bsl-analyzer-darwin-arm64"),
 ];
 
 fn create_http_client() -> Result<reqwest::blocking::Client> {

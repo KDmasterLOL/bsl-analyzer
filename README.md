@@ -29,7 +29,7 @@ curl -fsSL https://dev.runsystems.ru/releases/static/install.sh | bash -s -- --v
 ### Windows (PowerShell)
 
 ```powershell
-Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-launcher-windows-amd64.exe" -OutFile bsl-analyzer.exe
+Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-analyzer-windows-amd64.exe" -OutFile bsl-analyzer.exe
 ```
 
 ## Использование

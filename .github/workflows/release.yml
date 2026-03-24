@@ -48,14 +48,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/bsl-analyzer artifacts/bsl-launcher-${{ matrix.platform }}
+          cp target/${{ matrix.target }}/release/bsl-analyzer artifacts/bsl-analyzer-${{ matrix.platform }}
           cp target/${{ matrix.target }}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${{ matrix.platform }}
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         run: |
           mkdir artifacts
-          cp target/${{ matrix.target }}/release/bsl-analyzer.exe artifacts/bsl-launcher-${{ matrix.platform }}.exe
+          cp target/${{ matrix.target }}/release/bsl-analyzer.exe artifacts/bsl-analyzer-${{ matrix.platform }}.exe
           cp target/${{ matrix.target }}/release/bsl-analyzer-app.exe artifacts/bsl-analyzer-app-${{ matrix.platform }}.exe
 
       - uses: actions/upload-artifact@v4

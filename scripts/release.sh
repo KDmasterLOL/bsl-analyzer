@@ -5,7 +5,7 @@ set -euo pipefail
 # Использование: ./scripts/release.sh <version> [--upload]
 #
 # Собирает два артефакта:
-#   - bsl-launcher-{platform}     - launcher для IDE/репозиториев
+#   - bsl-analyzer-{platform}     - launcher для IDE/репозиториев
 #   - bsl-analyzer-app-{platform} - LSP сервер (скачивается с release-server)
 #
 # Переменные окружения:
@@ -20,7 +20,7 @@ if [ -z "$VERSION" ]; then
     echo "Example: $0 0.1.0 --upload"
     echo ""
     echo "Builds:"
-    echo "  - bsl-launcher-{platform}     (for IDE/repos)"
+    echo "  - bsl-analyzer-{platform}     (for IDE/repos)"
     echo "  - bsl-analyzer-app-{platform} (LSP server)"
     echo ""
     echo "Environment variables:"
@@ -45,7 +45,7 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 BINARY_EXT=${BINARY_EXT:-}
-LAUNCHER_NAME="bsl-launcher-${PLATFORM_SUFFIX}${BINARY_EXT}"
+LAUNCHER_NAME="bsl-analyzer-${PLATFORM_SUFFIX}${BINARY_EXT}"
 APP_NAME="bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}"
 
 echo "Platform: ${PLATFORM_SUFFIX}"

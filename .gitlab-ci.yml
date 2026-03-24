@@ -74,7 +74,7 @@ build:linux-amd64:
   script:
     - cargo build --release --target ${RUST_TARGET}
     - mkdir -p artifacts
-    - cp target/${RUST_TARGET}/release/bsl-analyzer artifacts/bsl-launcher-${PLATFORM_SUFFIX}
+    - cp target/${RUST_TARGET}/release/bsl-analyzer artifacts/bsl-analyzer-${PLATFORM_SUFFIX}
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}
     - ls -la artifacts/
 
@@ -86,7 +86,7 @@ build:windows-amd64:
   script:
     - cargo build --release --target ${RUST_TARGET}
     - mkdir -p artifacts
-    - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-launcher-${PLATFORM_SUFFIX}${BINARY_EXT}
+    - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-analyzer-${PLATFORM_SUFFIX}${BINARY_EXT}
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
     - ls -la artifacts/
 
