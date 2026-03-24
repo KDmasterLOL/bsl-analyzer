@@ -8,7 +8,7 @@ variables:
   CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
   RUSTFLAGS: "-D warnings"
   GIT_DEPTH: 1
-  CI_IMAGE: gitlab.runsystems.ru:5050/proit/ci:rust-1.93
+  CI_IMAGE: gitlab.runsystems.ru:5050/proit/ci:rust-1.93-xwin
 
 .cargo-cache:
   cache:
@@ -60,12 +60,12 @@ test:
     PLATFORM_SUFFIX: linux-amd64
     BINARY_EXT: ""
 
-.platform-windows-gnu:
+.platform-windows-msvc:
   variables:
-    RUST_TARGET: x86_64-pc-windows-gnu
+    RUST_TARGET: x86_64-pc-windows-msvc
     PLATFORM_SUFFIX: windows-amd64
     BINARY_EXT: ".exe"
-    RUSTFLAGS: "-D warnings -C target-feature=+crt-static -C link-arg=-static-libstdc++ -C link-arg=-static-libgcc"
+    CXXFLAGS: "-DMAP_FAILED=((void*)-1)"
 
 # Linux AMD64 (glibc 2.35, compatible with Ubuntu 22.04+)
 build:linux-amd64:
@@ -79,13 +79,13 @@ build:linux-amd64:
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}
     - ls -la artifacts/
 
-# Windows AMD64 (cross-compilation via mingw)
+# Windows AMD64 (cross-compilation via cargo-xwin, MSVC ABI)
 build:windows-amd64:
   extends:
     - .build-base
-    - .platform-windows-gnu
+    - .platform-windows-msvc
   script:
-    - cargo build --release --target ${RUST_TARGET}
+    - cargo xwin build --release --target ${RUST_TARGET}
     - mkdir -p artifacts
     - cp target/${RUST_TARGET}/release/bsl-analyzer${BINARY_EXT} artifacts/bsl-analyzer-${PLATFORM_SUFFIX}${BINARY_EXT}
     - cp target/${RUST_TARGET}/release/bsl-analyzer-app${BINARY_EXT} artifacts/bsl-analyzer-app-${PLATFORM_SUFFIX}${BINARY_EXT}
