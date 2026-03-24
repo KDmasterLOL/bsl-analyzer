@@ -66,6 +66,7 @@ test:
     PLATFORM_SUFFIX: windows-amd64
     BINARY_EXT: ".exe"
     RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
+    CXXFLAGS: "-static-libstdc++ -static-libgcc"
 
 # Linux AMD64 (glibc 2.35, compatible with Ubuntu 22.04+)
 build:linux-amd64:
