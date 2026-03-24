@@ -37,6 +37,9 @@ coverage/
 *.log
 /experiments/
 
+# 1C platform auto-generated
+**/ConfigDumpInfo.xml
+
 # Test data
 /data/
 bsl-platform-shcntx/
