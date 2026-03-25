@@ -66,6 +66,13 @@ pub enum Ty {
     /// In BSL, functions and procedures are first-class values.
     /// params: parameter types, ret: return type (Undefined for procedures).
     Function { params: Box<[Ty]>, ret: Box<Ty> },
+
+    /// Platform object type not covered by specific Ty variants.
+    ///
+    /// Represents platform types like Запрос, РезультатЗапроса, HTTPЗапрос, etc.
+    /// The name is stored as-is from the constructor (e.g., `Новый Запрос` → "Запрос").
+    /// Platform data lookup is case-insensitive and bilingual.
+    PlatformObject(crate::Name),
 }
 
 /// Metadata object kind.
@@ -164,7 +171,7 @@ impl Ty {
     }
 
     /// Get a human-readable display name for this type.
-    pub fn display_name(&self) -> &'static str {
+    pub fn display_name(&self) -> &str {
         match self {
             Ty::Unknown => "Unknown",
             Ty::Number => "Number",
@@ -181,6 +188,20 @@ impl Ty {
             Ty::ValueList => "ValueList",
             Ty::MetadataRef { .. } => "MetadataRef",
             Ty::Function { .. } => "Function",
+            Ty::PlatformObject(name) => name.as_str(),
+        }
+    }
+
+    /// Get the platform type name for method/property lookup via bsl-platform.
+    ///
+    /// Returns a type name suitable for `PlatformDataInner::get_type_methods()`.
+    /// The platform data accepts both Russian and English names, case-insensitive.
+    /// Returns None for types without platform methods.
+    pub fn platform_type_name(&self) -> Option<&str> {
+        match self {
+            Ty::Unknown | Ty::Undefined | Ty::Null | Ty::Function { .. } => None,
+            Ty::PlatformObject(name) => Some(name.as_str()),
+            _ => Some(self.display_name()),
         }
     }
 }
