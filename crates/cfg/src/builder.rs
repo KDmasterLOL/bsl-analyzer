@@ -749,15 +749,20 @@ impl CfgBuilder {
             // Create merge block
             let merge_block = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
 
-            // Connect both exits to merge
+            // Connect both exits to merge:
+            // - Direct if reachable, AdjacentCode (phantom) if terminated
             if let Some(exit) = try_exit {
-                if self.is_block_reachable(exit) {
+                if self.block_has_live_incoming(exit) {
                     let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                 }
             }
             if let Some(exit) = except_exit {
-                if self.is_block_reachable(exit) {
+                if self.block_has_live_incoming(exit) {
                     let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::Direct);
+                } else {
+                    let _ = self.cfg.add_edge(exit, merge_block, CfgEdgeType::AdjacentCode);
                 }
             }
 

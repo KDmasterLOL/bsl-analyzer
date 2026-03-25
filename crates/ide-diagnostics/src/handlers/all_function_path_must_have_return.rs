@@ -543,6 +543,57 @@ mod tests {
         );
     }
 
+    /// If (no Else) + TryExcept where BOTH try and except have Return — no diagnostic.
+    ///
+    /// Bug: try/except builder used `is_block_reachable` instead of `block_has_live_incoming`,
+    /// so dead blocks after Return were connected to merge block with Direct edges,
+    /// causing false positive.
+    #[test]
+    fn test_no_diagnostic_if_then_try_except_both_return() {
+        let code = r#"Функция ИндексДняПоИмениКолонки(Знач ИмяКолонки)
+    Если НЕ СтрНачинаетсяС(ИмяКолонки, "ПланРаботДень") Тогда
+        Возврат -1;
+    КонецЕсли;
+    Попытка
+        Возврат Число(Сред(ИмяКолонки, СтрДлина("ПланРаботДень") + 1));
+    Исключение
+        Возврат -1;
+    КонецПопытки;
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+                .count(),
+            0,
+            "If + TryExcept where all branches return should not trigger diagnostic"
+        );
+    }
+
+    /// Standalone TryExcept where both branches return — no diagnostic.
+    #[test]
+    fn test_no_diagnostic_try_except_both_return() {
+        let code = r#"Функция Тест(Х)
+    Попытка
+        Возврат Х / 2;
+    Исключение
+        Возврат -1;
+    КонецПопытки;
+КонецФункции"#;
+
+        let diagnostics = check_hir_diagnostic(code);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
+                .count(),
+            0,
+            "TryExcept where both branches return should not trigger diagnostic"
+        );
+    }
+
     /// Test procedure (not function) doesn't trigger diagnostic
     #[test]
     fn test_procedure_not_checked() {
