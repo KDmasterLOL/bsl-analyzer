@@ -244,7 +244,7 @@ fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<
 /// - Detail: Signature with return type
 /// - Insert text: Snippet with parameter placeholders
 /// - Documentation: Short description
-fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
+pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
     // Label: Russian name
     let label = method.name.to_string();
 

@@ -236,6 +236,33 @@ impl MdoType {
         }
     }
 
+    /// Returns the platform manager type prefix for this MDO type.
+    ///
+    /// Used to look up manager methods in platform data.
+    /// Example: `MdoType::Catalog.manager_type_prefix()` returns `Some("CatalogManager")`.
+    pub fn manager_type_prefix(&self) -> Option<&'static str> {
+        match self {
+            Self::Catalog => Some("CatalogManager"),
+            Self::Document => Some("DocumentManager"),
+            Self::InformationRegister => Some("InformationRegisterManager"),
+            Self::AccumulationRegister => Some("AccumulationRegisterManager"),
+            Self::AccountingRegister => Some("AccountingRegisterManager"),
+            Self::CalculationRegister => Some("CalculationRegisterManager"),
+            Self::ChartOfCharacteristicTypes => Some("ChartOfCharacteristicTypesManager"),
+            Self::ChartOfAccounts => Some("ChartOfAccountsManager"),
+            Self::ChartOfCalculationTypes => Some("ChartOfCalculationTypesManager"),
+            Self::BusinessProcess => Some("BusinessProcessManager"),
+            Self::Task => Some("TaskManager"),
+            Self::Enum => Some("EnumManager"),
+            Self::ExchangePlan => Some("ExchangePlanManager"),
+            Self::ExternalDataSource => Some("ExternalDataSourceManager"),
+            Self::Constant => Some("ConstantManager"),
+            Self::DataProcessor => Some("DataProcessorManager"),
+            Self::Report => Some("ReportManager"),
+            Self::Cube | Self::DimensionTable | Self::CommonModule => None,
+        }
+    }
+
     /// Check if a given name is an MDO plural form (case-insensitive).
     /// Uses O(1) lookup via FxHashSet with lazy static initialization.
     ///
