@@ -6,6 +6,7 @@
 
 - **180+ диагностик** качества кода BSL
 - **LSP** — поддержка Language Server Protocol для IDE
+- **MCP** — встроенный сервер Model Context Protocol для AI-агентов
 - **SonarQube** — отчёты SARIF, потоковый режим для крупных проектов
 - **Совместимость** с форматом конфигурации `.bsl-language-server.json`
 - **Кроссплатформенность** — Linux, Windows, macOS (Apple Silicon)
@@ -51,6 +52,118 @@ bsl-analyzer analyze -s ./my-project -r sarif -o ./reports
 
 # JSONL-вывод (для SonarQube)
 bsl-analyzer analyze -s ./my-project --format=jsonl > report.jsonl
+```
+
+### MCP-сервер
+
+BSL Analyzer включает встроенный [MCP-сервер](https://modelcontextprotocol.io/) (Model Context Protocol), позволяющий AI-агентам работать с конфигурацией 1С: просматривать метаданные, искать по коду и документации, валидировать запросы, выполнять код и отлаживать.
+
+> **Внимание:** MCP-сервер с подключением к 1С предоставляет полный доступ к базе данных, включая выполнение произвольного кода и запросов. Используйте только в контуре разработки или тестирования. Подключение к продуктивной базе крайне не рекомендуется.
+
+```bash
+bsl-analyzer mcp --source-dir ./my-project
+```
+
+С подключением к 1С (для выполнения запросов и кода):
+
+```bash
+bsl-analyzer mcp \
+  --source-dir ./my-project \
+  --onec-url http://localhost/base/hs/bsl-analyzer \
+  --onec-user admin \
+  --onec-password secret
+```
+
+#### Инструменты
+
+| Инструмент | Описание |
+|------------|----------|
+| **metadata** | Структура конфигурации: объекты, реквизиты, табличные части, формы |
+| **search** | Полнотекстовый и семантический поиск по коду и документации платформы |
+| **syntax_help** | Справка по API платформы: типы, методы, глобальные функции |
+| **query** | Валидация и выполнение SDBL-запросов |
+| **execute** | Проверка синтаксиса, выполнение кода и вычисление выражений |
+| **debug** | Интеграция с отладчиком 1С: точки останова, стек, шаги |
+
+#### Расширение 1С (для query, execute, debug)
+
+Инструменты `query`, `execute` и `debug` требуют подключения к работающей базе 1С через HTTP-сервис. Расширение конфигурации встроено в бинарник.
+
+Установка:
+
+1. Экспортируйте расширение из бинарника:
+   ```bash
+   bsl-analyzer extension export -o ./bsl-extension
+   ```
+2. В конфигураторе 1С откройте **Конфигурация → Расширения конфигурации**
+3. Нажмите **Добавить** и загрузите каталог `bsl-extension` как расширение
+4. Опубликуйте HTTP-сервис: **Администрирование → Публикация на веб-сервере**, включите сервис `BSLAnalyzerService` по пути `/hs/bsl-analyzer`
+5. Убедитесь, что пользователю назначена роль `BSL_ОсновнаяРоль`
+
+После публикации проверьте доступность:
+
+```bash
+curl http://localhost/base/hs/bsl-analyzer/version
+# {"version":"1.0.0"}
+```
+
+> **Примечание:** инструменты `metadata`, `search` и `syntax_help` работают локально и не требуют расширения.
+
+#### Настройка в Claude Desktop / Claude Code
+
+Добавьте в конфигурацию MCP (`claude_desktop_config.json` или `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "bsl-analyzer": {
+      "command": "bsl-analyzer",
+      "args": ["mcp", "--source-dir", "/path/to/project"]
+    }
+  }
+}
+```
+
+С подключением к 1С:
+
+```json
+{
+  "mcpServers": {
+    "bsl-analyzer": {
+      "command": "bsl-analyzer",
+      "args": [
+        "mcp",
+        "--source-dir", "/path/to/project",
+        "--onec-url", "http://localhost/base/hs/bsl-analyzer",
+        "--onec-user", "admin",
+        "--onec-password", "secret"
+      ]
+    }
+  }
+}
+```
+
+#### Настройка в VS Code (Copilot / Continue / Cline)
+
+Добавьте в `.vscode/mcp.json` в корне проекта:
+
+```json
+{
+  "servers": {
+    "bsl-analyzer": {
+      "command": "bsl-analyzer",
+      "args": ["mcp", "--source-dir", "${workspaceFolder}"]
+    }
+  }
+}
+```
+
+#### Семантический поиск
+
+Для работы семантического поиска (`search_code`, `search_docs`) необходим эмбеддинг-сервер, совместимый с OpenAI API:
+
+```bash
+EMBEDDING_URL=http://localhost:8000/v1/embeddings bsl-analyzer mcp --source-dir ./my-project
 ```
 
 ### Фиксация версии (CI/CD)
