@@ -15,6 +15,10 @@ use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 ///
 /// Returns Some(items) if this is an MDO completion context (after DOT on a manager collection),
 /// otherwise returns None to allow other completion providers to handle it.
+///
+/// Handles two cursor positions:
+/// - Right after DOT: `Справочники.|` → token is DOT
+/// - Inside IDENT after DOT: `Справочники.Допол|нительные` → token is IDENT
 pub(super) fn mdo_completions<DB: RootDatabase>(
     db: &DB,
     position: CompletionPosition,
@@ -26,34 +30,117 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 
     let token = root.token_at_offset(position.offset).left_biased()?;
 
-    if token.kind() != SyntaxKind::DOT {
-        return None;
-    }
+    // Detect MDO context from either DOT or IDENT-after-DOT
+    let context = detect_mdo_context(&token)?;
+    tracing::debug!(?context, "MDO completion context detected");
 
-    let receiver = find_receiver_before_dot(&token)?;
-
-    // Case 1: `Справочники.` → complete with MDO objects from metadata
-    if let Some(ident_text) = get_single_ident(&receiver) {
-        if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
-            tracing::debug!(?mdo_type, "MDO collection completion");
+    match context {
+        // `Справочники.` or `Справочники.Доп|` → complete MDO objects
+        MdoContext::CollectionDot { mdo_type } => {
             let items = complete_mdo_objects(db, position.file_id, mdo_type);
             if !items.is_empty() {
                 return Some(items);
             }
         }
+        // `Справочники.Валюты.` or `Справочники.Валюты.Найти|` → complete manager methods
+        MdoContext::ObjectDot { mdo_type } => {
+            if let Some(prefix) = mdo_type.manager_type_prefix() {
+                let items = complete_manager_methods(prefix);
+                if !items.is_empty() {
+                    return Some(items);
+                }
+            }
+        }
     }
 
-    // Case 2: `Справочники.Валюты.` → complete with manager methods
+    None
+}
+
+/// MDO completion context.
+#[derive(Debug)]
+enum MdoContext {
+    /// Cursor after `Справочники.` — complete with MDO object names
+    CollectionDot { mdo_type: MdoType },
+    /// Cursor after `Справочники.Валюты.` — complete with manager methods
+    ObjectDot { mdo_type: MdoType },
+}
+
+/// Detect MDO completion context from the token at cursor position.
+///
+/// Walks the syntax tree to find if we're in a `ManagerCollection.` or
+/// `ManagerCollection.Object.` context.
+fn detect_mdo_context(token: &SyntaxToken) -> Option<MdoContext> {
+    match token.kind() {
+        // Cursor right after DOT: `Справочники.|` or `Справочники.Валюты.|`
+        SyntaxKind::DOT => detect_from_dot(token),
+
+        // Cursor inside IDENT after DOT: `Справочники.Доп|` or `Справочники.Валюты.Найти|`
+        SyntaxKind::IDENT => detect_from_ident_after_dot(token),
+
+        _ => None,
+    }
+}
+
+/// Detect context when cursor is right after a DOT token.
+fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
+    let receiver = find_receiver_before_dot(dot_token)?;
+
+    // Case: `Справочники.` — receiver is simple IDENT
+    if let Some(ident_text) = get_single_ident(&receiver) {
+        if let Some(mdo_type) = MdoType::from_plural(&ident_text) {
+            return Some(MdoContext::CollectionDot { mdo_type });
+        }
+    }
+
+    // Case: `Справочники.Валюты.` — receiver is FIELD_EXPR
     if receiver.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, object_name)) = get_field_expr_parts(&receiver) {
+        if let Some((base_text, _object_name)) = get_field_expr_parts(&receiver) {
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                tracing::debug!(?mdo_type, %object_name, "MDO manager method completion");
-                if let Some(prefix) = mdo_type.manager_type_prefix() {
-                    let items = complete_manager_methods(prefix);
-                    if !items.is_empty() {
-                        return Some(items);
-                    }
-                }
+                return Some(MdoContext::ObjectDot { mdo_type });
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect context when cursor is inside an IDENT that follows a DOT.
+///
+/// The IDENT is inside a FIELD_EXPR: `base . ident|`
+/// We walk up to find the MDO context from the parent FIELD_EXPR structure.
+fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> {
+    // Verify there's a DOT before this IDENT
+    let has_dot_before = ident_token
+        .siblings_with_tokens(syntax::Direction::Prev)
+        .skip(1)
+        .find(|s| s.kind() != SyntaxKind::WHITESPACE)
+        .is_some_and(|s| s.kind() == SyntaxKind::DOT);
+
+    if !has_dot_before {
+        return None;
+    }
+
+    // Parent should be FIELD_EXPR: `base.ident`
+    let field_expr = ident_token.parent()?;
+    if field_expr.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+
+    // Get the base (first child node of the FIELD_EXPR)
+    let base = field_expr.children().next()?;
+
+    // Case: `Справочники.Доп|` — base is simple IDENT
+    if let Some(base_text) = get_single_ident(&base) {
+        if let Some(mdo_type) = MdoType::from_plural(&base_text) {
+            return Some(MdoContext::CollectionDot { mdo_type });
+        }
+    }
+
+    // Case: `Справочники.Валюты.Найти|` — base is FIELD_EXPR
+    if base.kind() == SyntaxKind::FIELD_EXPR {
+        if let Some((base_text, _object_name)) = get_field_expr_parts(&base) {
+            if let Some(mdo_type) = MdoType::from_plural(&base_text) {
+                return Some(MdoContext::ObjectDot { mdo_type });
             }
         }
     }
