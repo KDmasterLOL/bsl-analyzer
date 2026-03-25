@@ -5,8 +5,10 @@
 //! - Snippets with parameter placeholders
 
 use bsl_platform::{type_methods_query, PlatformData, PlatformMethod, TypeNameInput};
+use hir::{InferenceResult, Name, Ty};
 use ide_db::RootDatabase;
-use syntax::{SyntaxKind, SyntaxToken};
+use syntax::ast::{self, AstNode};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -14,72 +16,213 @@ use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 ///
 /// Returns Some(items) if this is a method completion context (after DOT),
 /// otherwise returns None to allow other completion providers to handle it.
+///
+/// Supports:
+/// - Simple variable: `МойМассив.` → methods of Массив
+/// - Direct type: `Строка.` → methods of Строка
+/// - Fluent chains: `Запрос.Выполнить().Выбрать().` → methods of return type
 pub(super) fn platform_completions(
     db: &dyn RootDatabase,
     position: CompletionPosition,
 ) -> Option<Vec<CompletionItem>> {
     let _span = tracing::info_span!("platform_completions").entered();
 
-    // Parse the file
     let parse = db.parse(position.file_id);
     let root = parse.syntax_node();
 
-    // Find token at position (left-biased to catch DOT)
     let token = root.token_at_offset(position.offset).left_biased()?;
 
     tracing::debug!(token_kind = ?token.kind(), token_text = ?token.text(), "Completion token");
 
-    // Check if we're right after a DOT
-    if token.kind() == SyntaxKind::DOT {
-        // Get the receiver (what's before the dot)
-        if let Some(receiver_type) = extract_receiver_type(&token) {
-            tracing::debug!(receiver_type = ?receiver_type, "Detected method completion context");
-            return Some(complete_platform_methods(db, &receiver_type));
-        }
+    if token.kind() != SyntaxKind::DOT {
+        return None;
     }
 
-    // Not a platform method completion context
+    // Resolve the type of the expression before the DOT
+    let receiver_expr = find_receiver_expr(&token)?;
+    let infer_result = db.infer(position.file_id);
+
+    let receiver_ty = resolve_syntax_expr_type(&receiver_expr, &infer_result);
+    tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
+
+    let type_name = receiver_ty.platform_type_name()?;
+    tracing::debug!(type_name = ?type_name, "Platform type for completion");
+
+    Some(complete_platform_methods(db, type_name))
+}
+
+/// Find the receiver expression node before the DOT token.
+///
+/// Walks up the syntax tree from DOT to find the parent expression,
+/// then returns its first child (the receiver).
+///
+/// Handles cases like:
+/// - `ident.` → parent is FIELD_EXPR, receiver is IDENT
+/// - `expr.Method().` → parent is FIELD_EXPR, receiver is CALL_EXPR
+fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
+    let parent = dot_token.parent()?;
+
+    // DOT is inside a FIELD_EXPR: the first child node is the receiver
+    if parent.kind() == SyntaxKind::FIELD_EXPR {
+        return parent.children().next();
+    }
+
+    // Fallback: look at the previous sibling node of the DOT
+    for sibling in dot_token.siblings_with_tokens(syntax::Direction::Prev).skip(1) {
+        if sibling.kind() == SyntaxKind::WHITESPACE {
+            continue;
+        }
+        if let Some(node) = sibling.as_node() {
+            return Some(node.clone());
+        }
+        if let Some(token) = sibling.as_token() {
+            return token.parent();
+        }
+        return None;
+    }
+
     None
 }
 
-/// Extracts the receiver type from the token before DOT.
+/// Recursively resolve the type of a syntax expression node.
 ///
-/// Example: `Строка.` -> Some("Строка")
-fn extract_receiver_type(dot_token: &SyntaxToken) -> Option<String> {
-    // Get previous sibling (skip whitespace)
-    let mut prev = dot_token.prev_sibling_or_token();
+/// This is a lightweight syntax-level type resolver for completion.
+/// It uses inference results (var_types) for variables and platform data
+/// for method return types to support fluent chains.
+fn resolve_syntax_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
+    match node.kind() {
+        // Simple identifier — look up in var_types or treat as type name
+        SyntaxKind::IDENT | SyntaxKind::EXPR => {
+            if let Some(ident_token) = node.first_token() {
+                if ident_token.kind() == SyntaxKind::IDENT {
+                    return resolve_ident_type(ident_token.text(), infer_result);
+                }
+            }
+            Ty::Unknown
+        }
 
-    // Skip whitespace
-    while let Some(sibling) = &prev {
-        if sibling.kind() == SyntaxKind::WHITESPACE {
-            prev = sibling.prev_sibling_or_token();
-        } else {
-            break;
+        // Call expression: callee(args) — resolve callee type
+        // For method calls like `obj.Method()`, this is a CALL_EXPR wrapping a FIELD_EXPR
+        SyntaxKind::CALL_EXPR => resolve_call_expr_type(node, infer_result),
+
+        // Field expression: base.field — resolve for intermediate chains
+        SyntaxKind::FIELD_EXPR => resolve_field_expr_type(node, infer_result),
+
+        // New expression: Новый Type(...)
+        SyntaxKind::NEW_EXPR => {
+            if let Some(new_expr) = ast::NewExpr::cast(node.clone()) {
+                Ty::from_new_expr(&new_expr)
+            } else {
+                Ty::Unknown
+            }
+        }
+
+        // Parenthesized expression
+        SyntaxKind::PAREN_EXPR => node
+            .children()
+            .next()
+            .map(|child| resolve_syntax_expr_type(&child, infer_result))
+            .unwrap_or(Ty::Unknown),
+
+        _ => {
+            // Try to find an IDENT token in this node (fallback)
+            if let Some(ident) = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) {
+                return resolve_ident_type(ident.text(), infer_result);
+            }
+            Ty::Unknown
+        }
+    }
+}
+
+/// Resolve type of an identifier (variable name or type name).
+fn resolve_ident_type(name: &str, infer_result: &InferenceResult) -> Ty {
+    let key = name.to_lowercase();
+
+    // Check var_types from inference
+    if let Some(ty) = infer_result.var_types.get(&key) {
+        if !ty.is_unknown() {
+            return ty.clone();
         }
     }
 
-    // Check if it's an identifier
-    if let Some(receiver) = prev {
-        if receiver.kind() == SyntaxKind::IDENT {
-            // Try to get as token first
-            if let Some(token) = receiver.as_token() {
-                let receiver_text = token.text().to_string();
-                tracing::debug!(receiver = ?receiver_text, "Found receiver (token)");
-                return Some(receiver_text);
-            }
+    // Check if it's a known platform type name directly (e.g., `Строка.`)
+    let ty = Ty::from_type_name(name);
+    if !ty.is_unknown() {
+        return ty;
+    }
 
-            // If it's a node, get the first token child
-            if let Some(node) = receiver.as_node() {
-                if let Some(token) = node.first_token() {
-                    let receiver_text = token.text().to_string();
-                    tracing::debug!(receiver = ?receiver_text, "Found receiver (from node)");
-                    return Some(receiver_text);
+    // Check if it's a known platform type (e.g., `Запрос.`)
+    let data = PlatformData::instance();
+    if !data.get_type_methods(name).is_empty() {
+        return Ty::PlatformObject(Name::new(name));
+    }
+
+    Ty::Unknown
+}
+
+/// Resolve type of a CALL_EXPR node.
+///
+/// Structure: CALL_EXPR → [callee_expr, ARG_LIST]
+/// If callee is a FIELD_EXPR (method call), resolve receiver type + method return type.
+fn resolve_call_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
+    let callee = node.children().next();
+    let callee = match callee {
+        Some(c) => c,
+        None => return Ty::Unknown,
+    };
+
+    // Method call: callee is FIELD_EXPR (base.method)
+    if callee.kind() == SyntaxKind::FIELD_EXPR {
+        let mut children = callee.children();
+        let base = children.next();
+        // Skip to find method name (IDENT after DOT)
+        let method_name = callee
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|t| t.kind() == SyntaxKind::IDENT)
+            .last();
+
+        if let (Some(base_node), Some(method_token)) = (base, method_name) {
+            let base_ty = resolve_syntax_expr_type(&base_node, infer_result);
+            if let Some(type_name) = base_ty.platform_type_name() {
+                let data = PlatformData::instance();
+                if let Some(method) = data.get_method(type_name, method_token.text()) {
+                    if let Some(ret_type) = &method.return_type {
+                        let ty = Ty::from_type_name(ret_type);
+                        if !ty.is_unknown() {
+                            return ty;
+                        }
+                        return Ty::PlatformObject(Name::new(ret_type));
+                    }
+                    return Ty::Undefined;
                 }
             }
         }
     }
 
-    None
+    // Simple function call — could check global function return types
+    // For now, return Unknown
+    Ty::Unknown
+}
+
+/// Resolve type of a FIELD_EXPR node (base.field).
+///
+/// Used for intermediate chain resolution.
+fn resolve_field_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
+    // FIELD_EXPR has: base_expr, DOT, IDENT(field_name)
+    let base = node.children().next();
+    let field_name = node
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .last();
+
+    if let (Some(base_node), Some(_field_token)) = (base, field_name) {
+        // For now, resolve base type (field access on platform types returns Unknown)
+        resolve_syntax_expr_type(&base_node, infer_result)
+    } else {
+        Ty::Unknown
+    }
 }
 
 /// Completes platform methods for a receiver type.
@@ -101,7 +244,7 @@ fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<
 /// - Detail: Signature with return type
 /// - Insert text: Snippet with parameter placeholders
 /// - Documentation: Short description
-fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
+pub(super) fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
     // Label: Russian name
     let label = method.name.to_string();
 

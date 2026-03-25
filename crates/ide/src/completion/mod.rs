@@ -6,6 +6,7 @@
 //! - BSL code (variables, functions, etc.) - TODO
 
 mod bsl_completion;
+mod mdo_completion;
 mod platform_completion;
 mod sdbl;
 
@@ -106,6 +107,12 @@ pub fn completions<DB: RootDatabase>(db: &DB, position: CompletionPosition) -> V
     // Try SDBL completion first (new Clean Architecture implementation)
     if let Some(items) = sdbl::sdbl_completions(db, position.clone()) {
         tracing::debug!(items = items.len(), "returning SDBL completions");
+        return items;
+    }
+
+    // Try MDO completion (metadata collection managers)
+    if let Some(items) = mdo_completion::mdo_completions(db, position.clone()) {
+        tracing::debug!(items = items.len(), "returning MDO completions");
         return items;
     }
 

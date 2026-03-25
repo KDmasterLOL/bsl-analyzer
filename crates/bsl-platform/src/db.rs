@@ -171,6 +171,17 @@ impl PlatformDataInner {
         self.methods.iter().filter(|m| m.type_name.to_lowercase() == en_type_key.as_str()).collect()
     }
 
+    /// Get all methods for a manager type prefix (case-insensitive).
+    ///
+    /// Manager type names in platform data have the form `"CatalogManager.<Catalog name>"`.
+    /// This method matches all methods whose type_name starts with `"{prefix}."`.
+    ///
+    /// Example: `get_manager_methods("CatalogManager")` returns НайтиПоКоду, СоздатьЭлемент, etc.
+    pub fn get_manager_methods(&self, manager_prefix: &str) -> Vec<&PlatformMethod> {
+        let prefix = format!("{}.", manager_prefix.to_lowercase());
+        self.methods.iter().filter(|m| m.type_name.to_lowercase().starts_with(&prefix)).collect()
+    }
+
     /// Get global function by name (case-insensitive, bilingual).
     pub fn get_global_function(&self, name: &str) -> Option<&GlobalFunction> {
         let key: SmolStr = name.to_lowercase().into();

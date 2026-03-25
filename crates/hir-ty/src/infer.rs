@@ -28,7 +28,7 @@
 
 use cfg_types::IdConversion;
 use hir_def::body::Body;
-use hir_def::hir::{BinaryOp, Expr, Literal, UnaryOp};
+use hir_def::hir::{BinaryOp, Expr, Literal, Stmt, StmtIdx, UnaryOp};
 use hir_def::resolver::Resolver;
 use hir_def::ty::Ty;
 use hir_def::{ExprId, Name};
@@ -49,6 +49,13 @@ use crate::method_resolution;
 pub struct InferenceResult {
     /// Type of each expression, keyed by ExprId.
     pub expr_types: FxHashMap<ExprId, Ty>,
+
+    /// Variable types inferred from assignments.
+    ///
+    /// Maps lowercase variable name to its last inferred type.
+    /// Populated by tracking `Stmt::Assign { target: Path(name), value }` during inference.
+    /// Used by completion to resolve receiver types for method lookup.
+    pub var_types: FxHashMap<String, Ty>,
 
     /// Diagnostics collected during type inference.
     ///
@@ -133,6 +140,9 @@ pub struct InferenceContext<'db> {
     /// HIR body for the file.
     body: Arc<Body>,
 
+    /// Variable types tracked from assignments (lowercase name → Ty).
+    var_types: FxHashMap<String, Ty>,
+
     /// Accumulated inference results.
     result: InferenceResult,
 }
@@ -140,11 +150,18 @@ pub struct InferenceContext<'db> {
 impl<'db> InferenceContext<'db> {
     /// Create a new inference context for a file.
     pub fn new(db: &'db dyn HirDatabase, file_id: FileId, body: &Arc<Body>) -> Self {
-        Self { db, file_id, body: Arc::clone(body), result: InferenceResult::default() }
+        Self {
+            db,
+            file_id,
+            body: Arc::clone(body),
+            var_types: FxHashMap::default(),
+            result: InferenceResult::default(),
+        }
     }
 
     /// Finish inference and return the result.
-    pub fn finish(self) -> InferenceResult {
+    pub fn finish(mut self) -> InferenceResult {
+        self.result.var_types = self.var_types;
         self.result
     }
 
@@ -164,23 +181,129 @@ impl<'db> InferenceContext<'db> {
 
     /// Infer types for all expressions in the body.
     ///
-    /// This is called from infer_query after creating the context.
+    /// Walks statements top-down to track variable types from assignments,
+    /// then infers remaining expressions. This ensures `Expr::Path` lookups
+    /// see variable types from prior assignments.
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
-        // Infer types for all expressions in the arena
-        // We collect all ExprIds first to avoid borrowing issues
-        let expr_ids: Vec<ExprId> = self.body.exprs_iter().map(|(id, _)| id).collect();
+        // Walk statements to track variable types from assignments
+        let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
+        self.infer_stmts(&stmts);
 
+        // Infer remaining expressions not reached via statements
+        let expr_ids: Vec<ExprId> = self.body.exprs_iter().map(|(id, _)| id).collect();
         for expr_id in expr_ids {
             self.infer_expr(expr_id);
         }
 
         debug!(
-            "inferred {} expression types, {} diagnostics",
+            "inferred {} expression types, {} var types, {} diagnostics",
             self.result.expr_types.len(),
+            self.var_types.len(),
             self.result.diagnostics.len()
         );
+    }
+
+    /// Walk a list of statements, inferring types and tracking variable assignments.
+    fn infer_stmts(&mut self, stmts: &[StmtIdx]) {
+        for &stmt_idx in stmts {
+            self.infer_stmt(stmt_idx);
+        }
+    }
+
+    /// Infer types for a single statement.
+    fn infer_stmt(&mut self, stmt_idx: StmtIdx) {
+        let stmt = self.body.stmt_idx(stmt_idx).clone();
+        match &stmt {
+            Stmt::Assign { target, value } => {
+                let value_ty = self.infer_expr(ExprId::from_idx(*value));
+
+                // Track variable type if target is a simple name
+                let target_expr = self.body.expr_idx(*target);
+                if let Expr::Path(name) = target_expr {
+                    if !value_ty.is_unknown() {
+                        self.var_types.insert(name.as_str().to_lowercase(), value_ty);
+                    }
+                }
+
+                self.infer_expr(ExprId::from_idx(*target));
+            }
+
+            Stmt::Expr(expr_idx) => {
+                self.infer_expr(ExprId::from_idx(*expr_idx));
+            }
+
+            Stmt::If(if_stmt) => {
+                self.infer_expr(ExprId::from_idx(if_stmt.condition));
+                self.infer_stmts(&if_stmt.then_branch);
+                for (cond, branch) in if_stmt.elsif_branches.iter() {
+                    self.infer_expr(ExprId::from_idx(*cond));
+                    self.infer_stmts(branch);
+                }
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    self.infer_stmts(else_branch);
+                }
+            }
+
+            Stmt::PreprocIf(preproc) => {
+                self.infer_stmts(&preproc.then_branch);
+                for (_, _, branch) in preproc.elsif_branches.iter() {
+                    self.infer_stmts(branch);
+                }
+                if let Some(else_branch) = &preproc.else_branch {
+                    self.infer_stmts(else_branch);
+                }
+            }
+
+            Stmt::While { condition, body } => {
+                self.infer_expr(ExprId::from_idx(*condition));
+                self.infer_stmts(body);
+            }
+
+            Stmt::For { from, to, body, .. } => {
+                self.infer_expr(ExprId::from_idx(*from));
+                self.infer_expr(ExprId::from_idx(*to));
+                self.infer_stmts(body);
+            }
+
+            Stmt::ForEach { collection, body, .. } => {
+                self.infer_expr(ExprId::from_idx(*collection));
+                self.infer_stmts(body);
+            }
+
+            Stmt::Try { body, except } => {
+                self.infer_stmts(body);
+                self.infer_stmts(except);
+            }
+
+            Stmt::Return { value } => {
+                if let Some(expr_idx) = value {
+                    self.infer_expr(ExprId::from_idx(*expr_idx));
+                }
+            }
+
+            Stmt::Raise { value } => {
+                if let Some(expr_idx) = value {
+                    self.infer_expr(ExprId::from_idx(*expr_idx));
+                }
+            }
+
+            Stmt::Execute { expr } => {
+                self.infer_expr(ExprId::from_idx(*expr));
+            }
+
+            Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+                self.infer_expr(ExprId::from_idx(*event));
+                self.infer_expr(ExprId::from_idx(*handler));
+            }
+
+            Stmt::VarDecl { .. }
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::Goto(_)
+            | Stmt::Label(_) => {}
+        }
     }
 
     /// Infer the type of an expression.
@@ -210,7 +333,12 @@ impl<'db> InferenceContext<'db> {
                     return Ty::Function { params: sig.params.clone(), ret: sig.ret.clone() };
                 }
 
-                // TODO: Phase 2+: Resolve variable/parameter type
+                // Look up variable type from tracked assignments
+                if let Some(ty) = self.var_types.get(&name.as_str().to_lowercase()) {
+                    trace!("resolved {} to variable type {:?}", name, ty);
+                    return ty.clone();
+                }
+
                 Ty::Unknown
             }
 
@@ -246,16 +374,14 @@ impl<'db> InferenceContext<'db> {
                 self.infer_call(ExprId::from_idx(*callee), &converted_args)
             }
 
-            Expr::MethodCall { receiver, method: _, args } => {
-                // Infer receiver and args
-                self.infer_expr(ExprId::from_idx(*receiver));
+            Expr::MethodCall { receiver, method, args } => {
+                let receiver_ty = self.infer_expr(ExprId::from_idx(*receiver));
                 for &arg in args.iter() {
                     self.infer_expr(ExprId::from_idx(arg));
                 }
 
-                // Phase 1: Return Unknown
-                // Phase 3: Resolve method on receiver type
-                Ty::Unknown
+                // Resolve method return type via platform data
+                self.resolve_method_return_type(&receiver_ty, method)
             }
 
             Expr::Index { base, index } => {
@@ -283,7 +409,16 @@ impl<'db> InferenceContext<'db> {
 
                 // Infer type from constructor
                 match type_name {
-                    Some(name) => Ty::from_type_name(name.as_str()),
+                    Some(name) => {
+                        let ty = Ty::from_type_name(name.as_str());
+                        if ty.is_unknown() {
+                            // Not a basic type — treat as platform object
+                            // (e.g., Запрос, HTTPЗапрос, ТекстовыйДокумент)
+                            Ty::PlatformObject(name.clone())
+                        } else {
+                            ty
+                        }
+                    }
                     None => Ty::Unknown,
                 }
             }
@@ -318,6 +453,28 @@ impl<'db> InferenceContext<'db> {
             Literal::Undefined => Ty::Undefined,
             Literal::Null => Ty::Null,
         }
+    }
+
+    /// Resolve return type of a platform method call.
+    ///
+    /// Given a receiver type and method name, looks up the method in platform data
+    /// and returns its return type. Enables fluent chains like `Запрос.Выполнить().Выбрать()`.
+    fn resolve_method_return_type(&self, receiver_ty: &Ty, method_name: &Name) -> Ty {
+        if let Some(type_name) = receiver_ty.platform_type_name() {
+            let data = bsl_platform::PlatformData::instance();
+            if let Some(platform_method) = data.get_method(type_name, method_name.as_str()) {
+                if let Some(ret_type_name) = &platform_method.return_type {
+                    let ty = Ty::from_type_name(ret_type_name);
+                    if ty.is_unknown() {
+                        return Ty::PlatformObject(Name::new(ret_type_name));
+                    }
+                    return ty;
+                }
+                // Method exists but returns void (procedure)
+                return Ty::Undefined;
+            }
+        }
+        Ty::Unknown
     }
 
     /// Infer type from a binary operation.
@@ -518,24 +675,30 @@ pub fn infer_query(db: &dyn HirDatabase, file_id: FileId) -> Arc<InferenceResult
     let module_id = hir_def::ModuleId { file_id };
     let module_bodies = db.module_bodies(module_id);
 
-    // For Phase 1 MVP: Only infer types for module-level code (code outside procedures/functions)
-    // TODO Phase 2: Also infer types for all method bodies
     let mut result = InferenceResult::default();
 
+    // Infer module-level code (statements outside procedures/functions)
     if let Some(body) = module_bodies.module_code() {
-        // Create inference context for module-level code
         let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
-
-        // Run inference
         ctx.infer_all();
+        let module_result = ctx.finish();
+        result.var_types.extend(module_result.var_types);
+        result.diagnostics.extend(module_result.diagnostics);
+    }
 
-        // Merge results
-        result = ctx.finish();
+    // Infer all method bodies (procedures and functions)
+    for (_local_id, body) in module_bodies.iter_bodies() {
+        let mut ctx = InferenceContext::new(db, file_id, &Arc::new(body.clone()));
+        ctx.infer_all();
+        let method_result = ctx.finish();
+        // Merge var_types from all methods (completion will match by variable name)
+        result.var_types.extend(method_result.var_types);
+        result.diagnostics.extend(method_result.diagnostics);
     }
 
     info!(
-        "type inference complete: {} expr types, {} diagnostics",
-        result.expr_types.len(),
+        "type inference complete: {} var types, {} diagnostics",
+        result.var_types.len(),
         result.diagnostics.len()
     );
 
