@@ -11,12 +11,23 @@ use std::fmt::Write;
 /// Returns configuration metadata tree — categories and object names.
 pub fn get_metadata_tree(
     config: &Configuration,
+    extensions: &[(String, Configuration)],
     filter: Option<String>,
 ) -> Result<CallToolResult, McpError> {
     if let Some(ref category) = filter {
         format_filtered_tree(config, category)
     } else {
-        format_summary_tree(config)
+        let mut result = format_summary_tree(config)?;
+        // Append extension summaries
+        if !extensions.is_empty() {
+            let text = result.content[0].raw.as_text().expect("text").text.clone();
+            let mut out = text;
+            for (name, ext_config) in extensions {
+                out.push_str(&format_extension_summary(name, ext_config));
+            }
+            result = CallToolResult::success(vec![Content::text(out)]);
+        }
+        Ok(result)
     }
 }
 
@@ -338,7 +349,10 @@ fn format_register_structure(reg: &bsl_metadata::Register) -> String {
 }
 
 /// Returns general configuration info.
-pub fn get_configuration_info(config: &Configuration) -> Result<CallToolResult, McpError> {
+pub fn get_configuration_info(
+    config: &Configuration,
+    extensions: &[(String, Configuration)],
+) -> Result<CallToolResult, McpError> {
     let total_objects = config.metadata_objects().len()
         + config.registers().len()
         + config.common_modules().len()
@@ -361,6 +375,16 @@ pub fn get_configuration_info(config: &Configuration) -> Result<CallToolResult, 
     let _ = writeln!(out, "- Роли: {}", config.roles().len());
     let _ = writeln!(out, "- HTTP-сервисы: {}", config.http_services().len());
     let _ = writeln!(out, "- Web-сервисы: {}", config.web_services().len());
+
+    if !extensions.is_empty() {
+        let _ = writeln!(out, "\n## Расширения ({})\n", extensions.len());
+        for (name, ext_config) in extensions {
+            let ext_objects = ext_config.metadata_objects().len()
+                + ext_config.registers().len()
+                + ext_config.common_modules().len();
+            let _ = writeln!(out, "- **{name}**: {ext_objects} объектов");
+        }
+    }
 
     Ok(CallToolResult::success(vec![Content::text(out)]))
 }
@@ -476,6 +500,34 @@ fn format_form(form: &bsl_metadata::Form) -> String {
     out
 }
 
+fn format_extension_summary(name: &str, config: &Configuration) -> String {
+    use std::collections::BTreeMap;
+    let mut out = format!("\n---\n\n# Расширение: {name}\n\n");
+    let mut categories: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for obj in config.metadata_objects() {
+        let key = obj.mdo_type.russian_name();
+        *categories.entry(key).or_default() += 1;
+    }
+    for reg in config.registers() {
+        let key = reg.mdo_type().russian_name();
+        *categories.entry(key).or_default() += 1;
+    }
+    let common_modules = config.common_modules().len();
+    if common_modules > 0 {
+        categories.insert("ОбщийМодуль", common_modules);
+    }
+
+    let total: usize = categories.values().sum();
+    let _ = writeln!(out, "Всего объектов: {total}\n");
+    let _ = writeln!(out, "| Категория | Количество |");
+    let _ = writeln!(out, "|-----------|------------|");
+    for (category, count) in &categories {
+        let _ = writeln!(out, "| {category} | {count} |");
+    }
+    out
+}
+
 #[cfg(test)]
 fn fixture_config() -> Configuration {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer");
@@ -511,7 +563,7 @@ mod tests {
     #[test]
     fn test_metadata_tree_summary() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, None).unwrap();
+        let result = get_metadata_tree(&config, &[], None).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("дерево метаданных"), "should have header");
@@ -523,7 +575,7 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_catalogs() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, Some("Справочник".into())).unwrap();
+        let result = get_metadata_tree(&config, &[], Some("Справочник".into())).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("Справочник"), "should have category name");
@@ -533,7 +585,7 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_common_modules() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, Some("ОбщиеМодули".into())).unwrap();
+        let result = get_metadata_tree(&config, &[], Some("ОбщиеМодули".into())).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("ОбщиеМодули"), "should have category name");
@@ -542,7 +594,7 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_invalid() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, Some("НесуществующаяКатегория".into()));
+        let result = get_metadata_tree(&config, &[], Some("НесуществующаяКатегория".into()));
 
         assert!(result.is_err(), "should return error for unknown category");
     }
@@ -575,7 +627,7 @@ mod tests {
     #[test]
     fn test_configuration_info() {
         let config = fixture_config();
-        let result = get_configuration_info(&config).unwrap();
+        let result = get_configuration_info(&config, &[]).unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("# Конфигурация:"), "should have config header");

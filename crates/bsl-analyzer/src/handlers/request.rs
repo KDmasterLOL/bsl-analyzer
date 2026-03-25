@@ -548,6 +548,9 @@ fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
         kind: Some(convert_completion_kind(item.kind)),
         insert_text: Some(item.insert_text),
         documentation: item.documentation.map(lsp_types::Documentation::String),
+        label_details: item
+            .source
+            .map(|s| lsp_types::CompletionItemLabelDetails { detail: None, description: Some(s) }),
         ..Default::default()
     }
 }

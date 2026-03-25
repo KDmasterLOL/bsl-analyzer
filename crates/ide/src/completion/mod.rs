@@ -45,6 +45,10 @@ pub struct CompletionItem {
 
     /// Filter text (for filtering when user types)
     pub filter_text: Option<String>,
+
+    /// Source of this completion item (extension name).
+    /// `None` for items from main configuration, `Some(name)` for extensions.
+    pub source: Option<String>,
 }
 
 impl CompletionItem {
@@ -58,6 +62,7 @@ impl CompletionItem {
             insert_text,
             sort_text: None,
             filter_text: None,
+            source: None,
         }
     }
 }
@@ -136,6 +141,7 @@ mod tests {
             documentation: None,
             sort_text: None,
             filter_text: None,
+            source: None,
         };
 
         assert_eq!(item.label, "Валюты");

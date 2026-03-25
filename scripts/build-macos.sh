@@ -3,7 +3,7 @@
 # Run on MacBook to build and publish macOS binaries
 #
 # Собирает два артефакта для каждой архитектуры:
-#   - bsl-launcher-darwin-{amd64,arm64}     - launcher
+#   - bsl-analyzer-darwin-{amd64,arm64}      - launcher
 #   - bsl-analyzer-app-darwin-{amd64,arm64} - LSP сервер
 #
 # Usage:
@@ -174,7 +174,7 @@ upload_binaries() {
     local target=$3
     local platform_suffix=$4
 
-    local launcher_name="bsl-launcher-${platform_suffix}"
+    local launcher_name="bsl-analyzer-${platform_suffix}"
     local app_name="bsl-analyzer-app-${platform_suffix}"
     local launcher_path="target/$target/release/bsl-analyzer"
     local app_path="target/$target/release/bsl-analyzer-app"

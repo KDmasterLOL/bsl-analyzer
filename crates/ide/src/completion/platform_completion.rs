@@ -122,6 +122,7 @@ fn render_platform_method(method: &PlatformMethod) -> CompletionItem {
         documentation,
         sort_text: None,
         filter_text: None,
+        source: None,
     }
 }
 

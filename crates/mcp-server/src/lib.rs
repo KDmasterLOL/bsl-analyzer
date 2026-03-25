@@ -29,36 +29,44 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-// -- Parameter types for tools --
+// -- Parameter types for consolidated tools --
 
 #[derive(Deserialize, JsonSchema)]
-struct MetadataTreeParams {
-    /// Категория метаданных для фильтрации (на русском): Справочники, Документы, Перечисления,
-    /// Обработки, Отчеты, РегистрыСведений, РегистрыНакопления, ОбщиеМодули и др.
-    /// Если не указан — возвращаются все категории с количеством объектов.
-    /// Примечание: здесь фильтр на русском, а в get_object_structure тип на английском (Document, Catalog...).
+struct MetadataParams {
+    /// Действие:
+    /// - "info" — общая информация о конфигурации (название, UUID, количество объектов)
+    /// - "tree" — дерево объектов по категориям (с filter — объекты категории, без — сводка)
+    /// - "object" — структура объекта: реквизиты, ТЧ, измерения, ресурсы (требует object_type + object_name)
+    /// - "form" — структура управляемой формы: элементы, команды, обработчики (требует object_type + object_name, form_name — опционально)
+    action: String,
+    /// Категория метаданных для фильтрации (action=tree, на русском): Справочники, Документы,
+    /// Перечисления, Обработки, Отчеты, РегистрыСведений, РегистрыНакопления, ОбщиеМодули и др.
     filter: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ObjectStructureParams {
-    /// Тип объекта метаданных на английском: Document (Документ), Catalog (Справочник),
-    /// InformationRegister (РегистрСведений), AccumulationRegister (РегистрНакопления),
-    /// Enum (Перечисление), DataProcessor (Обработка), Report (Отчет), CommonModule (ОбщийМодуль) и др.
-    object_type: String,
-    /// Имя объекта метаданных, например РеализацияТоваровУслуг
-    object_name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct FormStructureParams {
-    /// Тип объекта на английском: Document (Документ), Catalog (Справочник),
-    /// DataProcessor (Обработка), Report (Отчет) и т.д.
-    object_type: String,
-    /// Имя объекта метаданных
-    object_name: String,
-    /// Имя формы (если не указано — возвращается список форм объекта)
+    /// Тип объекта на английском (action=object, form): Document, Catalog, InformationRegister,
+    /// AccumulationRegister, Enum, DataProcessor, Report, CommonModule и др.
+    object_type: Option<String>,
+    /// Имя объекта метаданных, например РеализацияТоваровУслуг (action=object, form)
+    object_name: Option<String>,
+    /// Имя формы (action=form, необязательно — без него возвращается список форм)
     form_name: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchParams {
+    /// Действие:
+    /// - "find_code" — полнотекстовый поиск по коду (точные имена процедур, переменных, вызовов API)
+    /// - "search_code" — семантический поиск по коду на естественном языке (требует EMBEDDING_URL)
+    /// - "find_docs" — полнотекстовый поиск по справке платформы (точные имена типов, методов)
+    /// - "search_docs" — семантический поиск по справке на естественном языке (требует EMBEDDING_URL)
+    /// - "status" — статус поискового индекса (количество файлов, чанков, прогресс)
+    action: String,
+    /// Текст запроса.
+    /// Для find_code/find_docs: точные имена и токены ("ОбработкаПроведения", "Массив").
+    /// Для search_code/search_docs: описание на естественном языке ("обработка проведения документа").
+    /// Не требуется для action=status.
+    query: Option<String>,
+    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -70,164 +78,96 @@ struct SyntaxHelpParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct FindDocsParams {
-    /// Текст для поиска по справке платформы 1С: имена типов, методов, функций.
-    /// Используйте точные имена и токены из справочной документации.
-    /// Примеры: "Массив", "HTTPСоединение", "НачатьТранзакцию"
+struct QueryParams {
+    /// Действие:
+    /// - "validate" — проверить синтаксис запроса без выполнения (через СхемаЗапроса если доступен --onec-url, иначе локально парсером)
+    /// - "execute" — выполнить запрос и получить данные (только ВЫБРАТЬ/SELECT, требует --onec-url)
+    action: String,
+    /// Текст запроса на языке запросов 1С (SDBL). Параметры через &ИмяПараметра.
     query: String,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct SearchDocsParams {
-    /// Описание искомой функциональности платформы на естественном языке.
-    /// Примеры: "как записать файл на диск", "работа с HTTP запросами",
-    /// "сортировка массива", "текущая дата и время"
-    query: String,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ValidateQueryParams {
-    /// Текст запроса на языке запросов 1С (SDBL) для проверки.
-    /// Проверяет через СхемаЗапроса платформы 1С (если доступен --onec-url),
-    /// иначе локально парсером (находит только синтаксические ошибки).
-    query: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ExecuteQueryParams {
-    /// Текст запроса на языке запросов 1С. Только ВЫБРАТЬ/SELECT.
-    /// Параметры указывай через &ИмяПараметра.
-    query: String,
-    /// Максимальное количество строк результата (по умолчанию 100, максимум 1000)
+    /// Максимальное количество строк результата (action=execute, по умолчанию 100, максимум 1000)
     limit: Option<u32>,
-    /// Параметры запроса в виде пар ключ-значение.
-    /// Ключ — имя параметра без амперсанда.
+    /// Параметры запроса в виде пар ключ-значение (action=execute). Ключ — имя параметра без амперсанда.
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct CheckSyntaxParams {
-    /// BSL-код для проверки синтаксиса.
-    /// Нельзя объявлять Функция/Процедура — только операторы, выражения, условия, циклы.
+struct ExecuteParams {
+    /// Действие:
+    /// - "check" — проверить синтаксис BSL-кода без выполнения (компиляция платформой, но не запуск)
+    /// - "run" — выполнить BSL-код (операторы) через Выполнить(). Для возврата данных:
+    ///   Контекст.Вставить("ключ", значение). Содержимое Контекст возвращается в ответе.
+    /// - "eval" — вычислить BSL-выражение через Вычислить() и вернуть результат.
+    ///   Примеры: ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар")
+    ///
+    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы, выражения, условия, циклы.
+    /// action=run и action=eval требуют подключения к живой базе (--onec-url).
+    action: String,
+    /// BSL-код (action=check, run) или BSL-выражение (action=eval).
     code: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct ExecuteCodeParams {
-    /// BSL-код для выполнения (операторы). Код выполняется через Выполнить().
-    /// Для возврата данных пиши в переменную Контекст: Контекст.Вставить("ключ", значение).
-    /// Типы значений Контекст, сохраняющие структуру в JSON: Строка, Число, Булево, Дата,
-    /// Неопределено, Структура, Массив, Соответствие (и Фиксированные варианты).
-    /// Ссылки, объекты, ТаблицаЗначений и др. будут приведены к строке через Строка().
-    /// Нельзя объявлять Функция/Процедура — только операторы: присваивания, вызовы, циклы, условия.
-    code: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct EvalExpressionParams {
-    /// BSL-выражение для вычисления. Выражение вычисляется через Вычислить() и возвращает результат.
-    /// Нельзя объявлять Функция/Процедура. Только выражения, возвращающие значение:
-    /// ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар")
-    expression: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugAttachParams {
-    /// Хост сервера отладки 1С
-    host: String,
-    /// Порт сервера отладки (по умолчанию 1550)
-    #[serde(default = "default_debug_port")]
-    port: u16,
-    /// Имя информационной базы
-    infobase: String,
-    /// Корневой каталог конфигурации (для маппинга модулей на файлы).
-    /// Если не указан, используется workspace_root.
+struct DebugParams {
+    /// Действие:
+    /// - "attach" — подключиться к серверу отладки (требует host, infobase; port по умолчанию 1550)
+    /// - "disconnect" — отключиться от сервера отладки
+    /// - "set_breakpoint" — установить точку останова (требует module, line; condition опционально)
+    /// - "remove_breakpoint" — удалить точку останова (требует module, line)
+    /// - "continue" — продолжить выполнение после остановки
+    /// - "step" — пошаговое выполнение (требует direction: "next"/"in"/"out")
+    /// - "wait_stop" — ожидать остановку на breakpoint/исключении (timeout_secs по умолчанию 30)
+    /// - "stack_trace" — получить стек вызовов остановленной программы
+    /// - "locals" — получить локальные переменные (stack_level по умолчанию 0)
+    /// - "eval" — вычислить выражение в контексте остановленной программы (требует expression)
+    ///
+    /// ВАЖНО: если код запущен через execute(action=run) и остановился на breakpoint,
+    /// execute зависнет до вызова debug(action=continue). Запускай код через curl или в фоне.
+    action: String,
+    /// Хост сервера отладки 1С (action=attach)
+    host: Option<String>,
+    /// Порт сервера отладки (action=attach, по умолчанию 1550)
+    port: Option<u16>,
+    /// Имя информационной базы (action=attach)
+    infobase: Option<String>,
+    /// Корневой каталог конфигурации для маппинга модулей на файлы (action=attach)
     config_root: Option<String>,
-    /// Расширения: список пар ["имя", "путь_к_каталогу_расширения"].
-    /// Нужно для маппинга модулей расширений на файлы.
+    /// Расширения: список пар ["имя", "путь_к_каталогу"] для маппинга модулей расширений (action=attach)
     #[serde(default)]
     extensions: Vec<[String; 2]>,
-    /// Типы целей автоподключения. По умолчанию: Client, Server, HTTPService.
-    /// Допустимые значения: Client, ManagedClient, WEBClient, COMConnector,
-    /// Server, ServerEmulation, WEBService, HTTPService, OData, JOB, JobFileMode,
-    /// MobileClient, MobileServer, MobileManagedClient.
+    /// Типы целей автоподключения (action=attach). По умолчанию: Client, Server, HTTPService.
+    /// Допустимые: Client, ManagedClient, WEBClient, COMConnector, Server, ServerEmulation,
+    /// WEBService, HTTPService, OData, JOB, JobFileMode, MobileClient, MobileServer, MobileManagedClient.
     #[serde(default)]
     auto_attach: Vec<String>,
+    /// Имя модуля (action=set_breakpoint, remove_breakpoint).
+    /// Например "ОбщийМодуль.ОбщегоНазначения" или "Справочник.Номенклатура.МодульОбъекта".
+    /// Сокращённый формат поддерживается — суффикс .Модуль/.МодульОбъекта добавляется автоматически.
+    module: Option<String>,
+    /// Номер строки (action=set_breakpoint, remove_breakpoint)
+    line: Option<u32>,
+    /// Условие остановки — BSL-выражение (action=set_breakpoint, опционально)
+    condition: Option<String>,
+    /// Направление шага (action=step): "next" (через), "in" (внутрь), "out" (наружу)
+    direction: Option<String>,
+    /// Таймаут ожидания в секундах (action=wait_stop, по умолчанию 30)
+    timeout_secs: Option<u64>,
+    /// Уровень стека, 0 = текущий фрейм (action=locals, eval; по умолчанию 0)
+    stack_level: Option<u32>,
+    /// BSL-выражение для вычисления в контексте breakpoint (action=eval).
+    /// Для вычисления без отладчика используй execute(action=eval).
+    expression: Option<String>,
 }
 
 fn default_debug_port() -> u16 {
     1550
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct DebugBreakpointParams {
-    /// Имя модуля, например "ОбщийМодуль.ОбщегоНазначения" или "Справочник.Номенклатура.МодульОбъекта".
-    /// Поддерживается сокращённый формат — суффикс .Модуль/.МодульОбъекта добавляется автоматически.
-    module: String,
-    /// Номер строки
-    line: u32,
-    /// Условие остановки (BSL-выражение)
-    condition: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugRemoveBreakpointParams {
-    /// Имя модуля
-    module: String,
-    /// Номер строки
-    line: u32,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugStepParams {
-    /// Действие: "next" (шаг через), "in" (шаг внутрь), "out" (шаг наружу).
-    /// Допустимые значения: next, in, out.
-    action: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugWaitStopParams {
-    /// Таймаут ожидания в секундах (по умолчанию 30)
-    timeout_secs: Option<u64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugLocalsParams {
-    /// Уровень стека (0 = текущий фрейм, по умолчанию 0)
-    stack_level: Option<u32>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct DebugEvalParams {
-    /// BSL-выражение для вычисления в контексте остановленного на breakpoint сеанса отладки.
-    /// Для вычисления без отладчика (в новом серверном сеансе) используй eval_expression.
-    expression: String,
-    /// Уровень стека (0 = текущий фрейм)
-    stack_level: Option<u32>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct FindCodeParams {
-    /// Текст для поиска: имя процедуры, вызов API, переменная, строковый литерал.
-    /// Используйте точные имена и токены из кода.
-    /// Примеры: "ОбработкаПроведения", "СообщитьПользователю", "ТекущаяДата"
-    query: String,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct SearchCodeParams {
-    /// Описание искомого кода на естественном языке.
-    /// Примеры: "обработка проведения документа", "получение остатков товаров",
-    /// "проверка прав доступа пользователя", "отправка HTTP запроса"
-    query: String,
-    /// Максимальное количество результатов (по умолчанию 10, максимум 50)
-    limit: Option<usize>,
+/// Helper to extract a required field from Option, returning McpError if missing.
+fn require<T>(val: Option<T>, field: &str, action: &str) -> Result<T, McpError> {
+    val.ok_or_else(|| {
+        McpError::invalid_params(format!("'{field}' is required for action '{action}'"), None)
+    })
 }
 
 /// MCP server exposing bsl-analyzer capabilities as tools.
@@ -243,350 +183,254 @@ impl McpServer {
         Self { state, tool_router: Self::tool_router() }
     }
 
-    /// Список всех объектов конфигурации 1С по категориям: справочники, документы,
-    /// регистры, перечисления, обработки и т.д.
-    /// Без фильтра — сводка (категории и количество), с filter — полный перечень объектов категории.
-    #[tool(name = "get_metadata_tree", annotations(read_only_hint = true))]
-    async fn get_metadata_tree(
+    /// Метаданные конфигурации 1С: общая информация, дерево объектов по категориям,
+    /// структура объекта (реквизиты, ТЧ, измерения, ресурсы), структура формы.
+    /// action: info | tree | object | form
+    #[tool(name = "metadata", annotations(read_only_hint = true))]
+    async fn metadata(
         &self,
-        params: Parameters<MetadataTreeParams>,
+        params: Parameters<MetadataParams>,
     ) -> Result<CallToolResult, McpError> {
-        let config = self
-            .state
-            .configuration()
-            .await
-            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
-        tools::metadata::get_metadata_tree(&config, params.0.filter)
+        let p = params.0;
+        match p.action.as_str() {
+            "info" => {
+                let config =
+                    self.state.configuration().await.ok_or_else(|| {
+                        McpError::invalid_params("Configuration not loaded", None)
+                    })?;
+                let extensions = self.state.extensions().await;
+                tools::metadata::get_configuration_info(&config, &extensions)
+            }
+            "tree" => {
+                let config =
+                    self.state.configuration().await.ok_or_else(|| {
+                        McpError::invalid_params("Configuration not loaded", None)
+                    })?;
+                let extensions = self.state.extensions().await;
+                tools::metadata::get_metadata_tree(&config, &extensions, p.filter)
+            }
+            "object" => {
+                let config =
+                    self.state.configuration().await.ok_or_else(|| {
+                        McpError::invalid_params("Configuration not loaded", None)
+                    })?;
+                let object_type = require(p.object_type, "object_type", "object")?;
+                let object_name = require(p.object_name, "object_name", "object")?;
+                tools::metadata::get_object_structure(&config, &object_type, &object_name)
+            }
+            "form" => {
+                let object_type = require(p.object_type, "object_type", "form")?;
+                let object_name = require(p.object_name, "object_name", "form")?;
+                tools::metadata::get_form_structure(
+                    self.state.workspace_root().map(|p| p.as_path()),
+                    &object_type,
+                    &object_name,
+                    p.form_name.as_deref(),
+                )
+            }
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: info, tree, object, form"),
+                None,
+            )),
+        }
     }
 
-    /// Получить реквизиты, табличные части, измерения, ресурсы и типы полей объекта метаданных 1С.
-    #[tool(name = "get_object_structure", annotations(read_only_hint = true))]
-    async fn get_object_structure(
-        &self,
-        params: Parameters<ObjectStructureParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let config = self
-            .state
-            .configuration()
-            .await
-            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
-        tools::metadata::get_object_structure(&config, &params.0.object_type, &params.0.object_name)
-    }
-
-    /// Получить общую информацию о конфигурации 1С: название, UUID, количество объектов.
-    #[tool(name = "get_configuration_info", annotations(read_only_hint = true))]
-    async fn get_configuration_info(&self) -> Result<CallToolResult, McpError> {
-        let config = self
-            .state
-            .configuration()
-            .await
-            .ok_or_else(|| McpError::invalid_params("Configuration not loaded", None))?;
-        tools::metadata::get_configuration_info(&config)
-    }
-
-    /// Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, обработчики событий.
-    #[tool(name = "get_form_structure", annotations(read_only_hint = true))]
-    async fn get_form_structure(
-        &self,
-        params: Parameters<FormStructureParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::metadata::get_form_structure(
-            self.state.workspace_root().map(|p| p.as_path()),
-            &params.0.object_type,
-            &params.0.object_name,
-            params.0.form_name.as_deref(),
-        )
+    /// Поиск по коду и справке платформы 1С.
+    /// find_code/find_docs — полнотекстовый (точные имена). search_code/search_docs — семантический (по смыслу, требует EMBEDDING_URL).
+    /// action: find_code | search_code | find_docs | search_docs | status
+    #[tool(name = "search", annotations(read_only_hint = true))]
+    async fn search(&self, params: Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            "status" => {
+                let engine = self.state.search_engine().clone();
+                let progress = self.state.index_progress().clone();
+                tokio::task::spawn_blocking(move || {
+                    tools::search::search_status(&engine, &progress)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "find_code" | "search_code" | "find_docs" | "search_docs" => {
+                let query = require(p.query, "query", &p.action)?;
+                let limit = p.limit.unwrap_or(10).min(50);
+                let engine = self.state.search_engine().clone();
+                let action = p.action.clone();
+                tokio::task::spawn_blocking(move || match action.as_str() {
+                    "find_code" => tools::search::find_code(&engine, &query, limit),
+                    "search_code" => tools::search::search_code(&engine, &query, limit),
+                    "find_docs" => tools::search::find_docs(&engine, &query, limit),
+                    "search_docs" => tools::search::search_docs(&engine, &query, limit),
+                    _ => unreachable!(),
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            other => Err(McpError::invalid_params(
+                format!(
+                    "Unknown action '{other}'. Expected: find_code, search_code, find_docs, search_docs, status"
+                ),
+                None,
+            )),
+        }
     }
 
     /// Справка по типам, методам и глобальным функциям платформы 1С.
-    /// Точный поиск по имени: name="Массив" или name="Добавить", type_name="Массив".
-    /// Для полнотекстового поиска используй find_docs, для семантического — search_docs.
-    #[tool(name = "bsl_syntax_help", annotations(read_only_hint = true))]
-    async fn bsl_syntax_help(
+    /// Точный поиск по имени. Для полнотекстового/семантического поиска используй search.
+    #[tool(name = "syntax_help", annotations(read_only_hint = true))]
+    async fn syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
     ) -> Result<CallToolResult, McpError> {
         tools::platform::bsl_syntax_help(&params.0.name, params.0.type_name.as_deref())
     }
 
-    /// Проверить синтаксис запроса 1С (SDBL) без выполнения. Найдёт ошибки в ВЫБРАТЬ/SELECT.
-    #[tool(name = "validate_query", annotations(read_only_hint = true))]
-    async fn validate_query(
-        &self,
-        params: Parameters<ValidateQueryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::query::validate_query(&self.state, &params.0.query).await
+    /// Запросы 1С (SDBL): проверка синтаксиса или выполнение SELECT с получением данных.
+    /// action: validate | execute
+    #[tool(name = "query", annotations(read_only_hint = true))]
+    async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            "validate" => tools::query::validate_query(&self.state, &p.query).await,
+            "execute" => {
+                tools::query::execute_query(&self.state, &p.query, p.limit, p.parameters).await
+            }
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: validate, execute"),
+                None,
+            )),
+        }
     }
 
-    /// Выполнить запрос на языке 1С (ВЫБРАТЬ/SELECT) и получить данные из базы.
-    /// Требует подключения к живой базе 1С (--onec-url).
-    #[tool(name = "execute_query", annotations(read_only_hint = true))]
-    async fn execute_query(
-        &self,
-        params: Parameters<ExecuteQueryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::query::execute_query(
-            &self.state,
-            &params.0.query,
-            params.0.limit,
-            params.0.parameters,
-        )
-        .await
+    /// Выполнение BSL-кода в реальной базе 1С: проверка синтаксиса, выполнение операторов, вычисление выражений.
+    /// action=run и action=eval требуют подключения (--onec-url).
+    /// action: check | run | eval
+    #[tool(name = "execute")]
+    async fn execute(&self, params: Parameters<ExecuteParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        match p.action.as_str() {
+            "check" => tools::execution::check_syntax(&self.state, &p.code).await,
+            "run" => tools::execution::execute_code(&self.state, &p.code).await,
+            "eval" => tools::execution::eval_expression(&self.state, &p.code).await,
+            other => Err(McpError::invalid_params(
+                format!("Unknown action '{other}'. Expected: check, run, eval"),
+                None,
+            )),
+        }
     }
 
-    /// Проверить синтаксис BSL-кода без выполнения. Код компилируется платформой 1С, но не запускается.
-    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы, условия, циклы, присваивания.
-    #[tool(name = "check_syntax", annotations(read_only_hint = true))]
-    async fn check_syntax(
-        &self,
-        params: Parameters<CheckSyntaxParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::execution::check_syntax(&self.state, &params.0.code).await
-    }
-
-    /// Выполнить BSL-код (операторы) в реальной базе 1С. Код выполняется через Выполнить().
-    /// Для возврата данных используй переменную Контекст: Контекст.Вставить("ключ", значение).
-    /// Содержимое Контекст возвращается в ответе. Требует подключения (--onec-url).
-    /// ОГРАНИЧЕНИЯ: нельзя объявлять Функция/Процедура — только операторы.
-    #[tool(name = "execute_code")]
-    async fn execute_code(
-        &self,
-        params: Parameters<ExecuteCodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::execution::execute_code(&self.state, &params.0.code).await
-    }
-
-    /// Вычислить BSL-выражение в реальной базе 1С и получить результат.
-    /// Без отладчика — выполняет в новом серверном сеансе через Вычислить().
-    /// Для вычисления в контексте остановленного на breakpoint сеанса используй debug_eval.
-    /// Примеры: ТекущаяДата(), 1+1, Справочники.Номенклатура.НайтиПоНаименованию("Товар").
-    /// Требует подключения (--onec-url). Нельзя объявлять Функция/Процедура — только выражения.
-    #[tool(name = "eval_expression")]
-    async fn eval_expression(
-        &self,
-        params: Parameters<EvalExpressionParams>,
-    ) -> Result<CallToolResult, McpError> {
-        tools::execution::eval_expression(&self.state, &params.0.expression).await
-    }
-
-    /// Статус поискового индекса: количество файлов, чанков, режим (FTS/семантика),
-    /// количество векторов по коллекциям (code, platform), прогресс текущей индексации.
-    #[tool(name = "search_status", annotations(read_only_hint = true))]
-    async fn search_status(&self) -> Result<CallToolResult, McpError> {
-        let engine = self.state.search_engine().clone();
-        let progress = self.state.index_progress().clone();
-        tokio::task::spawn_blocking(move || tools::search::search_status(&engine, &progress))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Поиск кода 1С по точному тексту: имена процедур, вызовы API, переменные, строковые литералы.
-    /// Быстрый лексический поиск по всем проиндексированным BSL файлам конфигурации.
-    /// Используй когда знаешь точное имя или токен из кода.
-    #[tool(name = "find_code", annotations(read_only_hint = true))]
-    async fn find_code(
-        &self,
-        params: Parameters<FindCodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let engine = self.state.search_engine().clone();
-        let query = params.0.query;
-        let limit = params.0.limit.unwrap_or(10).min(50);
-        tokio::task::spawn_blocking(move || tools::search::find_code(&engine, &query, limit))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Семантический поиск кода 1С — поиск по смыслу на естественном языке.
-    /// Опиши что делает искомый код, не нужно знать точные имена.
-    /// Используй когда не знаешь точных имён, а знаешь только назначение кода.
-    /// Требует работающий сервис эмбеддингов (EMBEDDING_URL).
-    #[tool(name = "search_code", annotations(read_only_hint = true))]
-    async fn search_code(
-        &self,
-        params: Parameters<SearchCodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let engine = self.state.search_engine().clone();
-        let query = params.0.query;
-        let limit = params.0.limit.unwrap_or(10).min(50);
-        tokio::task::spawn_blocking(move || tools::search::search_code(&engine, &query, limit))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Поиск по справке платформы 1С по точному тексту: имена типов, методов, функций.
-    /// Быстрый лексический поиск по документации встроенных типов и глобальных функций.
-    /// Используй когда знаешь точное имя из справки.
-    #[tool(name = "find_docs", annotations(read_only_hint = true))]
-    async fn find_docs(
-        &self,
-        params: Parameters<FindDocsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let engine = self.state.search_engine().clone();
-        let query = params.0.query;
-        let limit = params.0.limit.unwrap_or(10).min(50);
-        tokio::task::spawn_blocking(move || tools::search::find_docs(&engine, &query, limit))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Семантический поиск по справке платформы 1С — поиск по смыслу.
-    /// Опиши что ищешь на естественном языке: "как записать файл", "работа с HTTP".
-    /// Используй когда не знаешь точных имён, а знаешь только что нужно.
-    /// Требует работающий сервис эмбеддингов (EMBEDDING_URL).
-    #[tool(name = "search_docs", annotations(read_only_hint = true))]
-    async fn search_docs(
-        &self,
-        params: Parameters<SearchDocsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let engine = self.state.search_engine().clone();
-        let query = params.0.query;
-        let limit = params.0.limit.unwrap_or(10).min(50);
-        tokio::task::spawn_blocking(move || tools::search::search_docs(&engine, &query, limit))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Подключиться к серверу отладки 1С. Начинает сеанс отладки.
-    /// По умолчанию автоподключается к Client, Server и HTTPService.
-    #[tool(name = "debug_attach")]
-    async fn debug_attach(
-        &self,
-        params: Parameters<DebugAttachParams>,
-    ) -> Result<CallToolResult, McpError> {
+    /// Отладчик 1С: подключение к серверу отладки, точки останова, пошаговое выполнение,
+    /// просмотр стека и переменных, вычисление выражений в контексте breakpoint.
+    /// action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step | wait_stop | stack_trace | locals | eval
+    #[tool(name = "debug")]
+    async fn debug(&self, params: Parameters<DebugParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let session = self.state.debug_session().clone();
-        let workspace_root = self.state.workspace_root().cloned();
-        tokio::task::spawn_blocking(move || {
-            tools::debug::debug_attach(
-                &session,
-                tools::debug::AttachParams {
-                    host: &p.host,
-                    port: p.port,
-                    infobase: &p.infobase,
-                    config_root: p.config_root.as_deref(),
-                    workspace_root: workspace_root.as_deref(),
-                    extensions: &p.extensions,
-                    auto_attach: &p.auto_attach,
-                },
-            )
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
 
-    /// Отключиться от сервера отладки 1С. Завершает сеанс отладки.
-    #[tool(name = "debug_disconnect")]
-    async fn debug_disconnect(&self) -> Result<CallToolResult, McpError> {
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_disconnect(&session))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Установить точку останова в модуле 1С.
-    #[tool(name = "debug_set_breakpoint")]
-    async fn debug_set_breakpoint(
-        &self,
-        params: Parameters<DebugBreakpointParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || {
-            tools::debug::debug_set_breakpoint(&session, &p.module, p.line, p.condition.as_deref())
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Удалить точку останова.
-    #[tool(name = "debug_remove_breakpoint")]
-    async fn debug_remove_breakpoint(
-        &self,
-        params: Parameters<DebugRemoveBreakpointParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || {
-            tools::debug::debug_remove_breakpoint(&session, &p.module, p.line)
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Продолжить выполнение программы после остановки.
-    #[tool(name = "debug_continue")]
-    async fn debug_continue(&self) -> Result<CallToolResult, McpError> {
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_continue(&session))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Пошаговое выполнение: next (через), in (внутрь), out (наружу).
-    #[tool(name = "debug_step")]
-    async fn debug_step(
-        &self,
-        params: Parameters<DebugStepParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_step(&session, &p.action))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Ожидать остановку программы (точка останова, исключение, шаг).
-    /// Блокирует до наступления события или таймаута.
-    /// ВАЖНО: если код запущен через execute_code и остановился на breakpoint,
-    /// execute_code зависнет до вызова debug_continue. Запускай код через curl
-    /// или в фоновом режиме, а не через execute_code, если планируешь отладку.
-    #[tool(name = "debug_wait_stop")]
-    async fn debug_wait_stop(
-        &self,
-        params: Parameters<DebugWaitStopParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_wait_stop(&session, p.timeout_secs))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Получить стек вызовов остановленной программы.
-    #[tool(name = "debug_stack_trace", annotations(read_only_hint = true))]
-    async fn debug_stack_trace(&self) -> Result<CallToolResult, McpError> {
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_stack_trace(&session))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Получить локальные переменные на указанном уровне стека.
-    #[tool(name = "debug_locals", annotations(read_only_hint = true))]
-    async fn debug_locals(
-        &self,
-        params: Parameters<DebugLocalsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || tools::debug::debug_locals(&session, p.stack_level))
-            .await
-            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-    }
-
-    /// Вычислить BSL-выражение в контексте остановленной программы.
-    #[tool(name = "debug_eval", annotations(read_only_hint = true))]
-    async fn debug_eval(
-        &self,
-        params: Parameters<DebugEvalParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        let session = self.state.debug_session().clone();
-        tokio::task::spawn_blocking(move || {
-            tools::debug::debug_eval(&session, &p.expression, p.stack_level)
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        match p.action.as_str() {
+            "attach" => {
+                let host = require(p.host, "host", "attach")?;
+                let infobase = require(p.infobase, "infobase", "attach")?;
+                let port = p.port.unwrap_or_else(default_debug_port);
+                let workspace_root = self.state.workspace_root().cloned();
+                let config_root = p.config_root;
+                let extensions = p.extensions;
+                let auto_attach = p.auto_attach;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_attach(
+                        &session,
+                        tools::debug::AttachParams {
+                            host: &host,
+                            port,
+                            infobase: &infobase,
+                            config_root: config_root.as_deref(),
+                            workspace_root: workspace_root.as_deref(),
+                            extensions: &extensions,
+                            auto_attach: &auto_attach,
+                        },
+                    )
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "disconnect" => {
+                tokio::task::spawn_blocking(move || tools::debug::debug_disconnect(&session))
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "set_breakpoint" => {
+                let module = require(p.module, "module", "set_breakpoint")?;
+                let line = require(p.line, "line", "set_breakpoint")?;
+                let condition = p.condition;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_set_breakpoint(
+                        &session,
+                        &module,
+                        line,
+                        condition.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "remove_breakpoint" => {
+                let module = require(p.module, "module", "remove_breakpoint")?;
+                let line = require(p.line, "line", "remove_breakpoint")?;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_remove_breakpoint(&session, &module, line)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "continue" => {
+                tokio::task::spawn_blocking(move || tools::debug::debug_continue(&session))
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "step" => {
+                let direction = require(p.direction, "direction", "step")?;
+                tokio::task::spawn_blocking(move || tools::debug::debug_step(&session, &direction))
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "wait_stop" => {
+                let timeout_secs = p.timeout_secs;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_wait_stop(&session, timeout_secs)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "stack_trace" => {
+                tokio::task::spawn_blocking(move || tools::debug::debug_stack_trace(&session))
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "locals" => {
+                let stack_level = p.stack_level;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_locals(&session, stack_level)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            "eval" => {
+                let expression = require(p.expression, "expression", "eval")?;
+                let stack_level = p.stack_level;
+                tokio::task::spawn_blocking(move || {
+                    tools::debug::debug_eval(&session, &expression, stack_level)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            }
+            other => Err(McpError::invalid_params(
+                format!(
+                    "Unknown action '{other}'. Expected: attach, disconnect, set_breakpoint, \
+                     remove_breakpoint, continue, step, wait_stop, stack_trace, locals, eval"
+                ),
+                None,
+            )),
+        }
     }
 }
 
@@ -596,8 +440,9 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "BSL Analyzer MCP server. Provides 1C:Enterprise metadata browsing, \
-             platform API reference, SDBL query validation, code execution, \
-             and code search (full-text and semantic)."
+             platform API reference, SDBL query validation, code execution, debugging, \
+             and code search (full-text and semantic). \
+             Tools: metadata, search, syntax_help, query, execute, debug."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
