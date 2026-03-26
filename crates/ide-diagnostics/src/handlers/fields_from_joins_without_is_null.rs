@@ -262,6 +262,45 @@ mod tests {
     }
 
     #[test]
+    fn test_no_diagnostic_for_fields_in_join_conditions() {
+        // Fields from a LEFT JOIN used in other JOINs' ON conditions should NOT trigger.
+        // Using a joined table's field in another JOIN's ON condition is standard practice -
+        // NULL in ON simply means "no match", which is expected LEFT JOIN behavior.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ РАЗЛИЧНЫЕ
+    |    ПартнерыКИ.Ссылка КАК Партнер,
+    |    ЕСТЬNULL(КИПочта.АдресЭП, """") КАК email,
+    |    ВЫБОР
+    |        КОГДА КартыЛояльности.Ссылка ЕСТЬ NULL
+    |            ТОГДА ЛОЖЬ
+    |        ИНАЧЕ ИСТИНА
+    |    КОНЕЦ КАК ЕстьДействующаяКарта
+    |ПОМЕСТИТЬ ИнформацияКлиент
+    |ИЗ
+    |    Справочник.Партнеры.КонтактнаяИнформация КАК ПартнерыКИ
+    |        ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Партнеры.КонтактнаяИнформация КАК КИПочта
+    |        ПО ПартнерыКИ.Ссылка = КИПочта.Ссылка
+    |        ЛЕВОЕ СОЕДИНЕНИЕ РегистрСведений.СостояниеАдресовЭлектроннойПочты КАК СостояниеАдресов
+    |        ПО (КИПочта.Ссылка = СостояниеАдресов.Партнер)
+    |            И (КИПочта.АдресЭП = СостояниеАдресов.АдресЭП)
+    |        ЛЕВОЕ СОЕДИНЕНИЕ Справочник.КартыЛояльности КАК КартыЛояльности
+    |        ПО ПартнерыКИ.Ссылка = КартыЛояльности.Партнер";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        // No unprotected fields: all joined table fields are either:
+        // - in ЕСТЬNULL (КИПочта.АдресЭП)
+        // - in IS NULL check (КартыЛояльности.Ссылка)
+        // - in JOIN ON conditions only (КИПочта.Ссылка, КИПочта.АдресЭП, etc.)
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Fields in JOIN ON conditions should not trigger diagnostic"
+        );
+    }
+
+    #[test]
     fn test_diagnostic_highlights_field_not_join() {
         // Verify diagnostic highlights the unprotected field, not the JOIN clause
         let code = r#"Процедура Тест()

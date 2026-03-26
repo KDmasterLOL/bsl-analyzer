@@ -46,6 +46,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 /// Single-pass dispatch for MultilineStringInQuery.
+///
+/// HIR lowering flags ALL SDBL_MULTI_STRING nodes with >2 tokens as potential
+/// multiline strings. This includes valid strings like `"Ж"` (3 tokens: open, content, close).
+/// We filter false positives here by checking the original query_text: only emit
+/// the diagnostic if the query actually contains multiline string literals.
+///
+/// NOTE: Rowan tree positions don't match query_text byte positions because the
+/// SDBL lexer skips newlines in `tokenize_strings_mode`. We cannot use the HIR range
+/// to index into query_text. Instead we check if query_text has ANY multiline strings.
 pub(crate) fn dispatch(
     ctx: &DiagnosticsContext,
     diag: &sdbl_hir::SdblDiagnostic,
@@ -54,16 +63,71 @@ pub(crate) fn dispatch(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::MultilineString { range } = diag {
+        // Filter false positives: HIR lowering flags ALL non-empty SDBL strings
+        // (since they all produce >2 tokens). Only emit if query_text actually
+        // contains a multiline string literal (one spanning across \n).
+        if !query_has_multiline_strings(query_text) {
+            return;
+        }
         crate::sdbl_utils::dispatch_simple(
             ctx,
             DiagnosticCode::MultilineStringInQuery,
-            "Check if multiline literal is correct",
+            "Проверьте корректность многострочного литерала",
             *range,
             mapper,
             query_text,
             diagnostics,
         );
     }
+}
+
+/// Check if query_text contains ANY multiline string literal.
+///
+/// Scans the entire query_text for SDBL string literals (delimited by `"`)
+/// and returns true if any of them span multiple lines.
+/// This is independent of Rowan positions (which don't match query_text
+/// due to newlines skipped by the SDBL lexer).
+fn query_has_multiline_strings(query_text: &str) -> bool {
+    let bytes = query_text.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        if bytes[pos] == b'"' {
+            // Found opening quote - scan for closing quote
+            pos += 1;
+            let mut has_newline = false;
+            loop {
+                if pos >= bytes.len() {
+                    // Unterminated string
+                    if has_newline {
+                        return true;
+                    }
+                    break;
+                }
+                if bytes[pos] == b'"' {
+                    // Check for escaped "" (SDBL empty string or escape)
+                    if pos + 1 < bytes.len() && bytes[pos + 1] == b'"' {
+                        pos += 2; // Skip ""
+                        continue;
+                    }
+                    // Closing quote found
+                    pos += 1;
+                    if has_newline {
+                        return true;
+                    }
+                    break;
+                }
+                if bytes[pos] == b'\n' {
+                    has_newline = true;
+                }
+                pos += 1;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+
+    false
 }
 
 /// Runs the MultilineStringInQuery diagnostic (standalone, used in tests).
@@ -84,7 +148,7 @@ mod tests {
     fn check_metadata(diag: &crate::Diagnostic) {
         assert_eq!(diag.code, DiagnosticCode::MultilineStringInQuery);
         assert_eq!(diag.severity, Severity::Critical);
-        assert_eq!(diag.message, "Check if multiline literal is correct");
+        assert_eq!(diag.message, "Проверьте корректность многострочного литерала");
     }
 
     #[test]
@@ -125,6 +189,27 @@ mod tests {
         assert_diagnostic_range_multiline(code, &diagnostics[0], 5, 8, 6, 5);
         assert_diagnostic_range_multiline(code, &diagnostics[1], 6, 31, 10, 10);
         assert_diagnostic_range_multiline(code, &diagnostics[2], 15, 60, 16, 68);
+    }
+
+    #[test]
+    fn test_no_diagnostic_for_string_literals_in_case() {
+        // ""Ж"" in BSL string = "Ж" in SDBL = valid single-line string literal
+        // Should NOT trigger multiline string diagnostic
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+    |   ВЫБОР
+    |       КОГДА Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)
+    |           ТОГДА ""М""
+    |       КОГДА Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Женский)
+    |           ТОГДА ""Ж""
+    |       ИНАЧЕ """"
+    |   КОНЕЦ КАК Пол
+    |ИЗ Справочник.ФизическиеЛица КАК Т";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]

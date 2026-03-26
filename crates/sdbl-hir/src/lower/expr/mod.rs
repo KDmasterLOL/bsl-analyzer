@@ -214,8 +214,9 @@ impl LoweringContext {
             })
             .count();
 
-        // If more than 2 STRING tokens, this is a multiline literal (likely error)
-        // Two strings is OK (e.g., "" + "" in some contexts), but 3+ is suspicious
+        // Flag all SDBL_MULTI_STRING with >2 tokens as potential multiline strings.
+        // False positives (valid strings like "Ж") are filtered in the dispatch layer
+        // by checking the original query_text for actual newlines.
         if string_count > 2 {
             self.diagnostics.push(SdblDiagnostic::MultilineString { range: node.text_range() });
         }
