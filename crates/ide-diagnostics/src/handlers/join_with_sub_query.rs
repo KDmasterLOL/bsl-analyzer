@@ -57,7 +57,7 @@ pub(crate) fn dispatch(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::JoinWithSubQuery { range } = diag {
-        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::JoinWithSubQuery, "Don't use a join with sub queries. Joins with subqueries cause severe performance issues.", *range, mapper, query_text, diagnostics);
+        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::JoinWithSubQuery, "Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью", *range, mapper, query_text, diagnostics);
     }
 }
 

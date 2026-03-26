@@ -58,7 +58,7 @@ pub(crate) fn dispatch(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::FullOuterJoin { range } = diag {
-        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::FullOuterJoinQuery, "Using FULL OUTER JOIN significantly reduces query performance. Consider rewriting using UNION with LEFT JOIN", *range, mapper, query_text, diagnostics);
+        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::FullOuterJoinQuery, "Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN", *range, mapper, query_text, diagnostics);
     }
 }
 
