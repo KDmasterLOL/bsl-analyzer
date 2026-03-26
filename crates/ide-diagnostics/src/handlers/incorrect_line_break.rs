@@ -153,7 +153,7 @@ fn check_line_end(
     if is_forbidden_at_line_end(*kind) {
         return Some(Diagnostic {
             code,
-            message: format!("Incorrect line break: '{}' at line end", text.trim()),
+            message: format!("Неправильный перенос строки: '{}' в конце строки", text.trim()),
             severity: ctx.severity(code),
             range: *range,
             tags: ctx.tags(code),

@@ -140,13 +140,17 @@ fn is_code_block(node: &SyntaxNode) -> bool {
     }
 }
 
-/// Check if node or its descendants contain executable code.
+/// Check if node or its descendants contain executable code outside of subroutines.
 ///
 /// Used for preprocessor regions and conditionals to determine if they should be flagged.
+/// Skips procedure/function bodies — code inside them is not "free" executable code.
 fn contains_executable_code(node: &SyntaxNode) -> bool {
-    node.descendants().any(|n| {
-        matches!(
-            n.kind(),
+    for child in node.children() {
+        if is_subroutine(&child) {
+            continue;
+        }
+        if matches!(
+            child.kind(),
             SyntaxKind::CALL_STMT
                 | SyntaxKind::ASSIGN_STMT
                 | SyntaxKind::IF_STMT
@@ -158,8 +162,14 @@ fn contains_executable_code(node: &SyntaxNode) -> bool {
                 | SyntaxKind::RAISE_STMT
                 | SyntaxKind::BREAK_STMT
                 | SyntaxKind::CONTINUE_STMT
-        )
-    })
+        ) {
+            return true;
+        }
+        if contains_executable_code(&child) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Create diagnostic for code blocks before subroutines.
@@ -309,6 +319,36 @@ mod tests {
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "Multiple code blocks reported as ONE diagnostic");
+    }
+
+    #[test]
+    fn test_region_with_only_procedures_before_top_level_procedure() {
+        // Region contains only procedures (no free code) before a top-level procedure
+        // Should NOT trigger — code inside procedure bodies is not "free" executable code
+        let code = r#"#Область ОбработчикиСобытий
+
+&НаКлиенте
+Процедура ПриОткрытии(Отказ)
+    Сообщить("Привет");
+КонецПроцедуры
+
+&НаСервере
+Функция ПолучитьДанные()
+    Возврат 42;
+КонецФункции
+
+#КонецОбласти
+
+&НаСервере
+Процедура ВнеОбласти()
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Region with only procedures should not be flagged as code block"
+        );
     }
 
     #[test]

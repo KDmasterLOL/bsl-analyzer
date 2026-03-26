@@ -43,7 +43,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::OneStatementPerLine,
-        "Several statements in one line",
+        "Несколько операторов в одной строке",
         range,
         ctx,
     )
