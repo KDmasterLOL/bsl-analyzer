@@ -148,7 +148,7 @@ fn get_8317_replacement(method_lower: &str) -> Option<&'static str> {
         "brieferrorrepresentation" => Some("ErrorProcessingManager.BriefErrorRepresentation"),
         "detailederrorrepresentation" => Some("ErrorProcessingManager.DetailedErrorRepresentation"),
         "showerrorinformation" => Some("ErrorProcessingManager.ShowErrorInformation"),
-        "получитьформу" => Some("Use alternative form retrieval methods"),
+        "получитьформу" => Some("Используйте альтернативные методы получения формы"),
         "getform" => Some("Use alternative form retrieval methods"),
         _ => None,
     }
