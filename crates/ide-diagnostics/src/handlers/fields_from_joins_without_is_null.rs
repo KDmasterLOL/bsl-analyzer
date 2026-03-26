@@ -301,6 +301,38 @@ mod tests {
     }
 
     #[test]
+    fn test_no_diagnostic_for_inner_joined_table_with_nested_left_join() {
+        // When INNER JOIN has a nested LEFT JOIN, fields from the INNER-joined table
+        // should NOT trigger - they are guaranteed non-NULL by the INNER JOIN.
+        // Only fields from the LEFT-joined table are potentially NULL.
+        let code = r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ
+    |    ЧекККМ.Ссылка КАК Документ,
+    |    ЕСТЬNULL(ДокЗаказ.НомерДокумента, """") КАК НомерЗаказа
+    |ИЗ
+    |    Документ.ЧекККМ.Товары КАК ЧекККМТовары
+    |        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+    |            ЛЕВОЕ СОЕДИНЕНИЕ Документ.ЗаказКлиента КАК ДокЗаказ
+    |            ПО ЧекККМ.ЗаказКлиента = ДокЗаказ.Ссылка
+    |        ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка";
+КонецПроцедуры
+"#;
+        let diagnostics = check_sdbl_diagnostic(code, check);
+        // ЧекККМ.Ссылка is from INNER JOIN - not nullable, should not trigger.
+        // ДокЗаказ.НомерДокумента is protected by ЕСТЬNULL.
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Fields from INNER-joined table should not trigger even with nested LEFT JOIN. Got: {:?}",
+            diagnostics.iter().map(|d| {
+                let text = &code[usize::from(d.range.start())..usize::from(d.range.end())];
+                format!("{}: {}", text, d.message)
+            }).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_diagnostic_highlights_field_not_join() {
         // Verify diagnostic highlights the unprotected field, not the JOIN clause
         let code = r#"Процедура Тест()

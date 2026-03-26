@@ -2158,3 +2158,28 @@ fn test_ref_overuse_with_metadata_simple_ref_no_error() {
         "Expected 0 RefOveruse diagnostics: simple Alias.Ссылка is not redundant"
     );
 }
+
+#[test]
+fn test_nested_inner_left_join_types() {
+    // INNER JOIN with nested LEFT JOIN must preserve correct join types.
+    // Previously, join_type() used node.text() which included nested JOIN keywords,
+    // causing INNER to be misidentified as LEFT.
+    let sdbl = "ВЫБРАТЬ
+    ЧекККМ.Ссылка КАК Документ,
+    ЕСТЬNULL(ДокЗаказ.НомерДокумента, \"\") КАК НомерЗаказа
+ИЗ
+    Документ.ЧекККМ.Товары КАК ЧекККМТовары
+        ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.ЧекККМ КАК ЧекККМ
+            ЛЕВОЕ СОЕДИНЕНИЕ Документ.ЗаказКлиента КАК ДокЗаказ
+            ПО ЧекККМ.ЗаказКлиента = ДокЗаказ.Ссылка
+        ПО ЧекККМТовары.Ссылка = ЧекККМ.Ссылка";
+    let hir = lower_query(sdbl);
+
+    assert_eq!(hir.joins.len(), 2);
+    // Nested LEFT JOIN comes first (depth-first)
+    assert_eq!(hir.joins[0].join_type, crate::hir::JoinType::Left);
+    assert!(hir.joins[0].table.alias.as_ref().unwrap().eq_ignore_ascii_case("ДокЗаказ"));
+    // INNER JOIN comes second
+    assert_eq!(hir.joins[1].join_type, crate::hir::JoinType::Inner);
+    assert!(hir.joins[1].table.alias.as_ref().unwrap().eq_ignore_ascii_case("ЧекККМ"));
+}
