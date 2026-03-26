@@ -203,18 +203,10 @@ impl LoweringContext {
             self.find_unprotected_refs(where_expr, table_alias, &mut unprotected_refs);
         }
 
-        // 3. Check other JOINs' ON conditions (but not this JOIN's own ON)
-        for other_join in &hir.joins {
-            // Skip the same JOIN (field in own ON is protected)
-            if other_join.range != join.range {
-                if let Some(ref on_expr) = other_join.condition {
-                    self.find_unprotected_refs(on_expr, table_alias, &mut unprotected_refs);
-                }
-            }
-        }
-
-        // NOTE: Fields in this JOIN's own ON condition are NOT checked
-        // because they are part of the join predicate itself, not vulnerable usage
+        // NOTE: Fields in ANY JOIN's ON condition are NOT checked.
+        // Using a joined table's field in a JOIN ON condition is standard practice.
+        // NULL in ON simply means "no match", which is expected LEFT JOIN behavior.
+        // This applies both to the JOIN's own ON and other JOINs' ON conditions.
 
         // Emit diagnostic if unprotected references found
         if !unprotected_refs.is_empty() {

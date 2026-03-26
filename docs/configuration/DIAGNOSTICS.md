@@ -254,15 +254,13 @@ Warning is logged if analysis exceeds this limit.
 
 **Defaults:**
 - `complexityThreshold`: 20
-- `checkModuleBody`: true
 
 ```json
 {
   "diagnostics": {
     "parameters": {
       "CyclomaticComplexity": {
-        "complexityThreshold": 15,
-        "checkModuleBody": false
+        "complexityThreshold": 15
       }
     }
   }
@@ -535,8 +533,7 @@ Warning is logged if analysis exceeds this limit.
         "maxMethodSize": 250
       },
       "CyclomaticComplexity": {
-        "complexityThreshold": 15,
-        "checkModuleBody": true
+        "complexityThreshold": 15
       },
       "CognitiveComplexity": {
         "complexityThreshold": 12

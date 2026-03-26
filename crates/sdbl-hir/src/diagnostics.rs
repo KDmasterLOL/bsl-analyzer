@@ -383,7 +383,7 @@ impl SdblDiagnostic {
                 )
             }
             Self::MultilineString { .. } => {
-                "Check if multiline literal is correct".to_string()
+                "Проверьте корректность многострочного литерала".to_string()
             }
             Self::QueryNestedFieldsByDot { .. } => {
                 "Обнаружено разыменование ссылочного поля".to_string()

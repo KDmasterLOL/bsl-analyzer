@@ -220,18 +220,26 @@ pub fn handle_did_close(state: &mut GlobalState, params: DidCloseTextDocumentPar
 
 /// Handles textDocument/didSave notification.
 ///
-/// Currently a no-op, but could be used for:
-/// - Triggering additional analysis
-/// - Running formatters
-/// - Updating external caches
-pub fn handle_did_save(_state: &mut GlobalState, params: DidSaveTextDocumentParams) -> Result<()> {
+/// If the saved file is a config file (.bsl-analyzer.json or .bsl-language-server.json),
+/// reloads the project config and recalculates diagnostics for all open documents.
+pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParams) -> Result<()> {
     let _p = tracing::info_span!("handle_did_save", uri = %params.text_document.uri).entered();
 
     let uri = params.text_document.uri;
 
     tracing::debug!("Document saved: {}", uri);
 
-    // Future: Could trigger additional analysis or formatting here
+    if let Ok(path) = uri.to_file_path() {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if (name == ".bsl-analyzer.json" || name == ".bsl-language-server.json")
+                && state.reload_project_config()
+            {
+                for uri in state.opened_document_uris() {
+                    schedule_diagnostics(state, &uri);
+                }
+            }
+        }
+    }
 
     Ok(())
 }
