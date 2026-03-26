@@ -45,7 +45,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::FormDataToValue,
-        "Use of FormDataToValue method detected",
+        "Обнаружено использование метода ДанныеФормыВЗначение",
         range,
         ctx,
     )
