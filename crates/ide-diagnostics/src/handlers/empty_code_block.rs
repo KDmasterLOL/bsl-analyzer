@@ -16,10 +16,6 @@
 //! - Empty function/procedure bodies (handled by other diagnostic)
 //! - Empty try/except blocks (handled by other diagnostic)
 //!
-//! ## Configuration
-//! - `commentAsCode` (boolean, default: false) - If true, blocks containing only comments
-//!   are NOT considered empty
-//!
 //! ## Implementation
 //! **This is a HIR-based diagnostic** - collected during AST→HIR lowering.
 //!

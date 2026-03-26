@@ -52,7 +52,6 @@
 //!
 //! ## Configuration
 //! - **complexityThreshold** (default: 20) - Maximum allowed cyclomatic complexity
-//! - **checkModuleBody** (default: true) - Check module-level code complexity
 //! - **Enabled by default:** Yes
 //! - **Severity:** CRITICAL
 //! - **Tags:** BRAINOVERLOAD

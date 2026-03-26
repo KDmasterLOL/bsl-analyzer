@@ -476,12 +476,7 @@ impl GlobalState {
         // Reload project config if config file changed
         // This invalidates all diagnostic caches (new config ID = new hash)
         if config_file_changed {
-            if let Some(root) = self.workspace_root.clone() {
-                tracing::info!("reloading project config after config file change");
-                let project = Project::new(&root);
-                self.project = Some(project);
-                self.update_diagnostics_config();
-            }
+            self.reload_project_config();
         }
 
         // Bump metadata version if XML files changed.
@@ -493,6 +488,20 @@ impl GlobalState {
         }
 
         (true, config_file_changed)
+    }
+
+    /// Reloads project config from disk and updates diagnostics config.
+    /// Returns true if config was reloaded.
+    pub fn reload_project_config(&mut self) -> bool {
+        if let Some(root) = self.workspace_root.clone() {
+            tracing::info!("reloading project config");
+            let project = Project::new(&root);
+            self.project = Some(project);
+            self.update_diagnostics_config();
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns URIs of all currently opened documents (for re-running diagnostics).
