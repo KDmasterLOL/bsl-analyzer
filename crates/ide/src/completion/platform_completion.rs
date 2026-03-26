@@ -2,10 +2,11 @@
 //!
 //! Provides completion for platform types and methods:
 //! - Method completion after DOT (e.g., `Строка.` shows ВРег, НРег, etc.)
+//! - CommonModule method completion (e.g., `ОбщегоНазначения.` shows exported methods)
 //! - Snippets with parameter placeholders
 
 use bsl_platform::{type_methods_query, PlatformData, PlatformMethod, TypeNameInput};
-use hir::{InferenceResult, Name, Ty};
+use hir::{InferenceResult, MethodSymbol, Name, Ty};
 use ide_db::RootDatabase;
 use syntax::ast::{self, AstNode};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -45,10 +46,23 @@ pub(super) fn platform_completions(
     let receiver_ty = resolve_syntax_expr_type(&receiver_expr, &infer_result);
     tracing::debug!(receiver_ty = ?receiver_ty, "Resolved receiver type");
 
-    let type_name = receiver_ty.platform_type_name()?;
-    tracing::debug!(type_name = ?type_name, "Platform type for completion");
+    // Try platform type completion first
+    if let Some(type_name) = receiver_ty.platform_type_name() {
+        tracing::debug!(type_name = ?type_name, "Platform type for completion");
+        return Some(complete_platform_methods(db, type_name));
+    }
 
-    Some(complete_platform_methods(db, type_name))
+    // If receiver type is Unknown, check if it's a CommonModule name
+    if receiver_ty.is_unknown() {
+        if let Some(receiver_name) = extract_receiver_ident(&receiver_expr) {
+            tracing::debug!(receiver_name = %receiver_name, "Checking CommonModule completion");
+            if let Some(items) = complete_common_module_methods(db, &position, &receiver_name) {
+                return Some(items);
+            }
+        }
+    }
+
+    None
 }
 
 /// Find the receiver expression node before the DOT token.
@@ -222,6 +236,110 @@ fn resolve_field_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) ->
         resolve_syntax_expr_type(&base_node, infer_result)
     } else {
         Ty::Unknown
+    }
+}
+
+/// Extract identifier text from receiver expression node.
+fn extract_receiver_ident(node: &SyntaxNode) -> Option<String> {
+    match node.kind() {
+        SyntaxKind::IDENT | SyntaxKind::EXPR => {
+            let token = node.first_token()?;
+            if token.kind() == SyntaxKind::IDENT {
+                return Some(token.text().to_string());
+            }
+            None
+        }
+        _ => {
+            let token = node.first_token().filter(|t| t.kind() == SyntaxKind::IDENT)?;
+            Some(token.text().to_string())
+        }
+    }
+}
+
+/// Completes exported methods from a CommonModule.
+///
+/// Uses module_index for O(1) name lookup, then symbol_tree for the specific module.
+/// symbol_tree is typically already cached as a dependency of the open file.
+fn complete_common_module_methods(
+    db: &dyn RootDatabase,
+    position: &CompletionPosition,
+    module_name: &str,
+) -> Option<Vec<CompletionItem>> {
+    let source_root_input = db.file_source_root_input(position.file_id);
+    let source_root_id = source_root_input.source_root_id(db);
+    let module_index = db.module_index(source_root_id);
+
+    let name = Name::new(module_name);
+    let module_file_id = module_index.resolve_common_module(&name)?;
+
+    tracing::debug!(
+        module_name = %module_name,
+        file_id = ?module_file_id,
+        "Found CommonModule in module_index"
+    );
+
+    let module_id = hir::ModuleId::new(module_file_id);
+    let symbol_tree = db.symbol_tree(module_id);
+
+    let items: Vec<CompletionItem> = symbol_tree
+        .methods()
+        .filter(|m| m.is_export)
+        .map(|method| render_common_module_method(db, method))
+        .collect();
+
+    tracing::debug!(item_count = items.len(), "CommonModule completion items");
+
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(items)
+}
+
+/// Renders a CommonModule method as a completion item.
+fn render_common_module_method(db: &dyn RootDatabase, method: &MethodSymbol) -> CompletionItem {
+    let label = method.name.to_string();
+
+    let kind =
+        if method.is_function { CompletionItemKind::Function } else { CompletionItemKind::Method };
+
+    // Build signature detail
+    let params_str: String = method
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if i > 0 { format!(", {}", p.name) } else { p.name.to_string() })
+        .collect();
+    let detail = if method.is_function {
+        format!("Функция {}({})", label, params_str)
+    } else {
+        format!("Процедура {}({})", label, params_str)
+    };
+
+    // Insert method name with parentheses; cursor inside for signature help
+    let insert_text =
+        if method.params.is_empty() { format!("{}()$0", label) } else { format!("{}($0)", label) };
+
+    // Get documentation from method docs
+    let documentation = db.method_docs(method.id).map(|docs| {
+        let mut doc = String::new();
+        if let Some(purpose) = &docs.purpose {
+            doc.push_str(purpose);
+        } else if !docs.raw.is_empty() {
+            doc.push_str(&docs.raw);
+        }
+        doc
+    });
+
+    CompletionItem {
+        label,
+        detail: Some(detail),
+        kind,
+        insert_text,
+        documentation,
+        sort_text: None,
+        filter_text: None,
+        source: None,
     }
 }
 

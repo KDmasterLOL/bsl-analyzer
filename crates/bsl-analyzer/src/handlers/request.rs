@@ -542,11 +542,17 @@ fn convert_location(
 
 /// Convert IDE CompletionItem to LSP CompletionItem.
 fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
+    let has_snippet = item.insert_text.contains('$');
     CompletionItem {
         label: item.label,
         detail: item.detail,
         kind: Some(convert_completion_kind(item.kind)),
         insert_text: Some(item.insert_text),
+        insert_text_format: if has_snippet {
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        } else {
+            None
+        },
         documentation: item.documentation.map(lsp_types::Documentation::String),
         label_details: item
             .source

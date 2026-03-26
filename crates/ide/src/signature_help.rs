@@ -76,6 +76,13 @@ pub fn signature_help<DB: RootDatabase>(
         if let Some(sig) = build_for_platform_method(db, &type_name, &callee_name, active_param) {
             return Some(sig);
         }
+
+        // Try CommonModule method
+        if let Some(sig) =
+            build_for_common_module_method(db, file_id, &type_name, &callee_name, active_param)
+        {
+            return Some(sig);
+        }
     }
 
     // Try global function
@@ -125,13 +132,21 @@ fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String
         SyntaxKind::FIELD_EXPR => {
             // Method call: receiver.method
             // FIELD_EXPR: receiver DOT method_name
+            // Note: receiver IDENT can be either a node or token depending on parser
             let mut receiver = None;
             let mut method = None;
 
             for child in first_child.children_with_tokens() {
                 match child.kind() {
                     SyntaxKind::IDENT => {
-                        let text = child.as_token()?.text().to_string();
+                        let text = if let Some(token) = child.as_token() {
+                            token.text().to_string()
+                        } else if let Some(node) = child.as_node() {
+                            // IDENT node wrapping an IDENT token
+                            node.text().to_string()
+                        } else {
+                            continue;
+                        };
                         if receiver.is_none() {
                             receiver = Some(text);
                         } else {
@@ -370,6 +385,58 @@ fn build_params_from_item_tree_params(params: &[Param]) -> Vec<ParameterInfo> {
         .collect()
 }
 
+/// Build SignatureHelp for a CommonModule method.
+///
+/// Resolves module via module_index, then looks up method in ItemTree.
+fn build_for_common_module_method<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    module_name: &str,
+    method_name: &str,
+    active_param: usize,
+) -> Option<SignatureHelp> {
+    use hir::Name;
+
+    let source_root_input = db.file_source_root_input(file_id);
+    let source_root_id = source_root_input.source_root_id(db);
+    let module_index = db.module_index(source_root_id);
+
+    let name = Name::new(module_name);
+    let module_file_id = module_index.resolve_common_module(&name)?;
+
+    let method_name = Name::new(method_name);
+    let module_id = hir::ModuleId::new(module_file_id);
+    let symbol_tree = db.symbol_tree(module_id);
+    let method = symbol_tree.find_method(&method_name)?;
+
+    if !method.is_export {
+        return None;
+    }
+
+    // Get method from ItemTree for full parameter info
+    let tree = db.item_tree(module_file_id);
+    let item = tree.top_level_items().get(method.id.local_id as usize)?;
+
+    let mut sig = match item {
+        ModItem::Procedure(idx) => {
+            let proc = tree.procedure(*idx);
+            build_signature_from_procedure(proc, active_param)
+        }
+        ModItem::Function(idx) => {
+            let func = tree.function(*idx);
+            build_signature_from_function(func, active_param)
+        }
+        ModItem::Variable(_) => return None,
+    };
+
+    // Add documentation from method docs
+    if let Some(docs) = db.method_docs(method.id) {
+        sig.doc = docs.purpose.clone();
+    }
+
+    Some(sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +571,64 @@ mod tests {
             // Should show signature for Внутренняя, not Внешняя
             assert!(sig.signature.contains("Внутренняя"));
         }
+    }
+
+    #[test]
+    fn test_common_module_method_signature() {
+        let mut db = RootDatabaseImpl::new();
+
+        // CommonModule file
+        let module_file_id = FileId(1);
+        let module_code = "// Проверяет, является ли символ разделителем слов.
+//
+// Параметры:
+//  КодСимвола - Число - код проверяемого символа
+//  РазделителиСлов - Строка - допустимые разделители
+//
+// Возвращаемое значение:
+//  Булево - Истина, если символ является разделителем
+//
+Функция ЭтоРазделительСлов(КодСимвола, РазделителиСлов = \" \") Экспорт
+    Возврат Истина;
+КонецФункции";
+
+        // Calling file
+        let caller_file_id = FileId(0);
+        let caller_code = "Процедура Тест()
+    СтроковыеФункцииКлиентСервер.ЭтоРазделительСлов($0)
+КонецПроцедуры";
+
+        let (caller_code, offset) = find_cursor(caller_code);
+
+        // Setup FileSet with CommonModule path
+        let mut file_set = FileSet::new();
+        file_set.insert(
+            module_file_id,
+            VfsPath::new("/cf/CommonModules/СтроковыеФункцииКлиентСервер/Ext/Module.bsl"),
+        );
+        file_set.insert(caller_file_id, VfsPath::new("/cf/HTTPServices/lk/Ext/Module.bsl"));
+
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+        db.set_file_source_root(module_file_id, SourceRootId(0));
+        db.set_file_source_root(caller_file_id, SourceRootId(0));
+        db.set_file_text(module_file_id, module_code);
+        db.set_file_text(caller_file_id, &caller_code);
+
+        let result = signature_help(&db, caller_file_id, offset);
+
+        assert!(result.is_some(), "Expected signature help for CommonModule method");
+        let sig = result.unwrap();
+        assert!(
+            sig.signature.contains("ЭтоРазделительСлов"),
+            "Signature should contain method name, got: {}",
+            sig.signature
+        );
+        assert!(
+            sig.signature.contains("КодСимвола"),
+            "Signature should contain first param, got: {}",
+            sig.signature
+        );
+        assert_eq!(sig.active_parameter, Some(0));
     }
 }
