@@ -43,7 +43,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
     Some(Diagnostic {
         code,
-        message: "Empty statement".to_string(),
+        message: "Пустой оператор".to_string(),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

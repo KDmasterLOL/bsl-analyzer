@@ -61,7 +61,7 @@ pub fn from_hir(_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Opti
 
     Some(Diagnostic {
         code,
-        message: "It is recommended not to use global variables. They often might cause issues that cannot be easily located".to_string(),
+        message: "Не рекомендуется использовать глобальные переменные. Они могут приводить к трудноуловимым ошибкам".to_string(),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

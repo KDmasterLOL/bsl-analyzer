@@ -73,7 +73,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
     crate::simple_hir_diagnostic(
         DiagnosticCode::ExecuteExternalCode,
-        "It is forbidden to execute external code on the server",
+        "Запрещено выполнять внешний код на сервере",
         range,
         ctx,
     )
