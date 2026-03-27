@@ -264,16 +264,16 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
                 BinaryOp::And => "and",
                 BinaryOp::Or => "or",
             };
-            format!("{}{}{}", lhs_str, op_str, rhs_str)
+            format!("{} {} {}", lhs_str, op_str, rhs_str)
         }
         Expr::UnaryOp { expr, op } => {
             let expr_str = expr_to_string(ExprId::from_idx(*expr), body);
             let op_str = match op {
-                UnaryOp::Not => "not",
+                UnaryOp::Not => "НЕ",
                 UnaryOp::Neg => "-",
                 UnaryOp::Plus => "+",
             };
-            format!("{}{}", op_str, expr_str)
+            format!("{} {}", op_str, expr_str)
         }
         Expr::Literal(lit) => match lit {
             Literal::Bool(b) => b.to_string(),
@@ -283,13 +283,9 @@ fn expr_to_string(expr_id: ExprId, body: &Body) -> String {
             Literal::Undefined => "undefined".to_string(),
             Literal::Null => "null".to_string(),
         },
-        Expr::Path(name) => name.as_str().to_lowercase(),
+        Expr::Path(name) => name.as_str().to_string(),
         Expr::Field { base, field } => {
-            format!(
-                "{}.{}",
-                expr_to_string(ExprId::from_idx(*base), body),
-                field.as_str().to_lowercase()
-            )
+            format!("{}.{}", expr_to_string(ExprId::from_idx(*base), body), field.as_str())
         }
         Expr::Index { base, index } => {
             format!(
@@ -557,7 +553,8 @@ fn check_logical_chain_hir(
 
     for &operand_id in &operands {
         let operand_str = expr_to_string(operand_id, body);
-        let normalized = normalize_operand_hir(&operand_str);
+        let lowered = operand_str.to_lowercase().replace(' ', "");
+        let normalized = normalize_operand_hir(&lowered);
 
         if !seen.insert(normalized) {
             duplicate = Some(operand_str);
@@ -946,8 +943,8 @@ mod tests {
             diagnostics.len()
         );
         assert!(
-            diagnostics[0].message.contains("б"),
-            "Message should contain 'б' (lowercase from expr_to_string)"
+            diagnostics[0].message.contains("Б"),
+            "Message should contain 'Б' (original case from expr_to_string)"
         );
     }
 

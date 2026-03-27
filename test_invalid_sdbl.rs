@@ -1,33 +1,22 @@
-use parser::parse_sdbl;
+use std::process::Command;
 
 fn main() {
-    // Test cases
-    let queries = vec![
-        "ВЫБРАТЬ ИЗ",          // Missing fields
-        "это вообще не запрос", // Garbage
-        "SELECT",              // Incomplete
-        "SELECT * FROM",       // Missing table
-    ];
-
-    for query in queries {
-        println!("\n=== Query: {:?} ===", query);
-        let parse = parse_sdbl(query);
-        println!("Has errors: {}", parse.has_errors());
-        println!("Error count: {}", parse.errors().len());
-        for error in parse.errors() {
-            println!("  - {}", error.message());
-        }
-        
-        let tree = format!("{:#?}", parse.syntax_node());
-        println!("Tree has ERROR nodes: {}", tree.contains("ERROR"));
-        if tree.contains("ERROR") {
-            let lines: Vec<&str> = tree.lines()
-                .filter(|line| line.contains("ERROR"))
-                .take(5)
-                .collect();
-            for line in lines {
-                println!("  {}", line);
-            }
-        }
-    }
+    // Just print what the parser sees
+    let code = r#"Процедура Тест()
+    Запрос = "ВЫБРАТЬ РАЗРЕШЕННЫЕ
+    |    Набор.Распоряжение          КАК Распоряжение,
+    |    Набор.Номенклатура          КАК Номенклатура,
+    |    СУММА(Набор.Заказано)       КАК Заказано
+    |ПОМЕСТИТЬ ИмяТаблицы
+    |ИЗ(
+    |    ВЫБРАТЬ
+    |        Таблица.Распоряжение          КАК Распоряжение,
+    |        Таблица.Номенклатура          КАК Номенклатура,
+    |        Таблица.ЗаказаноОборот        КАК Заказано
+    |    ИЗ
+    |        РегистрНакопления.РаспоряженияНаОтгрузку.Обороты(,,, &ОтборПоИзмерениям) КАК Таблица
+    // ++ NIA 28.02.2024 Дообработать механизм
+    | ";
+КонецПроцедуры"#;
+    println!("Code:\n{}", code);
 }

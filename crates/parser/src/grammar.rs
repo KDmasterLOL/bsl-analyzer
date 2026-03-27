@@ -49,7 +49,7 @@ fn annotated_item(p: &mut Parser) {
 
     // Now parse the actual procedure/function/variable
     match p.current() {
-        Some(TokenKind::KwAsync) => match p.nth(1) {
+        Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
             Some(TokenKind::KwProcedure) => {
                 items::procedure_def_content(p);
                 outer.complete(p, NodeKind::ProcedureDef);
@@ -97,7 +97,7 @@ pub fn source_file(p: &mut Parser) {
         match p.current() {
             Some(TokenKind::KwAsync) => {
                 // Look ahead to determine if it's procedure or function
-                match p.nth(1) {
+                match p.nth_non_trivia(0) {
                     Some(TokenKind::KwProcedure) => items::procedure_def(p),
                     Some(TokenKind::KwFunction) => items::function_def(p),
                     _ => p.error(),
@@ -158,7 +158,7 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
         match p.current() {
             Some(TokenKind::KwAsync) => {
                 // Look ahead to determine if it's procedure or function
-                match p.nth(1) {
+                match p.nth_non_trivia(0) {
                     Some(TokenKind::KwProcedure) => items::procedure_def(p),
                     Some(TokenKind::KwFunction) => items::function_def(p),
                     _ => p.error(),
@@ -263,7 +263,7 @@ fn preproc_content(p: &mut Parser) {
 
         // Parse content recursively like in preprocessor_region
         match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth(1) {
+            Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
                 Some(TokenKind::KwProcedure) => items::procedure_def(p),
                 Some(TokenKind::KwFunction) => items::function_def(p),
                 _ => p.error(),

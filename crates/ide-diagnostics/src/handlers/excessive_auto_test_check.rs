@@ -168,7 +168,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if let Some(range) = check_if_statement_optimized(&if_node, &return_stmts_by_parent) {
             diagnostics.push(Diagnostic {
                 code,
-                message: "Excessive check for deprecated 'АвтоТест' parameter".to_string(),
+                message: "Избыточная проверка устаревшего параметра 'АвтоТест'".to_string(),
                 severity: ctx.severity(code),
                 range,
                 tags: ctx.tags(code),

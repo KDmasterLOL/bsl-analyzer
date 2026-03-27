@@ -60,7 +60,7 @@ pub(crate) fn dispatch(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::LogicalOrInWhere { range } = diag {
-        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::LogicalOrInTheWhereSectionOfQuery, "Использование оператора ИЛИ (OR) в условии WHERE существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION или изменить структуру условий", *range, mapper, query_text, diagnostics);
+        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::LogicalOrInTheWhereSectionOfQuery, "Использование оператора ИЛИ в условии ГДЕ существенно снижает производительность запроса. Рассмотрите возможность переписать с использованием ОБЪЕДИНИТЬ или изменить структуру условий", *range, mapper, query_text, diagnostics);
     }
 }
 

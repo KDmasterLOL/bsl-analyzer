@@ -179,7 +179,7 @@ fn check_method(
     diagnostics.push(Diagnostic {
         code,
         message: format!(
-            "Move non export method \"{}\" from \"{}\" region",
+            "Перенесите неэкспортный метод \"{}\" из области \"{}\"",
             name.as_str(),
             region_name
         ),

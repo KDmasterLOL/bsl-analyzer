@@ -500,7 +500,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
     Some(Diagnostic {
         code,
-        message: "Incorrect use of StrTemplate".to_string(),
+        message: "Некорректное использование СтрШаблон".to_string(),
         severity: ctx.severity(code),
         range,
         tags: ctx.tags(code),

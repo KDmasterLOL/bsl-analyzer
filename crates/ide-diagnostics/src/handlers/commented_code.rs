@@ -113,10 +113,12 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // Check each group
     for group in comment_groups {
         if is_comment_group_code(&group, &config) {
+            // Compute range covering only code-like tokens (trim non-code comments from edges)
+            let code_range = code_tokens_range(&group, &config);
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
                 message: message_ru(),
-                range: group.range,
+                range: code_range.unwrap_or(group.range),
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
                 fixes: Vec::new(),
@@ -201,6 +203,17 @@ fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<
     }
 
     groups
+}
+
+/// Compute the range covering only code-like tokens in a group,
+/// trimming non-code comments from the start and end.
+fn code_tokens_range(group: &CommentGroup, config: &Config) -> Option<TextRange> {
+    let first = group.tokens.iter().position(|t| is_code_like(t.text(), config))?;
+    let last = group.tokens.iter().rposition(|t| is_code_like(t.text(), config))?;
+    Some(TextRange::new(
+        group.tokens[first].text_range().start(),
+        group.tokens[last].text_range().end(),
+    ))
 }
 
 fn is_method_documentation(group: &CommentGroup) -> bool {
@@ -623,6 +636,30 @@ mod tests {
             1,
             "Two consecutive commented lines should give 1 diagnostic"
         );
+    }
+
+    #[test]
+    fn test_range_excludes_wrapping_descriptive_comments() {
+        use crate::test_utils::assert_diagnostic_range_multiline;
+        // Descriptive comments wrapping commented-out code should not be included in range
+        let code = r#"Процедура Тест()
+    // ++ Должны быть одинаковые статьи в Документе
+    //ТЗТовары = Товары;
+    //ТЗТовары.Свернуть("СтатьяДвиженияДенежныхСредств");
+    //Если ТЗТовары.Количество() > 1 Тогда
+    //    Возврат Ложь;
+    //КонецЕсли;
+    //Возврат Истина;
+    // -- Должны быть одинаковые статьи в документе
+КонецПроцедуры"#;
+
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "Should detect commented code block");
+
+        // Range should cover only lines 2-7 (code), not line 1 (// ++) or line 8 (// --)
+        // Line 2: "    //ТЗТовары = Товары;" starts at col 4
+        // Line 7: "    //Возврат Истина;" ends at end of that line
+        assert_diagnostic_range_multiline(code, &diagnostics[0], 2, 4, 7, 21);
     }
 
     #[test]
