@@ -52,6 +52,30 @@ impl<'a> Parser<'a> {
         self.tokens.get(self.pos + n).map(|t| t.kind)
     }
 
+    /// Returns the nth non-trivia token kind (0-indexed), skipping whitespace/comments/newlines.
+    pub fn nth_non_trivia(&self, n: usize) -> Option<TokenKind> {
+        let mut count = 0;
+        let mut offset = 1; // start from next token
+        while let Some(t) = self.tokens.get(self.pos + offset) {
+            match t.kind {
+                TokenKind::Whitespace
+                | TokenKind::Comment
+                | TokenKind::Newline
+                | TokenKind::Bom => {
+                    offset += 1;
+                }
+                _ => {
+                    if count == n {
+                        return Some(t.kind);
+                    }
+                    count += 1;
+                    offset += 1;
+                }
+            }
+        }
+        None
+    }
+
     /// Checks if the current token matches the given kind.
     pub fn at(&self, kind: TokenKind) -> bool {
         self.current() == Some(kind)
