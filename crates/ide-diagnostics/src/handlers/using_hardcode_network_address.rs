@@ -68,6 +68,10 @@ impl Config {
     }
 }
 
+fn is_localhost(ip: &str) -> bool {
+    ip.starts_with("127.") || ip == "::1"
+}
+
 fn is_url(content: &str) -> bool {
     let bytes = content.as_bytes();
     let after_scheme = if bytes.len() > 8 && bytes[..8].eq_ignore_ascii_case(b"https://") {
@@ -235,6 +239,10 @@ fn check_body(
             continue;
         }
 
+        if is_localhost(first_value) {
+            continue;
+        }
+
         if first_value.starts_with(':') && is_letter_before_match(content, matched.start()) {
             continue;
         }
@@ -282,7 +290,7 @@ mod tests {
 НеСетевойАдресЕще = "10.10.2010";
 МассивАдресов = Новый Массив();
 МассивАдресов.Добавить("160.211.46.126"); // <-- ошибка
-МассивАдресов.Добавить("127.0.0.1"); // <-- ошибка
+МассивАдресов.Добавить("127.0.0.1"); // <- игнорим (localhost)
 МассивАдресов.Добавить("300.300.300.300");
 МассивАдресов.Добавить("da52:04d9:f9fc:8c45:7180:332d:527f:0c08"); // <-- ошибка
 МассивАдресов.Добавить("6885:e6fb:e56e:f46c:2da2:a736:f9dc:68b6"); // <-- ошибка
@@ -330,7 +338,7 @@ mod tests {
   |%5%6Префикс информационной базы: %7'");
 
 FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""False""]]", HTMLDocument.body, null, 0, null).iterateNext(); // <-- игнорим
-Правильный = "::1" // <-- ошибка
+Правильный = "::1" // <- игнорим (localhost)
 
 Функция ПодготовитьСведенияОВнешнейОбработке(Вид, Назначение, Наименование, Версия, Информация, Адрес = "8.8.8.10", ВерсияБСП = "1.2.1.4", РассылкаОтчетов = Ложь) Экспорт // <-- 1 ошибка 1 игнор
 КонецФункции
@@ -351,20 +359,18 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
 
-        assert_eq!(diagnostics.len(), 12, "Expected 12 diagnostics");
+        assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics");
 
         assert_diagnostic_range(code, &diagnostics[0], 2, 15, 31);
         assert_diagnostic_range(code, &diagnostics[1], 6, 23, 39);
-        assert_diagnostic_range(code, &diagnostics[2], 7, 23, 34);
-        assert_diagnostic_range(code, &diagnostics[3], 9, 23, 64);
-        assert_diagnostic_range(code, &diagnostics[4], 10, 23, 64);
-        assert_diagnostic_range(code, &diagnostics[5], 12, 44, 85);
-        assert_diagnostic_range(code, &diagnostics[6], 20, 18, 29);
-        assert_diagnostic_range(code, &diagnostics[7], 23, 7, 119);
-        assert_diagnostic_range(code, &diagnostics[8], 55, 13, 18);
-        assert_diagnostic_range(code, &diagnostics[9], 57, 104, 114);
-        assert_diagnostic_range(code, &diagnostics[10], 65, 9, 22);
-        assert_diagnostic_range(code, &diagnostics[11], 71, 6, 15);
+        assert_diagnostic_range(code, &diagnostics[2], 9, 23, 64);
+        assert_diagnostic_range(code, &diagnostics[3], 10, 23, 64);
+        assert_diagnostic_range(code, &diagnostics[4], 12, 44, 85);
+        assert_diagnostic_range(code, &diagnostics[5], 20, 18, 29);
+        assert_diagnostic_range(code, &diagnostics[6], 23, 7, 119);
+        assert_diagnostic_range(code, &diagnostics[7], 57, 104, 114);
+        assert_diagnostic_range(code, &diagnostics[8], 65, 9, 22);
+        assert_diagnostic_range(code, &diagnostics[9], 71, 6, 15);
     }
 
     #[test]
@@ -376,7 +382,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 НеСетевойАдресЕще = "10.10.2010";
 МассивАдресов = Новый Массив();
 МассивАдресов.Добавить("160.211.46.126"); // <-- ошибка
-МассивАдресов.Добавить("127.0.0.1"); // <-- ошибка
+МассивАдресов.Добавить("127.0.0.1"); // <- игнорим (localhost)
 МассивАдресов.Добавить("300.300.300.300");
 МассивАдресов.Добавить("da52:04d9:f9fc:8c45:7180:332d:527f:0c08"); // <-- ошибка
 МассивАдресов.Добавить("6885:e6fb:e56e:f46c:2da2:a736:f9dc:68b6"); // <-- ошибка
@@ -394,7 +400,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 Тест = "(.*<transportConnector name="")(.*)(""" uri=""tcp://0.0.0.0:61616\?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600""/>)"; // <-- ошибка
 Тест = "_to_SRVMIX"" uri=""static:(tcp://10.1.4.55:61616)"" duplex=""true"" UserName=""system"" Password=""manager""/>"; // <-- ошибка
 
-ЗапуститьПриложение("ping -n 60 127.0.0.1 >nul", , Истина);
+ЗапуститьПриложение("ping -n 60 127.0.0.1 >nul", , Истина); // <- игнорим (localhost)
 
 // исключаем "Драйвер"
 Справочники.ДрайверыОборудования.ЗаполнитьПредопределенныйЭлемент(
@@ -424,7 +430,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
   |%5%6Префикс информационной базы: %7'");
 
 FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""False""]]", HTMLDocument.body, null, 0, null).iterateNext(); // <-- игнорим
-Правильный = "::1" // <-- ошибка
+Правильный = "::1" // <- игнорим (localhost)
 
 Функция ПодготовитьСведенияОВнешнейОбработке(Вид, Назначение, Наименование, Версия, Информация, Адрес = "8.8.8.10", ВерсияБСП = "1.2.1.4", РассылкаОтчетов = Ложь) Экспорт // <-- 1 ошибка 1 игнор
 КонецФункции
@@ -452,7 +458,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics with reduced exclusion");
+        assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics with reduced exclusion");
     }
 
     #[test]
@@ -464,7 +470,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
 НеСетевойАдресЕще = "10.10.2010";
 МассивАдресов = Новый Массив();
 МассивАдресов.Добавить("160.211.46.126"); // <-- ошибка
-МассивАдресов.Добавить("127.0.0.1"); // <-- ошибка
+МассивАдресов.Добавить("127.0.0.1"); // <- игнорим (localhost)
 МассивАдресов.Добавить("300.300.300.300");
 МассивАдресов.Добавить("da52:04d9:f9fc:8c45:7180:332d:527f:0c08"); // <-- ошибка
 МассивАдресов.Добавить("6885:e6fb:e56e:f46c:2da2:a736:f9dc:68b6"); // <-- ошибка
@@ -540,7 +546,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
         );
 
         let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-        assert_eq!(diagnostics.len(), 15, "Expected 15 diagnostics without 2.* exclusion");
+        assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics without 2.* exclusion");
     }
 
     #[test]
@@ -567,25 +573,25 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
     }
 
     #[test]
-    fn test_localhost_detection() {
+    fn test_localhost_excluded() {
         let code = r#"
 Процедура Тест()
     IP = "127.0.0.1";
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics.len(), 0, "Localhost addresses should be excluded");
     }
 
     #[test]
-    fn test_ipv6_loopback_detection() {
+    fn test_ipv6_loopback_excluded() {
         let code = r#"
 Процедура Тест()
     IP = "::1";
 КонецПроцедуры
 "#;
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics.len(), 0, "IPv6 loopback should be excluded");
     }
 
     #[test]
