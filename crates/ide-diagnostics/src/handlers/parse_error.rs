@@ -148,6 +148,44 @@ HHH"#;
     }
 
     #[test]
+    fn test_return_without_semicolon_before_elseif() {
+        let code = r#"
+Процедура Тест()
+    Если А Тогда
+        Возврат
+    ИначеЕсли Б Тогда
+        Возврат
+    Иначе
+        Возврат
+    КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Return without semicolon before ИначеЕсли/Иначе/КонецЕсли should not trigger parse error"
+        );
+    }
+
+    #[test]
+    fn test_unicode_letter_in_identifier() {
+        let code = r#"
+Процедура Тест()
+    ПараметрΔE = 1;
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+        assert!(
+            parse_errors.is_empty(),
+            "Unicode letters (Greek Δ) in identifiers should not trigger parse error"
+        );
+    }
+
+    #[test]
     fn test_no_parse_error_for_bom_with_region() {
         // UTF-8 BOM + CRLF + #Область (common in 1C exports)
         let code =

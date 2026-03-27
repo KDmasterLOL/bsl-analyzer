@@ -461,11 +461,11 @@ pub enum SdblTokenKind {
 
     // Identifier: Unicode letters, digits, underscore
     // Lower priority than keywords
-    #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*", priority = 1)]
+    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
     Ident,
 
     // Parameter reference: &Name
-    #[regex(r"&[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
+    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
     Parameter,
 
     // Line comment: // ...

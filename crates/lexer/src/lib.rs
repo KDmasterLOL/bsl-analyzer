@@ -226,7 +226,7 @@ pub enum TokenKind {
     AnnChangeAndValidate,
 
     // Custom annotation (any identifier after &)
-    #[regex(r"&[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*")]
+    #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
     AnnCustom,
 
     #[token("=")]
@@ -335,8 +335,9 @@ pub enum TokenKind {
 
     // Identifier: Unicode letters, digits, underscore
     // Must start with letter or underscore
+    // Uses \p{L} to support all Unicode letters (Latin, Cyrillic, Greek, etc.)
     // Lower priority than keywords to ensure keywords are matched first
-    #[regex(r"[_a-zA-Zа-яА-ЯёЁ][_a-zA-Zа-яА-ЯёЁ0-9]*", priority = 1)]
+    #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
     Ident,
 
     // Line comment: // ...
