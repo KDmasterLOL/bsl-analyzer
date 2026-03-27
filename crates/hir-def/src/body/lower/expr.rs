@@ -1229,11 +1229,25 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     // === Emit candidates for RedundantAccessToObject ===
     // ThisObject pattern: ЭтотОбъект.Field or ThisObject.Field
     // This check applies to both field access and method calls
-    if let Some(ref object_name) = object_name_opt {
-        let lower = object_name.to_lowercase();
+    // Only check when the DIRECT base is an identifier (not a chained FIELD_EXPR),
+    // to avoid emitting duplicate diagnostics for chains like ЭтотОбъект.A.B.C
+    let direct_base_name = node.children().next().and_then(|base_node| {
+        if base_node.kind() == SyntaxKind::IDENT {
+            return Some(base_node.text().to_string());
+        }
+        if base_node.kind() == SyntaxKind::EXPR {
+            if let Some(ident_child) = base_node.children().find(|n| n.kind() == SyntaxKind::IDENT)
+            {
+                return Some(ident_child.text().to_string());
+            }
+        }
+        None
+    });
+    if let Some(ref base_name) = direct_base_name {
+        let lower = base_name.to_lowercase();
         if lower == "этотобъект" || lower == "thisobject" {
             ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
-                kind: RedundantAccessKind::ThisObject { prefix: object_name.clone() },
+                kind: RedundantAccessKind::ThisObject { prefix: base_name.clone() },
                 range: node.text_range(),
             });
         }

@@ -224,6 +224,28 @@ mod tests {
     }
 
     #[test]
+    fn test_this_object_chained_access_single_diagnostic() {
+        // Chained access ЭтотОбъект.Отбор.Регистратор.Значение should emit only ONE diagnostic,
+        // not one per each FIELD_EXPR level in the chain
+        use crate::test_utils::{check_metadata_diagnostic, make_non_common_module_metadata};
+
+        let metadata = make_non_common_module_metadata(bsl_metadata::ModuleType::ObjectModule);
+        let code = r#"Процедура Тест()
+    Если ТипЗНЧ(ЭтотОбъект.Отбор.Регистратор.Значение) = Тип("ДокументСсылка.ЭтапПроизводства2_2") Тогда
+        Возврат;
+    КонецЕсли;
+КонецПроцедуры"#;
+
+        let diagnostics =
+            check_metadata_diagnostic(metadata, code, |_meta, ctx| crate::diagnostics(ctx));
+        let redundant_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RedundantAccessToObject)
+            .collect();
+        assert_eq!(redundant_diags.len(), 1);
+    }
+
+    #[test]
     fn test_this_object_english() {
         // English ThisObject
         let code = r#"Procedure Test()
