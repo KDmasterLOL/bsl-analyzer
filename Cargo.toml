@@ -48,6 +48,7 @@ bsl-debug = { path = "crates/bsl-debug" }
 mcp-server = { path = "crates/mcp-server" }
 onec-client = { path = "crates/onec-client" }
 bsl-search = { path = "crates/bsl-search" }
+naparnik = { path = "crates/naparnik" }
 
 # Salsa for incremental computation
 salsa = { version = "0.25.2", features = ["rayon", "macros"] }
