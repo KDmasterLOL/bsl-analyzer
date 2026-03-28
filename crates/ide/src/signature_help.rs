@@ -356,7 +356,12 @@ fn build_signature_from_platform_method(
         .collect();
 
     let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("{}({})", method.name, param_labels.join(", "));
+    // For manager methods, method.name is "<Имя" — use Russian name from docs.syntax
+    let display_name = docs
+        .and_then(|d| d.syntax.split('(').next())
+        .filter(|n| !n.starts_with('<'))
+        .unwrap_or(&method.name);
+    let signature = format!("{}({})", display_name, param_labels.join(", "));
 
     let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
 
