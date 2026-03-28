@@ -755,8 +755,8 @@ fn test_tabular_section_field_resolution() {
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
 
-    // Should have Ссылка field + 3 tabular section attributes
-    assert_eq!(fields.len(), 4, "Expected 4 fields: Ссылка + 3 attributes");
+    // Should have Ссылка + НомерСтроки fields + 3 tabular section attributes
+    assert_eq!(fields.len(), 5, "Expected 5 fields: Ссылка + НомерСтроки + 3 attributes");
 
     // Verify Ссылка field
     let ref_field = fields.iter().find(|f| f.name.as_str() == "Ссылка");
@@ -769,6 +769,28 @@ fn test_tabular_section_field_resolution() {
     assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаИсполнителя"));
     assert!(fields.iter().any(|f| f.name.as_str() == "ЗадачаПроверяющего"));
     assert!(fields.iter().any(|f| f.name.as_str() == "ОтправленоНаДоработку"));
+}
+
+#[test]
+fn test_tabular_section_nomer_stroki_field() {
+    let metadata = create_test_metadata_with_tabular_section();
+
+    let code = "ВЫБРАТЬ Т.НомерСтроки ИЗ БизнесПроцесс.Исполнение.РезультатыПроверки КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(metadata)));
+    let hir = single_query_hir(&package);
+
+    let table_ref = &hir.from[0];
+    let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
+    let fields = resolved.fields();
+
+    // НомерСтроки must be present as a standard field
+    let line_num_field = fields.iter().find(|f| f.name.as_str() == "НомерСтроки");
+    assert!(line_num_field.is_some(), "Missing НомерСтроки field");
+    let line_num_field = line_num_field.unwrap();
+    assert!(line_num_field.is_standard, "НомерСтроки should be marked as standard");
+    assert_eq!(line_num_field.name_en.as_deref(), Some("LineNumber"));
 }
 
 #[test]
@@ -807,7 +829,7 @@ fn test_tabular_section_bilingual_support() {
     // Verify fields are present
     let resolved = table_ref.metadata.as_ref().expect("Metadata should be present");
     let fields = resolved.fields();
-    assert_eq!(fields.len(), 4, "Expected 4 fields");
+    assert_eq!(fields.len(), 5, "Expected 5 fields");
 }
 
 #[test]
@@ -2182,4 +2204,153 @@ fn test_nested_inner_left_join_types() {
     // INNER JOIN comes second
     assert_eq!(hir.joins[1].join_type, crate::hir::JoinType::Inner);
     assert!(hir.joins[1].table.alias.as_ref().unwrap().eq_ignore_ascii_case("ЧекККМ"));
+}
+
+// ===== VALUE()/ЗНАЧЕНИЕ() Function Tests =====
+
+/// Helper: create config with an enum that has known values.
+fn create_config_with_enum() -> bsl_metadata::Configuration {
+    use bsl_metadata::{metadata_object::EnumValue, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut enum_obj = MetadataObject::new(MdoType::Enum, "ПолФизическогоЛица");
+    enum_obj.enum_values = vec![
+        EnumValue {
+            name: "Мужской".to_string(),
+            name_en: Some("Male".to_string()),
+            uuid: "1".to_string(),
+        },
+        EnumValue {
+            name: "Женский".to_string(),
+            name_en: Some("Female".to_string()),
+            uuid: "2".to_string(),
+        },
+    ];
+    config.add_metadata_object(enum_obj);
+    config
+}
+
+#[test]
+fn test_value_function_valid_enum_value_gets_field_name_token() {
+    // VALUE(Enum.GenderEnum.Male) with metadata should produce FieldName token for last part
+    let config = create_config_with_enum();
+
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // "Мужской" should be in field_names (resolved)
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        resolved.iter().any(|t| t == "Мужской"),
+        "Expected 'Мужской' in field_names, got: {:?}",
+        resolved
+    );
+
+    // Must NOT appear in unresolved_field_names
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        !unresolved.iter().any(|t| t == "Мужской"),
+        "Expected 'Мужской' NOT in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_value_function_invalid_enum_value_gets_unresolved_token() {
+    // VALUE(Enum.X.InvalidValue) with metadata should produce UnresolvedFieldName token
+    let config = create_config_with_enum();
+
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.НесуществующееЗначение)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // "НесуществующееЗначение" should be in unresolved_field_names
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        unresolved.iter().any(|t| t == "НесуществующееЗначение"),
+        "Expected 'НесуществующееЗначение' in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_value_function_empty_ref_always_valid() {
+    // VALUE(Catalog.Currencies.ПустаяСсылка) — EmptyRef is always valid regardless of metadata
+    // Use alias "Вал" (longer than single letter) to avoid parser ambiguity
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Пол = ЗНАЧЕНИЕ(Справочник.Валюты.ПустаяСсылка)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, None); // no metadata
+    let sm = &package.source_map;
+
+    // "ПустаяСсылка" must be in field_names (not unresolved)
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        resolved.iter().any(|t| t == "ПустаяСсылка"),
+        "Expected 'ПустаяСсылка' in field_names (EmptyRef is always valid), got: {:?}",
+        resolved
+    );
+
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        !unresolved.iter().any(|t| t == "ПустаяСсылка"),
+        "Expected 'ПустаяСсылка' NOT in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_value_function_without_metadata_graceful_degradation() {
+    // Without metadata, the value part of VALUE() should be FieldName (not unresolved)
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Пол = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, None); // no metadata
+    let sm = &package.source_map;
+
+    // "Мужской" should NOT appear in unresolved_field_names when there's no metadata
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        !unresolved.iter().any(|t| t == "Мужской"),
+        "Without metadata, 'Мужской' should not be unresolved, got: {:?}",
+        unresolved
+    );
+
+    // "Мужской" should be in field_names
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        resolved.iter().any(|t| t == "Мужской"),
+        "Without metadata, 'Мужской' should be in field_names, got: {:?}",
+        resolved
+    );
+}
+
+#[test]
+fn test_value_function_mdo_type_and_table_name_tokens() {
+    // VALUE() arg parts 0 and 1 should be MdoType and TableName tokens respectively
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Тест КАК Т ГДЕ Т.Ссылка = ЗНАЧЕНИЕ(Перечисление.ПолФизическогоЛица.Мужской)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, None);
+    let sm = &package.source_map;
+
+    // "Перечисление" should be in mdo_types
+    let mdo_types: Vec<String> = sm.mdo_types.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        mdo_types.iter().any(|t| t == "Перечисление"),
+        "Expected 'Перечисление' in mdo_types, got: {:?}",
+        mdo_types
+    );
+
+    // "ПолФизическогоЛица" should be in table_names
+    let table_names: Vec<String> = sm.table_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        table_names.iter().any(|t| t == "ПолФизическогоЛица"),
+        "Expected 'ПолФизическогоЛица' in table_names, got: {:?}",
+        table_names
+    );
 }

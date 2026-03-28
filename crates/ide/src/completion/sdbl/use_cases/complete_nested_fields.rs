@@ -125,6 +125,21 @@ mod tests {
             name: "Валюты".to_string(),
             name_en: Some("Currencies".to_string()),
             attributes: vec![
+                // Standard attributes (normally added by XML parser)
+                bsl_metadata::Attribute {
+                    name: "Ссылка".to_string(),
+                    name_en: Some("Ref".to_string()),
+                    attr_type: bsl_metadata::AttributeType::Ref {
+                        mdo_type: bsl_metadata::MdoType::Catalog,
+                        name: "Валюты".to_string(),
+                    },
+                },
+                bsl_metadata::Attribute {
+                    name: "ПометкаУдаления".to_string(),
+                    name_en: Some("DeletionMark".to_string()),
+                    attr_type: bsl_metadata::AttributeType::Boolean,
+                },
+                // Custom attributes
                 bsl_metadata::Attribute {
                     name: "ОсновнаяВалюта".to_string(),
                     name_en: Some("BaseCurrency".to_string()),
