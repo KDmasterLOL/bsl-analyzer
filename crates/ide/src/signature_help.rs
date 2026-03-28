@@ -12,6 +12,8 @@ use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
 
+use crate::completion::platform_completion::resolve_syntax_expr_type;
+
 /// Result of signature help.
 #[derive(Debug, Clone)]
 pub struct SignatureHelp {
@@ -71,15 +73,26 @@ pub fn signature_help<DB: RootDatabase>(
     let active_param = count_commas_before(&arg_list, offset);
 
     // Resolve and build signature help
-    if let Some(type_name) = receiver_type {
+    if receiver_type.is_some() {
         // Method call: receiver.method()
-        if let Some(sig) = build_for_platform_method(db, &type_name, &callee_name, active_param) {
+        // First try type inference on the receiver node for accurate type resolution
+        // (handles MDO chains like Справочники.Партнеры.Method())
+        if let Some(sig) =
+            resolve_via_inference(db, file_id, &call_expr, &callee_name, active_param)
+        {
+            return Some(sig);
+        }
+
+        let type_name = receiver_type.as_deref().unwrap();
+
+        // Fallback: use extracted receiver name directly
+        if let Some(sig) = build_for_platform_method(db, type_name, &callee_name, active_param) {
             return Some(sig);
         }
 
         // Try CommonModule method
         if let Some(sig) =
-            build_for_common_module_method(db, file_id, &type_name, &callee_name, active_param)
+            build_for_common_module_method(db, file_id, type_name, &callee_name, active_param)
         {
             return Some(sig);
         }
@@ -190,6 +203,35 @@ fn count_commas_before(arg_list: &SyntaxNode, offset: TextSize) -> usize {
         }
     }
     count
+}
+
+/// Resolve receiver type via type inference and build signature help.
+///
+/// Uses `db.infer()` to properly resolve MDO chains like
+/// `Справочники.Партнеры.ПолучитьМакет()` → type `СправочникМенеджер`.
+fn resolve_via_inference<DB: RootDatabase>(
+    db: &DB,
+    file_id: FileId,
+    call_expr: &SyntaxNode,
+    method_name: &str,
+    active_param: usize,
+) -> Option<SignatureHelp> {
+    // Get the callee (first child of CALL_EXPR)
+    let callee = call_expr.first_child()?;
+    if callee.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+
+    // The receiver is the first child of the FIELD_EXPR (everything before the last .method)
+    let receiver_node = callee.children().next()?;
+
+    let infer_result = db.infer(file_id);
+    let receiver_ty = resolve_syntax_expr_type(&receiver_node, &infer_result);
+
+    let type_name = receiver_ty.platform_type_name()?;
+    tracing::debug!(?type_name, "Inferred receiver platform type for signature help");
+
+    build_for_platform_method(db, type_name, method_name, active_param)
 }
 
 /// Build SignatureHelp for a platform method.

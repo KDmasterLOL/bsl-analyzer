@@ -7,7 +7,7 @@
 
 mod bsl_completion;
 mod mdo_completion;
-mod platform_completion;
+pub(crate) mod platform_completion;
 mod sdbl;
 
 use ide_db::RootDatabase;
