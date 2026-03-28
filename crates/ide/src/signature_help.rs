@@ -12,7 +12,7 @@ use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
 
-use crate::completion::platform_completion::resolve_syntax_expr_type;
+use bsl_platform::PlatformData;
 
 /// Result of signature help.
 #[derive(Debug, Clone)]
@@ -75,11 +75,8 @@ pub fn signature_help<DB: RootDatabase>(
     // Resolve and build signature help
     if receiver_type.is_some() {
         // Method call: receiver.method()
-        // First try type inference on the receiver node for accurate type resolution
-        // (handles MDO chains like Справочники.Партнеры.Method())
-        if let Some(sig) =
-            resolve_via_inference(db, file_id, &call_expr, &callee_name, active_param)
-        {
+        // First try MDO chain detection (Справочники.Партнеры.Method() → CatalogManager)
+        if let Some(sig) = resolve_mdo_chain(&call_expr, &callee_name, active_param) {
             return Some(sig);
         }
 
@@ -205,33 +202,49 @@ fn count_commas_before(arg_list: &SyntaxNode, offset: TextSize) -> usize {
     count
 }
 
-/// Resolve receiver type via type inference and build signature help.
+/// Resolve MDO chain pattern and build signature help.
 ///
-/// Uses `db.infer()` to properly resolve MDO chains like
-/// `Справочники.Партнеры.ПолучитьМакет()` → type `СправочникМенеджер`.
-fn resolve_via_inference<DB: RootDatabase>(
-    db: &DB,
-    file_id: FileId,
+/// Handles patterns like `Справочники.Партнеры.ПолучитьМакет()` by recognizing
+/// "Справочники" as an MDO collection, mapping to "CatalogManager", and
+/// looking up "ПолучитьМакет" in the manager methods.
+fn resolve_mdo_chain(
     call_expr: &SyntaxNode,
     method_name: &str,
     active_param: usize,
 ) -> Option<SignatureHelp> {
-    // Get the callee (first child of CALL_EXPR)
     let callee = call_expr.first_child()?;
     if callee.kind() != SyntaxKind::FIELD_EXPR {
         return None;
     }
 
-    // The receiver is the first child of the FIELD_EXPR (everything before the last .method)
-    let receiver_node = callee.children().next()?;
+    // Collect all idents from the callee chain
+    let idents: Vec<String> = callee
+        .descendants_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
 
-    let infer_result = db.infer(file_id);
-    let receiver_ty = resolve_syntax_expr_type(&receiver_node, &infer_result);
+    // Need at least 3: Collection.Object.Method (e.g. Справочники.Партнеры.ПолучитьМакет)
+    if idents.len() < 3 {
+        return None;
+    }
 
-    let type_name = receiver_ty.platform_type_name()?;
-    tracing::debug!(?type_name, "Inferred receiver platform type for signature help");
+    // Check if first ident is an MDO collection
+    let mdo_type = bsl_metadata::MdoType::from_plural(&idents[0])?;
+    let manager_prefix = mdo_type.manager_type_prefix()?;
 
-    build_for_platform_method(db, type_name, method_name, active_param)
+    tracing::debug!(?manager_prefix, ?method_name, "MDO chain detected for signature help");
+
+    // Find the method in manager methods
+    let data = PlatformData::instance();
+    let method_lower = method_name.to_lowercase();
+    let method = data.get_manager_methods(manager_prefix).into_iter().find(|m| {
+        m.name.to_lowercase() == method_lower || m.english_name.to_lowercase() == method_lower
+    })?;
+
+    let docs = PlatformDataInner::instance().get_method_docs(method.id);
+    Some(build_signature_from_platform_method(method, docs.as_ref(), active_param))
 }
 
 /// Build SignatureHelp for a platform method.

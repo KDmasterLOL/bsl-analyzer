@@ -103,7 +103,7 @@ fn find_receiver_expr(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
 /// This is a lightweight syntax-level type resolver for completion.
 /// It uses inference results (var_types) for variables and platform data
 /// for method return types to support fluent chains.
-pub(crate) fn resolve_syntax_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
+fn resolve_syntax_expr_type(node: &SyntaxNode, infer_result: &InferenceResult) -> Ty {
     match node.kind() {
         // Simple identifier — look up in var_types or treat as type name
         SyntaxKind::IDENT | SyntaxKind::EXPR => {
