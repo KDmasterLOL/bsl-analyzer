@@ -119,24 +119,11 @@ impl ExprScopes {
         let mut scopes = Self::new();
         let root = scopes.root_scope();
 
-        // Add parameters to root scope
         if let Some(param_list) = proc.param_list() {
-            for param in param_list.params() {
-                if let Some(name_token) = param.name() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_parameter(name);
-                }
-            }
+            scopes.collect_params(&param_list);
         }
-
-        // Add local variables from body
         if let Some(body) = proc.body() {
-            for var_def in body.var_decls() {
-                for name_token in var_def.names() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_local_variable(root, name);
-                }
-            }
+            scopes.collect_body_symbols(root, &body);
         }
 
         scopes
@@ -147,27 +134,70 @@ impl ExprScopes {
         let mut scopes = Self::new();
         let root = scopes.root_scope();
 
-        // Add parameters to root scope
         if let Some(param_list) = func.param_list() {
-            for param in param_list.params() {
-                if let Some(name_token) = param.name() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_parameter(name);
-                }
-            }
+            scopes.collect_params(&param_list);
         }
-
-        // Add local variables from body
         if let Some(body) = func.body() {
-            for var_def in body.var_decls() {
-                for name_token in var_def.names() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_local_variable(root, name);
-                }
-            }
+            scopes.collect_body_symbols(root, &body);
         }
 
         scopes
+    }
+
+    fn collect_params(&mut self, param_list: &ast::ParamList) {
+        for param in param_list.params() {
+            if let Some(name_token) = param.name() {
+                let name = Name::new(name_token.text());
+                self.add_parameter(name);
+            }
+        }
+    }
+
+    fn collect_body_symbols(&mut self, scope: ScopeId, body: &ast::StmtList) {
+        use syntax::ast::AstNode;
+        use syntax::SyntaxKind;
+
+        // Collect explicit Перем declarations
+        for var_def in body.var_decls() {
+            for name_token in var_def.names() {
+                let name = Name::new(name_token.text());
+                self.add_local_variable(scope, name);
+            }
+        }
+
+        // Collect implicit variables from assignment targets (Партнер = ...)
+        // Only simple IDENT targets, not field expressions (Объект.Поле = ...)
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Add already-known names to seen set to avoid duplicates
+        for entry in &self.scopes[scope].entries {
+            seen.insert(entry.name.as_str().to_lowercase());
+        }
+
+        for node in body.syntax().descendants() {
+            if node.kind() != SyntaxKind::ASSIGN_STMT {
+                continue;
+            }
+            // First child of ASSIGN_STMT is the target
+            let Some(first) = node.first_child_or_token() else { continue };
+            if first.kind() != SyntaxKind::IDENT {
+                continue;
+            }
+            let text = match first.as_token() {
+                Some(t) => t.text().to_string(),
+                None => match first.as_node() {
+                    Some(n) => n.text().to_string(),
+                    None => continue,
+                },
+            };
+            let lower = text.to_lowercase();
+            if seen.contains(&lower) {
+                continue;
+            }
+            seen.insert(lower);
+            debug!(name = %text, "adding implicit variable from assignment");
+            self.add_local_variable(scope, Name::new(&text));
+        }
     }
 }
 

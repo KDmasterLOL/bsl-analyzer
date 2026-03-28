@@ -566,6 +566,8 @@ fn convert_completion_item(item: ide::CompletionItem) -> CompletionItem {
             None
         },
         documentation: item.documentation.map(lsp_types::Documentation::String),
+        sort_text: item.sort_text,
+        filter_text: item.filter_text,
         label_details: item
             .source
             .map(|s| lsp_types::CompletionItemLabelDetails { detail: None, description: Some(s) }),
