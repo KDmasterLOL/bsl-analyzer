@@ -138,10 +138,28 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
     if is_expression_start_position(&token) {
         tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
         let mut completions = Vec::new();
-        completions.extend(complete_local_symbols(db, position.file_id, position.offset, ""));
-        completions.extend(complete_user_defined_symbols(db, position.file_id, ""));
-        completions.extend(complete_mdo_symbols(db, position.file_id, ""));
-        completions.extend(complete_global_functions(""));
+
+        // Local symbols first (highest priority)
+        for mut item in complete_local_symbols(db, position.file_id, position.offset, "") {
+            item.sort_text = Some(format!("0_{}", item.label));
+            completions.push(item);
+        }
+        // User-defined methods
+        for mut item in complete_user_defined_symbols(db, position.file_id, "") {
+            item.sort_text = Some(format!("1_{}", item.label));
+            completions.push(item);
+        }
+        // Global functions
+        for mut item in complete_global_functions("") {
+            item.sort_text = Some(format!("2_{}", item.label));
+            completions.push(item);
+        }
+        // MDO types and objects (lowest priority in argument context)
+        for mut item in complete_mdo_symbols(db, position.file_id, "") {
+            item.sort_text = Some(format!("3_{}", item.label));
+            completions.push(item);
+        }
+
         tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
         return Some(completions);
     }
@@ -601,37 +619,12 @@ fn format_function_signature(function: &GlobalFunction) -> String {
     format!("{}({}){}", function.name, params.join(", "), ret_part)
 }
 
-/// Generates function snippet with parameter placeholders.
+/// Generates function snippet with cursor inside parentheses.
 ///
-/// LSP snippet format with tab stops:
-/// - $1, $2, $3 - Tab stop positions
-/// - ${1:placeholder} - Tab stop with placeholder text
-/// - $0 - Final cursor position
-///
-/// Example: `НачатьТранзакцию(${1:[РежимБлокировок]})$0`
+/// Inserts `FunctionName($0)` so cursor lands between parens and
+/// signatureHelp shows expected parameters.
 fn generate_function_snippet(function: &GlobalFunction) -> String {
-    if function.parameters.is_empty() {
-        // No parameters: just function name with parentheses and final cursor
-        return format!("{}()$0", function.name);
-    }
-
-    // Generate snippet with parameter placeholders
-    let mut snippet = format!("{}(", function.name);
-
-    for (idx, param) in function.parameters.iter().enumerate() {
-        if idx > 0 {
-            snippet.push_str(", ");
-        }
-
-        let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-        let placeholder =
-            if param.is_optional { format!("[{}]", param_type) } else { param_type.to_string() };
-
-        snippet.push_str(&format!("${{{}:{}}}", idx + 1, placeholder));
-    }
-
-    snippet.push_str(")$0");
-    snippet
+    format!("{}($0)", function.name)
 }
 
 /// Formats function documentation for the completion item.
@@ -856,7 +849,7 @@ mod tests {
 
         println!("Snippet: {}", snippet);
         assert!(snippet.starts_with("НачатьТранзакцию("));
-        assert!(snippet.ends_with(")$0"));
+        assert!(snippet.ends_with("$0)"));
     }
 
     #[test]
@@ -923,8 +916,8 @@ mod tests {
         assert!(item.detail.is_some());
         assert!(item.documentation.is_some());
 
-        // Snippet should end with $0
-        assert!(item.insert_text.ends_with("$0"));
+        // Snippet should end with $0)
+        assert!(item.insert_text.ends_with("$0)"));
     }
 
     #[test]

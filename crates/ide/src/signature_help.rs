@@ -124,43 +124,34 @@ fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
 /// Returns (receiver_type, method_name):
 /// - For `Строка.Найти()`: (Some("Строка"), "Найти")
 /// - For `НачатьТранзакцию()`: (None, "НачатьТранзакцию")
+/// - For `Справочники.Партнеры.ПолучитьМакет()`: (Some("Партнеры"), "ПолучитьМакет")
 fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String)> {
     // CALL_EXPR structure: callee (IDENT or FIELD_EXPR) followed by ARG_LIST
     let first_child = call_expr.first_child()?;
 
     match first_child.kind() {
         SyntaxKind::FIELD_EXPR => {
-            // Method call: receiver.method
-            // FIELD_EXPR: receiver DOT method_name
-            // Note: receiver IDENT can be either a node or token depending on parser
-            let mut receiver = None;
-            let mut method = None;
+            // Method call: receiver.method (possibly nested: a.b.method)
+            // Collect all IDENT tokens from descendants to handle nested FIELD_EXPR
+            let mut idents: Vec<String> = Vec::new();
 
-            for child in first_child.children_with_tokens() {
-                match child.kind() {
-                    SyntaxKind::IDENT => {
-                        let text = if let Some(token) = child.as_token() {
-                            token.text().to_string()
-                        } else if let Some(node) = child.as_node() {
-                            // IDENT node wrapping an IDENT token
-                            node.text().to_string()
-                        } else {
-                            continue;
-                        };
-                        if receiver.is_none() {
-                            receiver = Some(text);
-                        } else {
-                            method = Some(text);
-                        }
-                    }
-                    SyntaxKind::DOT => {
-                        // Next IDENT will be the method name
-                    }
-                    _ => {}
+            for token in first_child.descendants_with_tokens().filter_map(|it| it.into_token()) {
+                if token.kind() == SyntaxKind::IDENT {
+                    idents.push(token.text().to_string());
                 }
             }
 
-            Some((receiver, method?))
+            tracing::debug!(?idents, "extract_callee_info: collected idents from FIELD_EXPR");
+
+            match idents.len() {
+                0 => None,
+                1 => Some((None, idents.pop().unwrap())),
+                _ => {
+                    let method = idents.pop().unwrap();
+                    let receiver = idents.pop().unwrap();
+                    Some((Some(receiver), method))
+                }
+            }
         }
         SyntaxKind::IDENT => {
             // IDENT node (not token) - need to find IDENT token inside
