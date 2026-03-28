@@ -11,6 +11,7 @@ mod event_subscription;
 mod form;
 pub(crate) mod helpers;
 mod http_service;
+mod predefined_parser;
 mod register;
 mod role;
 mod scheduled_job;
@@ -31,6 +32,7 @@ pub use enum_parser::parse_enum_xml;
 pub use event_subscription::parse_event_subscription_xml;
 pub use form::{parse_form_from_bsl_path, parse_form_xml};
 pub use http_service::parse_http_service_xml;
+pub use predefined_parser::parse_predefined_xml;
 pub use register::{
     parse_accounting_register_xml, parse_accumulation_register_xml, parse_calculation_register_xml,
     parse_information_register_xml,

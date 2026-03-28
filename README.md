@@ -84,6 +84,7 @@ bsl-analyzer mcp \
 | **query** | Валидация и выполнение SDBL-запросов |
 | **execute** | Проверка синтаксиса, выполнение кода и вычисление выражений |
 | **debug** | Интеграция с отладчиком 1С: точки останова, стек, шаги |
+| **its_help** | Вопрос эксперту по ИТС: стандарты разработки, паттерны БСП, методические рекомендации |
 
 #### Расширение 1С (для query, execute, debug)
 
@@ -108,6 +109,15 @@ curl http://localhost/base/hs/bsl-analyzer/version
 ```
 
 > **Примечание:** инструменты `metadata`, `search` и `syntax_help` работают локально и не требуют расширения.
+
+#### Справка ИТС (its_help)
+
+Инструмент `its_help` обращается к [1С:Напарник](https://code.1c.ai/) для поиска по стандартам ИТС, методическим рекомендациям и документации платформы. Требуется токен доступа:
+
+1. Получите токен на [code.1c.ai/tokens](https://code.1c.ai/tokens)
+2. Передайте через переменную окружения `NAPARNIK_TOKEN`
+
+> **Примечание:** без `NAPARNIK_TOKEN` все остальные инструменты работают. `its_help` просто возвращает ошибку при вызове.
 
 #### Настройка в Claude Desktop / Claude Code
 
@@ -138,6 +148,30 @@ curl http://localhost/base/hs/bsl-analyzer/version
         "--onec-user", "admin",
         "--onec-password", "secret"
       ]
+    }
+  }
+}
+```
+
+Полная конфигурация со всеми возможностями (1С, ИТС, семантический поиск):
+
+```json
+{
+  "mcpServers": {
+    "bsl-analyzer": {
+      "command": "bsl-analyzer",
+      "args": [
+        "mcp",
+        "--source-dir", "/path/to/project",
+        "--onec-url", "http://localhost/base/hs/bsl-analyzer",
+        "--onec-user", "admin",
+        "--onec-password", "secret"
+      ],
+      "env": {
+        "NAPARNIK_TOKEN": "ваш_токен_с_code.1c.ai",
+        "EMBEDDING_URL": "http://localhost:8000/v1/embeddings",
+        "OPENROUTER_API_KEY": "ваш_ключ_openrouter"
+      }
     }
   }
 }
@@ -253,6 +287,7 @@ bsl-analyzer (LSP-сервер)
 
 - [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) — статический анализатор BSL (Java, LGPL-3.0)
 - [1c-syntax](https://github.com/1c-syntax) — сообщество разработчиков инструментов для 1С
+- [RDT1C](https://github.com/Segate-ekb/1c_RDT) — «Инструменты разработчика» для 1С. Реализация интеграции с API 1С:Напарник (FIM completion, context/update) использована как референс для модуля `naparnik`
 
 ## Лицензия
 

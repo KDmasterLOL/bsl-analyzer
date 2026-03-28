@@ -316,29 +316,32 @@ impl LoweringContext {
             _ => FunctionKind::Unknown(func_name.clone()),
         };
 
-        // Lower arguments - get all expression children
-        let args: Vec<ExprHir> = node
-            .children()
-            .filter(|c| {
-                matches!(
-                    c.kind(),
-                    syntax::SyntaxKind::SDBL_COLUMN_REF
-                        | syntax::SyntaxKind::SDBL_LITERAL
-                        | syntax::SyntaxKind::SDBL_MULTI_STRING
-                        | syntax::SyntaxKind::SDBL_FUNCTION_CALL
-                        | syntax::SyntaxKind::SDBL_PAREN_EXPR
-                        | syntax::SyntaxKind::SDBL_TUPLE_EXPR
-                        | syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
-                        | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
-                        | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
-                        | syntax::SyntaxKind::SDBL_ADDITIVE_EXPR
-                        | syntax::SyntaxKind::SDBL_MULTIPLICATIVE_EXPR
-                        | syntax::SyntaxKind::SDBL_UNARY_EXPR
-                        | syntax::SyntaxKind::SDBL_PARAMETER
-                )
-            })
-            .map(|arg| self.lower_expr(&arg))
-            .collect();
+        // Lower arguments - special handling for VALUE()/ЗНАЧЕНИЕ() function
+        let args: Vec<ExprHir> = if matches!(function, FunctionKind::Value) {
+            self.lower_value_function_args(node)
+        } else {
+            node.children()
+                .filter(|c| {
+                    matches!(
+                        c.kind(),
+                        syntax::SyntaxKind::SDBL_COLUMN_REF
+                            | syntax::SyntaxKind::SDBL_LITERAL
+                            | syntax::SyntaxKind::SDBL_MULTI_STRING
+                            | syntax::SyntaxKind::SDBL_FUNCTION_CALL
+                            | syntax::SyntaxKind::SDBL_PAREN_EXPR
+                            | syntax::SyntaxKind::SDBL_TUPLE_EXPR
+                            | syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR
+                            | syntax::SyntaxKind::SDBL_LOGICAL_AND_EXPR
+                            | syntax::SyntaxKind::SDBL_COMPARISON_EXPR
+                            | syntax::SyntaxKind::SDBL_ADDITIVE_EXPR
+                            | syntax::SyntaxKind::SDBL_MULTIPLICATIVE_EXPR
+                            | syntax::SyntaxKind::SDBL_UNARY_EXPR
+                            | syntax::SyntaxKind::SDBL_PARAMETER
+                    )
+                })
+                .map(|arg| self.lower_expr(&arg))
+                .collect()
+        };
 
         // Extract member access chain after closing paren
         // Token sequence: FUNC ( args ) . Field1 . Field2
@@ -448,6 +451,136 @@ impl LoweringContext {
             ty: SdblType::Unknown, // Parameters have unknown type without context
             range: node.text_range(),
         }
+    }
+
+    /// Lower VALUE()/ЗНАЧЕНИЕ() function arguments as MDO paths.
+    ///
+    /// VALUE() arguments are MDO paths like:
+    /// - Перечисление.Статусы.Активный (Enum.Statuses.Active)
+    /// - Справочник.Валюты.ПустаяСсылка (Catalog.Currencies.EmptyRef)
+    ///
+    /// These should NOT be resolved as table column references.
+    fn lower_value_function_args(&mut self, node: &syntax::SyntaxNode) -> Vec<ExprHir> {
+        // VALUE() argument is wrapped in precedence nodes: LOGICAL_OR → LOGICAL_AND →
+        // ADDITIVE → MULTIPLICATIVE → COLUMN_REF. Find it via descendants.
+        let Some(col_ref) =
+            node.descendants().find(|n| n.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF)
+        else {
+            // No column ref found — fall back to generic expression lowering for incomplete input
+            return node
+                .children()
+                .filter(|c| {
+                    matches!(
+                        c.kind(),
+                        syntax::SyntaxKind::SDBL_COLUMN_REF
+                            | syntax::SyntaxKind::SDBL_LITERAL
+                            | syntax::SyntaxKind::SDBL_MISSING_ARG
+                    )
+                })
+                .map(|arg| self.lower_expr(&arg))
+                .collect();
+        };
+
+        let text = col_ref.text().to_string();
+        let str_parts: Vec<&str> = text.split('.').collect();
+        let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
+
+        // Extract IDENT ranges for semantic highlighting
+        let ident_ranges: Vec<(TextRange, String)> = col_ref
+            .children_with_tokens()
+            .filter_map(|child| match child {
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::IDENT => {
+                    Some((token.text_range(), token.text().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Try to parse first part as MDO type: Перечисление, Справочник, Enum, Catalog, etc.
+        let mdo_type_parsed =
+            str_parts.first().and_then(|s| s.trim().parse::<bsl_metadata::MdoType>().ok());
+
+        if let Some(mdo_type) = mdo_type_parsed {
+            // Part 0: MDO type keyword → MdoType semantic token
+            if let Some((range, text)) = ident_ranges.first() {
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
+                    crate::source_map::TokenCategory::MdoType,
+                );
+            }
+
+            // Part 1: Object name → TableName semantic token
+            if let Some((range, text)) = ident_ranges.get(1) {
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
+                    crate::source_map::TokenCategory::TableName,
+                );
+            }
+
+            // Part 2: Value name → validate and assign FieldName or UnresolvedFieldName
+            if let Some((range, text)) = ident_ranges.get(2) {
+                let object_name = str_parts.get(1).map(|s| s.trim()).unwrap_or("");
+                let value_name = text.trim();
+
+                let is_empty_ref = {
+                    let lower = value_name.to_lowercase();
+                    lower == "пустаяссылка" || lower == "emptyref"
+                };
+
+                let is_valid = if is_empty_ref {
+                    true
+                } else if mdo_type == bsl_metadata::MdoType::Enum {
+                    self.metadata
+                        .as_ref()
+                        .and_then(|config| config.find_metadata_object(mdo_type, object_name))
+                        .map(|obj| obj.find_enum_value(value_name).is_some())
+                        .unwrap_or(true) // No metadata = don't flag as error
+                } else if matches!(
+                    mdo_type,
+                    bsl_metadata::MdoType::Catalog
+                        | bsl_metadata::MdoType::Document
+                        | bsl_metadata::MdoType::ChartOfCharacteristicTypes
+                        | bsl_metadata::MdoType::ChartOfAccounts
+                ) {
+                    self.metadata
+                        .as_ref()
+                        .and_then(|config| config.find_metadata_object(mdo_type, object_name))
+                        .map(|obj| {
+                            // If predefined_items is empty, metadata might not have loaded them yet
+                            // In that case, don't flag as error (graceful degradation)
+                            if obj.predefined_items.is_empty() {
+                                true
+                            } else {
+                                obj.find_predefined_item(value_name).is_some()
+                            }
+                        })
+                        .unwrap_or(true) // No metadata = don't flag as error
+                } else {
+                    true // Other types: only ПустаяСсылка is valid (already handled above)
+                };
+
+                let category = if is_valid {
+                    crate::source_map::TokenCategory::FieldName
+                } else {
+                    crate::source_map::TokenCategory::UnresolvedFieldName
+                };
+
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
+                    category,
+                );
+            }
+        } else {
+            // Cannot parse MDO type - fall back to UnresolvedFieldName for all parts
+            for (range, text) in &ident_ranges {
+                self.source_map.add_token(
+                    crate::source_map::TokenInfo::new(*range, syntax::SyntaxKind::IDENT, text),
+                    crate::source_map::TokenCategory::UnresolvedFieldName,
+                );
+            }
+        }
+
+        vec![ExprHir::ColumnRef { parts, ty: SdblType::AnyRef, range: col_ref.text_range() }]
     }
 
     /// Lower tuple expression (expr1, expr2, ...).

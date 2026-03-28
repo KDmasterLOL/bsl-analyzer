@@ -482,23 +482,14 @@ impl Scope {
 
         let mut fields = Vec::new();
 
-        // Add standard Ссылка field (reference to self)
-        fields.push(FieldDef::standard(
-            "Ссылка",
-            "Ref",
-            SdblType::reference(mdo_ref.mdo_type, &mdo_ref.name),
-        ));
-
-        // Add standard ПометкаУдаления field
-        fields.push(FieldDef::standard("ПометкаУдаления", "DeletionMark", SdblType::Boolean));
-
-        // Add custom attributes (access public field directly)
+        // Add attributes from metadata (includes standard ones like Ссылка, ПометкаУдаления, etc.)
         for attr in &mdo_object.attributes {
+            let is_standard = is_standard_attribute_name(&attr.name);
             fields.push(FieldDef::new_with_names(
                 attr.name.clone(),
                 attr.name_en.clone(),
                 SdblType::from_attribute_type(&attr.attr_type),
-                false, // is_standard
+                is_standard,
             ));
         }
 
@@ -537,6 +528,16 @@ impl Scope {
         let ts = mdo_object.find_tabular_section(ts_name)?;
 
         let mut fields = Vec::new();
+
+        // Add standard Ссылка field (reference to parent object)
+        fields.push(FieldDef::standard(
+            "Ссылка",
+            "Ref",
+            SdblType::reference(parent_mdo_type, parent_mdo_name),
+        ));
+
+        // Add standard НомерСтроки field
+        fields.push(FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()));
 
         // Add tabular section attributes as fields
         // Single source of truth: use attr_type directly from metadata
@@ -627,6 +628,63 @@ impl Scope {
     ) -> Vec<FieldDef> {
         self.resolve_defined_type_fields(name, underlying_type).unwrap_or_default()
     }
+}
+
+/// Returns `true` if `name` matches a known standard attribute name (case-insensitive, bilingual).
+fn is_standard_attribute_name(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "ссылка"
+            | "ref"
+            | "пометкаудаления"
+            | "deletionmark"
+            | "код"
+            | "code"
+            | "наименование"
+            | "description"
+            | "этогруппа"
+            | "isfolder"
+            | "родитель"
+            | "parent"
+            | "владелец"
+            | "owner"
+            | "предопределенный"
+            | "predefined"
+            | "имяпредопределенныхданных"
+            | "predefineddataname"
+            | "номер"
+            | "number"
+            | "дата"
+            | "date"
+            | "проведен"
+            | "posted"
+            | "стартован"
+            | "started"
+            | "завершен"
+            | "completed"
+            | "главнаязадача"
+            | "headtask"
+            | "выполнена"
+            | "executed"
+            | "бизнеспроцесс"
+            | "taskbusinessprocess"
+            | "точкамаршрута"
+            | "routepoint"
+            | "этотузел"
+            | "thisnode"
+            | "типзначения"
+            | "valuetype"
+            | "порядок"
+            | "order"
+            | "активность"
+            | "active"
+            | "номерстроки"
+            | "linenumber"
+            | "регистратор"
+            | "recorder"
+            | "период"
+            | "period"
+    )
 }
 
 /// Column completion item.
@@ -748,5 +806,69 @@ mod tests {
         // Shared field is ambiguous
         let ty = scope.resolve_column_type(None, "SharedField");
         assert_eq!(ty, SdblType::Error);
+    }
+
+    #[test]
+    fn test_no_duplicate_fields_when_metadata_has_standard_attributes() {
+        use bsl_metadata::{Attribute, AttributeType, Configuration, MetadataObject};
+        use std::sync::Arc;
+
+        let mut config = Configuration::new("TestConfig");
+        let mut obj = MetadataObject::new(MdoType::Catalog, "Валюты");
+
+        // Add standard attributes that metadata XML parser would include
+        obj.add_attribute(Attribute {
+            name: "Ссылка".to_string(),
+            name_en: Some("Ref".to_string()),
+            attr_type: AttributeType::String { length: None },
+        });
+        obj.add_attribute(Attribute {
+            name: "ПометкаУдаления".to_string(),
+            name_en: Some("DeletionMark".to_string()),
+            attr_type: AttributeType::Boolean,
+        });
+        obj.add_attribute(Attribute {
+            name: "Код".to_string(),
+            name_en: Some("Code".to_string()),
+            attr_type: AttributeType::String { length: Some(10) },
+        });
+        obj.add_attribute(Attribute {
+            name: "Наименование".to_string(),
+            name_en: Some("Description".to_string()),
+            attr_type: AttributeType::String { length: Some(100) },
+        });
+        obj.add_attribute(Attribute {
+            name: "Курс".to_string(),
+            name_en: Some("Rate".to_string()),
+            attr_type: AttributeType::Number { precision: 15, scale: 4 },
+        });
+
+        config.add_metadata_object(obj);
+
+        let scope = Scope::new_with_metadata(Some(Arc::new(config)));
+        let mdo_ref =
+            crate::types::MdoRef { mdo_type: MdoType::Catalog, name: "Валюты".to_string() };
+        let fields = scope.get_fields_for_ref(&mdo_ref);
+
+        // Verify no duplicate field names
+        let mut names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        let original_len = names.len();
+        names.dedup();
+        assert_eq!(names.len(), original_len, "Duplicate fields found in resolve_ref_fields");
+
+        // Verify standard attributes are marked correctly
+        let ref_field = fields.iter().find(|f| f.name == "Ссылка");
+        assert!(ref_field.is_some(), "Ссылка field should be present");
+        assert!(ref_field.unwrap().is_standard, "Ссылка should be marked as standard");
+
+        let deletion_mark = fields.iter().find(|f| f.name == "ПометкаУдаления");
+        assert!(deletion_mark.is_some(), "ПометкаУдаления field should be present");
+        assert!(deletion_mark.unwrap().is_standard, "ПометкаУдаления should be marked as standard");
+
+        // Verify custom attribute is not marked as standard
+        let rate_field = fields.iter().find(|f| f.name == "Курс");
+        assert!(rate_field.is_some(), "Курс field should be present");
+        assert!(!rate_field.unwrap().is_standard, "Курс should not be marked as standard");
     }
 }

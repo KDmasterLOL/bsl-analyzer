@@ -42,13 +42,20 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
                 return Some(items);
             }
         }
-        // `Справочники.Валюты.` or `Справочники.Валюты.Найти|` → complete manager methods
-        MdoContext::ObjectDot { mdo_type } => {
+        // `Справочники.Валюты.` or `Справочники.Валюты.Найти|` → complete manager methods + predefined items
+        MdoContext::ObjectDot { mdo_type, object_name } => {
+            let mut items = Vec::new();
+
+            // Manager methods (НайтиПоКоду, СоздатьЭлемент, ...)
             if let Some(prefix) = mdo_type.manager_type_prefix() {
-                let items = complete_manager_methods(prefix);
-                if !items.is_empty() {
-                    return Some(items);
-                }
+                items.extend(complete_manager_methods(prefix));
+            }
+
+            // Predefined items (EmailПартнера, Россия, ...)
+            items.extend(complete_predefined_items(db, position.file_id, mdo_type, &object_name));
+
+            if !items.is_empty() {
+                return Some(items);
             }
         }
     }
@@ -61,8 +68,8 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
 enum MdoContext {
     /// Cursor after `Справочники.` — complete with MDO object names
     CollectionDot { mdo_type: MdoType },
-    /// Cursor after `Справочники.Валюты.` — complete with manager methods
-    ObjectDot { mdo_type: MdoType },
+    /// Cursor after `Справочники.Валюты.` — complete with manager methods + predefined items
+    ObjectDot { mdo_type: MdoType, object_name: String },
 }
 
 /// Detect MDO completion context from the token at cursor position.
@@ -94,9 +101,9 @@ fn detect_from_dot(dot_token: &SyntaxToken) -> Option<MdoContext> {
 
     // Case: `Справочники.Валюты.` — receiver is FIELD_EXPR
     if receiver.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, _object_name)) = get_field_expr_parts(&receiver) {
+        if let Some((base_text, object_name)) = get_field_expr_parts(&receiver) {
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type });
+                return Some(MdoContext::ObjectDot { mdo_type, object_name });
             }
         }
     }
@@ -138,9 +145,9 @@ fn detect_from_ident_after_dot(ident_token: &SyntaxToken) -> Option<MdoContext> 
 
     // Case: `Справочники.Валюты.Найти|` — base is FIELD_EXPR
     if base.kind() == SyntaxKind::FIELD_EXPR {
-        if let Some((base_text, _object_name)) = get_field_expr_parts(&base) {
+        if let Some((base_text, object_name)) = get_field_expr_parts(&base) {
             if let Some(mdo_type) = MdoType::from_plural(&base_text) {
-                return Some(MdoContext::ObjectDot { mdo_type });
+                return Some(MdoContext::ObjectDot { mdo_type, object_name });
             }
         }
     }
@@ -260,4 +267,47 @@ fn complete_manager_methods(manager_prefix: &str) -> Vec<CompletionItem> {
         .iter()
         .map(|method| super::platform_completion::render_platform_method(method))
         .collect()
+}
+
+/// Complete predefined items from project metadata.
+///
+/// Example: `Справочники.ВидыКонтактнойИнформации.` → [EmailПартнера, АдресПартнера, ...]
+fn complete_predefined_items<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    mdo_type: MdoType,
+    object_name: &str,
+) -> Vec<CompletionItem> {
+    let configs = db.get_all_configurations(file_id);
+    let name_lower = object_name.to_lowercase();
+
+    for (_source_name, config) in &configs {
+        let mdo = config
+            .metadata_objects()
+            .iter()
+            .find(|obj| obj.mdo_type == mdo_type && obj.name.to_lowercase() == name_lower);
+
+        if let Some(mdo) = mdo {
+            let items: Vec<CompletionItem> = mdo
+                .predefined_items
+                .iter()
+                .map(|pi| CompletionItem {
+                    label: pi.name.clone(),
+                    detail: Some(format!("{}.{}", mdo_type.russian_name(), object_name)),
+                    kind: CompletionItemKind::Constant,
+                    insert_text: pi.name.clone(),
+                    documentation: None,
+                    sort_text: Some(format!("1_{}", pi.name)), // Sort after methods (default "0_")
+                    filter_text: None,
+                    source: None,
+                })
+                .collect();
+
+            tracing::debug!(object_name, count = items.len(), "Predefined items found");
+
+            return items;
+        }
+    }
+
+    Vec::new()
 }

@@ -663,6 +663,14 @@ impl LoweringContext {
             true, // is_standard
         ));
 
+        // 4b. Add standard НомерСтроки field
+        fields.push(FieldDef::new_with_names(
+            "НомерСтроки".to_string(),
+            Some("LineNumber".to_string()),
+            SdblType::number(),
+            true, // is_standard
+        ));
+
         // 5. Add all tabular section attributes
         for attribute in tabular_section.attributes() {
             // Use structured AttributeType directly (single source of truth)

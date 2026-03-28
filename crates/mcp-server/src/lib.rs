@@ -108,6 +108,16 @@ struct ExecuteParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ItsHelpParams {
+    /// Вопрос на русском языке. Примеры:
+    /// - "Как правильно реализовать обработку проведения документа?"
+    /// - "Стандарт структуры модуля по ИТС"
+    /// - "Когда использовать ПовторноеИспользование НаВремяСеанса?"
+    /// - "Ошибка 'Поле объекта не обнаружено' — причины и решения"
+    question: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DebugParams {
     /// Действие:
     /// - "attach" — подключиться к серверу отладки (требует host, infobase; port по умолчанию 1550)
@@ -319,6 +329,20 @@ impl McpServer {
         }
     }
 
+    /// Вопрос эксперту по 1С:Предприятие через ИТС (1С:Напарник).
+    /// Используйте для: стандартов разработки ИТС, паттернов БСП,
+    /// методических рекомендаций, типовых решений, диагностики ошибок.
+    /// НЕ используйте для: сигнатур методов платформы (→ syntax_help),
+    /// поиска в коде конфигурации (→ search).
+    /// Требует NAPARNIK_TOKEN. Latency: 5-20 секунд.
+    #[tool(name = "its_help", annotations(read_only_hint = true))]
+    async fn its_help(
+        &self,
+        params: Parameters<ItsHelpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        tools::its_help::its_help(&params.0.question).await
+    }
+
     /// Отладчик 1С: подключение к серверу отладки, точки останова, пошаговое выполнение,
     /// просмотр стека и переменных, вычисление выражений в контексте breakpoint.
     /// action: attach | disconnect | set_breakpoint | remove_breakpoint | continue | step | wait_stop | stack_trace | locals | eval
@@ -442,7 +466,7 @@ impl ServerHandler for McpServer {
             "BSL Analyzer MCP server. Provides 1C:Enterprise metadata browsing, \
              platform API reference, SDBL query validation, code execution, debugging, \
              and code search (full-text and semantic). \
-             Tools: metadata, search, syntax_help, query, execute, debug."
+             Tools: metadata, search, syntax_help, query, execute, debug, its_help."
                 .into(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

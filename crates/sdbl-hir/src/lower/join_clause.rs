@@ -133,6 +133,10 @@ impl LoweringContext {
             }
         }
 
+        // Add joined table to scope BEFORE processing ON condition
+        // so that fields from the joined table resolve correctly
+        self.scope.add_table(table.clone());
+
         // Lower ON condition - get the expression child directly from JOIN clause
         // AST structure: SDBL_JOIN_CLAUSE contains SDBL_DATA_SOURCE + expression (ON condition)
         let condition_node = join.syntax().children().find(|n| {
