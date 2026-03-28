@@ -236,11 +236,25 @@ fn resolve_mdo_chain(
 
     tracing::debug!(?manager_prefix, ?method_name, "MDO chain detected for signature help");
 
-    // Find the method in manager methods
+    // Find the method in manager methods.
+    // Manager methods have name="<Имя" for all entries. The actual Russian name
+    // is in MethodDocs.syntax (e.g. "ПолучитьМакет(...)") and the English name
+    // in english_name after the dot (e.g. "<Catalog name>.GetTemplate" → "GetTemplate").
     let data = PlatformData::instance();
     let method_lower = method_name.to_lowercase();
     let method = data.get_manager_methods(manager_prefix).into_iter().find(|m| {
-        m.name.to_lowercase() == method_lower || m.english_name.to_lowercase() == method_lower
+        // Match by Russian name from docs syntax
+        let docs = PlatformDataInner::instance().get_method_docs(m.id);
+        let ru_match = docs
+            .as_ref()
+            .and_then(|d| d.syntax.split('(').next())
+            .is_some_and(|ru| ru.to_lowercase() == method_lower);
+        if ru_match {
+            return true;
+        }
+        // Match by English name (part after dot)
+        let en_name = m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
+        en_name.to_lowercase() == method_lower
     })?;
 
     let docs = PlatformDataInner::instance().get_method_docs(method.id);
