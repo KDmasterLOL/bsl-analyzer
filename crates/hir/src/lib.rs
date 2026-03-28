@@ -13,7 +13,7 @@ pub use hir_def::{MethodId, ModuleData, ModuleId, VariableId};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
 // Re-export HIR body types for diagnostics
-pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext};
+pub use hir_def::body::{DeprecatedKind8312, ExternalRef, MagicNumberContext, ManagerType};
 pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
 
 // Re-export HIR expression/statement types

@@ -355,6 +355,87 @@ fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<
     methods.iter().map(render_platform_method).collect()
 }
 
+/// Renders a platform manager method as a completion item.
+///
+/// Manager methods in platform data have `name = "<Имя"` for all methods.
+/// The actual Russian name is extracted from `MethodDocs.syntax` (e.g., "НайтиПоКоду(...)"),
+/// and the English name from `english_name` (e.g., "<Catalog name>.FindByCode" → "FindByCode").
+pub(super) fn render_manager_method(method: &PlatformMethod) -> CompletionItem {
+    let data = PlatformData::instance();
+    let docs = data.get_method_docs(method.id);
+
+    // Extract Russian name from documentation syntax: "НайтиПоКоду(<Код>, ...)" → "НайтиПоКоду"
+    let ru_name: String =
+        docs.as_ref().and_then(|d| d.syntax.split('(').next()).unwrap_or(&method.name).to_string();
+
+    // Extract English name: "<Catalog name>.FindByCode" → "FindByCode"
+    let en_name: String = method
+        .english_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&method.english_name)
+        .to_string();
+
+    let label = ru_name.clone();
+
+    // Detail: signature with return type
+    let params: Vec<_> = method
+        .parameters
+        .iter()
+        .map(|p| {
+            let ty = p.param_type.as_deref().unwrap_or("Произвольный");
+            if p.is_optional {
+                format!("[{}]", ty)
+            } else {
+                format!("<{}>", ty)
+            }
+        })
+        .collect();
+    let ret_part = method.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+    let detail = format!("{}({}){}", ru_name, params.join(", "), ret_part);
+
+    // Insert text: snippet with parameter placeholders
+    let insert_text = if method.parameters.is_empty() {
+        format!("{}()$0", ru_name)
+    } else {
+        let mut snippet = format!("{}(", ru_name);
+        for (idx, param) in method.parameters.iter().enumerate() {
+            if idx > 0 {
+                snippet.push_str(", ");
+            }
+            let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
+            let placeholder = if param.is_optional {
+                format!("[{}]", param_type)
+            } else {
+                param_type.to_string()
+            };
+            snippet.push_str(&format!("${{{}:{}}}", idx + 1, placeholder));
+        }
+        snippet.push_str(")$0");
+        snippet
+    };
+
+    // Documentation
+    let documentation = docs.map(|d| {
+        let mut doc = format!("{} / {}\n\n", ru_name, en_name);
+        if !d.description.is_empty() {
+            doc.push_str(&d.description);
+        }
+        doc
+    });
+
+    CompletionItem {
+        label,
+        detail: Some(detail),
+        kind: CompletionItemKind::Method,
+        insert_text,
+        documentation,
+        sort_text: None,
+        filter_text: Some(format!("{} {}", ru_name, en_name)),
+        source: None,
+    }
+}
+
 /// Renders a platform method as a completion item.
 ///
 /// Generates a completion item with:
