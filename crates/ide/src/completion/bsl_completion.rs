@@ -10,7 +10,7 @@ use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
 use either::Either;
 use hir::{ExprScopes, ScopeDef};
 use ide_db::{RootDatabase, TextRange};
-use syntax::{ast::AstNode, SyntaxKind};
+use syntax::{ast::AstNode, NodeOrToken, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -252,9 +252,15 @@ fn complete_local_symbols<DB: RootDatabase>(
             if first.kind() != SyntaxKind::IDENT {
                 continue;
             }
-            let text = match first.as_token() {
-                Some(t) => t.text().to_string(),
-                None => continue,
+            // The parser wraps identifiers in an IDENT node (not a bare token),
+            // so first_child_or_token() returns NodeOrToken::Node for simple
+            // assignments like `Партнер = ...`. We need to handle both cases.
+            let text: String = match &first {
+                NodeOrToken::Token(t) => t.text().to_string(),
+                NodeOrToken::Node(n) => match n.first_token() {
+                    Some(t) => t.text().to_string(),
+                    None => continue,
+                },
             };
             let lower = text.to_lowercase();
             if seen.contains(&lower) {
@@ -1300,5 +1306,52 @@ mod tests {
         let var_count =
             items.iter().filter(|i| i.detail == Some("Локальная переменная".to_string())).count();
         assert_eq!(var_count, 2, "Should have 2 local variables");
+    }
+
+    #[test]
+    fn test_implicit_variables_from_assignments() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест(Запрос)
+    Партнер = Справочники.Партнеры.НайтиПоКоду("001");
+    Результат = Новый Структура;
+    Результат.Вставить("Партнер", Партнер);
+    ВременнаяПеременная = 42;
+КонецПроцедуры
+"#;
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+        db.set_file_text(file_id, source);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+
+        // Position inside the method body (after assignments)
+        let offset = syntax::TextSize::from(source.find("ВременнаяПеременная").unwrap() as u32);
+
+        let items = complete_local_symbols(&db, file_id, offset, "");
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        println!("Found local symbols: {:?}", labels);
+
+        // Should find parameter
+        assert!(labels.contains(&"Запрос"), "Should find parameter Запрос");
+
+        // Should find implicit variables from assignments
+        assert!(labels.contains(&"Партнер"), "Should find implicit var Партнер");
+        assert!(labels.contains(&"Результат"), "Should find implicit var Результат");
+        assert!(
+            labels.contains(&"ВременнаяПеременная"),
+            "Should find implicit var ВременнаяПеременная"
+        );
+
+        // Implicit vars should have detail "Переменная"
+        let implicit_count =
+            items.iter().filter(|i| i.detail == Some("Переменная".to_string())).count();
+        assert_eq!(implicit_count, 3, "Should have 3 implicit variables");
     }
 }
