@@ -133,6 +133,19 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
         return Some(completions);
     }
 
+    // Check if we're at a trigger position where expression is expected
+    // but nothing is typed yet (e.g., inside parentheses, after comma, empty line)
+    if is_expression_start_position(&token) {
+        tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
+        let mut completions = Vec::new();
+        completions.extend(complete_local_symbols(db, position.file_id, position.offset, ""));
+        completions.extend(complete_user_defined_symbols(db, position.file_id, ""));
+        completions.extend(complete_mdo_symbols(db, position.file_id, ""));
+        completions.extend(complete_global_functions(""));
+        tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
+        return Some(completions);
+    }
+
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
     None
@@ -234,6 +247,35 @@ fn find_method_for_token(
         }
     }
     None
+}
+
+/// Check if the token indicates a position where an expression is expected
+/// but nothing has been typed yet (trigger position for empty-prefix completion).
+///
+/// Examples: `Foo(|)`, `Foo(x, |)`, empty line inside method body.
+fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
+    match token.kind() {
+        // Inside parentheses: Foo(|) or Foo(x, |)
+        SyntaxKind::R_PAREN | SyntaxKind::L_PAREN | SyntaxKind::COMMA => true,
+        // Semicolon: after end of statement, new statement expected
+        SyntaxKind::SEMICOLON => true,
+        // Whitespace/newline: check previous non-trivia token for context
+        SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {
+            // Walk backwards to find previous non-trivia token
+            let mut prev = token.prev_token();
+            while let Some(ref t) = prev {
+                if !t.kind().is_trivia() {
+                    break;
+                }
+                prev = t.prev_token();
+            }
+            match prev {
+                Some(t) => !matches!(t.kind(), SyntaxKind::DOT),
+                None => true,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Helper: Get plural Russian form for MDO type.
