@@ -292,11 +292,9 @@ impl LoweringContext {
             self.scope.add_table(table.clone());
         }
 
-        // 3. Lower JOINs
+        // 3. Lower JOINs (tables are added to scope inside lower_join_clause,
+        //    before ON conditions are processed, so fields from joined tables resolve)
         let joins = self.lower_joins(query);
-        for join in &joins {
-            self.scope.add_table(join.table.clone());
-        }
 
         // 4. Extract DISTINCT and TOP from limitations
         let (distinct, top, top_range) = self.extract_limitations(query.syntax());

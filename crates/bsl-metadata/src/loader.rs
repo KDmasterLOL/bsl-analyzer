@@ -968,6 +968,73 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn test_niagara_field_resolution() {
+        let path = concat!(env!("HOME"), "/src/niagara_ut/src/cf");
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let config = load_from_directory(path).unwrap();
+
+        // КартыЛояльности: check Партнер, Статус
+        let kl = config
+            .metadata_objects()
+            .iter()
+            .find(|o| o.name == "КартыЛояльности" && o.mdo_type == MdoType::Catalog);
+        if let Some(kl) = kl {
+            println!("КартыЛояльности: {} attrs", kl.attributes.len());
+            for a in &kl.attributes {
+                println!("  {}", a.name);
+            }
+            assert!(kl.attributes.iter().any(|a| a.name == "Партнер"), "Партнер not found");
+            assert!(kl.attributes.iter().any(|a| a.name == "Статус"), "Статус not found");
+        } else {
+            println!("КартыЛояльности not found in metadata");
+        }
+
+        // СостояниеАдресовЭлектроннойПочты: check dims/resources
+        let reg =
+            config.registers().iter().find(|r| r.name() == "СостояниеАдресовЭлектроннойПочты");
+        if let Some(reg) = reg {
+            println!(
+                "Регистр: dims={}, res={}, attrs={}",
+                reg.dimensions().len(),
+                reg.resources().len(),
+                reg.attributes().len()
+            );
+            for d in reg.dimensions() {
+                println!("  dim: {}", d.name());
+            }
+            for r in reg.resources() {
+                println!("  res: {}", r.name());
+            }
+            for a in reg.attributes() {
+                println!("  attr: {}", a.name());
+            }
+        } else {
+            println!("Register not found");
+        }
+
+        // Партнеры.КонтактнаяИнформация: check АдресЭП, Вид
+        let p = config
+            .metadata_objects()
+            .iter()
+            .find(|o| o.name == "Партнеры" && o.mdo_type == MdoType::Catalog);
+        if let Some(p) = p {
+            for ts in &p.tabular_sections {
+                if ts.name() == "КонтактнаяИнформация" {
+                    println!("ТЧ КонтактнаяИнформация: {} attrs", ts.attributes().len());
+                    for a in ts.attributes() {
+                        println!("  {}", a.name());
+                    }
+                }
+            }
+        } else {
+            println!("Партнеры not found");
+        }
+    }
+
     /// Test loading from doc3 project (only run when doc3 is available)
     #[test]
     #[ignore] // Only run when doc3 project is available

@@ -2456,3 +2456,55 @@ fn test_value_function_predefined_item_empty_list_graceful_degradation() {
         unresolved
     );
 }
+
+#[test]
+fn test_join_paren_field_resolution() {
+    let query = r#"ВЫБРАТЬ Т.Ссылка ИЗ Справочник.Валюты КАК Т ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Валюты КАК Т2 ПО Т.Ссылка = Т2.Ссылка И (Т2.Код = "USD")"#;
+
+    let ast = parser::parse_sdbl(query);
+
+    let mut config = bsl_metadata::Configuration::new("Test");
+    let catalog = bsl_metadata::MetadataObject {
+        mdo_type: bsl_metadata::MdoType::Catalog,
+        name: "Валюты".to_string(),
+        name_en: None,
+        attributes: vec![
+            bsl_metadata::Attribute {
+                name: "Ссылка".to_string(),
+                name_en: Some("Ref".to_string()),
+                attr_type: bsl_metadata::AttributeType::Ref {
+                    mdo_type: bsl_metadata::MdoType::Catalog,
+                    name: "Валюты".to_string(),
+                },
+            },
+            bsl_metadata::Attribute {
+                name: "Код".to_string(),
+                name_en: Some("Code".to_string()),
+                attr_type: bsl_metadata::AttributeType::String { length: Some(10) },
+            },
+        ],
+        tabular_sections: vec![],
+        children: vec![],
+        enum_values: vec![],
+        predefined_items: vec![],
+        check_unique: false,
+        code_series: bsl_metadata::CodeSeries::default(),
+    };
+    config.add_metadata_object(catalog);
+
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    let source_map = &package.source_map;
+    let unresolved =
+        source_map.tokens_by_category(crate::source_map::TokenCategory::UnresolvedFieldName);
+    let resolved = source_map.tokens_by_category(crate::source_map::TokenCategory::FieldName);
+
+    println!("Unresolved fields: {:?}", unresolved.iter().map(|t| &t.text).collect::<Vec<_>>());
+    println!("Resolved fields: {:?}", resolved.iter().map(|t| &t.text).collect::<Vec<_>>());
+
+    assert!(
+        unresolved.is_empty(),
+        "Fields inside parens should resolve. Unresolved: {:?}",
+        unresolved.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+}
