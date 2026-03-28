@@ -201,19 +201,20 @@ fn complete_local_symbols<DB: RootDatabase>(
         None => return completions, // Not inside a method
     };
 
-    // Build ExprScopes for this method
-    let scopes = match method_def {
-        Either::Left(proc) => ExprScopes::from_procedure(&proc),
-        Either::Right(func) => ExprScopes::from_function(&func),
+    // Build ExprScopes for this method (parameters + Перем declarations)
+    let scopes = match &method_def {
+        Either::Left(proc) => ExprScopes::from_procedure(proc),
+        Either::Right(func) => ExprScopes::from_function(func),
     };
 
     let root_scope = scopes.root_scope();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Get all entries from root scope (parameters + local variables)
     for (name, scope_def) in scopes.all_entries_in_scope(root_scope) {
         let name_str = name.as_str();
+        seen.insert(name_str.to_lowercase());
 
-        // Filter by prefix
         if !name_str.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
@@ -233,6 +234,48 @@ fn complete_local_symbols<DB: RootDatabase>(
             filter_text: None,
             source: None,
         });
+    }
+
+    // Collect implicit variables from assignment targets (e.g. Партнер = ...)
+    // This is done here (not in ExprScopes) because ExprScopes doesn't know about
+    // module-level variables, and we'd incorrectly shadow them.
+    let body_node = match &method_def {
+        Either::Left(proc) => proc.body().map(|b| b.syntax().clone()),
+        Either::Right(func) => func.body().map(|b| b.syntax().clone()),
+    };
+    if let Some(body) = body_node {
+        for node in body.descendants() {
+            if node.kind() != SyntaxKind::ASSIGN_STMT {
+                continue;
+            }
+            let Some(first) = node.first_child_or_token() else { continue };
+            if first.kind() != SyntaxKind::IDENT {
+                continue;
+            }
+            let text = match first.as_token() {
+                Some(t) => t.text().to_string(),
+                None => continue,
+            };
+            let lower = text.to_lowercase();
+            if seen.contains(&lower) {
+                continue;
+            }
+            if !lower.starts_with(&prefix_lower) {
+                seen.insert(lower);
+                continue;
+            }
+            seen.insert(lower);
+            completions.push(CompletionItem {
+                label: text.clone(),
+                detail: Some("Переменная".to_string()),
+                kind: CompletionItemKind::Field,
+                insert_text: text,
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            });
+        }
     }
 
     tracing::debug!(

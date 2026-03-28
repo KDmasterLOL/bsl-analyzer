@@ -154,49 +154,17 @@ impl ExprScopes {
     }
 
     fn collect_body_symbols(&mut self, scope: ScopeId, body: &ast::StmtList) {
-        use syntax::ast::AstNode;
-        use syntax::SyntaxKind;
-
-        // Collect explicit Перем declarations
+        // Collect explicit Перем declarations only.
+        // Implicit variables from assignments are NOT collected here because
+        // ExprScopes doesn't know about module-level variables, and treating
+        // assignments as implicit locals would incorrectly shadow module vars
+        // (breaking reference finding). Implicit vars are collected separately
+        // in the completion code path where this distinction doesn't matter.
         for var_def in body.var_decls() {
             for name_token in var_def.names() {
                 let name = Name::new(name_token.text());
                 self.add_local_variable(scope, name);
             }
-        }
-
-        // Collect implicit variables from assignment targets (Партнер = ...)
-        // Only simple IDENT targets, not field expressions (Объект.Поле = ...)
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        // Add already-known names to seen set to avoid duplicates
-        for entry in &self.scopes[scope].entries {
-            seen.insert(entry.name.as_str().to_lowercase());
-        }
-
-        for node in body.syntax().descendants() {
-            if node.kind() != SyntaxKind::ASSIGN_STMT {
-                continue;
-            }
-            // First child of ASSIGN_STMT is the target
-            let Some(first) = node.first_child_or_token() else { continue };
-            if first.kind() != SyntaxKind::IDENT {
-                continue;
-            }
-            let text = match first.as_token() {
-                Some(t) => t.text().to_string(),
-                None => match first.as_node() {
-                    Some(n) => n.text().to_string(),
-                    None => continue,
-                },
-            };
-            let lower = text.to_lowercase();
-            if seen.contains(&lower) {
-                continue;
-            }
-            seen.insert(lower);
-            debug!(name = %text, "adding implicit variable from assignment");
-            self.add_local_variable(scope, Name::new(&text));
         }
     }
 }
