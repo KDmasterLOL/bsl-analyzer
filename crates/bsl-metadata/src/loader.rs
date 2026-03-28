@@ -464,7 +464,22 @@ where
                 }
 
                 let xml = fs::read_to_string(&xml_path).ok()?;
-                parser(&xml).ok()
+                let mut mdo = parser(&xml).ok()?;
+
+                // Load predefined items from Ext/Predefined.xml if exists
+                let predefined_path = path.join("Ext").join("Predefined.xml");
+                if predefined_path.exists() {
+                    if let Ok(predefined_xml) = fs::read_to_string(&predefined_path) {
+                        mdo.predefined_items = xml_parser::parse_predefined_xml(&predefined_xml);
+                        tracing::debug!(
+                            name = %name,
+                            count = mdo.predefined_items.len(),
+                            "Loaded predefined items"
+                        );
+                    }
+                }
+
+                Some(mdo)
             } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
                 // Case 2: XML file without directory
                 let file_stem = path.file_stem()?.to_str()?;

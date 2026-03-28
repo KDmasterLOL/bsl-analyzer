@@ -535,8 +535,28 @@ impl LoweringContext {
                         .and_then(|config| config.find_metadata_object(mdo_type, object_name))
                         .map(|obj| obj.find_enum_value(value_name).is_some())
                         .unwrap_or(true) // No metadata = don't flag as error
+                } else if matches!(
+                    mdo_type,
+                    bsl_metadata::MdoType::Catalog
+                        | bsl_metadata::MdoType::Document
+                        | bsl_metadata::MdoType::ChartOfCharacteristicTypes
+                        | bsl_metadata::MdoType::ChartOfAccounts
+                ) {
+                    self.metadata
+                        .as_ref()
+                        .and_then(|config| config.find_metadata_object(mdo_type, object_name))
+                        .map(|obj| {
+                            // If predefined_items is empty, metadata might not have loaded them yet
+                            // In that case, don't flag as error (graceful degradation)
+                            if obj.predefined_items.is_empty() {
+                                true
+                            } else {
+                                obj.find_predefined_item(value_name).is_some()
+                            }
+                        })
+                        .unwrap_or(true) // No metadata = don't flag as error
                 } else {
-                    true // Non-enum types: graceful degradation
+                    true // Other types: only ПустаяСсылка is valid (already handled above)
                 };
 
                 let category = if is_valid {

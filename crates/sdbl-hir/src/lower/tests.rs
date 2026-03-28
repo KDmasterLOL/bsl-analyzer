@@ -2354,3 +2354,105 @@ fn test_value_function_mdo_type_and_table_name_tokens() {
         table_names
     );
 }
+
+/// Helper: create config with a catalog that has known predefined items.
+fn create_config_with_catalog_predefined() -> bsl_metadata::Configuration {
+    use bsl_metadata::{metadata_object::PredefinedItem, MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let mut catalog_obj = MetadataObject::new(MdoType::Catalog, "Валюты");
+    catalog_obj.predefined_items = vec![
+        PredefinedItem {
+            name: "Доллар".to_string(),
+            name_en: Some("Dollar".to_string()),
+            uuid: "1".to_string(),
+        },
+        PredefinedItem {
+            name: "Евро".to_string(),
+            name_en: Some("Euro".to_string()),
+            uuid: "2".to_string(),
+        },
+    ];
+    config.add_metadata_object(catalog_obj);
+    config
+}
+
+#[test]
+fn test_value_function_valid_predefined_item_gets_field_name_token() {
+    // VALUE(Catalog.Currencies.Dollar) with metadata should produce FieldName token for last part
+    let config = create_config_with_catalog_predefined();
+
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Ссылка = ЗНАЧЕНИЕ(Справочник.Валюты.Доллар)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // "Доллар" should be in field_names (resolved)
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        resolved.iter().any(|t| t == "Доллар"),
+        "Expected 'Доллар' in field_names, got: {:?}",
+        resolved
+    );
+
+    // Must NOT appear in unresolved_field_names
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        !unresolved.iter().any(|t| t == "Доллар"),
+        "Expected 'Доллар' NOT in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_value_function_invalid_predefined_item_gets_unresolved_token() {
+    // VALUE(Catalog.Currencies.NonExistent) with metadata should produce UnresolvedFieldName token
+    let config = create_config_with_catalog_predefined();
+
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Ссылка = ЗНАЧЕНИЕ(Справочник.Валюты.Несуществующий)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // "Несуществующий" should be in unresolved_field_names
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        unresolved.iter().any(|t| t == "Несуществующий"),
+        "Expected 'Несуществующий' in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_value_function_predefined_item_empty_list_graceful_degradation() {
+    // When predefined_items is empty, should not flag as error (graceful degradation)
+    use bsl_metadata::{MdoType, MetadataObject};
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    // Catalog exists but has no predefined_items loaded
+    let catalog_obj = MetadataObject::new(MdoType::Catalog, "Валюты");
+    config.add_metadata_object(catalog_obj);
+
+    let code = "ВЫБРАТЬ 1 ИЗ Справочник.Валюты КАК Вал ГДЕ Вал.Ссылка = ЗНАЧЕНИЕ(Справочник.Валюты.ЛюбоеЗначение)";
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // "ЛюбоеЗначение" should be in field_names (not unresolved) because predefined_items is empty
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        resolved.iter().any(|t| t == "ЛюбоеЗначение"),
+        "Expected 'ЛюбоеЗначение' in field_names when predefined_items is empty, got: {:?}",
+        resolved
+    );
+
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+    assert!(
+        !unresolved.iter().any(|t| t == "ЛюбоеЗначение"),
+        "Expected 'ЛюбоеЗначение' NOT in unresolved_field_names when predefined_items is empty, got: {:?}",
+        unresolved
+    );
+}
