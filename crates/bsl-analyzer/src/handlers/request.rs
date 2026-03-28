@@ -238,8 +238,14 @@ pub fn handle_completion(
         );
     }
 
-    // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    // Convert position to offset (handle race condition with didChange)
+    let offset = match crate::lsp::offset(&line_index, &text, position) {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
+            return Ok(None);
+        }
+    };
     tracing::info!("Converted position to offset: {:?}", offset);
 
     // Call IDE API with workspace root
@@ -392,8 +398,14 @@ pub fn handle_signature_help(
 
     let line_index = LineIndex::new(&text);
 
-    // Convert position to offset
-    let offset = crate::lsp::offset(&line_index, &text, position)?;
+    // Convert position to offset (handle race condition with didChange)
+    let offset = match crate::lsp::offset(&line_index, &text, position) {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::warn!("Position out of bounds, likely race with didChange - returning empty");
+            return Ok(None);
+        }
+    };
 
     // Call IDE API
     let sig_help = snap.analysis.signature_help(file_id, offset.into());
