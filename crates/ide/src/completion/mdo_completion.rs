@@ -189,7 +189,12 @@ fn find_receiver_before_dot(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
 }
 
 /// Extract identifier text from a simple IDENT node.
+///
+/// Returns None if node is not a simple identifier (e.g., rejects FIELD_EXPR).
 fn get_single_ident(node: &SyntaxNode) -> Option<String> {
+    if node.kind() != SyntaxKind::IDENT {
+        return None;
+    }
     let token = node.first_token()?;
     if token.kind() == SyntaxKind::IDENT {
         Some(token.text().to_string())
