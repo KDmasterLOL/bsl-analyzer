@@ -17,7 +17,7 @@ pub enum NaparnikError {
     Api { status: u16, body: String },
     #[error("SSE parse error: {0}")]
     SseParse(String),
-    #[error("No token: set NAPARNIK_TOKEN environment variable")]
+    #[error("NAPARNIK_TOKEN not set. Get token at https://code.1c.ai (profile → API token), then add to .mcp.json: \"env\": {{ \"NAPARNIK_TOKEN\": \"your_token\" }}")]
     NoToken,
     #[error("Session not found for configuration: {0}")]
     SessionNotFound(String),
