@@ -99,15 +99,19 @@ impl LoweringContext {
         );
 
         // Check for unknown field
+        // Only emit UnknownField if the field is genuinely absent from the table.
+        // A field with SdblType::Unknown type still exists (e.g., untyped dimension).
         if ty == SdblType::Unknown {
             if let Some(alias) = table_alias_str {
-                if let Some(table) = self.scope.find_table(alias) {
-                    if table.metadata.is_some() {
-                        self.diagnostics.push(SdblDiagnostic::UnknownField {
-                            table_name: table.full_name.clone(),
-                            field_name: column_name_str.to_string(),
-                            range: node.text_range(),
-                        });
+                if self.scope.find_field_def(Some(alias), column_name_str).is_none() {
+                    if let Some(table) = self.scope.find_table(alias) {
+                        if table.metadata.is_some() {
+                            self.diagnostics.push(SdblDiagnostic::UnknownField {
+                                table_name: table.full_name.clone(),
+                                field_name: column_name_str.to_string(),
+                                range: node.text_range(),
+                            });
+                        }
                     }
                 }
             }
@@ -136,7 +140,12 @@ impl LoweringContext {
                 );
             } else {
                 // All other identifiers = field names (intermediate or final)
-                let category = if ty != SdblType::Unknown && ty != SdblType::Error {
+                // A field is "resolved" if it has a known type OR exists in metadata
+                // (type may be Unknown for untyped fields, but the field itself is valid)
+                let field_exists =
+                    self.scope.find_field_def(table_alias_str, column_name_str).is_some();
+                let category = if (ty != SdblType::Unknown && ty != SdblType::Error) || field_exists
+                {
                     crate::source_map::TokenCategory::FieldName
                 } else {
                     crate::source_map::TokenCategory::UnresolvedFieldName

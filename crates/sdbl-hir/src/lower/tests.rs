@@ -2508,3 +2508,258 @@ fn test_join_paren_field_resolution() {
         unresolved.iter().map(|t| &t.text).collect::<Vec<_>>()
     );
 }
+
+// ===== Virtual Table Field Resolution Tests =====
+
+/// Helper: create a config with an AccumulationRegister that has dimensions and resources.
+fn create_config_with_accumulation_register() -> bsl_metadata::Configuration {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+
+    let register = Register::builder()
+        .name("ИзмененияВНакопленияхКлиента")
+        .mdo_type(MdoType::AccumulationRegister)
+        .dimensions(vec![DimensionBuilder::default().name("Партнер").build()])
+        .resources(vec![
+            RegisterResource::new(Default::default(), "Сумма"),
+            RegisterResource::new(Default::default(), "Количество"),
+        ])
+        .build();
+
+    config.add_register(register);
+    config
+}
+
+#[test]
+fn test_virtual_table_turnovers_field_generation() {
+    let config = create_config_with_accumulation_register();
+    let code = "ВЫБРАТЬ Т.Партнер, Т.СуммаОборот, Т.КоличествоОборот ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,,) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    // Check table resolved as Register
+    assert_eq!(hir.from.len(), 1);
+    let table_ref = &hir.from[0];
+    assert!(table_ref.is_virtual_table);
+    let resolved = table_ref.metadata.as_ref().expect("Should have metadata");
+
+    // Check fields: standard (Период, Регистратор, НомерСтроки) + Партнер + СуммаОборот + КоличествоОборот
+    let fields = resolved.fields();
+    let field_names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(field_names.contains(&"Период"), "Should have Период, got: {:?}", field_names);
+    assert!(
+        field_names.contains(&"Регистратор"),
+        "Should have Регистратор, got: {:?}",
+        field_names
+    );
+    assert!(field_names.contains(&"Партнер"), "Should have Партнер, got: {:?}", field_names);
+    assert!(
+        field_names.contains(&"СуммаОборот"),
+        "Should have СуммаОборот, got: {:?}",
+        field_names
+    );
+    assert!(
+        field_names.contains(&"КоличествоОборот"),
+        "Should have КоличествоОборот, got: {:?}",
+        field_names
+    );
+
+    // Raw resource names should NOT be present
+    assert!(!field_names.contains(&"Сумма"), "Should NOT have raw Сумма, got: {:?}", field_names);
+    assert!(
+        !field_names.contains(&"Количество"),
+        "Should NOT have raw Количество, got: {:?}",
+        field_names
+    );
+
+    // No UnknownField diagnostics
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| matches!(d, crate::diagnostics::SdblDiagnostic::UnknownField { .. }))
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "Should have no UnknownField diagnostics, got: {:?}",
+        unknown_diags
+    );
+}
+
+#[test]
+fn test_virtual_table_balance_field_generation() {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let register = Register::builder()
+        .name("ТоварыНаСкладах")
+        .mdo_type(MdoType::AccumulationRegister)
+        .dimensions(vec![DimensionBuilder::default().name("Склад").build()])
+        .resources(vec![RegisterResource::new(Default::default(), "Количество")])
+        .build();
+    config.add_register(register);
+
+    let code = "ВЫБРАТЬ Т.Склад, Т.КоличествоОстаток ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(,) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    let resolved = hir.from[0].metadata.as_ref().expect("Should have metadata");
+    let field_names: Vec<&str> = resolved.fields().iter().map(|f| f.name.as_str()).collect();
+
+    assert!(field_names.contains(&"Склад"), "Should have Склад");
+    assert!(field_names.contains(&"КоличествоОстаток"), "Should have КоличествоОстаток");
+    assert!(!field_names.contains(&"Количество"), "Should NOT have raw Количество");
+}
+
+#[test]
+fn test_virtual_table_balance_and_turnovers_field_generation() {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let register = Register::builder()
+        .name("Продажи")
+        .mdo_type(MdoType::AccumulationRegister)
+        .dimensions(vec![DimensionBuilder::default().name("Товар").build()])
+        .resources(vec![RegisterResource::new(Default::default(), "Сумма")])
+        .build();
+    config.add_register(register);
+
+    let code = "ВЫБРАТЬ Т.Товар, Т.СуммаНачальныйОстаток, Т.СуммаОборот, Т.СуммаКонечныйОстаток ИЗ РегистрНакопления.Продажи.ОстаткиИОбороты(,,) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    let resolved = hir.from[0].metadata.as_ref().expect("Should have metadata");
+    let field_names: Vec<&str> = resolved.fields().iter().map(|f| f.name.as_str()).collect();
+
+    assert!(field_names.contains(&"Товар"), "Should have Товар");
+    assert!(
+        field_names.contains(&"СуммаНачальныйОстаток"),
+        "Should have СуммаНачальныйОстаток, got: {:?}",
+        field_names
+    );
+    assert!(field_names.contains(&"СуммаОборот"), "Should have СуммаОборот");
+    assert!(field_names.contains(&"СуммаКонечныйОстаток"), "Should have СуммаКонечныйОстаток");
+}
+
+#[test]
+fn test_virtual_table_slice_last_preserves_fields() {
+    use bsl_metadata::{
+        dimension::DimensionBuilder, register::RegisterResource, MdoType, Register,
+    };
+
+    let mut config = bsl_metadata::Configuration::new("TestConfig");
+    let register = Register::builder()
+        .name("Курсы")
+        .mdo_type(MdoType::InformationRegister)
+        .dimensions(vec![DimensionBuilder::default().name("Валюта").build()])
+        .resources(vec![RegisterResource::new(Default::default(), "Курс")])
+        .build();
+    config.add_register(register);
+
+    let code =
+        "ВЫБРАТЬ Т.Валюта, Т.Курс, Т.Период ИЗ РегистрСведений.Курсы.СрезПоследних(&Дата,) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let hir = single_query_hir(&package);
+
+    let resolved = hir.from[0].metadata.as_ref().expect("Should have metadata");
+    let field_names: Vec<&str> = resolved.fields().iter().map(|f| f.name.as_str()).collect();
+
+    // SliceLast preserves fields as-is + adds Период
+    assert!(field_names.contains(&"Валюта"), "Should have Валюта");
+    assert!(field_names.contains(&"Курс"), "Should have Курс (not suffixed)");
+    assert!(field_names.contains(&"Период"), "Should have Период");
+}
+
+#[test]
+fn test_virtual_table_param_scope_resolves_dimension() {
+    let config = create_config_with_accumulation_register();
+    // Партнер in the VT condition should resolve as a register dimension
+    let code = "ВЫБРАТЬ Т.Партнер ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,,, Партнер В (ВЫБРАТЬ 1)) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+
+    // No UnknownField diagnostic for Партнер in condition
+    let unknown_diags: Vec<_> = package
+        .all_diagnostics()
+        .filter(|d| {
+            matches!(d, crate::diagnostics::SdblDiagnostic::UnknownField { field_name, .. } if field_name == "Партнер")
+        })
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "Партнер in VT condition should resolve via dimension scope, got: {:?}",
+        unknown_diags
+    );
+}
+
+#[test]
+fn test_virtual_table_periodicity_resolved() {
+    let config = create_config_with_accumulation_register();
+    // Авто is a periodicity value — should not be unresolved
+    let code = "ВЫБРАТЬ Т.Партнер ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,, Авто, Партнер В (ВЫБРАТЬ 1)) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    // Авто should be in special_keywords, not in unresolved
+    let special: Vec<String> = sm.special_keywords.iter().map(|t| t.text.to_string()).collect();
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+
+    assert!(
+        special.iter().any(|t| t == "Авто"),
+        "Авто should be in special_keywords, got: {:?}",
+        special
+    );
+    assert!(
+        !unresolved.iter().any(|t| t == "Авто"),
+        "Авто should NOT be in unresolved_field_names, got: {:?}",
+        unresolved
+    );
+}
+
+#[test]
+fn test_virtual_table_semantic_tokens_resolved() {
+    let config = create_config_with_accumulation_register();
+    let code = "ВЫБРАТЬ Т.СуммаОборот, Т.КоличествоОборот ИЗ РегистрНакопления.ИзмененияВНакопленияхКлиента.Обороты(,,) КАК Т";
+
+    let ast = parser::parse_sdbl(code);
+    let package = lower_sdbl_to_hir(&ast, Some(std::sync::Arc::new(config)));
+    let sm = &package.source_map;
+
+    let resolved: Vec<String> = sm.field_names.iter().map(|t| t.text.to_string()).collect();
+    let unresolved: Vec<String> =
+        sm.unresolved_field_names.iter().map(|t| t.text.to_string()).collect();
+
+    assert!(
+        resolved.iter().any(|t| t == "СуммаОборот"),
+        "СуммаОборот should be in field_names, got: {:?}",
+        resolved
+    );
+    assert!(
+        resolved.iter().any(|t| t == "КоличествоОборот"),
+        "КоличествоОборот should be in field_names, got: {:?}",
+        resolved
+    );
+    assert!(
+        !unresolved.iter().any(|t| t == "СуммаОборот"),
+        "СуммаОборот should NOT be in unresolved, got: {:?}",
+        unresolved
+    );
+}
