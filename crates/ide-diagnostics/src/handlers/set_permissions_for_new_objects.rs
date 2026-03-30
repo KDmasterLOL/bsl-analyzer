@@ -194,17 +194,14 @@ mod tests {
             0,
         );
 
+        let provider = ide_db::SalsaProvider::with_workspace(
+            &db,
+            Some(configuration_path_input),
+            Some(&workspace_root),
+            None,
+        );
         let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: Some(&workspace_root),
-            configuration_path: Some(&workspace_root),
-            configuration_path_input: Some(configuration_path_input),
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         (diagnostics, code.to_string())
@@ -259,17 +256,10 @@ mod tests {
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, "Процедура Тест()\nКонецПроцедуры");
 
+        let provider =
+            ide_db::SalsaProvider::with_workspace(&db, None, Some(&workspace_root), None);
         let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: Some(&workspace_root),
-            configuration_path: Some(&workspace_root),
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
 
         let diagnostics = check(&ctx);
 
@@ -311,6 +301,13 @@ mod tests {
             0,
         );
 
+        let provider = ide_db::SalsaProvider::with_workspace(
+            &db,
+            Some(configuration_path_input),
+            Some(&workspace_root),
+            None,
+        );
+
         // Custom config: only Роль2 is allowed (not ПолныеПрава)
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
@@ -318,16 +315,7 @@ mod tests {
             serde_json::json!({"namesFullAccessRole": "Роль2"}),
         );
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: Some(&workspace_root),
-            configuration_path: Some(&workspace_root),
-            configuration_path_input: Some(configuration_path_input),
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
 
         let diagnostics = check(&ctx);
 

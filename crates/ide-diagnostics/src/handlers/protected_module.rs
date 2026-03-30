@@ -126,16 +126,7 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::new(&db, &config, file_id);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Not session module should return empty diagnostics");
@@ -160,16 +151,7 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::ProtectedModule);
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::new(&db, &config, file_id);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");
@@ -197,16 +179,7 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = DiagnosticsContext::new(&db, &config, file_id);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");

@@ -59,16 +59,7 @@ impl Analysis {
 
     /// Returns diagnostics for a file.
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
-        let ctx = ide_diagnostics::DiagnosticsContext {
-            db: self.db.as_ref(),
-            config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = ide_diagnostics::DiagnosticsContext::new(self.db.as_ref(), config, file_id);
         ide_diagnostics::diagnostics(&ctx)
     }
 

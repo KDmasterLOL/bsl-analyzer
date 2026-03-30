@@ -8,143 +8,66 @@ use vfs::FileId;
 /// Context for running diagnostics.
 ///
 /// Supports two modes of operation:
-/// - **Salsa mode** (LSP): Uses `db` field with full caching
-/// - **Provider mode** (streaming): Uses `provider` field for abstracted data access
+/// - **Salsa mode** (LSP): Uses `db` + auto-created SalsaProvider
+/// - **Provider mode** (streaming): Uses explicit `provider` for abstracted data access
 ///
-/// Helper methods automatically use `provider` when available, falling back to `db`.
+/// Helper methods dispatch through `provider` when available, falling back to an
+/// ad-hoc SalsaProvider created from `db`.
+///
+/// Workspace-specific data (file paths, configuration, cross-module resolution) is
+/// accessed through the provider, not stored on the context.
 pub struct DiagnosticsContext<'a> {
-    /// RootDatabase for Salsa-backed queries (LSP mode).
+    /// RootDatabase for Salsa-backed queries (fallback when provider is None).
     pub db: &'a dyn RootDatabase,
     /// DiagnosticsConfig with enabled/disabled diagnostics and parameters.
     pub config: &'a DiagnosticsConfig,
     /// FileId of the file being analyzed.
     pub file_id: FileId,
-
-    // === Provider abstraction (for streaming mode) ===
-    /// Optional AnalysisProvider for abstracted data access.
+    /// AnalysisProvider for abstracted data access.
     /// When set, helper methods use this instead of db directly.
-    /// This enables StreamingProvider for analyze mode with minimal memory.
     pub provider: Option<&'a dyn ide_db::AnalysisProvider>,
-
-    // === Workspace integration (for Tier 3 diagnostics) ===
-    /// Root directory of the workspace (for finding Configuration.xml)
-    pub workspace_root: Option<&'a std::path::Path>,
-    /// Direct path to Configuration.xml (if known)
-    pub configuration_path: Option<&'a std::path::Path>,
-    /// Pre-created ConfigurationPathInput for metadata queries (CRITICAL for Salsa caching!)
-    /// If None, diagnostics should create it once from configuration_path/workspace_root
-    pub configuration_path_input: Option<ide_db::metadata::ConfigurationPathInput<'a>>,
-    /// FileSet for path lookups (CRITICAL for performance!)
-    /// Keeping FileSet outside of Salsa avoids O(n) hash/compare operations.
-    /// If None, falls back to Salsa lookup (slower, for tests only).
-    pub file_set: Option<&'a vfs::FileSet>,
 }
 
 impl<'a> DiagnosticsContext<'a> {
-    /// Create a new DiagnosticsContext with db (Salsa mode).
-    ///
-    /// This is the standard constructor for LSP mode with full Salsa caching.
+    /// Create a new DiagnosticsContext with db (Salsa mode, no workspace context).
     pub fn new(db: &'a dyn RootDatabase, config: &'a DiagnosticsConfig, file_id: FileId) -> Self {
-        Self {
-            db,
-            config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        }
+        Self { db, config, file_id, provider: None }
     }
 
-    /// Create a new DiagnosticsContext with provider (streaming mode).
+    /// Create a new DiagnosticsContext with provider.
     ///
-    /// This constructor is for analyze mode where an AnalysisProvider
-    /// abstracts the data source (enabling StreamingProvider).
-    ///
-    /// Note: `db` is still required for compatibility with existing code
-    /// that hasn't been migrated to use helper methods.
+    /// The provider encapsulates workspace context (configuration, file paths,
+    /// cross-module resolution). Use `SalsaProvider::with_workspace()` for LSP mode
+    /// or `StreamingProvider` for analyze mode.
     pub fn with_provider(
         db: &'a dyn RootDatabase,
         config: &'a DiagnosticsConfig,
         file_id: FileId,
         provider: &'a dyn ide_db::AnalysisProvider,
     ) -> Self {
-        Self {
-            db,
-            config,
-            file_id,
-            provider: Some(provider),
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        }
+        Self { db, config, file_id, provider: Some(provider) }
     }
 
-    /// Load configuration metadata using cached ConfigurationPathInput.
+    /// Load configuration metadata via provider.
     ///
-    /// CRITICAL: This method uses ctx.configuration_path_input if available
-    /// to ensure Salsa caching works properly. Creating a new ConfigurationPathInput
-    /// for each file would break caching and cause massive performance degradation!
-    ///
-    /// Returns `None` if no configuration path is available.
+    /// Returns `None` if no configuration is available.
     pub fn load_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-        if let Some(path_input) = self.configuration_path_input {
-            return Some(ide_db::metadata::load_configuration(self.db, path_input));
-        }
-
-        let config_path = self.configuration_path.or(self.workspace_root)?;
-        tracing::warn!(
-            "load_configuration: creating ad-hoc ConfigurationPathInput (breaks Salsa caching)"
-        );
-        let config_path_str = config_path.to_string_lossy().to_string();
-        let path_input = ide_db::metadata::ConfigurationPathInput::new(
-            self.db,
-            config_path_str,
-            self.db.metadata_version(),
-        );
-        Some(ide_db::metadata::load_configuration(self.db, path_input))
+        self.query(|p| p.configuration())
     }
 
-    /// Get the file path for the current file.
-    ///
-    /// CRITICAL for performance: Uses the provided FileSet directly (O(1) lookup)
-    /// instead of going through Salsa (which would require O(n) hash/compare
-    /// of the entire FileSet).
+    /// Get the file path for the current file via provider.
     ///
     /// Returns `None` if file path cannot be resolved.
     pub fn file_path(&self) -> Option<String> {
-        if let Some(file_set) = self.file_set {
-            let vfs_path = file_set.path_for_file(&self.file_id)?;
-            return Some(vfs_path.as_path().to_string_lossy().to_string());
-        }
-
-        if let Some(provider) = self.provider {
-            return provider.file_path(self.file_id);
-        }
-
-        self.file_path_via_salsa()
-    }
-
-    fn file_path_via_salsa(&self) -> Option<String> {
-        let source_root_input = self.db.file_source_root_input(self.file_id);
-        let source_root_id = source_root_input.source_root_id(self.db);
-        let source_root_input = self.db.source_root_input(source_root_id);
-        let source_root = source_root_input.root(self.db);
-        let file_set = source_root.file_set();
-        let vfs_path = file_set.path_for_file(&self.file_id)?;
-        Some(vfs_path.as_path().to_string_lossy().to_string())
+        self.query(|p| p.file_path(self.file_id))
     }
 
     /// Dispatch to provider if available, else create a SalsaProvider for db fallback.
-    ///
-    /// Eliminates repetitive `if let Some(provider) { ... } self.db.xxx()` dispatch blocks.
     fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
         if let Some(provider) = self.provider {
             f(provider)
         } else {
-            let salsa = ide_db::SalsaProvider::new(self.db, self.configuration_path_input);
+            let salsa = ide_db::SalsaProvider::new(self.db, None);
             f(&salsa)
         }
     }
@@ -282,17 +205,12 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.reaching_definitions(method_id))
     }
 
-    /// Resolve VfsPath to FileId.
-    ///
-    /// Uses file_set fast path when available, otherwise dispatches via query().
+    /// Resolve VfsPath to FileId via provider.
     pub fn resolve_vfs_path(
         &self,
         source_root_id: base_db::SourceRootId,
         vfs_path: &vfs::VfsPath,
     ) -> Option<vfs::FileId> {
-        if let Some(file_set) = self.file_set {
-            return file_set.file_for_path(vfs_path).copied();
-        }
         self.query(|p| p.resolve_vfs_path(source_root_id, vfs_path))
     }
 
@@ -343,10 +261,7 @@ impl<'a> DiagnosticsContext<'a> {
     // Cross-module file resolution
     // ========================================================================
 
-    /// Resolve a CommonModule metadata entry to its FileId.
-    ///
-    /// Builds absolute path from workspace root + module URI, then resolves
-    /// via file_set (fast path) or provider (fallback for tests).
+    /// Resolve a CommonModule metadata entry to its FileId via provider.
     pub fn find_common_module_file(
         &self,
         common_module: &bsl_metadata::CommonModule,
@@ -354,16 +269,7 @@ impl<'a> DiagnosticsContext<'a> {
         use bsl_metadata::traits::{MdObject, Module};
 
         let uri = common_module.uri()?;
-        let workspace_root = self.configuration_path.or(self.workspace_root)?;
-        let full_path = workspace_root.join(uri);
-        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-
-        let file_id = if let Some(file_set) = self.file_set {
-            file_set.file_for_path(&vfs_path).copied()
-        } else {
-            let source_root_id = self.source_root_id();
-            self.resolve_vfs_path(source_root_id, &vfs_path)
-        };
+        let file_id = self.resolve_module_file(uri);
 
         if file_id.is_none() {
             tracing::warn!(
@@ -374,6 +280,13 @@ impl<'a> DiagnosticsContext<'a> {
         }
 
         file_id
+    }
+
+    /// Resolve a relative module URI to FileId via provider.
+    ///
+    /// The provider handles workspace root resolution and file_set lookup.
+    pub fn resolve_module_file(&self, relative_uri: &str) -> Option<vfs::FileId> {
+        self.query(|p| p.resolve_module_file(relative_uri))
     }
 
     // ========================================================================

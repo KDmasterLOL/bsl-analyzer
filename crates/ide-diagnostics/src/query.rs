@@ -30,16 +30,7 @@ pub fn file_diagnostics_query<'db>(
 
     let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
 
-    let ctx = DiagnosticsContext {
-        db,
-        config: &config,
-        file_id,
-        provider: None,
-        workspace_root: None,
-        configuration_path: None,
-        configuration_path_input: None,
-        file_set: None,
-    };
+    let ctx = DiagnosticsContext::new(db, &config, file_id);
 
     Arc::new(diagnostics(&ctx))
 }

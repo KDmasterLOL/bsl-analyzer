@@ -24,6 +24,8 @@ use crate::{
 pub struct SalsaProvider<'db> {
     db: &'db dyn RootDatabase,
     configuration_path_input: Option<ConfigurationPathInput<'db>>,
+    workspace_root: Option<&'db std::path::Path>,
+    file_set: Option<&'db vfs::file_set::FileSet>,
 }
 
 impl<'db> SalsaProvider<'db> {
@@ -32,7 +34,17 @@ impl<'db> SalsaProvider<'db> {
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
     ) -> Self {
-        Self { db, configuration_path_input }
+        Self { db, configuration_path_input, workspace_root: None, file_set: None }
+    }
+
+    /// Create a SalsaProvider with workspace context for cross-module resolution.
+    pub fn with_workspace(
+        db: &'db dyn RootDatabase,
+        configuration_path_input: Option<ConfigurationPathInput<'db>>,
+        workspace_root: Option<&'db std::path::Path>,
+        file_set: Option<&'db vfs::file_set::FileSet>,
+    ) -> Self {
+        Self { db, configuration_path_input, workspace_root, file_set }
     }
 
     /// Get the underlying database.
@@ -83,10 +95,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.line_index(input)
-    }
-
-    fn file_path(&self, file_id: FileId) -> Option<String> {
-        crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
 
     fn file_source_root_id(&self, file_id: FileId) -> SourceRootId {
@@ -166,5 +174,28 @@ impl AnalysisProvider for SalsaProvider<'_> {
         vfs_path: &vfs::VfsPath,
     ) -> Option<FileId> {
         self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
+
+    fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {
+        let workspace_root = self.workspace_root?;
+        let full_path = workspace_root.join(relative_uri);
+        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+
+        // Use file_set fast path if available, else fall back to Salsa VFS lookup
+        if let Some(file_set) = self.file_set {
+            file_set.file_for_path(&vfs_path).copied()
+        } else {
+            // Fall back to Salsa-based resolution via default source root
+            self.db.resolve_vfs_path(SourceRootId(0), &vfs_path)
+        }
+    }
+
+    fn file_path(&self, file_id: FileId) -> Option<String> {
+        // Use file_set fast path if available
+        if let Some(file_set) = self.file_set {
+            let vfs_path = file_set.path_for_file(&file_id)?;
+            return Some(vfs_path.as_path().to_string_lossy().to_string());
+        }
+        crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
 }

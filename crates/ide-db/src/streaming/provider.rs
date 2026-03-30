@@ -445,6 +445,11 @@ impl AnalysisProvider for StreamingProvider {
         // In streaming mode, use global file_set directly (no Salsa)
         self.global.file_set.file_for_path(vfs_path).copied()
     }
+
+    fn resolve_module_file(&self, _relative_uri: &str) -> Option<FileId> {
+        // Workspace-relative module resolution not yet supported in streaming mode
+        None
+    }
 }
 
 #[cfg(test)]

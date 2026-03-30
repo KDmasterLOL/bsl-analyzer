@@ -54,7 +54,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{MethodSymbol, ModuleId, Name};
 use ide_db::TextRange;
-use vfs::{FileId, VfsPath};
+use vfs::FileId;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -327,27 +327,13 @@ fn find_manager_module_file(
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
 
-    // Get configuration path (where metadata files are)
-    // Configuration path has priority because paths are relative to it
-    let config_path = ctx.configuration_path.or(ctx.workspace_root)?;
-    let full_path = config_path.join(&manager_module_path);
-    let vfs_path = VfsPath::new(full_path.clone());
-
-    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
-    let file_id = if let Some(file_set) = ctx.file_set {
-        file_set.file_for_path(&vfs_path).copied()
-    } else {
-        // Fallback: Use provider/db (slower, for tests)
-        let source_root_id = ctx.source_root_id();
-        ctx.resolve_vfs_path(source_root_id, &vfs_path)
-    };
+    let file_id = ctx.resolve_module_file(&manager_module_path);
 
     if file_id.is_none() {
         tracing::warn!(
             mdo_type = ?mdo_type,
             mdo_name,
             manager_module_path,
-            full_path = ?full_path,
             "Manager Module file not found in VFS - ensure file is loaded"
         );
     }

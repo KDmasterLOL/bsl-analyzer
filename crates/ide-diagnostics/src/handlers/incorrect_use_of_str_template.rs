@@ -652,16 +652,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         // Call full diagnostic pipeline (includes both HIR lowering + post-HIR check())
         let diagnostics = crate::diagnostics(&ctx);
@@ -717,16 +708,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -771,16 +753,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -829,16 +802,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -885,16 +849,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -940,16 +895,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -997,16 +943,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics
@@ -1054,16 +991,7 @@ mod tests {
         let db = Arc::new(db) as Arc<dyn RootDatabase>;
 
         let config = crate::DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let ctx = crate::DiagnosticsContext::new(db.as_ref(), &config, file_id);
 
         let diagnostics = crate::diagnostics(&ctx);
         let filtered: Vec<_> = diagnostics

@@ -476,6 +476,11 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         use ide_db::base_db::SourceDatabase;
         self.db.resolve_vfs_path(source_root_id, path)
     }
+
+    fn resolve_module_file(&self, _relative_uri: &str) -> Option<vfs::FileId> {
+        // Not supported in test provider
+        None
+    }
 }
 
 /// Test helper for module-level metadata diagnostics.

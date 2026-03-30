@@ -178,6 +178,15 @@ pub trait AnalysisProvider {
     /// Used for finding metadata files (CommonModules, EventSubscriptions, etc.)
     /// given their URI from Configuration.
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
+
+    /// Resolve a relative module URI to FileId.
+    ///
+    /// Builds absolute path from workspace root + relative URI, then resolves
+    /// through file_set (fast path) or VFS. Used for cross-module diagnostics
+    /// that need to find CommonModule/ManagerModule files.
+    ///
+    /// Returns `None` if workspace root is not available or file not found.
+    fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
 }
 
 #[cfg(test)]
