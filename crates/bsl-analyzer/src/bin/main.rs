@@ -988,7 +988,7 @@ fn analyze_salsa(
                 Some(&source_dir_arc),
                 Some(&file_set_arc),
             );
-            let ctx = DiagnosticsContext::with_provider(db_snapshot, &config, *file_id, &provider);
+            let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
             // Catch panics to continue analyzing other files if one fails
             let file_start = std::time::Instant::now();

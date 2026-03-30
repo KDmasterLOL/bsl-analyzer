@@ -222,7 +222,8 @@ where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
     let (db, file_id) = create_test_db(code);
-    let ctx = crate::DiagnosticsContext::new(&db, &config, file_id);
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
     check_fn(&ctx)
 }
 
@@ -282,7 +283,8 @@ pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic>
     let test_file = *fixture.files.keys().last().expect("Fixture should have at least one file");
 
     let config = crate::DiagnosticsConfig::all_enabled();
-    let ctx = crate::DiagnosticsContext::new(&db, &config, test_file);
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let ctx = crate::DiagnosticsContext::new(&config, test_file, &provider);
 
     crate::diagnostics(&ctx)
 }
@@ -515,8 +517,7 @@ where
 
     let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
 
-    let ctx = crate::DiagnosticsContext::with_provider(
-        &provider_impl.db,
+    let ctx = crate::DiagnosticsContext::new(
         &config_rc,
         file_id,
         &provider_impl as &dyn ide_db::provider::AnalysisProvider,

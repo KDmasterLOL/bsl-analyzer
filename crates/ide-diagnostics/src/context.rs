@@ -1,75 +1,57 @@
 //! Diagnostics context for running diagnostics.
 
 use crate::DiagnosticsConfig;
-use ide_db::RootDatabase;
 use std::sync::Arc;
 use vfs::FileId;
 
 /// Context for running diagnostics.
 ///
-/// Supports two modes of operation:
-/// - **Salsa mode** (LSP): Uses `db` + auto-created SalsaProvider
-/// - **Provider mode** (streaming): Uses explicit `provider` for abstracted data access
+/// All data access goes through the `AnalysisProvider`. Callers construct
+/// the appropriate provider (SalsaProvider for LSP, StreamingProvider for
+/// analyze mode) and pass it here.
 ///
-/// Helper methods dispatch through `provider` when available, falling back to an
-/// ad-hoc SalsaProvider created from `db`.
-///
-/// Workspace-specific data (file paths, configuration, cross-module resolution) is
-/// accessed through the provider, not stored on the context.
+/// Workspace-specific data (file paths, configuration, cross-module resolution)
+/// is encapsulated inside the provider, not stored on the context.
 pub struct DiagnosticsContext<'a> {
-    /// RootDatabase for Salsa-backed queries (fallback when provider is None).
-    pub db: &'a dyn RootDatabase,
     /// DiagnosticsConfig with enabled/disabled diagnostics and parameters.
     pub config: &'a DiagnosticsConfig,
     /// FileId of the file being analyzed.
     pub file_id: FileId,
-    /// AnalysisProvider for abstracted data access.
-    /// When set, helper methods use this instead of db directly.
-    pub provider: Option<&'a dyn ide_db::AnalysisProvider>,
+    /// AnalysisProvider for all data access.
+    provider: &'a dyn ide_db::AnalysisProvider,
 }
 
 impl<'a> DiagnosticsContext<'a> {
-    /// Create a new DiagnosticsContext with db (Salsa mode, no workspace context).
-    pub fn new(db: &'a dyn RootDatabase, config: &'a DiagnosticsConfig, file_id: FileId) -> Self {
-        Self { db, config, file_id, provider: None }
-    }
-
-    /// Create a new DiagnosticsContext with provider.
+    /// Create a new DiagnosticsContext.
     ///
-    /// The provider encapsulates workspace context (configuration, file paths,
-    /// cross-module resolution). Use `SalsaProvider::with_workspace()` for LSP mode
-    /// or `StreamingProvider` for analyze mode.
-    pub fn with_provider(
-        db: &'a dyn RootDatabase,
+    /// The provider encapsulates all data access (parsing, HIR, metadata,
+    /// workspace context). Use `SalsaProvider` for LSP/Salsa mode or
+    /// `StreamingProvider` for analyze mode.
+    pub fn new(
         config: &'a DiagnosticsConfig,
         file_id: FileId,
         provider: &'a dyn ide_db::AnalysisProvider,
     ) -> Self {
-        Self { db, config, file_id, provider: Some(provider) }
+        Self { config, file_id, provider }
     }
 
     /// Load configuration metadata via provider.
     ///
     /// Returns `None` if no configuration is available.
     pub fn load_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
-        self.query(|p| p.configuration())
+        self.provider.configuration()
     }
 
     /// Get the file path for the current file via provider.
     ///
     /// Returns `None` if file path cannot be resolved.
     pub fn file_path(&self) -> Option<String> {
-        self.query(|p| p.file_path(self.file_id))
+        self.provider.file_path(self.file_id)
     }
 
-    /// Dispatch to provider if available, else create a SalsaProvider for db fallback.
+    /// Dispatch a query to the provider.
     fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
-        if let Some(provider) = self.provider {
-            f(provider)
-        } else {
-            let salsa = ide_db::SalsaProvider::new(self.db, None);
-            f(&salsa)
-        }
+        f(self.provider)
     }
 
     // ========================================================================

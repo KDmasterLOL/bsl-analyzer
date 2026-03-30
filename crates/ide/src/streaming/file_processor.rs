@@ -292,23 +292,12 @@ impl<'a> FileProcessor<'a> {
     /// This method creates a DiagnosticsContext with provider and calls
     /// ide_diagnostics::diagnostics() to collect all enabled diagnostics.
     ///
-    /// Creates a minimal RootDatabaseImpl for compatibility (many handlers
-    /// still use ctx.db for some operations), but uses provider for all
-    /// file text/parse/symbol tree access.
+    /// Uses provider for all file text/parse/symbol tree access.
     fn collect_diagnostics(&self, file_id: FileId) -> Vec<DiagnosticOutput> {
         let _span = tracing::debug_span!("collect_diagnostics", ?file_id).entered();
 
-        // Create minimal RootDatabaseImpl for compatibility
-        // This is needed because DiagnosticsContext::with_provider() requires a db reference
-        let dummy_db = ide_db::RootDatabaseImpl::default();
-
         // Create DiagnosticsContext with provider
-        let ctx = ide_diagnostics::DiagnosticsContext::with_provider(
-            &dummy_db,
-            self.config,
-            file_id,
-            self.provider,
-        );
+        let ctx = ide_diagnostics::DiagnosticsContext::new(self.config, file_id, self.provider);
 
         // Collect all enabled diagnostics
         let diagnostics = ide_diagnostics::diagnostics(&ctx);

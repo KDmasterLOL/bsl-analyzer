@@ -155,7 +155,8 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = DiagnosticsContext::new(&db, &config, file_id);
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");
@@ -180,7 +181,8 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::PrivilegedModuleMethodCall);
 
-        let ctx = DiagnosticsContext::new(&db, &config, file_id);
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");

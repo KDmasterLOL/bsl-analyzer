@@ -164,7 +164,7 @@ mod tests {
         );
         let config = DiagnosticsConfig { ordinary_app_support, ..Default::default() };
 
-        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         (diagnostics, code.to_string())

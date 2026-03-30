@@ -201,7 +201,7 @@ mod tests {
             None,
         );
         let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         (diagnostics, code.to_string())
@@ -259,7 +259,7 @@ mod tests {
         let provider =
             ide_db::SalsaProvider::with_workspace(&db, None, Some(&workspace_root), None);
         let config = DiagnosticsConfig::default();
-        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
 
@@ -315,7 +315,7 @@ mod tests {
             serde_json::json!({"namesFullAccessRole": "Роль2"}),
         );
 
-        let ctx = DiagnosticsContext::with_provider(&db, &config, file_id, &provider);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
 
