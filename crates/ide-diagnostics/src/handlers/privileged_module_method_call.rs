@@ -26,7 +26,7 @@ use bsl_metadata::traits::MdObject;
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{ExternalRef, ModuleId, PathResolution};
+use hir::{ExternalRef, PathResolution};
 use rustc_hash::FxHashSet;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -85,8 +85,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let module_id = ModuleId::new(ctx.file_id);
-    let external_refs = ctx.db.file_external_refs(module_id);
+    let external_refs = ctx.file_external_refs();
 
     let mut diagnostics = Vec::new();
 

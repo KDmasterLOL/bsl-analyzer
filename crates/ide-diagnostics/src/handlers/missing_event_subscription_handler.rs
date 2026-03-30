@@ -59,11 +59,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use bsl_metadata::traits::MdObject;
 use bsl_metadata::{EventSubscription, EventSubscriptionHandler};
 use hir::{ModuleId, Name};
 use ide_db::TextRange;
-use vfs::FileId;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: crate::metadata::DiagnosticType::Error,
@@ -213,7 +211,7 @@ fn check_method(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     // Resolve CommonModule file via VFS
-    let module_file_id = match find_common_module_file(ctx, common_module) {
+    let module_file_id = match ctx.find_common_module_file(common_module) {
         Some(id) => id,
         None => return, // Module has no source code, skip method check
     };
@@ -326,48 +324,6 @@ fn create_diagnostic(
         tags: ctx.tags(code),
         fixes: vec![],
     }
-}
-
-/// Find CommonModule BSL file via VFS resolution
-///
-/// This function resolves the CommonModule URI to a FileId using the VFS.
-/// Similar to MissingCommonModuleMethod::find_common_module_file.
-fn find_common_module_file(
-    ctx: &DiagnosticsContext,
-    common_module: &bsl_metadata::CommonModule,
-) -> Option<FileId> {
-    use bsl_metadata::traits::Module;
-
-    // Get module URI (e.g., "CommonModules/ModuleName/Ext/Module.bsl")
-    let uri = common_module.uri()?;
-
-    // Get workspace root (prefer configuration_path for proper path resolution)
-    let workspace_root = ctx.configuration_path.or(ctx.workspace_root)?;
-
-    // Build absolute path
-    let full_path = workspace_root.join(uri);
-
-    // Convert to VfsPath
-    let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-
-    // CRITICAL: Use ctx.file_set directly to bypass Salsa for performance
-    let file_id = if let Some(file_set) = ctx.file_set {
-        file_set.file_for_path(&vfs_path).copied()
-    } else {
-        // Fallback: Use provider/db (slower, for tests)
-        let source_root_id = ctx.source_root_id();
-        ctx.resolve_vfs_path(source_root_id, &vfs_path)
-    };
-
-    if file_id.is_none() {
-        tracing::warn!(
-            module = %common_module.name(),
-            uri = %uri,
-            "CommonModule file not found in VFS"
-        );
-    }
-
-    file_id
 }
 
 #[cfg(test)]

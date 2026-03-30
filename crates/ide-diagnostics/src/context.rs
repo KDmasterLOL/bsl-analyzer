@@ -254,6 +254,26 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.method_docs(method_id))
     }
 
+    /// Get external references (qualified calls) from current module.
+    pub fn file_external_refs(&self) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.file_external_refs(module_id))
+    }
+
+    /// Get liveness analysis for module-level code.
+    pub fn module_level_liveness_analysis(
+        &self,
+    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
+    {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.module_level_liveness_analysis(module_id))
+    }
+
+    /// Get module bodies for a specific (possibly different) module.
+    pub fn module_bodies_for(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleBodies> {
+        self.query(|p| p.module_bodies(module_id))
+    }
+
     /// Get reaching definitions for a specific method.
     pub fn reaching_definitions(
         &self,
@@ -317,6 +337,43 @@ impl<'a> DiagnosticsContext<'a> {
             module_name.clone(),
             method_name.clone(),
         ]))
+    }
+
+    // ========================================================================
+    // Cross-module file resolution
+    // ========================================================================
+
+    /// Resolve a CommonModule metadata entry to its FileId.
+    ///
+    /// Builds absolute path from workspace root + module URI, then resolves
+    /// via file_set (fast path) or provider (fallback for tests).
+    pub fn find_common_module_file(
+        &self,
+        common_module: &bsl_metadata::CommonModule,
+    ) -> Option<vfs::FileId> {
+        use bsl_metadata::traits::{MdObject, Module};
+
+        let uri = common_module.uri()?;
+        let workspace_root = self.configuration_path.or(self.workspace_root)?;
+        let full_path = workspace_root.join(uri);
+        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+
+        let file_id = if let Some(file_set) = self.file_set {
+            file_set.file_for_path(&vfs_path).copied()
+        } else {
+            let source_root_id = self.source_root_id();
+            self.resolve_vfs_path(source_root_id, &vfs_path)
+        };
+
+        if file_id.is_none() {
+            tracing::warn!(
+                module = %common_module.name(),
+                uri = %uri,
+                "CommonModule file not found in VFS"
+            );
+        }
+
+        file_id
     }
 
     // ========================================================================

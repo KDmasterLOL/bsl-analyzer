@@ -422,6 +422,21 @@ impl AnalysisProvider for StreamingProvider {
         module_reaching_defs.get(method_id.local_id).cloned()
     }
 
+    fn file_external_refs(&self, _module_id: hir::ModuleId) -> Arc<Vec<hir::ExternalRef>> {
+        // External refs require full HIR lowering across modules;
+        // not supported in streaming mode
+        Arc::new(Vec::new())
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        _module_id: hir::ModuleId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
+        // Module-level liveness requires CFG construction;
+        // not supported in streaming mode
+        None
+    }
+
     fn resolve_vfs_path(
         &self,
         _source_root_id: base_db::SourceRootId,

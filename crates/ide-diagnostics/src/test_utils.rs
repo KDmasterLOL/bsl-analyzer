@@ -451,6 +451,23 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.module_cfgs(input)
     }
 
+    fn file_external_refs(
+        &self,
+        module_id: hir::ModuleId,
+    ) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        use hir::DefDatabase;
+        self.db.file_external_refs(module_id)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: hir::ModuleId,
+    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
+    {
+        use ide_db::RootDatabase;
+        self.db.module_level_liveness_analysis(module_id)
+    }
+
     fn resolve_vfs_path(
         &self,
         source_root_id: ide_db::base_db::SourceRootId,

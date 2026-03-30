@@ -153,6 +153,23 @@ pub trait AnalysisProvider {
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
     // ========================================================================
+    // Cross-module References
+    // ========================================================================
+
+    /// Get external references (qualified calls) from a module.
+    ///
+    /// Returns list of cross-module references like `CommonModule.Method()`.
+    fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>>;
+
+    /// Get liveness analysis for module-level code.
+    ///
+    /// Returns `None` if no module-level code or analysis doesn't converge.
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: ModuleId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
+
+    // ========================================================================
     // VFS Resolution (for metadata lookups)
     // ========================================================================
 

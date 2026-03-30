@@ -148,6 +148,18 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.reaching_definitions(method_id)
     }
 
+    fn file_external_refs(&self, module_id: ModuleId) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        self.db.file_external_refs(module_id)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: ModuleId,
+    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
+    {
+        self.db.module_level_liveness_analysis(module_id)
+    }
+
     fn resolve_vfs_path(
         &self,
         source_root_id: base_db::SourceRootId,
