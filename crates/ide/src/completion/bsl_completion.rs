@@ -10,7 +10,7 @@ use bsl_platform::{GlobalFunction, PlatformData, PlatformDataInner};
 use either::Either;
 use hir::{ExprScopes, ScopeDef};
 use ide_db::{RootDatabase, TextRange};
-use syntax::{ast::AstNode, SyntaxKind};
+use syntax::{ast::AstNode, NodeOrToken, SyntaxKind};
 
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
@@ -133,6 +133,37 @@ pub(super) fn bsl_completions<DB: RootDatabase>(
         return Some(completions);
     }
 
+    // Check if we're at a trigger position where expression is expected
+    // but nothing is typed yet (e.g., inside parentheses, after comma, empty line)
+    if is_expression_start_position(&token) {
+        tracing::info!(token_kind = ?token.kind(), "Expression start position - completing with empty prefix");
+        let mut completions = Vec::new();
+
+        // Local symbols first (highest priority)
+        for mut item in complete_local_symbols(db, position.file_id, position.offset, "") {
+            item.sort_text = Some(format!("0_{}", item.label));
+            completions.push(item);
+        }
+        // User-defined methods
+        for mut item in complete_user_defined_symbols(db, position.file_id, "") {
+            item.sort_text = Some(format!("1_{}", item.label));
+            completions.push(item);
+        }
+        // Global functions
+        for mut item in complete_global_functions("") {
+            item.sort_text = Some(format!("2_{}", item.label));
+            completions.push(item);
+        }
+        // MDO types and objects (lowest priority in argument context)
+        for mut item in complete_mdo_symbols(db, position.file_id, "") {
+            item.sort_text = Some(format!("3_{}", item.label));
+            completions.push(item);
+        }
+
+        tracing::info!(count = completions.len(), "Returning BSL completions (trigger position)");
+        return Some(completions);
+    }
+
     // No BSL completion context
     tracing::info!("No BSL completion context - returning None");
     None
@@ -170,19 +201,20 @@ fn complete_local_symbols<DB: RootDatabase>(
         None => return completions, // Not inside a method
     };
 
-    // Build ExprScopes for this method
-    let scopes = match method_def {
-        Either::Left(proc) => ExprScopes::from_procedure(&proc),
-        Either::Right(func) => ExprScopes::from_function(&func),
+    // Build ExprScopes for this method (parameters + Перем declarations)
+    let scopes = match &method_def {
+        Either::Left(proc) => ExprScopes::from_procedure(proc),
+        Either::Right(func) => ExprScopes::from_function(func),
     };
 
     let root_scope = scopes.root_scope();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Get all entries from root scope (parameters + local variables)
     for (name, scope_def) in scopes.all_entries_in_scope(root_scope) {
         let name_str = name.as_str();
+        seen.insert(name_str.to_lowercase());
 
-        // Filter by prefix
         if !name_str.to_lowercase().starts_with(&prefix_lower) {
             continue;
         }
@@ -202,6 +234,54 @@ fn complete_local_symbols<DB: RootDatabase>(
             filter_text: None,
             source: None,
         });
+    }
+
+    // Collect implicit variables from assignment targets (e.g. Партнер = ...)
+    // This is done here (not in ExprScopes) because ExprScopes doesn't know about
+    // module-level variables, and we'd incorrectly shadow them.
+    let body_node = match &method_def {
+        Either::Left(proc) => proc.body().map(|b| b.syntax().clone()),
+        Either::Right(func) => func.body().map(|b| b.syntax().clone()),
+    };
+    if let Some(body) = body_node {
+        for node in body.descendants() {
+            if node.kind() != SyntaxKind::ASSIGN_STMT {
+                continue;
+            }
+            let Some(first) = node.first_child_or_token() else { continue };
+            if first.kind() != SyntaxKind::IDENT {
+                continue;
+            }
+            // The parser wraps identifiers in an IDENT node (not a bare token),
+            // so first_child_or_token() returns NodeOrToken::Node for simple
+            // assignments like `Партнер = ...`. We need to handle both cases.
+            let text: String = match &first {
+                NodeOrToken::Token(t) => t.text().to_string(),
+                NodeOrToken::Node(n) => match n.first_token() {
+                    Some(t) => t.text().to_string(),
+                    None => continue,
+                },
+            };
+            let lower = text.to_lowercase();
+            if seen.contains(&lower) {
+                continue;
+            }
+            if !lower.starts_with(&prefix_lower) {
+                seen.insert(lower);
+                continue;
+            }
+            seen.insert(lower);
+            completions.push(CompletionItem {
+                label: text.clone(),
+                detail: Some("Переменная".to_string()),
+                kind: CompletionItemKind::Field,
+                insert_text: text,
+                documentation: None,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            });
+        }
     }
 
     tracing::debug!(
@@ -234,6 +314,35 @@ fn find_method_for_token(
         }
     }
     None
+}
+
+/// Check if the token indicates a position where an expression is expected
+/// but nothing has been typed yet (trigger position for empty-prefix completion).
+///
+/// Examples: `Foo(|)`, `Foo(x, |)`, empty line inside method body.
+fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
+    match token.kind() {
+        // Inside parentheses: Foo(|) or Foo(x, |)
+        SyntaxKind::R_PAREN | SyntaxKind::L_PAREN | SyntaxKind::COMMA => true,
+        // Semicolon: after end of statement, new statement expected
+        SyntaxKind::SEMICOLON => true,
+        // Whitespace/newline: check previous non-trivia token for context
+        SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {
+            // Walk backwards to find previous non-trivia token
+            let mut prev = token.prev_token();
+            while let Some(ref t) = prev {
+                if !t.kind().is_trivia() {
+                    break;
+                }
+                prev = t.prev_token();
+            }
+            match prev {
+                Some(t) => !matches!(t.kind(), SyntaxKind::DOT),
+                None => true,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Helper: Get plural Russian form for MDO type.
@@ -559,37 +668,12 @@ fn format_function_signature(function: &GlobalFunction) -> String {
     format!("{}({}){}", function.name, params.join(", "), ret_part)
 }
 
-/// Generates function snippet with parameter placeholders.
+/// Generates function snippet with cursor inside parentheses.
 ///
-/// LSP snippet format with tab stops:
-/// - $1, $2, $3 - Tab stop positions
-/// - ${1:placeholder} - Tab stop with placeholder text
-/// - $0 - Final cursor position
-///
-/// Example: `НачатьТранзакцию(${1:[РежимБлокировок]})$0`
+/// Inserts `FunctionName($0)` so cursor lands between parens and
+/// signatureHelp shows expected parameters.
 fn generate_function_snippet(function: &GlobalFunction) -> String {
-    if function.parameters.is_empty() {
-        // No parameters: just function name with parentheses and final cursor
-        return format!("{}()$0", function.name);
-    }
-
-    // Generate snippet with parameter placeholders
-    let mut snippet = format!("{}(", function.name);
-
-    for (idx, param) in function.parameters.iter().enumerate() {
-        if idx > 0 {
-            snippet.push_str(", ");
-        }
-
-        let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-        let placeholder =
-            if param.is_optional { format!("[{}]", param_type) } else { param_type.to_string() };
-
-        snippet.push_str(&format!("${{{}:{}}}", idx + 1, placeholder));
-    }
-
-    snippet.push_str(")$0");
-    snippet
+    format!("{}($0)", function.name)
 }
 
 /// Formats function documentation for the completion item.
@@ -814,7 +898,7 @@ mod tests {
 
         println!("Snippet: {}", snippet);
         assert!(snippet.starts_with("НачатьТранзакцию("));
-        assert!(snippet.ends_with(")$0"));
+        assert!(snippet.ends_with("$0)"));
     }
 
     #[test]
@@ -881,8 +965,8 @@ mod tests {
         assert!(item.detail.is_some());
         assert!(item.documentation.is_some());
 
-        // Snippet should end with $0
-        assert!(item.insert_text.ends_with("$0"));
+        // Snippet should end with $0)
+        assert!(item.insert_text.ends_with("$0)"));
     }
 
     #[test]
@@ -1222,5 +1306,52 @@ mod tests {
         let var_count =
             items.iter().filter(|i| i.detail == Some("Локальная переменная".to_string())).count();
         assert_eq!(var_count, 2, "Should have 2 local variables");
+    }
+
+    #[test]
+    fn test_implicit_variables_from_assignments() {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+        use vfs::{file_set::FileSet, VfsPath};
+
+        let source = r#"
+Процедура Тест(Запрос)
+    Партнер = Справочники.Партнеры.НайтиПоКоду("001");
+    Результат = Новый Структура;
+    Результат.Вставить("Партнер", Партнер);
+    ВременнаяПеременная = 42;
+КонецПроцедуры
+"#;
+        let mut db = RootDatabaseImpl::default();
+        let file_id = vfs::FileId(0);
+        db.set_file_text(file_id, source);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/test.bsl"));
+        let source_root = SourceRoot::new_local(file_set);
+        db.set_source_root(SourceRootId(0), source_root);
+
+        // Position inside the method body (after assignments)
+        let offset = syntax::TextSize::from(source.find("ВременнаяПеременная").unwrap() as u32);
+
+        let items = complete_local_symbols(&db, file_id, offset, "");
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        println!("Found local symbols: {:?}", labels);
+
+        // Should find parameter
+        assert!(labels.contains(&"Запрос"), "Should find parameter Запрос");
+
+        // Should find implicit variables from assignments
+        assert!(labels.contains(&"Партнер"), "Should find implicit var Партнер");
+        assert!(labels.contains(&"Результат"), "Should find implicit var Результат");
+        assert!(
+            labels.contains(&"ВременнаяПеременная"),
+            "Should find implicit var ВременнаяПеременная"
+        );
+
+        // Implicit vars should have detail "Переменная"
+        let implicit_count =
+            items.iter().filter(|i| i.detail == Some("Переменная".to_string())).count();
+        assert_eq!(implicit_count, 3, "Should have 3 implicit variables");
     }
 }

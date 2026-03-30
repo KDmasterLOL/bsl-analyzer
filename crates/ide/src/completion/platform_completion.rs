@@ -355,6 +355,69 @@ fn complete_platform_methods(db: &dyn RootDatabase, receiver_type: &str) -> Vec<
     methods.iter().map(render_platform_method).collect()
 }
 
+/// Renders a platform manager method as a completion item.
+///
+/// Manager methods in platform data have `name = "<Имя"` for all methods.
+/// The actual Russian name is extracted from `MethodDocs.syntax` (e.g., "НайтиПоКоду(...)"),
+/// and the English name from `english_name` (e.g., "<Catalog name>.FindByCode" → "FindByCode").
+pub(super) fn render_manager_method(method: &PlatformMethod) -> CompletionItem {
+    let data = PlatformData::instance();
+    let docs = data.get_method_docs(method.id);
+
+    // Extract Russian name from documentation syntax: "НайтиПоКоду(<Код>, ...)" → "НайтиПоКоду"
+    let ru_name: String =
+        docs.as_ref().and_then(|d| d.syntax.split('(').next()).unwrap_or(&method.name).to_string();
+
+    // Extract English name: "<Catalog name>.FindByCode" → "FindByCode"
+    let en_name: String = method
+        .english_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&method.english_name)
+        .to_string();
+
+    let label = ru_name.clone();
+
+    // Detail: signature with return type
+    let params: Vec<_> = method
+        .parameters
+        .iter()
+        .map(|p| {
+            let ty = p.param_type.as_deref().unwrap_or("Произвольный");
+            if p.is_optional {
+                format!("[{}]", ty)
+            } else {
+                format!("<{}>", ty)
+            }
+        })
+        .collect();
+    let ret_part = method.return_type.as_ref().map(|r| format!(" -> {}", r)).unwrap_or_default();
+    let detail = format!("{}({}){}", ru_name, params.join(", "), ret_part);
+
+    // Insert text: cursor inside parentheses, signatureHelp shows parameters
+    let insert_text = format!("{}($0)", ru_name);
+
+    // Documentation
+    let documentation = docs.map(|d| {
+        let mut doc = format!("{} / {}\n\n", ru_name, en_name);
+        if !d.description.is_empty() {
+            doc.push_str(&d.description);
+        }
+        doc
+    });
+
+    CompletionItem {
+        label,
+        detail: Some(detail),
+        kind: CompletionItemKind::Method,
+        insert_text,
+        documentation,
+        sort_text: None,
+        filter_text: Some(format!("{} {}", ru_name, en_name)),
+        source: None,
+    }
+}
+
 /// Renders a platform method as a completion item.
 ///
 /// Generates a completion item with:
@@ -409,37 +472,12 @@ fn format_method_signature(method: &PlatformMethod) -> String {
     format!("{}({}){}", method.name, params.join(", "), ret_part)
 }
 
-/// Generates method snippet with parameter placeholders.
+/// Generates method snippet with cursor inside parentheses.
 ///
-/// LSP snippet format with tab stops:
-/// - $1, $2, $3 - Tab stop positions
-/// - ${1:placeholder} - Tab stop with placeholder text
-/// - $0 - Final cursor position
-///
-/// Example: `ВРег(${1:Строка})$0`
+/// Inserts `MethodName($0)` so cursor lands between parens and
+/// signatureHelp shows expected parameters.
 fn generate_method_snippet(method: &PlatformMethod) -> String {
-    if method.parameters.is_empty() {
-        // No parameters: just method name with parentheses and final cursor
-        return format!("{}()$0", method.name);
-    }
-
-    // Generate snippet with parameter placeholders
-    let mut snippet = format!("{}(", method.name);
-
-    for (idx, param) in method.parameters.iter().enumerate() {
-        if idx > 0 {
-            snippet.push_str(", ");
-        }
-
-        let param_type = param.param_type.as_deref().unwrap_or("Произвольный");
-        let placeholder =
-            if param.is_optional { format!("[{}]", param_type) } else { param_type.to_string() };
-
-        snippet.push_str(&format!("${{{}:{}}}", idx + 1, placeholder));
-    }
-
-    snippet.push_str(")$0");
-    snippet
+    format!("{}($0)", method.name)
 }
 
 /// Formats method documentation for the completion item.
@@ -569,7 +607,7 @@ mod tests {
         let method = create_test_method();
         let snippet = generate_method_snippet(&method);
 
-        assert_eq!(snippet, "ВРег(${1:Строка})$0");
+        assert_eq!(snippet, "ВРег($0)");
     }
 
     #[test]
@@ -587,7 +625,7 @@ mod tests {
 
         let snippet = generate_method_snippet(&method);
 
-        assert_eq!(snippet, "Цел()$0");
+        assert_eq!(snippet, "Цел($0)");
     }
 
     #[test]
@@ -616,7 +654,7 @@ mod tests {
 
         let snippet = generate_method_snippet(&method);
 
-        assert_eq!(snippet, "Лев(${1:Строка}, ${2:[Число]})$0");
+        assert_eq!(snippet, "Лев($0)");
     }
 
     #[test]
@@ -639,7 +677,7 @@ mod tests {
 
         assert_eq!(item.label, "ВРег");
         assert_eq!(item.kind, CompletionItemKind::Method);
-        assert_eq!(item.insert_text, "ВРег(${1:Строка})$0");
+        assert_eq!(item.insert_text, "ВРег($0)");
         assert!(item.detail.is_some());
         assert!(item.documentation.is_some());
     }
@@ -699,10 +737,10 @@ mod tests {
 
         // If we have methods, verify snippet format
         for item in &items {
-            // All methods should have snippets ending with $0
+            // All methods should have snippets ending with $0)
             assert!(
-                item.insert_text.ends_with("$0"),
-                "Method snippet should end with $0: {}",
+                item.insert_text.ends_with("$0)"),
+                "Method snippet should end with $0): {}",
                 item.insert_text
             );
 

@@ -169,7 +169,16 @@ impl LoweringContext {
         let is_virtual = parts.last().map(|p| is_virtual_table_name(p)).unwrap_or(false);
 
         // Resolve in metadata
-        let (_metadata, resolved) = self.resolve_table(&parts, table_ref.syntax().text_range());
+        let (_metadata, mut resolved) = self.resolve_table(&parts, table_ref.syntax().text_range());
+
+        // Transform fields for virtual tables (e.g., Обороты → resources get Оборот suffix)
+        if is_virtual {
+            if let Some(vt_type) = parts.last().and_then(|p| virtual_table_type(p)) {
+                if let Some(r) = resolved.take() {
+                    resolved = Some(Self::transform_for_virtual_table(r, vt_type));
+                }
+            }
+        }
 
         // NEW: Extract IDENT token ranges for semantic highlighting
         let ident_ranges: Vec<TextRange> = table_ref
@@ -237,7 +246,41 @@ impl LoweringContext {
         let virtual_table_params = if is_virtual {
             tracing::debug!(table_name = %full_name, "Lowering virtual table parameters");
 
-            table_ref
+            // Push temporary scope with register dimensions for VT condition resolution.
+            // This allows unqualified references like `Партнер В (...)` in VT params
+            // to resolve against the register's dimensions.
+            let has_vt_scope = if let Some(ref r) = resolved {
+                let dims = r.dimensions();
+                if !dims.is_empty() {
+                    self.scope.push_frame();
+                    let dim_table = TableRef {
+                        parts: Vec::new(),
+                        full_name: String::new(),
+                        alias: None,
+                        metadata: Some(ResolvedTable::Metadata {
+                            mdo_type: MdoType::AccumulationRegister,
+                            name: String::new(),
+                            fields: dims.to_vec(),
+                        }),
+                        is_virtual_table: false,
+                        virtual_table_params: Vec::new(),
+                        subquery: Vec::new(),
+                        range: table_ref.syntax().text_range(),
+                    };
+                    self.scope.add_table(dim_table);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            // Determine VT type for positional parameter handling
+            let vt_type = parts.last().and_then(|p| virtual_table_type(p));
+            let has_periodicity = vt_type.map(|vt| vt.has_periodicity()).unwrap_or(false);
+
+            let param_nodes: Vec<_> = table_ref
                 .syntax()
                 .children()
                 .filter(|n| {
@@ -260,8 +303,56 @@ impl LoweringContext {
                             | syntax::SyntaxKind::ERROR
                     )
                 })
-                .map(|expr| self.lower_expr(&expr))
-                .collect()
+                .collect();
+
+            let params: Vec<_> = param_nodes
+                .into_iter()
+                .enumerate()
+                .map(|(idx, expr)| {
+                    // 3rd parameter (index 2) for Turnovers/BalanceAndTurnovers is periodicity.
+                    // The parser wraps single identifiers in precedence nodes
+                    // (LOGICAL_OR → ... → COLUMN_REF), so find the inner COLUMN_REF.
+                    if idx == 2 && has_periodicity {
+                        let col_ref = if expr.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF {
+                            Some(expr.clone())
+                        } else {
+                            expr.descendants()
+                                .find(|n| n.kind() == syntax::SyntaxKind::SDBL_COLUMN_REF)
+                        };
+                        if let Some(ref col) = col_ref {
+                            if let Some(token) = col.first_token() {
+                                if token.kind() == syntax::SyntaxKind::IDENT
+                                    && crate::standard_fields::is_periodicity_value(token.text())
+                                {
+                                    self.source_map.add_token(
+                                        crate::source_map::TokenInfo::new(
+                                            token.text_range(),
+                                            syntax::SyntaxKind::IDENT,
+                                            token.text(),
+                                        ),
+                                        crate::source_map::TokenCategory::SpecialKeyword,
+                                    );
+                                    return crate::hir::ExprHir::Literal {
+                                        value: crate::hir::LiteralValue::String(
+                                            token.text().to_string(),
+                                        ),
+                                        ty: SdblType::string(),
+                                        range: expr.text_range(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    self.lower_expr(&expr)
+                })
+                .collect();
+
+            // Pop temporary VT scope
+            if has_vt_scope {
+                self.scope.pop_frame();
+            }
+
+            params
         } else {
             Vec::new()
         };
@@ -406,33 +497,40 @@ impl LoweringContext {
 
         // Build resolved table
         let full_name_for_logging = parts.join(".");
-
-        // Start with empty fields - metadata will provide all fields including standard ones
-        let mut fields = Vec::new();
+        let is_register = matches!(
+            mdo_type,
+            MdoType::InformationRegister
+                | MdoType::AccumulationRegister
+                | MdoType::AccountingRegister
+                | MdoType::CalculationRegister
+        );
 
         tracing::debug!(
             full_name = %full_name_for_logging,
             mdo_type = ?mdo_type,
             object_name = %object_name,
             tabular_section = ?tabular_section_name,
-            initial_fields = fields.len(),
+            is_register = is_register,
             has_metadata = self.metadata.is_some(),
             "resolve_table: Starting field resolution"
         );
 
-        // Add fields from metadata if available
-        if let Some(ref _metadata) = self.metadata {
+        // Registers (without tabular section) → Register variant with structured fields
+        if is_register && tabular_section_name.is_none() {
+            let resolved =
+                self.build_register_resolved(mdo_type, object_name, &full_name_for_logging);
+            return (Some(mdo_type), resolved);
+        }
+
+        // Non-register types and tabular sections → Metadata variant
+        let mut fields = Vec::new();
+        if self.metadata.is_some() {
             self.add_metadata_fields(
                 mdo_type,
                 object_name,
                 tabular_section_name,
                 &full_name_for_logging,
                 &mut fields,
-            );
-        } else {
-            tracing::debug!(
-                full_name = %full_name_for_logging,
-                "resolve_table: No metadata available, cannot add custom fields"
             );
         }
 
@@ -446,6 +544,228 @@ impl LoweringContext {
         let resolved = ResolvedTable::Metadata { mdo_type, name: object_name.clone(), fields };
 
         (Some(mdo_type), Some(resolved))
+    }
+
+    /// Build `ResolvedTable::Register` with structured dimensions/resources/attributes.
+    fn build_register_resolved(
+        &self,
+        mdo_type: MdoType,
+        object_name: &str,
+        full_name: &str,
+    ) -> Option<ResolvedTable> {
+        let metadata = self.metadata.as_ref()?;
+        let register = metadata.find_register_by_type_and_name(mdo_type, object_name)?;
+
+        let mut dimensions = Vec::new();
+        for dim in register.dimensions() {
+            let ty = dim
+                .attr_type()
+                .map(|at| self.resolve_attribute_type(at))
+                .unwrap_or(SdblType::Unknown);
+            dimensions.push(FieldDef::new(dim.name(), ty));
+        }
+
+        let mut resources = Vec::new();
+        for res in register.resources() {
+            let ty = res
+                .attr_type()
+                .map(|at| self.resolve_attribute_type(at))
+                .unwrap_or(SdblType::Unknown);
+            resources.push(FieldDef::new_with_names(
+                res.name().to_string(),
+                res.name_en().map(|s| s.to_string()),
+                ty,
+                false,
+            ));
+        }
+
+        let mut attributes = Vec::new();
+        for attr in register.attributes() {
+            let ty = attr
+                .attr_type()
+                .map(|at| self.resolve_attribute_type(at))
+                .unwrap_or(SdblType::Unknown);
+            attributes.push(FieldDef::new_with_names(
+                attr.name().to_string(),
+                attr.name_en().map(|s| s.to_string()),
+                ty,
+                false,
+            ));
+        }
+
+        // Combined fields for API compatibility
+        let mut fields = Vec::new();
+        fields.extend(dimensions.iter().cloned());
+        fields.extend(resources.iter().cloned());
+        fields.extend(attributes.iter().cloned());
+
+        tracing::debug!(
+            mdo_type = ?mdo_type,
+            object_name = object_name,
+            full_name = full_name,
+            dimensions = dimensions.len(),
+            resources = resources.len(),
+            attributes = attributes.len(),
+            total_fields = fields.len(),
+            "Built Register resolved table"
+        );
+
+        Some(ResolvedTable::Register {
+            mdo_type,
+            name: object_name.to_string(),
+            fields,
+            dimensions,
+            resources,
+            attributes,
+        })
+    }
+
+    /// Transform register fields for a virtual table type.
+    ///
+    /// Generates synthetic fields based on virtual table semantics:
+    /// - Обороты: resources get `Оборот` suffix
+    /// - Остатки: resources get `Остаток` suffix
+    /// - ОстаткиИОбороты: resources get three suffix variants
+    /// - СрезПоследних/СрезПервых: fields as-is + Период
+    fn transform_for_virtual_table(
+        resolved: ResolvedTable,
+        vt_type: crate::standard_fields::VirtualTableType,
+    ) -> ResolvedTable {
+        use crate::standard_fields::VirtualTableType;
+
+        let ResolvedTable::Register { mdo_type, name, dimensions, resources, attributes, .. } =
+            resolved
+        else {
+            return resolved;
+        };
+
+        match vt_type {
+            VirtualTableType::Turnovers => {
+                let new_resources: Vec<FieldDef> = resources
+                    .iter()
+                    .map(|r| {
+                        FieldDef::new_with_names(
+                            format!("{}Оборот", r.name),
+                            r.name_en.as_ref().map(|en| format!("{}Turnover", en)),
+                            r.ty.clone(),
+                            false,
+                        )
+                    })
+                    .collect();
+
+                let mut fields = vec![
+                    FieldDef::standard("Период", "Period", SdblType::Date),
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
+                ];
+                fields.extend(dimensions.iter().cloned());
+                fields.extend(new_resources.iter().cloned());
+
+                ResolvedTable::Register {
+                    mdo_type,
+                    name,
+                    fields,
+                    dimensions,
+                    resources: new_resources,
+                    attributes: Vec::new(),
+                }
+            }
+            VirtualTableType::Balance => {
+                let new_resources: Vec<FieldDef> = resources
+                    .iter()
+                    .map(|r| {
+                        FieldDef::new_with_names(
+                            format!("{}Остаток", r.name),
+                            r.name_en.as_ref().map(|en| format!("{}Balance", en)),
+                            r.ty.clone(),
+                            false,
+                        )
+                    })
+                    .collect();
+
+                let mut fields = Vec::new();
+                fields.extend(dimensions.iter().cloned());
+                fields.extend(new_resources.iter().cloned());
+
+                ResolvedTable::Register {
+                    mdo_type,
+                    name,
+                    fields,
+                    dimensions,
+                    resources: new_resources,
+                    attributes: Vec::new(),
+                }
+            }
+            VirtualTableType::BalanceAndTurnovers => {
+                let mut new_resources = Vec::new();
+                for r in &resources {
+                    new_resources.push(FieldDef::new_with_names(
+                        format!("{}НачальныйОстаток", r.name),
+                        r.name_en.as_ref().map(|en| format!("{}OpeningBalance", en)),
+                        r.ty.clone(),
+                        false,
+                    ));
+                    new_resources.push(FieldDef::new_with_names(
+                        format!("{}Оборот", r.name),
+                        r.name_en.as_ref().map(|en| format!("{}Turnover", en)),
+                        r.ty.clone(),
+                        false,
+                    ));
+                    new_resources.push(FieldDef::new_with_names(
+                        format!("{}КонечныйОстаток", r.name),
+                        r.name_en.as_ref().map(|en| format!("{}ClosingBalance", en)),
+                        r.ty.clone(),
+                        false,
+                    ));
+                }
+
+                let mut fields = vec![
+                    FieldDef::standard("Период", "Period", SdblType::Date),
+                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
+                ];
+                fields.extend(dimensions.iter().cloned());
+                fields.extend(new_resources.iter().cloned());
+
+                ResolvedTable::Register {
+                    mdo_type,
+                    name,
+                    fields,
+                    dimensions,
+                    resources: new_resources,
+                    attributes: Vec::new(),
+                }
+            }
+            VirtualTableType::SliceLast | VirtualTableType::SliceFirst => {
+                let mut fields = vec![FieldDef::standard("Период", "Period", SdblType::Date)];
+                fields.extend(dimensions.iter().cloned());
+                fields.extend(resources.iter().cloned());
+                fields.extend(attributes.iter().cloned());
+
+                ResolvedTable::Register {
+                    mdo_type,
+                    name,
+                    fields,
+                    dimensions,
+                    resources,
+                    attributes,
+                }
+            }
+            // Changes, RecordsWithExtDimensions, etc. — fields as-is
+            _ => ResolvedTable::Register {
+                mdo_type,
+                name: name.clone(),
+                fields: {
+                    let mut f = Vec::new();
+                    f.extend(dimensions.iter().cloned());
+                    f.extend(resources.iter().cloned());
+                    f.extend(attributes.iter().cloned());
+                    f
+                },
+                dimensions,
+                resources,
+                attributes,
+            },
+        }
     }
 
     /// Add fields from metadata to the fields list.
@@ -468,73 +788,9 @@ impl LoweringContext {
             return; // Early return - don't process as main object
         }
 
-        // Continue with existing logic for main objects
+        // Continue with existing logic for non-register main objects
+        // (Registers are handled by build_register_resolved() in resolve_table())
         match mdo_type {
-            // For registers, add dimensions, resources, and attributes
-            MdoType::InformationRegister
-            | MdoType::AccumulationRegister
-            | MdoType::AccountingRegister
-            | MdoType::CalculationRegister => {
-                tracing::debug!(
-                    full_name = %full_name,
-                    mdo_type = ?mdo_type,
-                    object_name = %object_name,
-                    "add_metadata_fields: Looking up register in metadata"
-                );
-
-                // Use find_register_by_type_and_name to ensure we get the correct register type
-                if let Some(register) =
-                    metadata.find_register_by_type_and_name(mdo_type, object_name)
-                {
-                    let initial_count = fields.len();
-
-                    // Add dimensions
-                    for dimension in register.dimensions() {
-                        let ty = dimension
-                            .attr_type()
-                            .map(|attr_type| self.resolve_attribute_type(attr_type))
-                            .unwrap_or(SdblType::Unknown);
-                        fields.push(FieldDef::new(dimension.name(), ty));
-                    }
-
-                    // Add resources
-                    for resource in register.resources() {
-                        let ty = resource
-                            .attr_type()
-                            .map(|attr_type| self.resolve_attribute_type(attr_type))
-                            .unwrap_or(SdblType::Unknown);
-                        fields.push(FieldDef::new(resource.name(), ty));
-                    }
-
-                    // Add attributes
-                    for attribute in register.attributes() {
-                        let ty = attribute
-                            .attr_type()
-                            .map(|attr_type| self.resolve_attribute_type(attr_type))
-                            .unwrap_or(SdblType::Unknown);
-                        fields.push(FieldDef::new(attribute.name(), ty));
-                    }
-
-                    tracing::debug!(
-                        mdo_type = ?mdo_type,
-                        object_name = object_name,
-                        dimensions = register.dimensions().len(),
-                        resources = register.resources().len(),
-                        attributes = register.attributes().len(),
-                        fields_added = fields.len() - initial_count,
-                        total_fields = fields.len(),
-                        "Added metadata fields to register"
-                    );
-                } else {
-                    tracing::debug!(
-                        full_name = %full_name,
-                        mdo_type = ?mdo_type,
-                        object_name = %object_name,
-                        "Register not found in metadata (may be from extension)"
-                    );
-                }
-            }
-
             // For catalogs, documents, business processes, tasks, exchange plans - add attributes
             MdoType::Catalog
             | MdoType::Document

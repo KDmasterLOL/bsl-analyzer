@@ -12,6 +12,8 @@ use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextSize};
 use vfs::FileId;
 
+use bsl_platform::PlatformData;
+
 /// Result of signature help.
 #[derive(Debug, Clone)]
 pub struct SignatureHelp {
@@ -71,15 +73,23 @@ pub fn signature_help<DB: RootDatabase>(
     let active_param = count_commas_before(&arg_list, offset);
 
     // Resolve and build signature help
-    if let Some(type_name) = receiver_type {
+    if receiver_type.is_some() {
         // Method call: receiver.method()
-        if let Some(sig) = build_for_platform_method(db, &type_name, &callee_name, active_param) {
+        // First try MDO chain detection (Справочники.Партнеры.Method() → CatalogManager)
+        if let Some(sig) = resolve_mdo_chain(&call_expr, &callee_name, active_param) {
+            return Some(sig);
+        }
+
+        let type_name = receiver_type.as_deref().unwrap();
+
+        // Fallback: use extracted receiver name directly
+        if let Some(sig) = build_for_platform_method(db, type_name, &callee_name, active_param) {
             return Some(sig);
         }
 
         // Try CommonModule method
         if let Some(sig) =
-            build_for_common_module_method(db, file_id, &type_name, &callee_name, active_param)
+            build_for_common_module_method(db, file_id, type_name, &callee_name, active_param)
         {
             return Some(sig);
         }
@@ -124,43 +134,34 @@ fn find_call_expr(arg_list: &SyntaxNode) -> Option<SyntaxNode> {
 /// Returns (receiver_type, method_name):
 /// - For `Строка.Найти()`: (Some("Строка"), "Найти")
 /// - For `НачатьТранзакцию()`: (None, "НачатьТранзакцию")
+/// - For `Справочники.Партнеры.ПолучитьМакет()`: (Some("Партнеры"), "ПолучитьМакет")
 fn extract_callee_info(call_expr: &SyntaxNode) -> Option<(Option<String>, String)> {
     // CALL_EXPR structure: callee (IDENT or FIELD_EXPR) followed by ARG_LIST
     let first_child = call_expr.first_child()?;
 
     match first_child.kind() {
         SyntaxKind::FIELD_EXPR => {
-            // Method call: receiver.method
-            // FIELD_EXPR: receiver DOT method_name
-            // Note: receiver IDENT can be either a node or token depending on parser
-            let mut receiver = None;
-            let mut method = None;
+            // Method call: receiver.method (possibly nested: a.b.method)
+            // Collect all IDENT tokens from descendants to handle nested FIELD_EXPR
+            let mut idents: Vec<String> = Vec::new();
 
-            for child in first_child.children_with_tokens() {
-                match child.kind() {
-                    SyntaxKind::IDENT => {
-                        let text = if let Some(token) = child.as_token() {
-                            token.text().to_string()
-                        } else if let Some(node) = child.as_node() {
-                            // IDENT node wrapping an IDENT token
-                            node.text().to_string()
-                        } else {
-                            continue;
-                        };
-                        if receiver.is_none() {
-                            receiver = Some(text);
-                        } else {
-                            method = Some(text);
-                        }
-                    }
-                    SyntaxKind::DOT => {
-                        // Next IDENT will be the method name
-                    }
-                    _ => {}
+            for token in first_child.descendants_with_tokens().filter_map(|it| it.into_token()) {
+                if token.kind() == SyntaxKind::IDENT {
+                    idents.push(token.text().to_string());
                 }
             }
 
-            Some((receiver, method?))
+            tracing::debug!(?idents, "extract_callee_info: collected idents from FIELD_EXPR");
+
+            match idents.len() {
+                0 => None,
+                1 => Some((None, idents.pop().unwrap())),
+                _ => {
+                    let method = idents.pop().unwrap();
+                    let receiver = idents.pop().unwrap();
+                    Some((Some(receiver), method))
+                }
+            }
         }
         SyntaxKind::IDENT => {
             // IDENT node (not token) - need to find IDENT token inside
@@ -199,6 +200,65 @@ fn count_commas_before(arg_list: &SyntaxNode, offset: TextSize) -> usize {
         }
     }
     count
+}
+
+/// Resolve MDO chain pattern and build signature help.
+///
+/// Handles patterns like `Справочники.Партнеры.ПолучитьМакет()` by recognizing
+/// "Справочники" as an MDO collection, mapping to "CatalogManager", and
+/// looking up "ПолучитьМакет" in the manager methods.
+fn resolve_mdo_chain(
+    call_expr: &SyntaxNode,
+    method_name: &str,
+    active_param: usize,
+) -> Option<SignatureHelp> {
+    let callee = call_expr.first_child()?;
+    if callee.kind() != SyntaxKind::FIELD_EXPR {
+        return None;
+    }
+
+    // Collect all idents from the callee chain
+    let idents: Vec<String> = callee
+        .descendants_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT)
+        .map(|t| t.text().to_string())
+        .collect();
+
+    // Need at least 3: Collection.Object.Method (e.g. Справочники.Партнеры.ПолучитьМакет)
+    if idents.len() < 3 {
+        return None;
+    }
+
+    // Check if first ident is an MDO collection
+    let mdo_type = bsl_metadata::MdoType::from_plural(&idents[0])?;
+    let manager_prefix = mdo_type.manager_type_prefix()?;
+
+    tracing::debug!(?manager_prefix, ?method_name, "MDO chain detected for signature help");
+
+    // Find the method in manager methods.
+    // Manager methods have name="<Имя" for all entries. The actual Russian name
+    // is in MethodDocs.syntax (e.g. "ПолучитьМакет(...)") and the English name
+    // in english_name after the dot (e.g. "<Catalog name>.GetTemplate" → "GetTemplate").
+    let data = PlatformData::instance();
+    let method_lower = method_name.to_lowercase();
+    let method = data.get_manager_methods(manager_prefix).into_iter().find(|m| {
+        // Match by Russian name from docs syntax
+        let docs = PlatformDataInner::instance().get_method_docs(m.id);
+        let ru_match = docs
+            .as_ref()
+            .and_then(|d| d.syntax.split('(').next())
+            .is_some_and(|ru| ru.to_lowercase() == method_lower);
+        if ru_match {
+            return true;
+        }
+        // Match by English name (part after dot)
+        let en_name = m.english_name.rsplit_once('.').map(|(_, n)| n).unwrap_or(&m.english_name);
+        en_name.to_lowercase() == method_lower
+    })?;
+
+    let docs = PlatformDataInner::instance().get_method_docs(method.id);
+    Some(build_signature_from_platform_method(method, docs.as_ref(), active_param))
 }
 
 /// Build SignatureHelp for a platform method.
@@ -296,7 +356,12 @@ fn build_signature_from_platform_method(
         .collect();
 
     let param_labels: Vec<_> = params.iter().map(|p| p.label.clone()).collect();
-    let signature = format!("{}({})", method.name, param_labels.join(", "));
+    // For manager methods, method.name is "<Имя" — use Russian name from docs.syntax
+    let display_name = docs
+        .and_then(|d| d.syntax.split('(').next())
+        .filter(|n| !n.starts_with('<'))
+        .unwrap_or(&method.name);
+    let signature = format!("{}({})", display_name, param_labels.join(", "));
 
     let active_parameter = if active_param < params.len() { Some(active_param) } else { None };
 

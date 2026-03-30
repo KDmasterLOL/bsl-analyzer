@@ -119,24 +119,11 @@ impl ExprScopes {
         let mut scopes = Self::new();
         let root = scopes.root_scope();
 
-        // Add parameters to root scope
         if let Some(param_list) = proc.param_list() {
-            for param in param_list.params() {
-                if let Some(name_token) = param.name() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_parameter(name);
-                }
-            }
+            scopes.collect_params(&param_list);
         }
-
-        // Add local variables from body
         if let Some(body) = proc.body() {
-            for var_def in body.var_decls() {
-                for name_token in var_def.names() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_local_variable(root, name);
-                }
-            }
+            scopes.collect_body_symbols(root, &body);
         }
 
         scopes
@@ -147,27 +134,38 @@ impl ExprScopes {
         let mut scopes = Self::new();
         let root = scopes.root_scope();
 
-        // Add parameters to root scope
         if let Some(param_list) = func.param_list() {
-            for param in param_list.params() {
-                if let Some(name_token) = param.name() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_parameter(name);
-                }
-            }
+            scopes.collect_params(&param_list);
         }
-
-        // Add local variables from body
         if let Some(body) = func.body() {
-            for var_def in body.var_decls() {
-                for name_token in var_def.names() {
-                    let name = Name::new(name_token.text());
-                    scopes.add_local_variable(root, name);
-                }
-            }
+            scopes.collect_body_symbols(root, &body);
         }
 
         scopes
+    }
+
+    fn collect_params(&mut self, param_list: &ast::ParamList) {
+        for param in param_list.params() {
+            if let Some(name_token) = param.name() {
+                let name = Name::new(name_token.text());
+                self.add_parameter(name);
+            }
+        }
+    }
+
+    fn collect_body_symbols(&mut self, scope: ScopeId, body: &ast::StmtList) {
+        // Collect explicit Перем declarations only.
+        // Implicit variables from assignments are NOT collected here because
+        // ExprScopes doesn't know about module-level variables, and treating
+        // assignments as implicit locals would incorrectly shadow module vars
+        // (breaking reference finding). Implicit vars are collected separately
+        // in the completion code path where this distinction doesn't matter.
+        for var_def in body.var_decls() {
+            for name_token in var_def.names() {
+                let name = Name::new(name_token.text());
+                self.add_local_variable(scope, name);
+            }
+        }
     }
 }
 

@@ -6,6 +6,7 @@
 
 use bsl_metadata::MdoType;
 use bsl_platform::PlatformData;
+use hir::{ManagerType, Name};
 use ide_db::RootDatabase;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -46,10 +47,18 @@ pub(super) fn mdo_completions<DB: RootDatabase>(
         MdoContext::ObjectDot { mdo_type, object_name } => {
             let mut items = Vec::new();
 
-            // Manager methods (НайтиПоКоду, СоздатьЭлемент, ...)
+            // Platform manager methods (НайтиПоКоду, СоздатьЭлемент, ...)
             if let Some(prefix) = mdo_type.manager_type_prefix() {
                 items.extend(complete_manager_methods(prefix));
             }
+
+            // Exported methods from ManagerModule.bsl
+            items.extend(complete_manager_module_methods(
+                db,
+                position.file_id,
+                mdo_type,
+                &object_name,
+            ));
 
             // Predefined items (EmailПартнера, Россия, ...)
             items.extend(complete_predefined_items(db, position.file_id, mdo_type, &object_name));
@@ -180,7 +189,12 @@ fn find_receiver_before_dot(dot_token: &SyntaxToken) -> Option<SyntaxNode> {
 }
 
 /// Extract identifier text from a simple IDENT node.
+///
+/// Returns None if node is not a simple identifier (e.g., rejects FIELD_EXPR).
 fn get_single_ident(node: &SyntaxNode) -> Option<String> {
+    if node.kind() != SyntaxKind::IDENT {
+        return None;
+    }
     let token = node.first_token()?;
     if token.kind() == SyntaxKind::IDENT {
         Some(token.text().to_string())
@@ -263,10 +277,103 @@ fn complete_manager_methods(manager_prefix: &str) -> Vec<CompletionItem> {
 
     tracing::debug!(manager_prefix, method_count = methods.len(), "Manager methods found");
 
-    methods
-        .iter()
-        .map(|method| super::platform_completion::render_platform_method(method))
-        .collect()
+    methods.iter().map(|method| super::platform_completion::render_manager_method(method)).collect()
+}
+
+/// Complete exported methods from ManagerModule.bsl.
+///
+/// Example: `Справочники.Партнеры.` → [МояЭкспортнаяФункция, ...]
+fn complete_manager_module_methods<DB: RootDatabase>(
+    db: &DB,
+    file_id: vfs::FileId,
+    mdo_type: MdoType,
+    object_name: &str,
+) -> Vec<CompletionItem> {
+    let manager_type = match ManagerType::from_mdo_type(mdo_type) {
+        Some(mt) => mt,
+        None => return Vec::new(),
+    };
+
+    let source_root_input = db.file_source_root_input(file_id);
+    let source_root_id = source_root_input.source_root_id(db);
+    let module_index = db.module_index(source_root_id);
+
+    let name = Name::new(object_name);
+    let module_file_id = match module_index.resolve_manager(manager_type, &name) {
+        Some(id) => id,
+        None => {
+            tracing::debug!(
+                mdo_type = ?mdo_type,
+                object_name,
+                "Manager module not found in module_index"
+            );
+            return Vec::new();
+        }
+    };
+
+    let module_id = hir::ModuleId::new(module_file_id);
+    let symbol_tree = db.symbol_tree(module_id);
+
+    let items: Vec<CompletionItem> = symbol_tree
+        .methods()
+        .filter(|m| m.is_export)
+        .map(|method| {
+            let label = method.name.to_string();
+            let kind = if method.is_function {
+                CompletionItemKind::Function
+            } else {
+                CompletionItemKind::Method
+            };
+
+            let params_str: String = method
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| if i > 0 { format!(", {}", p.name) } else { p.name.to_string() })
+                .collect();
+            let detail = if method.is_function {
+                format!("Функция {}({}) Экспорт", label, params_str)
+            } else {
+                format!("Процедура {}({}) Экспорт", label, params_str)
+            };
+
+            let insert_text = if method.params.is_empty() {
+                format!("{}()$0", label)
+            } else {
+                format!("{}($0)", label)
+            };
+
+            let documentation = db.method_docs(method.id).map(|docs| {
+                let mut doc = String::new();
+                if let Some(purpose) = &docs.purpose {
+                    doc.push_str(purpose);
+                } else if !docs.raw.is_empty() {
+                    doc.push_str(&docs.raw);
+                }
+                doc
+            });
+
+            CompletionItem {
+                label,
+                detail: Some(detail),
+                kind,
+                insert_text,
+                documentation,
+                sort_text: None,
+                filter_text: None,
+                source: None,
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        mdo_type = ?mdo_type,
+        object_name,
+        count = items.len(),
+        "Manager module exported methods found"
+    );
+
+    items
 }
 
 /// Complete predefined items from project metadata.

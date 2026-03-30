@@ -209,14 +209,34 @@ impl TableRef {
 /// Resolved table reference - either from metadata or temporary table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedTable {
-    /// Table from 1C metadata (Catalog, Document, Register, etc.).
+    /// Table from 1C metadata (Catalog, Document, etc.) — non-register objects.
     Metadata {
-        /// MDO type (Catalog, Document, InformationRegister, etc.).
+        /// MDO type (Catalog, Document, etc.).
         mdo_type: MdoType,
         /// Object name.
         name: String,
         /// Available fields from metadata.
         fields: Vec<FieldDef>,
+    },
+
+    /// Register table with structured field classification.
+    ///
+    /// Dimensions, resources, and attributes are stored separately
+    /// to support virtual table field transformation (e.g., `.Обороты()`
+    /// generates `{Resource}Оборот` fields from resources).
+    Register {
+        /// MDO type (InformationRegister, AccumulationRegister, etc.).
+        mdo_type: MdoType,
+        /// Object name.
+        name: String,
+        /// All fields combined (dimensions + resources + attributes).
+        fields: Vec<FieldDef>,
+        /// Register dimensions.
+        dimensions: Vec<FieldDef>,
+        /// Register resources.
+        resources: Vec<FieldDef>,
+        /// Register attributes.
+        attributes: Vec<FieldDef>,
     },
 
     /// Temporary table created with INTO clause.
@@ -229,29 +249,46 @@ pub enum ResolvedTable {
 }
 
 impl ResolvedTable {
-    /// Find field by name (case-insensitive).
+    /// Find field by name (case-insensitive, bilingual).
     pub fn find_field(&self, name: &str) -> Option<&FieldDef> {
         let name_lower = name.to_lowercase();
-        let fields = match self {
-            ResolvedTable::Metadata { fields, .. } => fields,
-            ResolvedTable::TempTable { fields, .. } => fields,
-        };
-        fields.iter().find(|f| f.name.to_lowercase() == name_lower)
+        self.fields().iter().find(|f| {
+            f.name.to_lowercase() == name_lower
+                || f.name_en.as_ref().map(|en| en.to_lowercase() == name_lower).unwrap_or(false)
+        })
     }
 
     /// Get table name.
     pub fn name(&self) -> &str {
         match self {
-            ResolvedTable::Metadata { name, .. } => name,
-            ResolvedTable::TempTable { name, .. } => name,
+            Self::Metadata { name, .. } => name,
+            Self::Register { name, .. } => name,
+            Self::TempTable { name, .. } => name,
         }
     }
 
     /// Get all fields.
     pub fn fields(&self) -> &[FieldDef] {
         match self {
-            ResolvedTable::Metadata { fields, .. } => fields,
-            ResolvedTable::TempTable { fields, .. } => fields,
+            Self::Metadata { fields, .. } => fields,
+            Self::Register { fields, .. } => fields,
+            Self::TempTable { fields, .. } => fields,
+        }
+    }
+
+    /// Get register dimensions (empty for non-register tables).
+    pub fn dimensions(&self) -> &[FieldDef] {
+        match self {
+            Self::Register { dimensions, .. } => dimensions,
+            _ => &[],
+        }
+    }
+
+    /// Get register resources (empty for non-register tables).
+    pub fn resources(&self) -> &[FieldDef] {
+        match self {
+            Self::Register { resources, .. } => resources,
+            _ => &[],
         }
     }
 }
