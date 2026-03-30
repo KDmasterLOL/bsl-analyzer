@@ -194,12 +194,7 @@ mod tests {
             0,
         );
 
-        let provider = ide_db::SalsaProvider::with_workspace(
-            &db,
-            Some(configuration_path_input),
-            Some(&workspace_root),
-            None,
-        );
+        let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
         let config = DiagnosticsConfig::default();
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
@@ -240,7 +235,6 @@ mod tests {
         let mut db = RootDatabaseImpl::new();
 
         // Create VFS for a non-ManagedApplicationModule file (CommonModule)
-        let workspace_root = PathBuf::from(fixtures_dir);
         let vfs_path = VfsPath::new(format!("{}/CommonModules/Test/Ext/Module.bsl", fixtures_dir));
 
         // Create FileSet and SourceRoot
@@ -256,8 +250,7 @@ mod tests {
         db.set_file_source_root(file_id, source_root_id);
         db.set_file_text(file_id, "Процедура Тест()\nКонецПроцедуры");
 
-        let provider =
-            ide_db::SalsaProvider::with_workspace(&db, None, Some(&workspace_root), None);
+        let provider = ide_db::SalsaProvider::new(&db, None);
         let config = DiagnosticsConfig::default();
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
@@ -301,12 +294,7 @@ mod tests {
             0,
         );
 
-        let provider = ide_db::SalsaProvider::with_workspace(
-            &db,
-            Some(configuration_path_input),
-            Some(&workspace_root),
-            None,
-        );
+        let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
 
         // Custom config: only Роль2 is allowed (not ПолныеПрава)
         let mut config = DiagnosticsConfig::default();

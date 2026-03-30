@@ -982,10 +982,9 @@ fn analyze_salsa(
     let results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = file_ids
         .par_iter()
         .map_with(db.clone(), |db_snapshot, (file_id, path)| {
-            let provider = ide_db::SalsaProvider::with_workspace(
+            let provider = ide_db::SalsaProvider::with_file_set(
                 db_snapshot,
                 config_path_input,
-                Some(&source_dir_arc),
                 Some(&file_set_arc),
             );
             let ctx = DiagnosticsContext::new(&config, *file_id, &provider);

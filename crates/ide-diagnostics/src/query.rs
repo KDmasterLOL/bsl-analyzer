@@ -31,7 +31,8 @@ pub fn file_diagnostics_query<'db>(
 
     let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
 
-    let provider = SalsaProvider::new(db, None);
+    let config_path_input = ide_db::configuration_path_for_file(db, file_id);
+    let provider = SalsaProvider::new(db, config_path_input);
     let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
     Arc::new(diagnostics(&ctx))

@@ -57,8 +57,8 @@ pub use streaming::{
 
 // Salsa query functions
 pub use queries::{
-    all_sdbl_in_file_query, line_index_query, liveness_analysis_query, method_cfg_query,
-    module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
+    all_sdbl_in_file_query, configuration_path_for_file, line_index_query, liveness_analysis_query,
+    method_cfg_query, module_metadata_query, reaching_definitions_query, sdbl_hir_in_file_query,
 };
 
 // Metadata helpers

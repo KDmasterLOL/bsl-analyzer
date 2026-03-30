@@ -156,12 +156,7 @@ mod tests {
             0,
         );
 
-        let provider = ide_db::SalsaProvider::with_workspace(
-            &db,
-            Some(configuration_path_input),
-            Some(&workspace_root),
-            None,
-        );
+        let provider = ide_db::SalsaProvider::new(&db, Some(configuration_path_input));
         let config = DiagnosticsConfig { ordinary_app_support, ..Default::default() };
 
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);

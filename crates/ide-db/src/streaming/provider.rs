@@ -423,8 +423,9 @@ impl AnalysisProvider for StreamingProvider {
     }
 
     fn file_external_refs(&self, _module_id: hir::ModuleId) -> Arc<Vec<hir::ExternalRef>> {
-        // External refs require full HIR lowering across modules;
-        // not supported in streaming mode
+        // Not supported in streaming mode: cross-module diagnostics
+        // (e.g. PrivilegedModuleMethodCall) will silently skip these checks.
+        tracing::debug!("file_external_refs not supported in streaming mode");
         Arc::new(Vec::new())
     }
 
@@ -432,8 +433,9 @@ impl AnalysisProvider for StreamingProvider {
         &self,
         _module_id: hir::ModuleId,
     ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-        // Module-level liveness requires CFG construction;
-        // not supported in streaming mode
+        // Not supported in streaming mode: unused module-level variable
+        // detection will be skipped.
+        tracing::debug!("module_level_liveness_analysis not supported in streaming mode");
         None
     }
 
@@ -442,12 +444,13 @@ impl AnalysisProvider for StreamingProvider {
         _source_root_id: base_db::SourceRootId,
         vfs_path: &vfs::VfsPath,
     ) -> Option<FileId> {
-        // In streaming mode, use global file_set directly (no Salsa)
         self.global.file_set.file_for_path(vfs_path).copied()
     }
 
     fn resolve_module_file(&self, _relative_uri: &str) -> Option<FileId> {
-        // Workspace-relative module resolution not yet supported in streaming mode
+        // Not supported in streaming mode: cross-module file resolution
+        // (e.g. MissedRequiredParameter manager module lookup) will be skipped.
+        tracing::debug!("resolve_module_file not supported in streaming mode");
         None
     }
 }
