@@ -145,7 +145,8 @@ mod tests {
         db.set_file_text(file_id, code);
 
         let config = Rc::new(DiagnosticsConfig::all_enabled());
-        let ctx = DiagnosticsContext::new(&db, &config, file_id);
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         detect_violations(&ctx)
     }
@@ -278,7 +279,8 @@ mod tests {
         config.disabled.push(DiagnosticCode::ExecuteExternalCodeInCommonModule);
         let config = Rc::new(config);
 
-        let ctx = DiagnosticsContext::new(&db, &config, file_id);
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");

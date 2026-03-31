@@ -145,16 +145,8 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::UnsafeFindByCode);
 
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let all = crate::diagnostics(&ctx);
         let diagnostics: Vec<_> =
@@ -185,16 +177,8 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let all = crate::diagnostics(&ctx);
         let diagnostics: Vec<_> =

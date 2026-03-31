@@ -42,8 +42,8 @@ use rustc_hash::FxHashSet;
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{BindingId, IdConversion, ModuleId};
-use ide_db::{RootDatabase, TextRange};
+use hir::{BindingId, IdConversion};
+use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -186,11 +186,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     // Check module-level code for unused variables
-    // FIXME: Skip in streaming mode until module_level_liveness_analysis is migrated to provider
-    if ctx.provider.is_none() {
-        let module_id = hir::ModuleId::new(ctx.file_id);
-        diagnostics.extend(check_module_level_code(ctx.db, module_id, code, ctx, &skip_attr_names));
-    }
+    diagnostics.extend(check_module_level_code(code, ctx, &skip_attr_names));
 
     // Check explicit module-level variable declarations (Перем X;)
     // that are not referenced by any method body or module-level code
@@ -418,8 +414,6 @@ fn check_method_with_module_liveness(
 /// Analyzes code outside procedures/functions (module initialization code).
 /// Uses liveness analysis to detect variables that are assigned but never read.
 fn check_module_level_code(
-    db: &dyn RootDatabase,
-    module_id: ModuleId,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
     skip_attr_names: &FxHashSet<String>,
@@ -438,11 +432,11 @@ fn check_module_level_code(
     let body = &lower_result.body;
     let source_map = &lower_result.source_map;
 
-    // Run liveness analysis (cached by Salsa)
-    let liveness_result = match db.module_level_liveness_analysis(module_id) {
+    // Run liveness analysis via provider (cached by Salsa in LSP mode)
+    let liveness_result = match ctx.module_level_liveness_analysis() {
         Some(result) => result,
         None => {
-            tracing::warn!("Liveness analysis failed for module-level code: {:?}", module_id);
+            tracing::warn!("Liveness analysis failed for module-level code: {:?}", ctx.file_id);
             return diagnostics;
         }
     };

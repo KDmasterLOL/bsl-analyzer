@@ -112,16 +112,8 @@ mod tests {
         db.set_file_text(file_id, code);
 
         let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         check(&ctx)
     }
@@ -141,16 +133,8 @@ mod tests {
         db.set_file_text(file_id, code);
 
         let config = Rc::new(DiagnosticsConfig::default());
-        let ctx = crate::DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         check(&ctx)
     }

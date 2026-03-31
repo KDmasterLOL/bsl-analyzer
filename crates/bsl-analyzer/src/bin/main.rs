@@ -975,7 +975,6 @@ fn analyze_salsa(
     let progress_arc = Arc::new(progress);
     let workspace_dir_arc = Arc::new(workspace_dir.clone());
     let source_dir_arc = Arc::new(source_dir.clone());
-    let configuration_path_arc = Arc::new(configuration_path);
     let diff_filter_arc = Arc::new(diff_filter);
     // file_set_arc is created above and stored in SourceRoot
 
@@ -983,16 +982,12 @@ fn analyze_salsa(
     let results: Vec<(Option<FileAnalysis>, Option<FileTiming>)> = file_ids
         .par_iter()
         .map_with(db.clone(), |db_snapshot, (file_id, path)| {
-            let ctx = DiagnosticsContext {
-                db: db_snapshot,
-                config: &config,
-                file_id: *file_id,
-                provider: None,
-                workspace_root: Some(&source_dir_arc),
-                configuration_path: configuration_path_arc.as_deref(),
-                configuration_path_input: config_path_input,
-                file_set: Some(&file_set_arc),
-            };
+            let provider = ide_db::SalsaProvider::with_file_set(
+                db_snapshot,
+                config_path_input,
+                Some(&file_set_arc),
+            );
+            let ctx = DiagnosticsContext::new(&config, *file_id, &provider);
 
             // Catch panics to continue analyzing other files if one fails
             let file_start = std::time::Instant::now();

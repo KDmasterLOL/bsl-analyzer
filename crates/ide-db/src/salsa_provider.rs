@@ -24,6 +24,7 @@ use crate::{
 pub struct SalsaProvider<'db> {
     db: &'db dyn RootDatabase,
     configuration_path_input: Option<ConfigurationPathInput<'db>>,
+    file_set: Option<&'db vfs::file_set::FileSet>,
 }
 
 impl<'db> SalsaProvider<'db> {
@@ -32,7 +33,16 @@ impl<'db> SalsaProvider<'db> {
         db: &'db dyn RootDatabase,
         configuration_path_input: Option<ConfigurationPathInput<'db>>,
     ) -> Self {
-        Self { db, configuration_path_input }
+        Self { db, configuration_path_input, file_set: None }
+    }
+
+    /// Create a SalsaProvider with file_set for fast path resolution.
+    pub fn with_file_set(
+        db: &'db dyn RootDatabase,
+        configuration_path_input: Option<ConfigurationPathInput<'db>>,
+        file_set: Option<&'db vfs::file_set::FileSet>,
+    ) -> Self {
+        Self { db, configuration_path_input, file_set }
     }
 
     /// Get the underlying database.
@@ -83,10 +93,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
     fn line_index(&self, file_id: FileId) -> Arc<line_index::LineIndex> {
         let input = FileIdInput::new(self.db, file_id);
         self.db.line_index(input)
-    }
-
-    fn file_path(&self, file_id: FileId) -> Option<String> {
-        crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
 
     fn file_source_root_id(&self, file_id: FileId) -> SourceRootId {
@@ -148,11 +154,48 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.reaching_definitions(method_id)
     }
 
+    fn file_external_refs(&self, module_id: ModuleId) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        self.db.file_external_refs(module_id)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: ModuleId,
+    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
+    {
+        self.db.module_level_liveness_analysis(module_id)
+    }
+
     fn resolve_vfs_path(
         &self,
         source_root_id: base_db::SourceRootId,
         vfs_path: &vfs::VfsPath,
     ) -> Option<FileId> {
         self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
+
+    fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {
+        // Resolve relative to configuration root (not workspace root!)
+        // Metadata URIs like "CommonModules/Foo/Ext/Module.bsl" are relative to config root.
+        let config_path_input = self.configuration_path_input?;
+        let config_root = config_path_input.path(self.db);
+        let full_path = std::path::PathBuf::from(&config_root).join(relative_uri);
+        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
+
+        // Use file_set fast path if available, else fall back to Salsa VFS lookup
+        if let Some(file_set) = self.file_set {
+            file_set.file_for_path(&vfs_path).copied()
+        } else {
+            self.db.resolve_vfs_path(SourceRootId(0), &vfs_path)
+        }
+    }
+
+    fn file_path(&self, file_id: FileId) -> Option<String> {
+        // Use file_set fast path if available
+        if let Some(file_set) = self.file_set {
+            let vfs_path = file_set.path_for_file(&file_id)?;
+            return Some(vfs_path.as_path().to_string_lossy().to_string());
+        }
+        crate::vfs_helpers::get_file_path(self.db, file_id).map(|p| p.to_string_lossy().to_string())
     }
 }

@@ -222,7 +222,8 @@ where
     F: Fn(&crate::DiagnosticsContext) -> Vec<Diagnostic>,
 {
     let (db, file_id) = create_test_db(code);
-    let ctx = crate::DiagnosticsContext::new(&db, &config, file_id);
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
     check_fn(&ctx)
 }
 
@@ -282,7 +283,8 @@ pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic>
     let test_file = *fixture.files.keys().last().expect("Fixture should have at least one file");
 
     let config = crate::DiagnosticsConfig::all_enabled();
-    let ctx = crate::DiagnosticsContext::new(&db, &config, test_file);
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let ctx = crate::DiagnosticsContext::new(&config, test_file, &provider);
 
     crate::diagnostics(&ctx)
 }
@@ -451,6 +453,23 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.module_cfgs(input)
     }
 
+    fn file_external_refs(
+        &self,
+        module_id: hir::ModuleId,
+    ) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        use hir::DefDatabase;
+        self.db.file_external_refs(module_id)
+    }
+
+    fn module_level_liveness_analysis(
+        &self,
+        module_id: hir::ModuleId,
+    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
+    {
+        use ide_db::RootDatabase;
+        self.db.module_level_liveness_analysis(module_id)
+    }
+
     fn resolve_vfs_path(
         &self,
         source_root_id: ide_db::base_db::SourceRootId,
@@ -458,6 +477,11 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     ) -> Option<vfs::FileId> {
         use ide_db::base_db::SourceDatabase;
         self.db.resolve_vfs_path(source_root_id, path)
+    }
+
+    fn resolve_module_file(&self, _relative_uri: &str) -> Option<vfs::FileId> {
+        // Not supported in test provider
+        None
     }
 }
 
@@ -493,8 +517,7 @@ where
 
     let provider_impl = MetadataTestProvider { db, metadata: Arc::clone(&metadata_arc) };
 
-    let ctx = crate::DiagnosticsContext::with_provider(
-        &provider_impl.db,
+    let ctx = crate::DiagnosticsContext::new(
         &config_rc,
         file_id,
         &provider_impl as &dyn ide_db::provider::AnalysisProvider,

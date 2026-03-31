@@ -247,16 +247,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert_eq!(diagnostics.len(), 0, "Should skip when no CommonModule metadata");
@@ -272,16 +264,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert_eq!(diagnostics.len(), 0);
@@ -295,16 +279,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert_eq!(diagnostics.len(), 0);
@@ -342,16 +318,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
 
@@ -395,16 +363,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringSession);
         assert_eq!(diagnostics.len(), 2, "DuringSession is also cached");
@@ -438,16 +398,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DontUse);
         assert_eq!(diagnostics.len(), 0, "DontUse means not cached");
@@ -498,16 +450,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
         assert_eq!(diagnostics.len(), 1, "Function should trigger diagnostic");
@@ -525,16 +469,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
         assert_eq!(diagnostics.len(), 1, "One region = one diagnostic");
@@ -554,16 +490,8 @@ mod tests {
 #КонецОбласти
 "#;
         let (db, file_id, config) = create_test_ctx(code);
-        let ctx = DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
         assert_eq!(diagnostics.len(), 1, "Only public region triggers diagnostic");

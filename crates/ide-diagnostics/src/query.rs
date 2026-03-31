@@ -3,6 +3,7 @@
 use crate::{diagnostics, Diagnostic, DiagnosticsConfig, DiagnosticsContext};
 use base_db::{DiagnosticsConfigId, FileIdInput};
 use ide_db::RootDatabase;
+use ide_db::SalsaProvider;
 use std::sync::Arc;
 
 /// Salsa-cached diagnostics query.
@@ -30,16 +31,9 @@ pub fn file_diagnostics_query<'db>(
 
     let _span = tracing::info_span!("file_diagnostics_query", file_id = file_id.0,).entered();
 
-    let ctx = DiagnosticsContext {
-        db,
-        config: &config,
-        file_id,
-        provider: None,
-        workspace_root: None,
-        configuration_path: None,
-        configuration_path_input: None,
-        file_set: None,
-    };
+    let config_path_input = ide_db::configuration_path_for_file(db, file_id);
+    let provider = SalsaProvider::new(db, config_path_input);
+    let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
     Arc::new(diagnostics(&ctx))
 }

@@ -26,7 +26,7 @@ use bsl_metadata::traits::MdObject;
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{common_module_helpers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{ExternalRef, ModuleId, PathResolution};
+use hir::{ExternalRef, PathResolution};
 use rustc_hash::FxHashSet;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -85,8 +85,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
 
-    let module_id = ModuleId::new(ctx.file_id);
-    let external_refs = ctx.db.file_external_refs(module_id);
+    let external_refs = ctx.file_external_refs();
 
     let mut diagnostics = Vec::new();
 
@@ -156,16 +155,8 @@ mod tests {
 
         let config = DiagnosticsConfig::default();
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "No metadata should return empty diagnostics");
@@ -190,16 +181,8 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::PrivilegedModuleMethodCall);
 
-        let ctx = DiagnosticsContext {
-            db: &db,
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
         assert!(diagnostics.is_empty(), "Disabled config should return empty diagnostics");

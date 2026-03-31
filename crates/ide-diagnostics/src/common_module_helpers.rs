@@ -55,29 +55,19 @@ pub fn find_common_module_for_file(
     ctx: &crate::DiagnosticsContext,
     configuration: &bsl_metadata::Configuration,
 ) -> Option<bsl_metadata::CommonModule> {
-    let file_uri = file_uri(ctx.db, ctx.file_id)?;
+    let file_path = ctx.file_path()?;
 
     configuration
         .common_modules()
         .iter()
         .find(|module| {
             if let Some(module_uri) = module.uri() {
-                module_uri.to_lowercase() == file_uri.to_lowercase()
+                module_uri.to_lowercase() == file_path.to_lowercase()
             } else {
                 false
             }
         })
         .cloned()
-}
-
-fn file_uri(db: &dyn ide_db::RootDatabase, file_id: vfs::FileId) -> Option<String> {
-    let source_root_input = db.file_source_root_input(file_id);
-    let source_root_id = source_root_input.source_root_id(db);
-    let source_root_input = db.source_root_input(source_root_id);
-    let source_root = source_root_input.root(db);
-    let file_set = source_root.file_set();
-    let vfs_path = file_set.path_for_file(&file_id)?;
-    Some(vfs_path.as_path().to_string_lossy().to_string())
 }
 
 /// Reusable check for CommonModuleName* diagnostics.

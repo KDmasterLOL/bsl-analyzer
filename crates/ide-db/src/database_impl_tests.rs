@@ -5,7 +5,8 @@ use hir::{DefDatabase, ModuleId};
 use vfs::FileId;
 use vfs::{file_set::FileSet, VfsPath};
 
-use crate::{RootDatabase, RootDatabaseImpl};
+use super::RootDatabaseImpl;
+use crate::RootDatabase;
 
 #[test]
 fn test_root_database_basic() {

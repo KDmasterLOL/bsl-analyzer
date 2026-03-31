@@ -557,16 +557,8 @@ mod tests {
 
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let config = DiagnosticsConfig::default();
-        let ctx = crate::DiagnosticsContext {
-            db: db.as_ref(),
-            config: &config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
+        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         let _diagnostics = super::check(&ctx);
     }

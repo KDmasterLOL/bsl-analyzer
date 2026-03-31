@@ -59,16 +59,9 @@ impl Analysis {
 
     /// Returns diagnostics for a file.
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
-        let ctx = ide_diagnostics::DiagnosticsContext {
-            db: self.db.as_ref(),
-            config,
-            file_id,
-            provider: None,
-            workspace_root: None,
-            configuration_path: None,
-            configuration_path_input: None,
-            file_set: None,
-        };
+        let config_path_input = ide_db::configuration_path_for_file(self.db.as_ref(), file_id);
+        let provider = ide_db::SalsaProvider::new(self.db.as_ref(), config_path_input);
+        let ctx = ide_diagnostics::DiagnosticsContext::new(config, file_id, &provider);
         ide_diagnostics::diagnostics(&ctx)
     }
 

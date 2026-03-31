@@ -382,7 +382,8 @@ mod tests {
         let file_id = vfs::FileId(0);
         let diagnostics_config = default_config();
 
-        let ctx = crate::DiagnosticsContext::new(&db, &diagnostics_config, file_id);
+        let provider = ide_db::SalsaProvider::new(&db, None);
+        let ctx = crate::DiagnosticsContext::new(&diagnostics_config, file_id, &provider);
 
         let diagnostics = check_session_module(&bsl_config, &ctx);
 
