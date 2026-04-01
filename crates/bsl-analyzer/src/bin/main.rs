@@ -440,14 +440,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
     let env = args.env.into_iter().collect::<BTreeMap<_, _>>();
     let password = decode_password(&args.onec_password);
     let source_dir = args.source_dir.unwrap_or_else(|| project_dir.clone());
-
-    if matches!(args.preset, InstallPresetCli::Recommended) && args.name.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--name is ambiguous for '--preset recommended'; use default names for now",
-        )
-        .into());
-    }
+    let name = args.name;
 
     let target = match args.target {
         InstallTargetCli::Codex => InstallTargetSelector::One(InstallTarget::Codex),
@@ -462,9 +455,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             target,
             scope: resolve_scope(args.scope, InstallScope::Project)?,
             preset: InstallPreset::Workspace,
-            name: args
-                .name
-                .unwrap_or_else(|| default_server_name(InstallPreset::Workspace).to_owned()),
+            name: name.unwrap_or_else(|| default_server_name(InstallPreset::Workspace).to_owned()),
             project_dir: project_dir.clone(),
             source_dir,
             onec_url: args.onec_url,
@@ -478,9 +469,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             target,
             scope: resolve_scope(args.scope, InstallScope::User)?,
             preset: InstallPreset::Reference,
-            name: args
-                .name
-                .unwrap_or_else(|| default_server_name(InstallPreset::Reference).to_owned()),
+            name: name.unwrap_or_else(|| default_server_name(InstallPreset::Reference).to_owned()),
             project_dir: project_dir.clone(),
             source_dir,
             onec_url: args.onec_url,
@@ -499,12 +488,14 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                 .into());
             }
 
+            let (reference_name, workspace_name) = resolve_recommended_names(name.as_deref())?;
+
             vec![
                 InstallRequest {
                     target,
                     scope: InstallScope::User,
                     preset: InstallPreset::Reference,
-                    name: default_server_name(InstallPreset::Reference).to_owned(),
+                    name: reference_name,
                     project_dir: project_dir.clone(),
                     source_dir: source_dir.clone(),
                     onec_url: args.onec_url.clone(),
@@ -518,7 +509,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                     target,
                     scope: InstallScope::Project,
                     preset: InstallPreset::Workspace,
-                    name: default_server_name(InstallPreset::Workspace).to_owned(),
+                    name: workspace_name,
                     project_dir,
                     source_dir,
                     onec_url: args.onec_url,
@@ -566,6 +557,31 @@ fn resolve_scope(
         Some(InstallScopeCli::Local) => bsl_analyzer::mcp_install::InstallScope::Local,
         None => default,
     })
+}
+
+fn resolve_recommended_names(name: Option<&str>) -> Result<(String, String), io::Error> {
+    match name {
+        None => Ok((
+            bsl_analyzer::mcp_install::default_server_name(
+                bsl_analyzer::mcp_install::InstallPreset::Reference,
+            )
+            .to_owned(),
+            bsl_analyzer::mcp_install::default_server_name(
+                bsl_analyzer::mcp_install::InstallPreset::Workspace,
+            )
+            .to_owned(),
+        )),
+        Some(base) => {
+            let base = base.trim();
+            if base.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--name must not be empty",
+                ));
+            }
+            Ok((format!("{base}-reference"), format!("{base}-workspace")))
+        }
+    }
 }
 
 fn format_install_error(err: &bsl_analyzer::mcp_install::InstallError) -> String {

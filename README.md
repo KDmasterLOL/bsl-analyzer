@@ -122,6 +122,11 @@ bsl-analyzer mcp install \
 - `reference` в `user scope`
 - `workspace` в `project scope`
 
+Если передать `--name custom-bsl`, будут созданы серверы:
+
+- `custom-bsl-reference`
+- `custom-bsl-workspace`
+
 Поддерживаемые targets:
 
 | Target | Способ установки |

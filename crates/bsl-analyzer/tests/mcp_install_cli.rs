@@ -295,6 +295,52 @@ fn codex_recommended_installs_reference_and_workspace() {
     ));
 }
 
+#[test]
+fn codex_recommended_uses_name_prefix_for_both_servers() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--preset",
+            "recommended",
+            "--name",
+            "custom-bsl",
+            "--source-dir",
+            harness.source_dir().to_str().expect("utf-8 path"),
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let invocations = harness.invocations();
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "custom-bsl-reference", "--json"]);
+    assert_eq!(
+        invocations[1].args,
+        vec![
+            "mcp",
+            "add",
+            "custom-bsl-reference",
+            "--",
+            "bsl-analyzer",
+            "mcp",
+            "serve",
+            "--profile",
+            "reference",
+        ]
+    );
+
+    let config_path = harness.project_dir.join(".codex/config.toml");
+    let config = fs::read_to_string(&config_path).expect("project config");
+    assert!(config.contains("[mcp_servers.custom-bsl-workspace]"));
+}
+
 fn parse_invocations(contents: &str) -> Vec<Invocation> {
     let mut invocations = Vec::new();
     let mut program = None;
