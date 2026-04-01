@@ -16,6 +16,8 @@ use crate::mcp_install::{
     ports::{CommandOutput, CommandRunner, FileStore},
 };
 
+const LEGACY_SERVER_NAME: &str = "bsl-analyzer";
+
 pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
@@ -106,9 +108,9 @@ fn install_codex_user(
     runner: &dyn CommandRunner,
 ) -> Result<InstallEntryResult, InstallError> {
     let location = home_dir()?.join(".codex/config.toml");
-    let exists = codex_server_exists(runner, &action.spec.name, &action.project_dir)?;
+    let existing_name = codex_existing_server_name(runner, &action.spec.name, &action.project_dir)?;
     let decision = resolve_apply_decision(
-        exists,
+        existing_name.is_some(),
         action.force,
         action.target,
         action.scope,
@@ -118,19 +120,41 @@ fn install_codex_user(
     let cli_args = build_codex_add_args(&action.spec);
 
     if action.dry_run {
+        let mut detail = render_dry_run_command(
+            &location.display().to_string(),
+            decision.action_label(),
+            "codex",
+            &cli_args,
+            &action.spec,
+        );
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                detail.push('\n');
+                detail.push_str(&format!(
+                    "migration: legacy MCP server '{existing_name}' will be removed before install"
+                ));
+            }
+        }
         return Ok(InstallEntryResult {
             target: action.target,
             scope: action.scope,
             status: InstallStatus::DryRun,
             location: location.display().to_string(),
-            detail: render_dry_run_command(
-                &location.display().to_string(),
-                decision.action_label(),
-                "codex",
-                &cli_args,
-                &action.spec,
-            ),
+            detail,
         });
+    }
+
+    if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                run_checked(
+                    runner,
+                    "codex",
+                    &build_codex_remove_args(existing_name),
+                    &action.project_dir,
+                )?;
+            }
+        }
     }
 
     run_checked(runner, "codex", &cli_args, &action.project_dir)?;
@@ -170,9 +194,9 @@ fn install_codex_project(
         DocumentMut::new()
     };
 
-    let exists = codex_project_contains_server(&doc, &action.spec.name);
+    let existing_name = codex_project_existing_server_name(&doc, &action.spec.name);
     let decision = resolve_apply_decision(
-        exists,
+        existing_name.is_some(),
         action.force,
         action.target,
         action.scope,
@@ -180,20 +204,35 @@ fn install_codex_project(
         &path.display().to_string(),
     )?;
 
-    let updated_doc = upsert_codex_project_server(doc, &action.spec);
+    let updated_doc = upsert_codex_project_server(
+        remove_codex_project_server(
+            doc,
+            existing_name.as_deref().filter(|name| *name != action.spec.name),
+        ),
+        &action.spec,
+    );
 
     if action.dry_run {
+        let mut detail = render_dry_run_config(
+            &path.display().to_string(),
+            decision.action_label(),
+            updated_doc.to_string(),
+            &action.spec,
+        );
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                detail.push('\n');
+                detail.push_str(&format!(
+                    "migration: legacy MCP server '{existing_name}' will be replaced"
+                ));
+            }
+        }
         return Ok(InstallEntryResult {
             target: action.target,
             scope: action.scope,
             status: InstallStatus::DryRun,
             location: path.display().to_string(),
-            detail: render_dry_run_config(
-                &path.display().to_string(),
-                decision.action_label(),
-                updated_doc.to_string(),
-                &action.spec,
-            ),
+            detail,
         });
     }
 
@@ -226,9 +265,10 @@ fn install_gemini(
     files: &dyn FileStore,
 ) -> Result<InstallEntryResult, InstallError> {
     let location = gemini_config_path(action.scope, &action.project_dir)?;
-    let exists = json_config_contains_server(files, &location, &action.spec.name, "mcpServers")?;
+    let existing_name =
+        json_existing_server_name(files, &location, &action.spec.name, "mcpServers")?;
     let decision = resolve_apply_decision(
-        exists,
+        existing_name.is_some(),
         action.force,
         action.target,
         action.scope,
@@ -238,19 +278,41 @@ fn install_gemini(
 
     let cli_args = build_gemini_add_args(&action.spec, action.scope);
     if action.dry_run {
+        let mut detail = render_dry_run_command(
+            &location.display().to_string(),
+            decision.action_label(),
+            "gemini",
+            &cli_args,
+            &action.spec,
+        );
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                detail.push('\n');
+                detail.push_str(&format!(
+                    "migration: legacy MCP server '{existing_name}' will be removed before install"
+                ));
+            }
+        }
         return Ok(InstallEntryResult {
             target: action.target,
             scope: action.scope,
             status: InstallStatus::DryRun,
             location: location.display().to_string(),
-            detail: render_dry_run_command(
-                &location.display().to_string(),
-                decision.action_label(),
-                "gemini",
-                &cli_args,
-                &action.spec,
-            ),
+            detail,
         });
+    }
+
+    if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                run_checked(
+                    runner,
+                    "gemini",
+                    &build_gemini_remove_args(existing_name, action.scope),
+                    &action.project_dir,
+                )?;
+            }
+        }
     }
 
     run_checked(runner, "gemini", &cli_args, &action.project_dir)?;
@@ -273,9 +335,10 @@ fn install_claude(
     runner: &dyn CommandRunner,
 ) -> Result<InstallEntryResult, InstallError> {
     let location = claude_location_hint(action.scope, &action.project_dir)?;
-    let exists = claude_server_exists(runner, &action.spec.name, &action.project_dir)?;
+    let existing_name =
+        claude_existing_server_name(runner, &action.spec.name, &action.project_dir)?;
     let decision = resolve_apply_decision(
-        exists,
+        existing_name.is_some(),
         action.force,
         action.target,
         action.scope,
@@ -285,13 +348,21 @@ fn install_claude(
 
     let cli_args = build_claude_add_args(&action.spec, action.scope);
     if action.dry_run {
-        let detail = render_dry_run_command(
+        let mut detail = render_dry_run_command(
             &location,
             decision.action_label(),
             "claude",
             &cli_args,
             &action.spec,
         );
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                detail.push('\n');
+                detail.push_str(&format!(
+                    "migration: legacy MCP server '{existing_name}' will be removed before install"
+                ));
+            }
+        }
         return Ok(InstallEntryResult {
             target: action.target,
             scope: action.scope,
@@ -302,13 +373,8 @@ fn install_claude(
     }
 
     if matches!(decision, crate::mcp_install::ApplyDecision::Update) {
-        let remove_args = vec![
-            "mcp".to_owned(),
-            "remove".to_owned(),
-            "-s".to_owned(),
-            action.scope.to_string(),
-            action.spec.name.clone(),
-        ];
+        let remove_name = existing_name.as_deref().unwrap_or(&action.spec.name);
+        let remove_args = build_claude_remove_args(remove_name, action.scope);
         run_checked(runner, "claude", &remove_args, &action.project_dir)?;
     }
 
@@ -355,9 +421,9 @@ fn install_cursor(
         &path,
     )?;
 
-    let exists = mcp_servers.contains_key(&action.spec.name);
+    let existing_name = json_object_existing_server_name(mcp_servers, &action.spec.name);
     let decision = resolve_apply_decision(
-        exists,
+        existing_name.is_some(),
         action.force,
         action.target,
         action.scope,
@@ -365,6 +431,11 @@ fn install_cursor(
         &path.display().to_string(),
     )?;
 
+    if let Some(existing_name) = existing_name.as_deref() {
+        if existing_name != action.spec.name {
+            mcp_servers.remove(existing_name);
+        }
+    }
     mcp_servers.insert(action.spec.name.clone(), cursor_server_value(&action.spec));
     let rendered =
         serde_json::to_string_pretty(&root).map_err(|err| InstallError::ConfigParse {
@@ -374,17 +445,26 @@ fn install_cursor(
         })?;
 
     if action.dry_run {
+        let mut detail = render_dry_run_config(
+            &path.display().to_string(),
+            decision.action_label(),
+            rendered,
+            &action.spec,
+        );
+        if let Some(existing_name) = existing_name.as_deref() {
+            if existing_name != action.spec.name {
+                detail.push('\n');
+                detail.push_str(&format!(
+                    "migration: legacy MCP server '{existing_name}' will be replaced"
+                ));
+            }
+        }
         return Ok(InstallEntryResult {
             target: action.target,
             scope: action.scope,
             status: InstallStatus::DryRun,
             location: path.display().to_string(),
-            detail: render_dry_run_config(
-                &path.display().to_string(),
-                decision.action_label(),
-                rendered,
-                &action.spec,
-            ),
+            detail,
         });
     }
 
@@ -424,6 +504,10 @@ fn build_codex_add_args(spec: &ServerSpec) -> Vec<String> {
     args
 }
 
+fn build_codex_remove_args(name: &str) -> Vec<String> {
+    vec!["mcp".to_owned(), "remove".to_owned(), name.to_owned()]
+}
+
 fn build_gemini_add_args(spec: &ServerSpec, scope: InstallScope) -> Vec<String> {
     let mut args = vec!["mcp".to_owned(), "add".to_owned(), "-s".to_owned(), scope.to_string()];
     for (key, value) in &spec.env {
@@ -434,6 +518,10 @@ fn build_gemini_add_args(spec: &ServerSpec, scope: InstallScope) -> Vec<String> 
     args.push(spec.command.clone());
     args.extend(spec.args.clone());
     args
+}
+
+fn build_gemini_remove_args(name: &str, scope: InstallScope) -> Vec<String> {
+    vec!["mcp".to_owned(), "remove".to_owned(), "-s".to_owned(), scope.to_string(), name.to_owned()]
 }
 
 fn build_claude_add_args(spec: &ServerSpec, scope: InstallScope) -> Vec<String> {
@@ -452,6 +540,10 @@ fn build_claude_add_args(spec: &ServerSpec, scope: InstallScope) -> Vec<String> 
     args.push(spec.command.clone());
     args.extend(spec.args.clone());
     args
+}
+
+fn build_claude_remove_args(name: &str, scope: InstallScope) -> Vec<String> {
+    vec!["mcp".to_owned(), "remove".to_owned(), "-s".to_owned(), scope.to_string(), name.to_owned()]
 }
 
 fn codex_server_exists(
@@ -474,6 +566,24 @@ fn codex_server_exists(
     })
 }
 
+fn codex_existing_server_name(
+    runner: &dyn CommandRunner,
+    requested_name: &str,
+    cwd: &Path,
+) -> Result<Option<String>, InstallError> {
+    if codex_server_exists(runner, requested_name, cwd)? {
+        return Ok(Some(requested_name.to_owned()));
+    }
+
+    if let Some(legacy_name) = legacy_server_name(requested_name) {
+        if codex_server_exists(runner, legacy_name, cwd)? {
+            return Ok(Some(legacy_name.to_owned()));
+        }
+    }
+
+    Ok(None)
+}
+
 fn claude_server_exists(
     runner: &dyn CommandRunner,
     name: &str,
@@ -492,6 +602,24 @@ fn claude_server_exists(
         name: name.to_owned(),
         message: output.stderr.trim().to_owned(),
     })
+}
+
+fn claude_existing_server_name(
+    runner: &dyn CommandRunner,
+    requested_name: &str,
+    cwd: &Path,
+) -> Result<Option<String>, InstallError> {
+    if claude_server_exists(runner, requested_name, cwd)? {
+        return Ok(Some(requested_name.to_owned()));
+    }
+
+    if let Some(legacy_name) = legacy_server_name(requested_name) {
+        if claude_server_exists(runner, legacy_name, cwd)? {
+            return Ok(Some(legacy_name.to_owned()));
+        }
+    }
+
+    Ok(None)
 }
 
 fn run_checked(
@@ -519,6 +647,25 @@ fn run_checked(
 
 fn codex_project_contains_server(doc: &DocumentMut, name: &str) -> bool {
     doc.get("mcp_servers").and_then(Item::as_table_like).and_then(|table| table.get(name)).is_some()
+}
+
+fn codex_project_existing_server_name(doc: &DocumentMut, requested_name: &str) -> Option<String> {
+    if codex_project_contains_server(doc, requested_name) {
+        return Some(requested_name.to_owned());
+    }
+
+    legacy_server_name(requested_name)
+        .filter(|legacy_name| codex_project_contains_server(doc, legacy_name))
+        .map(str::to_owned)
+}
+
+fn remove_codex_project_server(mut doc: DocumentMut, server_name: Option<&str>) -> DocumentMut {
+    if let Some(server_name) = server_name {
+        if let Some(servers) = doc.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
+            servers.remove(server_name);
+        }
+    }
+    doc
 }
 
 fn upsert_codex_project_server(mut doc: DocumentMut, spec: &ServerSpec) -> DocumentMut {
@@ -552,14 +699,14 @@ fn codex_server_table(spec: &ServerSpec) -> Table {
     table
 }
 
-fn json_config_contains_server(
+fn json_existing_server_name(
     files: &dyn FileStore,
     path: &Path,
-    name: &str,
+    requested_name: &str,
     servers_key: &str,
-) -> Result<bool, InstallError> {
+) -> Result<Option<String>, InstallError> {
     if !files.exists(path) {
-        return Ok(false);
+        return Ok(None);
     }
 
     let value = serde_json::from_str::<Value>(&files.read_to_string(path).map_err(|err| {
@@ -574,8 +721,20 @@ fn json_config_contains_server(
     Ok(value
         .get(servers_key)
         .and_then(Value::as_object)
-        .map(|servers| servers.contains_key(name))
-        .unwrap_or(false))
+        .and_then(|servers| json_object_existing_server_name(servers, requested_name)))
+}
+
+fn json_object_existing_server_name(
+    servers: &Map<String, Value>,
+    requested_name: &str,
+) -> Option<String> {
+    if servers.contains_key(requested_name) {
+        return Some(requested_name.to_owned());
+    }
+
+    legacy_server_name(requested_name)
+        .filter(|legacy_name| servers.contains_key(*legacy_name))
+        .map(str::to_owned)
 }
 
 fn cursor_server_value(spec: &ServerSpec) -> Value {
@@ -609,6 +768,10 @@ fn ensure_json_object<'a>(
         path: path.display().to_string(),
         what: what.to_owned(),
     })
+}
+
+fn legacy_server_name(requested_name: &str) -> Option<&'static str> {
+    (requested_name != LEGACY_SERVER_NAME).then_some(LEGACY_SERVER_NAME)
 }
 
 fn gemini_config_path(scope: InstallScope, project_dir: &Path) -> Result<PathBuf, InstallError> {
@@ -803,11 +966,40 @@ mod tests {
         }
     }
 
+    fn spec_named(name: &str) -> ServerSpec {
+        ServerSpec {
+            name: name.to_owned(),
+            command: "bsl-analyzer".to_owned(),
+            args: vec![
+                "mcp".to_owned(),
+                "serve".to_owned(),
+                "--profile".to_owned(),
+                "reference".to_owned(),
+            ],
+            env: BTreeMap::new(),
+        }
+    }
+
     fn action(target: InstallTarget, scope: InstallScope) -> InstallAction {
         InstallAction {
             target,
             scope,
             spec: spec(),
+            project_dir: PathBuf::from("/workspace"),
+            force: true,
+            dry_run: false,
+        }
+    }
+
+    fn action_with_spec(
+        target: InstallTarget,
+        scope: InstallScope,
+        spec: ServerSpec,
+    ) -> InstallAction {
+        InstallAction {
+            target,
+            scope,
+            spec,
             project_dir: PathBuf::from("/workspace"),
             force: true,
             dry_run: false,
@@ -831,6 +1023,35 @@ args = ["serve"]
     }
 
     #[test]
+    fn codex_project_force_migrates_legacy_server_name() {
+        let path = PathBuf::from("/workspace/.codex/config.toml");
+        let files = MemoryFiles::with(
+            path.clone(),
+            r#"[mcp_servers.bsl-analyzer]
+command = "old"
+args = ["mcp", "--source-dir", "."]
+"#,
+        );
+        let runner = FakeRunner::new(Vec::new());
+
+        let result = apply_action(
+            &action_with_spec(
+                InstallTarget::Codex,
+                InstallScope::Project,
+                spec_named("bsl-analyzer-reference"),
+            ),
+            &runner,
+            &files,
+        )
+        .expect("codex migration succeeds");
+
+        assert_eq!(result.status, InstallStatus::Updated);
+        let written = files.read_to_string(&path).expect("file written");
+        assert!(!written.contains("[mcp_servers.bsl-analyzer]\n"));
+        assert!(written.contains("[mcp_servers.bsl-analyzer-reference]"));
+    }
+
+    #[test]
     fn cursor_merge_preserves_existing_servers() {
         let path = PathBuf::from("/workspace/.cursor/mcp.json");
         let files = MemoryFiles::with(
@@ -847,6 +1068,32 @@ args = ["serve"]
         let written = files.read_to_string(&path).expect("file written");
         assert!(written.contains("\"other\""));
         assert!(written.contains("\"bsl-analyzer\""));
+    }
+
+    #[test]
+    fn cursor_force_migrates_legacy_server_name() {
+        let path = PathBuf::from("/workspace/.cursor/mcp.json");
+        let files = MemoryFiles::with(
+            path.clone(),
+            r#"{"mcpServers":{"bsl-analyzer":{"type":"stdio","command":"old","args":["serve"]}}}"#,
+        );
+        let runner = FakeRunner::new(Vec::new());
+
+        let result = apply_action(
+            &action_with_spec(
+                InstallTarget::Cursor,
+                InstallScope::Project,
+                spec_named("bsl-analyzer-reference"),
+            ),
+            &runner,
+            &files,
+        )
+        .expect("cursor migration succeeds");
+
+        assert_eq!(result.status, InstallStatus::Updated);
+        let written = files.read_to_string(&path).expect("file written");
+        assert!(!written.contains("\"bsl-analyzer\":"));
+        assert!(written.contains("\"bsl-analyzer-reference\":"));
     }
 
     #[test]

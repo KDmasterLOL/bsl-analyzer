@@ -123,6 +123,51 @@ fn codex_user_reference_force_uses_cli_and_passes_env() {
 }
 
 #[test]
+fn codex_user_reference_force_migrates_legacy_name() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .env("CODEX_GET_EXISTS_NAMES", "bsl-analyzer")
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--scope",
+            "user",
+            "--preset",
+            "reference",
+            "--force",
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let invocations = harness.invocations();
+    assert_eq!(invocations.len(), 4);
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-reference", "--json"]);
+    assert_eq!(invocations[1].args, vec!["mcp", "get", "bsl-analyzer", "--json"]);
+    assert_eq!(invocations[2].args, vec!["mcp", "remove", "bsl-analyzer"]);
+    assert_eq!(
+        invocations[3].args,
+        vec![
+            "mcp",
+            "add",
+            "bsl-analyzer-reference",
+            "--",
+            "bsl-analyzer",
+            "mcp",
+            "serve",
+            "--profile",
+            "reference",
+        ]
+    );
+}
+
+#[test]
 fn codex_project_writes_toml_without_invoking_cli() {
     let harness = TestHarness::new();
     harness.install_stub("codex", &failing_stub());
@@ -268,10 +313,11 @@ fn codex_recommended_installs_reference_and_workspace() {
     assert!(stdout.contains("[codex:project] installed"));
 
     let invocations = harness.invocations();
-    assert_eq!(invocations.len(), 2);
+    assert_eq!(invocations.len(), 3);
     assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-reference", "--json"]);
+    assert_eq!(invocations[1].args, vec!["mcp", "get", "bsl-analyzer", "--json"]);
     assert_eq!(
-        invocations[1].args,
+        invocations[2].args,
         vec![
             "mcp",
             "add",
@@ -321,8 +367,9 @@ fn codex_recommended_uses_name_prefix_for_both_servers() {
 
     let invocations = harness.invocations();
     assert_eq!(invocations[0].args, vec!["mcp", "get", "custom-bsl-reference", "--json"]);
+    assert_eq!(invocations[1].args, vec!["mcp", "get", "bsl-analyzer", "--json"]);
     assert_eq!(
-        invocations[1].args,
+        invocations[2].args,
         vec![
             "mcp",
             "add",
@@ -379,6 +426,12 @@ if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then
     echo '{}'
     exit 0
   fi
+  case ",$CODEX_GET_EXISTS_NAMES," in
+    *,"$3",*)
+      echo '{}'
+      exit 0
+      ;;
+  esac
   echo "Error: No MCP server named '$3' found." >&2
   exit 1
 fi
