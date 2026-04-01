@@ -74,6 +74,15 @@ bsl-analyzer mcp serve --profile workspace --source-dir ./my-project
 Автоустановка MCP-конфига в AI-инструменты:
 
 ```bash
+# Рекомендуемый сценарий: одной командой установить
+# global reference + project workspace
+bsl-analyzer mcp install \
+  --target all \
+  --preset recommended \
+  --source-dir ./my-project \
+  --env NAPARNIK_TOKEN=your_token \
+  --env EMBEDDING_URL=http://localhost:8000/v1/embeddings
+
 # Установить глобальный MCP справки в Codex / Gemini / Claude / Cursor
 bsl-analyzer mcp install \
   --target all \
@@ -107,6 +116,11 @@ bsl-analyzer mcp install \
 |--------|-------|-------------|
 | `reference` | `user` | `search(find_docs/search_docs/status)`, `syntax_help`, `its_help` |
 | `workspace` | `project` | `metadata`, `search(find_code/search_code/status)`, `query`, `execute`, `debug` |
+
+`recommended` в `mcp install` разворачивается в две установки:
+
+- `reference` в `user scope`
+- `workspace` в `project scope`
 
 Поддерживаемые targets:
 

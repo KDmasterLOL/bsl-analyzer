@@ -216,10 +216,10 @@ struct McpInstallArgs {
     target: InstallTargetCli,
 
     /// Configuration scope
-    #[arg(long, value_enum, default_value_t = InstallScopeCli::Project)]
-    scope: InstallScopeCli,
+    #[arg(long, value_enum)]
+    scope: Option<InstallScopeCli>,
 
-    /// Installation preset
+    /// Installation preset or recommended bundle
     #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
     preset: InstallPresetCli,
 
@@ -278,6 +278,7 @@ enum InstallPresetCli {
     #[default]
     Workspace,
     Reference,
+    Recommended,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -438,38 +439,100 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
     let project_dir = env::current_dir()?;
     let env = args.env.into_iter().collect::<BTreeMap<_, _>>();
     let password = decode_password(&args.onec_password);
-    let preset = match args.preset {
-        InstallPresetCli::Workspace => InstallPreset::Workspace,
-        InstallPresetCli::Reference => InstallPreset::Reference,
-    };
     let source_dir = args.source_dir.unwrap_or_else(|| project_dir.clone());
 
-    let request = InstallRequest {
-        target: match args.target {
-            InstallTargetCli::Codex => InstallTargetSelector::One(InstallTarget::Codex),
-            InstallTargetCli::Gemini => InstallTargetSelector::One(InstallTarget::Gemini),
-            InstallTargetCli::Claude => InstallTargetSelector::One(InstallTarget::Claude),
-            InstallTargetCli::Cursor => InstallTargetSelector::One(InstallTarget::Cursor),
-            InstallTargetCli::All => InstallTargetSelector::All,
-        },
-        scope: match args.scope {
-            InstallScopeCli::User => InstallScope::User,
-            InstallScopeCli::Project => InstallScope::Project,
-            InstallScopeCli::Local => InstallScope::Local,
-        },
-        preset,
-        name: args.name.unwrap_or_else(|| default_server_name(preset).to_owned()),
-        project_dir,
-        source_dir,
-        onec_url: args.onec_url,
-        onec_user: args.onec_user,
-        onec_password: password,
-        env,
-        force: args.force,
-        dry_run: args.dry_run,
+    if matches!(args.preset, InstallPresetCli::Recommended) && args.name.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--name is ambiguous for '--preset recommended'; use default names for now",
+        )
+        .into());
+    }
+
+    let target = match args.target {
+        InstallTargetCli::Codex => InstallTargetSelector::One(InstallTarget::Codex),
+        InstallTargetCli::Gemini => InstallTargetSelector::One(InstallTarget::Gemini),
+        InstallTargetCli::Claude => InstallTargetSelector::One(InstallTarget::Claude),
+        InstallTargetCli::Cursor => InstallTargetSelector::One(InstallTarget::Cursor),
+        InstallTargetCli::All => InstallTargetSelector::All,
     };
 
-    let result = match mcp_install::install(request) {
+    let requests = match args.preset {
+        InstallPresetCli::Workspace => vec![InstallRequest {
+            target,
+            scope: resolve_scope(args.scope, InstallScope::Project)?,
+            preset: InstallPreset::Workspace,
+            name: args
+                .name
+                .unwrap_or_else(|| default_server_name(InstallPreset::Workspace).to_owned()),
+            project_dir: project_dir.clone(),
+            source_dir,
+            onec_url: args.onec_url,
+            onec_user: args.onec_user,
+            onec_password: password,
+            env,
+            force: args.force,
+            dry_run: args.dry_run,
+        }],
+        InstallPresetCli::Reference => vec![InstallRequest {
+            target,
+            scope: resolve_scope(args.scope, InstallScope::User)?,
+            preset: InstallPreset::Reference,
+            name: args
+                .name
+                .unwrap_or_else(|| default_server_name(InstallPreset::Reference).to_owned()),
+            project_dir: project_dir.clone(),
+            source_dir,
+            onec_url: args.onec_url,
+            onec_user: args.onec_user,
+            onec_password: password,
+            env,
+            force: args.force,
+            dry_run: args.dry_run,
+        }],
+        InstallPresetCli::Recommended => {
+            if args.scope.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--scope is not used with '--preset recommended'; it installs 'reference:user' and 'workspace:project'",
+                )
+                .into());
+            }
+
+            vec![
+                InstallRequest {
+                    target,
+                    scope: InstallScope::User,
+                    preset: InstallPreset::Reference,
+                    name: default_server_name(InstallPreset::Reference).to_owned(),
+                    project_dir: project_dir.clone(),
+                    source_dir: source_dir.clone(),
+                    onec_url: args.onec_url.clone(),
+                    onec_user: args.onec_user.clone(),
+                    onec_password: password.clone(),
+                    env: env.clone(),
+                    force: args.force,
+                    dry_run: args.dry_run,
+                },
+                InstallRequest {
+                    target,
+                    scope: InstallScope::Project,
+                    preset: InstallPreset::Workspace,
+                    name: default_server_name(InstallPreset::Workspace).to_owned(),
+                    project_dir,
+                    source_dir,
+                    onec_url: args.onec_url,
+                    onec_user: args.onec_user,
+                    onec_password: password,
+                    env,
+                    force: args.force,
+                    dry_run: args.dry_run,
+                },
+            ]
+        }
+    };
+
+    let result = match mcp_install::install_many(requests) {
         Ok(result) => result,
         Err(err) => {
             eprintln!("{}", format_install_error(&err));
@@ -491,6 +554,18 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
     }
 
     Ok(())
+}
+
+fn resolve_scope(
+    scope: Option<InstallScopeCli>,
+    default: bsl_analyzer::mcp_install::InstallScope,
+) -> Result<bsl_analyzer::mcp_install::InstallScope, io::Error> {
+    Ok(match scope {
+        Some(InstallScopeCli::User) => bsl_analyzer::mcp_install::InstallScope::User,
+        Some(InstallScopeCli::Project) => bsl_analyzer::mcp_install::InstallScope::Project,
+        Some(InstallScopeCli::Local) => bsl_analyzer::mcp_install::InstallScope::Local,
+        None => default,
+    })
 }
 
 fn format_install_error(err: &bsl_analyzer::mcp_install::InstallError) -> String {

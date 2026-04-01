@@ -240,6 +240,61 @@ fn claude_project_force_runs_get_remove_add() {
     assert!(invocations[2].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
 }
 
+#[test]
+fn codex_recommended_installs_reference_and_workspace() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--preset",
+            "recommended",
+            "--source-dir",
+            harness.source_dir().to_str().expect("utf-8 path"),
+            "--env",
+            "NAPARNIK_TOKEN=test",
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[codex:user] installed"));
+    assert!(stdout.contains("[codex:project] installed"));
+
+    let invocations = harness.invocations();
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-reference", "--json"]);
+    assert_eq!(
+        invocations[1].args,
+        vec![
+            "mcp",
+            "add",
+            "bsl-analyzer-reference",
+            "--env",
+            "NAPARNIK_TOKEN=test",
+            "--",
+            "bsl-analyzer",
+            "mcp",
+            "serve",
+            "--profile",
+            "reference",
+        ]
+    );
+
+    let config_path = harness.project_dir.join(".codex/config.toml");
+    let config = fs::read_to_string(&config_path).expect("project config");
+    assert!(config.contains("[mcp_servers.bsl-analyzer-workspace]"));
+    assert!(config.contains(
+        "args = [\"mcp\", \"serve\", \"--profile\", \"workspace\", \"--source-dir\", \"src\"]"
+    ));
+}
+
 fn parse_invocations(contents: &str) -> Vec<Invocation> {
     let mut invocations = Vec::new();
     let mut program = None;
