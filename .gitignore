@@ -23,6 +23,7 @@ Thumbs.db
 *.swo
 
 # Build artifacts
+.build/
 *.so
 *.dylib
 *.dll
