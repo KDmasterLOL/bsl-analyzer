@@ -3,9 +3,9 @@
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{
-    BaselineRef, CorpusId, Document, ExternalBaselineAdapter, ExternalBaselineBackend,
-    ExternalBaselineConfig, IndexProgress, ResolvedView, SearchEngine, SnapshotCatalog,
-    SnapshotContentStore,
+    fingerprint_documents, BaselineRef, CorpusId, Document, ExternalBaselineAdapter,
+    ExternalBaselineBackend, ExternalBaselineConfig, IndexProgress, ResolvedView, SearchEngine,
+    SnapshotCatalog, SnapshotContentStore,
 };
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -141,11 +141,13 @@ impl SharedState {
         {
             let engine_arc = Arc::clone(&search_engine);
             let progress_arc = Arc::clone(&index_progress);
+            let external_baseline = external_baseline.clone();
             std::thread::Builder::new()
                 .name("bsl-search-reference-init".to_owned())
                 .spawn(move || {
                     tracing::info!("reference search engine initialization started in background");
-                    let engine = Self::init_reference_search_engine(&progress_arc);
+                    let engine =
+                        Self::init_reference_search_engine(&progress_arc, external_baseline);
                     if let Ok(mut guard) = engine_arc.lock() {
                         *guard = engine;
                     }
@@ -405,14 +407,29 @@ impl SharedState {
         Some(engine)
     }
 
-    fn init_reference_search_engine(progress: &Arc<IndexProgress>) -> Option<SearchEngine> {
+    fn init_reference_search_engine(
+        progress: &Arc<IndexProgress>,
+        external_baseline: Option<Arc<ExternalBaselineSource>>,
+    ) -> Option<SearchEngine> {
         let db_path = Self::reference_search_db_path()?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
         let mut engine = Self::open_search_engine(&db_path)?;
-        Self::index_platform_docs(&mut engine, progress);
+        if external_baseline
+            .as_ref()
+            .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::Reference))
+        {
+            if let Err(error) = engine.remove_file("platform://docs") {
+                tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
+            }
+            tracing::info!(
+                "external reference baseline is configured; local platform docs indexing is skipped"
+            );
+        } else {
+            Self::index_platform_docs(&mut engine, progress);
+        }
         Some(engine)
     }
 
@@ -720,6 +737,7 @@ impl ExternalBaselineSource {
                         selection,
                         state: ExternalBaselineState::Ready {
                             snapshot_id: snapshot.id.0,
+                            fingerprint: snapshot.fingerprint,
                             documents: documents.len(),
                             files: files.len(),
                         },
@@ -772,6 +790,13 @@ impl ExternalBaselineSource {
     pub(crate) fn corpus(&self) -> &CorpusId {
         &self.baseline.corpus
     }
+
+    pub(crate) fn local_reference_fingerprint(&self) -> Option<String> {
+        if !matches!(self.baseline.corpus, CorpusId::Reference) {
+            return None;
+        }
+        Some(fingerprint_documents(&platform_reference_documents()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -784,9 +809,86 @@ pub(crate) struct ExternalBaselineStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExternalBaselineState {
-    Ready { snapshot_id: String, documents: usize, files: usize },
+    Ready { snapshot_id: String, fingerprint: Option<String>, documents: usize, files: usize },
     Missing,
     Error(String),
+}
+
+fn platform_reference_documents() -> Vec<Document> {
+    let platform = PlatformDataInner::instance();
+    let mut documents = Vec::new();
+
+    for ty in platform.all_types() {
+        let methods = platform.get_type_methods(&ty.name);
+        let method_list: String = methods
+            .iter()
+            .map(|method| format!("{} / {}", method.name, method.english_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        documents.push(Document {
+            title: format!("{} / {}", ty.name, ty.english_name),
+            body: format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name),
+            kind: "type".to_owned(),
+        });
+    }
+
+    for method in platform.all_methods() {
+        let mut body = format!(
+            "Тип: {}\nМетод: {} / {}\n",
+            method.type_name, method.name, method.english_name
+        );
+        if let Some(ref ret) = method.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_method_docs(method.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+            for example in &docs.examples {
+                body.push_str(&format!("Пример: {}\n", example.code));
+            }
+        }
+        documents.push(Document {
+            title: format!(
+                "{}.{} / {}.{}",
+                method.type_name, method.name, method.type_name, method.english_name
+            ),
+            body,
+            kind: "method".to_owned(),
+        });
+    }
+
+    for func in platform.all_global_functions() {
+        let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name);
+        if let Some(ref ret) = func.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_global_function_docs(func.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+        }
+        documents.push(Document {
+            title: format!("{} / {}", func.name, func.english_name),
+            body,
+            kind: "global_function".to_owned(),
+        });
+    }
+
+    documents
 }
 
 fn baseline_description(baseline: &BaselineRef) -> String {

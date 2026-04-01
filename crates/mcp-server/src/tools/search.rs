@@ -141,9 +141,21 @@ pub fn find_docs(
 /// Semantic search across platform documentation.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
+    if external_baseline
+        .as_ref()
+        .is_some_and(|baseline| matches!(baseline.corpus(), bsl_search::CorpusId::Reference))
+    {
+        return Err(McpError::invalid_params(
+            "Semantic search for centralized reference baseline is not available yet. \
+             Use find_docs or keep local reference indexing.",
+            None,
+        ));
+    }
+
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -275,11 +287,14 @@ pub fn search_status(
         let _ = writeln!(out, "  Schema:   {}", status.schema);
         let _ = writeln!(out, "  Select:   {}", status.selection);
         match status.state {
-            ExternalBaselineState::Ready { snapshot_id, documents, files } => {
+            ExternalBaselineState::Ready { snapshot_id, fingerprint, documents, files } => {
                 let _ = writeln!(out, "  Status:   ready");
                 let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
                 let _ = writeln!(out, "  Files:    {}", files);
                 let _ = writeln!(out, "  Chunks:   {}", documents);
+                if let Some(fingerprint) = fingerprint.as_deref() {
+                    let _ = writeln!(out, "  Fingerprint: {}", shorten_fingerprint(fingerprint));
+                }
                 match external_baseline.corpus() {
                     bsl_search::CorpusId::WorkspaceCode => {
                         if let Some(engine) = guard.as_ref() {
@@ -309,27 +324,43 @@ pub fn search_status(
                             }
                         }
                     }
-                    bsl_search::CorpusId::Reference => match external_baseline
-                        .resolve_reference_view()
-                    {
-                        Ok(Some(view)) => {
-                            let resolved_files: HashSet<&str> = view
-                                .documents()
-                                .iter()
-                                .map(|document| document.path.as_str())
-                                .collect();
-                            let _ = writeln!(out, "  Resolved view: ready");
-                            let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
-                            let _ = writeln!(out, "  Resolved chunks: {}", view.documents().len());
+                    bsl_search::CorpusId::Reference => {
+                        if let Some(local_fingerprint) =
+                            external_baseline.local_reference_fingerprint()
+                        {
+                            let freshness = match fingerprint.as_deref() {
+                                Some(shared) if shared == local_fingerprint => "up to date",
+                                Some(_) => "stale",
+                                None => "unknown",
+                            };
+                            let _ = writeln!(out, "  Freshness: {}", freshness);
+                            let _ = writeln!(
+                                out,
+                                "  Local fingerprint: {}",
+                                shorten_fingerprint(&local_fingerprint)
+                            );
                         }
-                        Ok(None) => {
-                            let _ = writeln!(out, "  Resolved view: unavailable");
+                        match external_baseline.resolve_reference_view() {
+                            Ok(Some(view)) => {
+                                let resolved_files: HashSet<&str> = view
+                                    .documents()
+                                    .iter()
+                                    .map(|document| document.path.as_str())
+                                    .collect();
+                                let _ = writeln!(out, "  Resolved view: ready");
+                                let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
+                                let _ =
+                                    writeln!(out, "  Resolved chunks: {}", view.documents().len());
+                            }
+                            Ok(None) => {
+                                let _ = writeln!(out, "  Resolved view: unavailable");
+                            }
+                            Err(error) => {
+                                let _ = writeln!(out, "  Resolved view: error");
+                                let _ = writeln!(out, "  Resolved error: {}", error);
+                            }
                         }
-                        Err(error) => {
-                            let _ = writeln!(out, "  Resolved view: error");
-                            let _ = writeln!(out, "  Resolved error: {}", error);
-                        }
-                    },
+                    }
                     bsl_search::CorpusId::Custom(_) => {}
                 }
             }
@@ -426,9 +457,13 @@ fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
     format!("latest {}", baseline.corpus.as_str())
 }
 
+fn shorten_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{search_status, ExternalBaselineSource};
+    use super::{search_docs, search_status, ExternalBaselineSource};
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
         IndexedDocument, ResolvedView, SearchEngine,
@@ -521,6 +556,25 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Docs lexical source: local sqlite"));
+    }
+
+    #[test]
+    fn search_docs_rejects_external_reference_baseline_for_now() {
+        let source = ExternalBaselineSource::new(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            bsl_search::BaselineRef {
+                corpus: bsl_search::CorpusId::Reference,
+                snapshot_id: None,
+                branch: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let error = search_docs(&Arc::new(Mutex::new(None)), Some(Arc::new(source)), "Массив", 10)
+            .unwrap_err();
+
+        assert!(error.message.contains("Semantic search for centralized reference baseline"));
     }
 
     #[test]

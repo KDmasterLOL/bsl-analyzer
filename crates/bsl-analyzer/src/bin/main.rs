@@ -622,7 +622,8 @@ fn run_search_baseline_sync_pg(
     args: SearchBaselineSyncPgArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
-        CorpusId, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot, SnapshotPublisher,
+        fingerprint_documents, fingerprint_indexed_documents, CorpusId, ExternalBaselineAdapter,
+        ExternalBaselineConfig, Snapshot, SnapshotPublisher,
     };
 
     let project = project_model::Project::new(&args.source_dir);
@@ -682,7 +683,15 @@ fn run_search_baseline_sync_pg(
     }
 
     let adapter = ExternalBaselineAdapter::new(config)?;
-    let snapshot = Snapshot::new(snapshot_id, corpus.clone());
+    let fingerprint = match corpus {
+        CorpusId::WorkspaceCode => fingerprint_indexed_documents(&documents),
+        CorpusId::Reference => {
+            let reference_documents = build_reference_source_documents();
+            fingerprint_documents(&reference_documents)
+        }
+        CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
+    };
+    let snapshot = Snapshot::new(snapshot_id, corpus.clone()).with_fingerprint(fingerprint);
     adapter.ensure_storage()?;
     adapter.publish_snapshot(&snapshot, branch.as_deref(), commit.as_deref(), &documents)?;
 
@@ -754,8 +763,27 @@ fn build_workspace_code_baseline_documents(
 
 fn build_reference_baseline_documents(
 ) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+    use bsl_search::SearchEngine;
+
+    let documents = build_reference_source_documents();
+
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("reference-baseline-sync.db");
+    let mut engine = SearchEngine::fts_only(&db_path)?;
+    let indexed_files = engine.index_documents(
+        "platform",
+        "platform://docs",
+        env!("CARGO_PKG_VERSION").as_bytes(),
+        &documents,
+        None,
+    )?;
+    let indexed_documents = engine.load_indexed_documents(Some("platform"))?;
+    Ok((indexed_files, indexed_documents))
+}
+
+fn build_reference_source_documents() -> Vec<bsl_search::Document> {
     use bsl_platform::PlatformDataInner;
-    use bsl_search::{Document, SearchEngine};
+    use bsl_search::Document;
 
     let platform = PlatformDataInner::instance();
     let mut documents = Vec::new();
@@ -778,7 +806,7 @@ fn build_reference_baseline_documents(
     for method in platform.all_methods() {
         let mut body = format!(
             "Тип: {}\nМетод: {} / {}\n",
-            method.type_name, method.name, method.english_name,
+            method.type_name, method.name, method.english_name
         );
         if let Some(ref ret) = method.return_type {
             body.push_str(&format!("Возвращает: {ret}\n"));
@@ -830,18 +858,7 @@ fn build_reference_baseline_documents(
         });
     }
 
-    let temp_dir = tempfile::tempdir()?;
-    let db_path = temp_dir.path().join("reference-baseline-sync.db");
-    let mut engine = SearchEngine::fts_only(&db_path)?;
-    let indexed_files = engine.index_documents(
-        "platform",
-        "platform://docs",
-        env!("CARGO_PKG_VERSION").as_bytes(),
-        &documents,
-        None,
-    )?;
-    let indexed_documents = engine.load_indexed_documents(Some("platform"))?;
-    Ok((indexed_files, indexed_documents))
+    documents
 }
 
 fn resolve_scope(

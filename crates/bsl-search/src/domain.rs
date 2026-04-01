@@ -103,11 +103,17 @@ impl ExternalBaselineConfig {
 pub struct Snapshot {
     pub id: SnapshotId,
     pub corpus: CorpusId,
+    pub fingerprint: Option<String>,
 }
 
 impl Snapshot {
     pub fn new(id: impl Into<String>, corpus: CorpusId) -> Self {
-        Self { id: SnapshotId::new(id), corpus }
+        Self { id: SnapshotId::new(id), corpus, fingerprint: None }
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = Some(fingerprint.into());
+        self
     }
 }
 

@@ -9,6 +9,7 @@ use postgres::{Client, NoTls, Row};
 /// - `<schema>.snapshots`
 ///   `id TEXT PRIMARY KEY`
 ///   `corpus TEXT NOT NULL`
+///   `fingerprint TEXT NULL`
 ///   `branch TEXT NULL`
 ///   `commit_sha TEXT NULL`
 ///   `created_at TIMESTAMPTZ NOT NULL`
@@ -51,12 +52,14 @@ impl PostgresBaselineAdapter {
 
     fn snapshot_row_to_model(row: Row) -> Snapshot {
         let corpus = CorpusId::from_storage(row.get::<_, String>("corpus"));
-        Snapshot::new(row.get::<_, String>("id"), corpus)
+        let mut snapshot = Snapshot::new(row.get::<_, String>("id"), corpus);
+        snapshot.fingerprint = row.get("fingerprint");
+        snapshot
     }
 
     fn latest_snapshot_query(&self, with_filter: &str) -> String {
         format!(
-            "SELECT id, corpus
+            "SELECT id, corpus, fingerprint
              FROM {}
              WHERE {}
              ORDER BY created_at DESC
@@ -73,10 +76,15 @@ impl PostgresBaselineAdapter {
                 "CREATE TABLE IF NOT EXISTS {} (
                     id TEXT PRIMARY KEY,
                     corpus TEXT NOT NULL,
+                    fingerprint TEXT NULL,
                     branch TEXT NULL,
                     commit_sha TEXT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )",
+                self.table("snapshots")
+            ),
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS fingerprint TEXT NULL",
                 self.table("snapshots")
             ),
             format!(
@@ -130,7 +138,7 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
 
         let row = if let Some(snapshot_id) = &baseline.snapshot_id {
             let query = format!(
-                "SELECT id, corpus
+                "SELECT id, corpus, fingerprint
                  FROM {}
                  WHERE id = $1 AND corpus = $2
                  LIMIT 1",
@@ -218,17 +226,18 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let mut tx = client.transaction()?;
 
         let upsert_snapshot = format!(
-            "INSERT INTO {} (id, corpus, branch, commit_sha)
-             VALUES ($1, $2, $3, $4)
+            "INSERT INTO {} (id, corpus, fingerprint, branch, commit_sha)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (id) DO UPDATE SET
                 corpus = EXCLUDED.corpus,
+                fingerprint = EXCLUDED.fingerprint,
                 branch = EXCLUDED.branch,
                 commit_sha = EXCLUDED.commit_sha",
             self.table("snapshots")
         );
         tx.execute(
             &upsert_snapshot,
-            &[&snapshot.id.0, &snapshot.corpus.as_str(), &branch, &commit],
+            &[&snapshot.id.0, &snapshot.corpus.as_str(), &snapshot.fingerprint, &branch, &commit],
         )?;
 
         let delete_items =

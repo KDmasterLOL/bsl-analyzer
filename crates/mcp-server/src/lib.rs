@@ -478,9 +478,11 @@ impl McpServer {
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
                     "find_docs" => {
-                        tools::search::find_docs(&engine, external_baseline, &query, limit)
+                        tools::search::find_docs(&engine, external_baseline.clone(), &query, limit)
                     }
-                    "search_docs" => tools::search::search_docs(&engine, &query, limit),
+                    "search_docs" => {
+                        tools::search::search_docs(&engine, external_baseline, &query, limit)
+                    }
                     _ => unreachable!(),
                 })
                 .await
