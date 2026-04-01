@@ -9,6 +9,9 @@ mod baseline;
 mod state;
 mod tools;
 
+pub use baseline::{
+    resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
+};
 pub use state::SharedState;
 
 /// Start MCP server on stdio (stdin/stdout).

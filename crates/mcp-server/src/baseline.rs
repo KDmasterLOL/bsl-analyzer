@@ -12,6 +12,19 @@ use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineResolutionSummary {
+    pub backend: String,
+    pub selection: String,
+    pub issue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineConfigDiagnostics {
+    pub workspace: BaselineResolutionSummary,
+    pub reference: BaselineResolutionSummary,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BaselineRuntime {
     pub configured_baseline: ConfiguredBaselineStatus,
@@ -126,6 +139,23 @@ impl BaselineRuntime {
             }
         }
     }
+
+    fn summary(&self) -> BaselineResolutionSummary {
+        BaselineResolutionSummary {
+            backend: self.configured_baseline.backend.to_owned(),
+            selection: self.configured_baseline.selection.clone(),
+            issue: self.configured_baseline.issue.clone(),
+        }
+    }
+}
+
+pub fn resolve_project_baseline_diagnostics(
+    project_config: &ProjectConfig,
+) -> BaselineConfigDiagnostics {
+    let workspace = BaselineRuntime::workspace(project_config);
+    let reference = BaselineRuntime::reference(Some(project_config));
+
+    BaselineConfigDiagnostics { workspace: workspace.summary(), reference: reference.summary() }
 }
 
 #[derive(Debug)]
@@ -385,8 +415,9 @@ fn platform_reference_documents() -> Vec<Document> {
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_description, BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineSource,
-        ExternalBaselineState,
+        baseline_description, resolve_project_baseline_diagnostics, BaselineConfigDiagnostics,
+        BaselineResolutionSummary, BaselineRuntime, ConfiguredBaselineStatus,
+        ExternalBaselineSource, ExternalBaselineState,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig};
     use project_model::{
@@ -483,5 +514,45 @@ mod tests {
             .as_deref()
             .is_some_and(|issue| issue.contains("search.baseline.postgres.url")));
         assert!(runtime.external_baseline.is_none());
+    }
+
+    #[test]
+    fn project_baseline_diagnostics_returns_workspace_and_reference_summaries() {
+        let diagnostics = resolve_project_baseline_diagnostics(&ProjectConfig {
+            search: SearchConfig {
+                baseline: SearchBaselineConfig {
+                    backend: SearchBaselineBackend::Postgres,
+                    postgres: SearchPostgresConfig {
+                        url: Some("postgres://shared-search".to_owned()),
+                        schema: Some("corp_search".to_owned()),
+                    },
+                    workspace_code: SearchBaselineTargetConfig {
+                        branch: Some("main".to_owned()),
+                        ..SearchBaselineTargetConfig::default()
+                    },
+                    reference: SearchBaselineTargetConfig {
+                        snapshot_id: Some("reference:0.1.104".to_owned()),
+                        ..SearchBaselineTargetConfig::default()
+                    },
+                },
+            },
+            ..ProjectConfig::default()
+        });
+
+        assert_eq!(
+            diagnostics,
+            BaselineConfigDiagnostics {
+                workspace: BaselineResolutionSummary {
+                    backend: "postgres".to_owned(),
+                    selection: "branch main".to_owned(),
+                    issue: None,
+                },
+                reference: BaselineResolutionSummary {
+                    backend: "postgres".to_owned(),
+                    selection: "snapshot reference:0.1.104".to_owned(),
+                    issue: None,
+                },
+            }
+        );
     }
 }

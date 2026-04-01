@@ -2149,11 +2149,23 @@ fn check_config(config: std::path::PathBuf) -> Result<(), Box<dyn Error + Send +
     tracing::info!("Checking configuration: {:?}", config);
 
     let content = std::fs::read_to_string(&config)?;
-    let _config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let config: project_model::ProjectConfig = serde_json::from_str(&content)?;
+    let diagnostics = mcp_server::resolve_project_baseline_diagnostics(&config);
 
-    println!("Configuration is valid!");
+    println!("Configuration is valid.");
+    println!();
+    println!("Search baseline:");
+    print_baseline_summary("Workspace", &diagnostics.workspace);
+    print_baseline_summary("Reference", &diagnostics.reference);
 
     Ok(())
+}
+
+fn print_baseline_summary(label: &str, summary: &mcp_server::BaselineResolutionSummary) {
+    println!("  {label}:");
+    println!("    Backend: {backend}", backend = summary.backend);
+    println!("    Select:  {selection}", selection = summary.selection);
+    println!("    Status:  {status}", status = summary.issue.as_deref().unwrap_or("ready"));
 }
 
 fn setup_logging(

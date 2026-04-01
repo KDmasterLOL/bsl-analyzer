@@ -151,6 +151,47 @@ bsl-analyzer mcp install \
 
 Если в конфиге уже есть старая single-server запись с именем `bsl-analyzer`, установка с `--force` автоматически мигрирует её в новую split-модель с отдельными `reference` и `workspace` серверами.
 
+Если для проекта используется централизованный search baseline в PostgreSQL, backend задаётся в `.bsl-analyzer.json`, а env остаётся только для секретов и override:
+
+```json
+{
+  "search": {
+    "baseline": {
+      "backend": "postgres",
+      "postgres": {
+        "schema": "bsl_search"
+      },
+      "workspaceCode": {
+        "branch": "main"
+      },
+      "reference": {
+        "snapshotId": "reference:0.1.104"
+      }
+    }
+  }
+}
+```
+
+Проверить, как этот конфиг будет разрешён на runtime, можно без запуска MCP:
+
+```bash
+bsl-analyzer check-config .bsl-analyzer.json
+```
+
+Команда покажет отдельно для `workspace` и `reference`:
+
+- выбранный backend;
+- итоговый `snapshot` / `branch` / `commit`;
+- проблемы конфигурации, например отсутствие `search.baseline.postgres.url`.
+
+Порядок разрешения такой:
+
+1. `search.baseline.backend` в `.bsl-analyzer.json` выбирает `sqlite` или `postgres`.
+2. Для `postgres` `url/schema` берутся из env, если они заданы, иначе из конфига.
+3. `snapshotId/branch/commit` тоже могут быть переопределены через env.
+
+Для workspace-профиля env больше не переключает backend сам по себе: если в конфиге не выбран `postgres`, будет использован локальный SQLite. Для `reference` user-scope без project root по-прежнему допускается env-only режим.
+
 С подключением к 1С (для выполнения запросов и кода):
 
 ```bash
@@ -321,6 +362,31 @@ BSL_ANALYZER_VERSION=0.1.33 bsl-analyzer analyze -s ./src
     }
 }
 ```
+
+Пример с централизованным search baseline:
+
+```json
+{
+    "configurationRoot": "src/cf",
+    "search": {
+        "baseline": {
+            "backend": "postgres",
+            "postgres": {
+                "url": "postgres://shared-search",
+                "schema": "bsl_search"
+            },
+            "workspaceCode": {
+                "branch": "main"
+            },
+            "reference": {
+                "snapshotId": "reference:0.1.104"
+            }
+        }
+    }
+}
+```
+
+Если `search.baseline` отсутствует или `backend` равен `sqlite`, используется локальный SQLite search index.
 
 ## Сборка из исходников
 

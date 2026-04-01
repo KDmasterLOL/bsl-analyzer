@@ -118,6 +118,23 @@ Resolution order for PostgreSQL mode:
 2. connection/schema are taken from env when present, otherwise from config;
 3. snapshot/branch/commit are taken from env when present, otherwise from config.
 
+To inspect the resolved runtime choice without starting MCP, use:
+
+```bash
+bsl-analyzer-app check-config .bsl-analyzer.json
+```
+
+The command now prints resolved `search.baseline` diagnostics for both:
+
+- `workspace`
+- `reference`
+
+Including:
+
+- selected backend (`sqlite` or `postgres`);
+- resolved selection (`snapshot`, `branch`, `commit`, or local mode);
+- configuration problems such as missing PostgreSQL connection string.
+
 ## Why full snapshot first
 
 This is not the final storage strategy. It is the smallest useful write-side
