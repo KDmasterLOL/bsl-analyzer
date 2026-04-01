@@ -29,7 +29,9 @@ mod workspace_overlay;
 pub use baseline_runtime::BaselineOverlaySearchService;
 pub use chunker::{Chunk, ChunkKind, Chunker};
 pub use context::{enrich_chunk_text, file_path_to_module_path};
-pub use document::Document;
+pub use document::{
+    semantic_key_for_indexed_document, semantic_text_for_indexed_document, Document,
+};
 pub use domain::{
     BaselineRef, BaselineSourceConfig, CorpusId, DocumentPath, ExternalBaselineBackend,
     ExternalBaselineConfig, FileOverlay, IndexedDocument, OverlayChange, SearchOverlay, Snapshot,

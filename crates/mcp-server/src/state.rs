@@ -395,7 +395,11 @@ impl SharedState {
                     }
                 }
                 if let Some(external_baseline) = external_baseline.as_ref() {
-                    match external_baseline.load_workspace_snapshot_documents() {
+                    let model_id = engine.embedding_model().map(ToOwned::to_owned);
+                    let dimension = engine.embedding_dimension();
+                    match external_baseline
+                        .load_workspace_snapshot_documents(model_id.as_deref(), dimension)
+                    {
                         Ok(Some(snapshot)) => {
                             Self::index_external_workspace_docs(&mut engine, progress, snapshot);
                         }
@@ -484,7 +488,11 @@ impl SharedState {
                         );
                     }
                 }
-                match external_baseline.load_reference_snapshot_documents() {
+                let model_id = engine.embedding_model().map(ToOwned::to_owned);
+                let dimension = engine.embedding_dimension();
+                match external_baseline
+                    .load_reference_snapshot_documents(model_id.as_deref(), dimension)
+                {
                     Ok(Some(snapshot)) => {
                         Self::index_external_reference_docs(&mut engine, progress, snapshot);
                     }
@@ -514,33 +522,24 @@ impl SharedState {
         progress: &Arc<IndexProgress>,
         snapshot: BaselineSnapshotDocuments,
     ) {
-        let documents = snapshot
-            .documents
-            .iter()
-            .map(|document| Document {
-                title: document.symbol_name.clone(),
-                body: document.text.clone(),
-                kind: document.kind.clone(),
-            })
-            .collect::<Vec<_>>();
         let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
 
         tracing::info!(
             snapshot = %version,
-            documents = documents.len(),
+            documents = snapshot.documents.len(),
+            shared_embeddings = snapshot.shared_embeddings.len(),
             "synchronizing external reference snapshot into local semantic cache"
         );
 
-        match engine.index_documents(
+        match engine.sync_indexed_documents_in_collection_with_embeddings(
             "platform",
-            "platform://docs",
-            version.as_bytes(),
-            &documents,
+            &snapshot.documents,
+            Some(&snapshot.shared_embeddings),
             Some(progress),
         ) {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::info!(count, "external reference docs cached locally");
+            Ok(indexed_files) => {
+                if indexed_files > 0 {
+                    tracing::info!(indexed_files, "external reference docs cached locally");
                 } else {
                     tracing::info!("external reference docs cache is up to date");
                 }
@@ -561,12 +560,14 @@ impl SharedState {
         tracing::info!(
             snapshot = %version,
             documents = snapshot.documents.len(),
+            shared_embeddings = snapshot.shared_embeddings.len(),
             "synchronizing external workspace snapshot into local semantic cache"
         );
 
-        match engine.sync_indexed_documents_in_collection(
+        match engine.sync_indexed_documents_in_collection_with_embeddings(
             "code",
             &snapshot.documents,
+            Some(&snapshot.shared_embeddings),
             Some(progress),
         ) {
             Ok(indexed_files) => {

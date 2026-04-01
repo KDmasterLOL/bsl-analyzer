@@ -757,6 +757,7 @@ fn run_search_baseline_sync_pg(
         SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
     adapter.ensure_storage()?;
     let publish_stats = adapter.publish_snapshot(&snapshot, &publish_metadata, &documents)?;
+    let embedding_stats = publish_shared_embeddings_if_configured(&adapter, &documents)?;
 
     let published_files = documents
         .iter()
@@ -783,6 +784,11 @@ fn run_search_baseline_sync_pg(
     println!("  Reused chunks: {}", publish_stats.reused_documents);
     println!("  Written chunks: {}", publish_stats.written_documents);
     println!("  Chunks:        {}", documents.len());
+    if let Some((model_id, reused, stored)) = embedding_stats {
+        println!("  Embedding model: {}", model_id);
+        println!("  Reused embeddings: {}", reused);
+        println!("  Stored embeddings: {}", stored);
+    }
 
     Ok(())
 }
@@ -951,6 +957,72 @@ fn build_postgres_baseline_adapter(
         config = config.with_schema(schema.to_owned());
     }
     Ok(bsl_search::ExternalBaselineAdapter::new(config)?)
+}
+
+fn embedding_config_from_env() -> Option<bsl_search::EmbedderConfig> {
+    let base_url = env::var("EMBEDDING_URL").ok()?;
+    let model =
+        env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "Qwen/Qwen3-Embedding-0.6B".to_owned());
+    let dim = env::var("EMBEDDING_DIM").ok().and_then(|value| value.parse().ok()).or(Some(1024));
+
+    Some(bsl_search::EmbedderConfig {
+        base_url,
+        model,
+        dim,
+        api_key: env::var("EMBEDDING_API_KEY").ok(),
+    })
+}
+
+type SharedEmbeddingPublishStats = (String, usize, usize);
+
+fn publish_shared_embeddings_if_configured(
+    adapter: &bsl_search::ExternalBaselineAdapter,
+    documents: &[bsl_search::IndexedDocument],
+) -> Result<Option<SharedEmbeddingPublishStats>, Box<dyn Error + Send + Sync>> {
+    let Some(config) = embedding_config_from_env() else {
+        return Ok(None);
+    };
+    if documents.is_empty() {
+        return Ok(Some((config.model, 0, 0)));
+    }
+
+    let embedder = bsl_search::Embedder::new(config.clone());
+    let dimension = embedder.dim();
+    let model_id = embedder.model().to_owned();
+
+    let unique_documents = documents
+        .iter()
+        .map(|document| {
+            (
+                bsl_search::semantic_key_for_indexed_document(document),
+                bsl_search::semantic_text_for_indexed_document(document),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let embedding_keys = unique_documents.keys().cloned().collect::<Vec<_>>();
+    let existing = adapter.load_embeddings(&embedding_keys, &model_id, dimension)?;
+    let reused = existing.len();
+
+    let mut missing = unique_documents
+        .into_iter()
+        .filter(|(key, _)| !existing.contains_key(key))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(Some((model_id, reused, 0)));
+    }
+
+    let mut generated = Vec::with_capacity(missing.len());
+    for batch in missing.chunks(32) {
+        let texts = batch.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>();
+        let vectors = embedder.embed_batch(&texts)?;
+        for ((embedding_key, _), embedding) in batch.iter().zip(vectors.into_iter()) {
+            generated.push((embedding_key.clone(), embedding));
+        }
+    }
+    let stats = adapter.store_embeddings(&model_id, dimension, &generated)?;
+    missing.clear();
+
+    Ok(Some((model_id, reused + stats.reused, stats.stored)))
 }
 
 fn search_baseline_corpus_cli_to_domain(corpus: SearchBaselineCorpusCli) -> bsl_search::CorpusId {

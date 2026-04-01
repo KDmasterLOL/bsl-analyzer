@@ -4,6 +4,7 @@ use crate::domain::{
 };
 use crate::error::SearchError;
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
+use std::collections::HashMap;
 
 mod postgres;
 
@@ -31,6 +32,12 @@ pub struct BaselineCollectionRecord {
 pub struct BaselineSnapshotDetails {
     pub snapshot: BaselineSnapshotRecord,
     pub collections: Vec<BaselineCollectionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaselineEmbeddingStats {
+    pub stored: usize,
+    pub reused: usize,
 }
 
 /// Infrastructure adapter for centralized baseline storage.
@@ -76,6 +83,28 @@ impl ExternalBaselineAdapter {
     ) -> Result<Option<BaselineSnapshotDetails>, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.snapshot_details(snapshot_id),
+        }
+    }
+
+    pub fn store_embeddings(
+        &self,
+        model_id: &str,
+        dimension: usize,
+        embeddings: &[(String, Vec<f32>)],
+    ) -> Result<BaselineEmbeddingStats, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.store_embeddings(model_id, dimension, embeddings),
+        }
+    }
+
+    pub fn load_embeddings(
+        &self,
+        embedding_keys: &[String],
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_embeddings(embedding_keys, model_id, dimension),
         }
     }
 }

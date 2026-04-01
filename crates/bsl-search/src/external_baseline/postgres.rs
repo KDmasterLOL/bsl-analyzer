@@ -4,11 +4,12 @@ use crate::domain::{
 };
 use crate::error::SearchError;
 use crate::external_baseline::{
-    BaselineCollectionRecord, BaselineSnapshotDetails, BaselineSnapshotRecord,
+    BaselineCollectionRecord, BaselineEmbeddingStats, BaselineSnapshotDetails,
+    BaselineSnapshotRecord,
 };
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use postgres::{Client, NoTls, Row, Transaction};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// PostgreSQL adapter for centralized baseline storage.
 ///
@@ -46,6 +47,11 @@ use std::collections::{BTreeMap, HashSet};
 /// - `<schema>.content_objects`
 ///   `content_hash TEXT PRIMARY KEY`
 ///   `text TEXT NOT NULL`
+/// - `<schema>.semantic_embeddings`
+///   `embedding_key TEXT NOT NULL`
+///   `model_id TEXT NOT NULL`
+///   `dimension INTEGER NOT NULL`
+///   `embedding BYTEA NOT NULL`
 #[derive(Debug, Clone)]
 pub struct PostgresBaselineAdapter {
     config: ExternalBaselineConfig,
@@ -121,6 +127,16 @@ impl PostgresBaselineAdapter {
                     text TEXT NOT NULL
                 )",
                 self.table("content_objects")
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    embedding_key TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    embedding BYTEA NOT NULL,
+                    PRIMARY KEY (embedding_key, model_id, dimension)
+                )",
+                self.table("semantic_embeddings")
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
@@ -219,6 +235,12 @@ impl PostgresBaselineAdapter {
                  ON {} (file_object_id, ordinal)",
                 self.schema,
                 self.table("file_object_items")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_semantic_embeddings_model_dim
+                 ON {} (model_id, dimension)",
+                self.schema,
+                self.table("semantic_embeddings")
             ),
         ]
     }
@@ -372,6 +394,77 @@ impl PostgresBaselineAdapter {
                 documents: row.get::<_, i64>("documents") as usize,
             })
             .collect())
+    }
+
+    pub fn store_embeddings(
+        &self,
+        model_id: &str,
+        dimension: usize,
+        embeddings: &[(String, Vec<f32>)],
+    ) -> Result<BaselineEmbeddingStats, SearchError> {
+        self.ensure_storage()?;
+        if embeddings.is_empty() {
+            return Ok(BaselineEmbeddingStats { stored: 0, reused: 0 });
+        }
+
+        let mut client = self.connect()?;
+        let mut tx = client.transaction()?;
+        let insert = format!(
+            "INSERT INTO {} (embedding_key, model_id, dimension, embedding)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (embedding_key, model_id, dimension) DO NOTHING",
+            self.table("semantic_embeddings")
+        );
+
+        let mut stored = 0usize;
+        let mut seen = HashSet::new();
+        for (embedding_key, embedding) in embeddings {
+            if !seen.insert(embedding_key.as_str()) {
+                continue;
+            }
+            let blob: Vec<u8> = embedding.iter().flat_map(|value| value.to_le_bytes()).collect();
+            let inserted =
+                tx.execute(&insert, &[&embedding_key, &model_id, &(dimension as i32), &blob])?;
+            stored += inserted as usize;
+        }
+
+        tx.commit()?;
+        Ok(BaselineEmbeddingStats { stored, reused: seen.len().saturating_sub(stored) })
+    }
+
+    pub fn load_embeddings(
+        &self,
+        embedding_keys: &[String],
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        if embedding_keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut client = self.connect()?;
+        let query = format!(
+            "SELECT embedding_key, embedding
+             FROM {}
+             WHERE model_id = $1 AND dimension = $2 AND embedding_key = ANY($3)",
+            self.table("semantic_embeddings")
+        );
+        let rows = client.query(&query, &[&model_id, &(dimension as i32), &embedding_keys])?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let key: String = row.get("embedding_key");
+            let blob: Vec<u8> = row.get("embedding");
+            if blob.len() != dimension * 4 {
+                continue;
+            }
+            let embedding = blob
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .collect::<Vec<_>>();
+            result.insert(key, embedding);
+        }
+        Ok(result)
     }
 }
 

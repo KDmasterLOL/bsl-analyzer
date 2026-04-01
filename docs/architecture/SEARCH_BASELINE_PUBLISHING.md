@@ -36,7 +36,8 @@ Behavior:
    - `snapshot_files`
    - `file_objects`
    - `file_object_items`
-   - `content_objects`
+    - `content_objects`
+    - `semantic_embeddings` when embedding configuration is available
 
 The published snapshot may also carry parent lineage metadata:
 
@@ -53,6 +54,13 @@ Publish now reuses a shared file-object store in the write path:
 - snapshots point to shared `file_objects` instead of duplicating chunk mappings;
 - if the same file object already exists, only the `snapshot_files` mapping is written;
 - legacy `snapshot_items` remain readable for snapshots published by older versions.
+
+When `EMBEDDING_URL` is configured for the publishing process:
+
+- indexed documents are converted into stable semantic payloads;
+- missing embeddings are uploaded into shared PostgreSQL storage keyed by
+  `embedding_key + model_id + dimension`;
+- existing shared embeddings are not recomputed.
 
 If `--snapshot-id` is omitted, the CLI derives it automatically:
 
@@ -192,6 +200,7 @@ bsl-analyzer-app search baseline sync-pg \
 - branch and commit labels;
 - reused/written file counters;
 - reused/written chunk counters;
+- reused/stored embedding counters when semantic publishing is enabled;
 - indexed files, resolved files, and chunk counts.
 
 Operational inspection commands:
@@ -236,6 +245,7 @@ The runtime model is also hybrid:
 - local workspace additions, edits, and deletions are applied as an overlay;
 - semantic `search_code` uses a local SQLite cache synchronized from that same
   shared snapshot;
+- shared PostgreSQL embeddings are loaded first when the local model matches;
 - cache refresh is skipped when the normalized chunk fingerprint of one file is
   unchanged;
 - local workspace changes are still embedded only for the overlay layer.
@@ -251,6 +261,7 @@ The runtime model is intentionally hybrid:
 
 - lexical `find_docs` resolves directly from the shared PostgreSQL snapshot;
 - semantic `search_docs` uses a local SQLite cache in the user profile;
+- shared PostgreSQL embeddings are loaded first when the local model matches;
 - that cache is synchronized from the selected shared snapshot on startup;
 - cache refresh is skipped when the snapshot fingerprint or snapshot id is unchanged.
 

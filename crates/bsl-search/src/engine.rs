@@ -21,7 +21,11 @@ use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
     WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
-use crate::{BaselineOverlaySearchService, BaselineRef, CorpusId};
+use crate::{
+    semantic_key_for_indexed_document, semantic_text_for_indexed_document,
+    BaselineOverlaySearchService, BaselineRef, CorpusId,
+};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -589,6 +593,14 @@ impl SearchEngine {
         self.embedder.is_some()
     }
 
+    pub fn embedding_model(&self) -> Option<&str> {
+        self.embedder.as_ref().map(Embedder::model)
+    }
+
+    pub fn embedding_dimension(&self) -> Option<usize> {
+        self.embedder.as_ref().map(Embedder::dim)
+    }
+
     /// Attach a workspace source root for building a local overlay view.
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
         self.workspace_root = Some(workspace_root.into());
@@ -897,6 +909,18 @@ impl SearchEngine {
         documents: &[crate::IndexedDocument],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
+        self.sync_indexed_documents_in_collection_with_embeddings(
+            collection, documents, None, progress,
+        )
+    }
+
+    pub fn sync_indexed_documents_in_collection_with_embeddings(
+        &mut self,
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        shared_embeddings: Option<&HashMap<String, Vec<f32>>>,
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
         use std::collections::{BTreeMap, HashSet};
 
         let mut grouped = BTreeMap::<String, Vec<crate::IndexedDocument>>::new();
@@ -937,25 +961,41 @@ impl SearchEngine {
             }
 
             let embeddings = if let Some(embedder) = &self.embedder {
-                let texts = file_documents
-                    .iter()
-                    .map(|document| {
-                        format!(
-                            "Path: {}\nKind: {}\nSymbol: {}\n{}",
-                            document.path, document.kind, document.symbol_name, document.text
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let mut vectors = Vec::with_capacity(texts.len());
-                for batch in texts.chunks(self.batch_size.max(1)) {
+                let mut vectors = vec![Vec::<f32>::new(); file_documents.len()];
+                let mut missing_indices = Vec::new();
+                let mut missing_texts = Vec::new();
+
+                for (idx, document) in file_documents.iter().enumerate() {
+                    let embedding_key = semantic_key_for_indexed_document(document);
+                    if let Some(shared_embedding) =
+                        shared_embeddings.and_then(|items| items.get(&embedding_key))
+                    {
+                        vectors[idx] = shared_embedding.clone();
+                        if let Some(p) = progress {
+                            p.done_chunks.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        missing_indices.push(idx);
+                        missing_texts.push(semantic_text_for_indexed_document(document));
+                    }
+                }
+
+                let mut cursor = 0usize;
+                for batch in missing_texts.chunks(self.batch_size.max(1)) {
                     let refs = batch.iter().map(String::as_str).collect::<Vec<_>>();
                     let batch_vectors = embedder.embed_batch(&refs)?;
                     if let Some(p) = progress {
                         p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
                         p.done_batches.fetch_add(1, Ordering::Relaxed);
                     }
-                    vectors.extend(batch_vectors);
+
+                    for (offset, embedding) in batch_vectors.into_iter().enumerate() {
+                        let idx = missing_indices[cursor + offset];
+                        vectors[idx] = embedding;
+                    }
+                    cursor += batch.len();
                 }
+
                 Some(vectors)
             } else {
                 None

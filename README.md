@@ -231,6 +231,10 @@ Publish теперь использует shared file-object storage в PostgreS
 - если такой объект уже есть, snapshot только ссылается на него;
 - `snapshot_items` остаётся как legacy fallback для старых snapshot'ов.
 
+Если при `sync-pg` заданы `EMBEDDING_URL` и `EMBEDDING_MODEL`, команда также публикует
+shared embeddings в PostgreSQL. Тогда на старте MCP local semantic cache сначала забирает
+готовые embeddings из shared storage, а локально считает только missing часть.
+
 Для проверки содержимого shared PostgreSQL storage доступны read-only команды:
 
 ```bash
@@ -270,14 +274,16 @@ bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
 
 - lexical (`find_docs`) читается из shared PostgreSQL baseline;
 - semantic (`search_docs`) использует локальный user-scope cache этого snapshot;
-- cache синхронизируется при старте reference MCP и не переэмбеддится, если fingerprint/snapshot не изменился.
+- cache синхронизируется при старте reference MCP и не переэмбеддится, если fingerprint/snapshot не изменился;
+- если в shared baseline уже есть embeddings для текущего `EMBEDDING_MODEL`, они переиспользуются напрямую.
 
 Для centralized `workspace` semantic search используется та же hybrid-модель:
 
 - lexical `find_code` читает baseline из shared snapshot и накладывает local overlay;
 - semantic `search_code` использует локальный SQLite cache shared baseline;
 - локальные изменённые файлы и удаления по-прежнему накладываются overlay-поверх этого cache;
-- cache baseline не переиндексируется заново, если snapshot не изменился.
+- cache baseline не переиндексируется заново, если snapshot не изменился;
+- shared embeddings из PostgreSQL используются как первый источник, локальный embedder остаётся fallback.
 
 С подключением к 1С (для выполнения запросов и кода):
 

@@ -8,6 +8,7 @@ use project_model::{
     ProjectConfig, SearchBaselineBackend, SearchBaselineConfig, SearchBaselineTargetConfig,
     SearchPostgresConfig,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
@@ -25,11 +26,12 @@ pub struct BaselineConfigDiagnostics {
     pub reference: BaselineResolutionSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BaselineSnapshotDocuments {
     pub snapshot_id: String,
     pub fingerprint: Option<String>,
     pub documents: Vec<IndexedDocument>,
+    pub shared_embeddings: HashMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -251,33 +253,49 @@ impl ExternalBaselineSource {
 
     pub(crate) fn load_workspace_snapshot_documents(
         &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
         if !matches!(self.baseline.corpus, CorpusId::WorkspaceCode) {
             return Ok(None);
         }
-        self.load_snapshot_documents()
+        self.load_snapshot_documents(model_id, dimension)
     }
 
     pub(crate) fn load_reference_snapshot_documents(
         &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
         if !matches!(self.baseline.corpus, CorpusId::Reference) {
             return Ok(None);
         }
-        self.load_snapshot_documents()
+        self.load_snapshot_documents(model_id, dimension)
     }
 
     fn load_snapshot_documents(
         &self,
+        model_id: Option<&str>,
+        dimension: Option<usize>,
     ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
         let Some(snapshot) = self.adapter.resolve_baseline(&self.baseline)? else {
             return Ok(None);
         };
         let documents = self.adapter.load_snapshot_documents(&snapshot)?;
+        let shared_embeddings = if let (Some(model_id), Some(dimension)) = (model_id, dimension) {
+            let embedding_keys = documents
+                .iter()
+                .map(bsl_search::semantic_key_for_indexed_document)
+                .collect::<Vec<_>>();
+            self.adapter.load_embeddings(&embedding_keys, model_id, dimension)?
+        } else {
+            HashMap::new()
+        };
         Ok(Some(BaselineSnapshotDocuments {
             snapshot_id: snapshot.id.0,
             fingerprint: snapshot.fingerprint,
             documents,
+            shared_embeddings,
         }))
     }
 

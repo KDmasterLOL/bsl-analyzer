@@ -55,7 +55,7 @@ Introduce a search architecture based on `baseline + overlay + resolved view`.
 - `FileObject`
   Deduplicated logical file representation identified by per-file fingerprint.
 - `Embedding`
-  Vector representation for `content_hash + model_id`.
+  Vector representation for a stable semantic payload and one model/dimension pair.
 - `SnapshotItem`
   Legacy mapping of a content object into a logical file/document path.
 - `SnapshotFile`
@@ -77,6 +77,7 @@ The current iteration already includes:
 - PostgreSQL baseline read adapters;
 - CLI publishing of full snapshots into PostgreSQL.
 - shared file-object materialization for PostgreSQL publish/read paths;
+- shared embedding storage for PostgreSQL publish/read paths;
 
 The default standalone developer path still uses local SQLite. PostgreSQL is an
 additional backend for shared baseline scenarios.
@@ -124,7 +125,7 @@ Use cases:
 Adapters:
 
 - current SQLite store and local HNSW index;
-- PostgreSQL catalog, shared file storage, and shared content storage;
+- PostgreSQL catalog, shared file storage, shared content storage, and shared embedding storage;
 - future PostgreSQL delta materialization and vector storage;
 - future GitLab ingestion worker.
 
