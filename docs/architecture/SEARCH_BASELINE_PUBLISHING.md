@@ -135,6 +135,49 @@ Including:
 - resolved selection (`snapshot`, `branch`, `commit`, or local mode);
 - configuration problems such as missing PostgreSQL connection string.
 
+## End-to-End Workflow
+
+The current operational path is:
+
+1. Configure `.bsl-analyzer.json` with `search.baseline`.
+2. Run `bsl-analyzer-app check-config .bsl-analyzer.json`.
+3. Publish one or more snapshots with `search baseline sync-pg`.
+4. Start or install MCP.
+5. Verify runtime state with MCP `search(action=status)`.
+
+Example:
+
+```bash
+# Validate runtime resolution before publishing
+bsl-analyzer-app check-config .bsl-analyzer.json
+
+# Publish workspace baseline
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer-app search baseline sync-pg \
+  --source-dir . \
+  --branch main \
+  --commit "$CI_COMMIT_SHA"
+
+# Publish shared reference baseline
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer-app search baseline sync-pg \
+  --corpus reference
+```
+
+`sync-pg` now prints:
+
+- selected corpus;
+- published snapshot id;
+- target PostgreSQL schema;
+- branch and commit labels;
+- indexed files, resolved files, and chunk counts.
+
+MCP `search(action=status)` is the runtime verification step:
+
+- `workspace` should show `Configured baseline`, `Code lexical source`, and `External baseline`;
+- `reference` should show `Configured baseline`, `Docs lexical source`, `External baseline`,
+  and `Freshness`.
+
 ## Why full snapshot first
 
 This is not the final storage strategy. It is the smallest useful write-side

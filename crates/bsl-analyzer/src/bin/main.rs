@@ -681,6 +681,7 @@ fn run_search_baseline_sync_pg(
     if let Some(schema) = pg_schema {
         config = config.with_schema(schema);
     }
+    let schema_label = config.schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
 
     let adapter = ExternalBaselineAdapter::new(config)?;
     let fingerprint = match corpus {
@@ -695,17 +696,23 @@ fn run_search_baseline_sync_pg(
     adapter.ensure_storage()?;
     adapter.publish_snapshot(&snapshot, branch.as_deref(), commit.as_deref(), &documents)?;
 
-    println!(
-        "Published snapshot '{}' to PostgreSQL: indexed_files={}, files={}, chunks={}",
-        snapshot.id.0,
-        indexed_files,
-        documents
-            .iter()
-            .map(|document| document.path.as_str())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        documents.len(),
-    );
+    let published_files = documents
+        .iter()
+        .map(|document| document.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let branch_label = branch.as_deref().unwrap_or("-");
+    let commit_label = commit.as_deref().unwrap_or("-");
+
+    println!("Published search baseline to PostgreSQL.");
+    println!("  Corpus:        {}", corpus.as_str());
+    println!("  Snapshot:      {}", snapshot.id.0);
+    println!("  Schema:        {}", schema_label);
+    println!("  Branch:        {}", branch_label);
+    println!("  Commit:        {}", commit_label);
+    println!("  Indexed files: {}", indexed_files);
+    println!("  Files:         {}", published_files);
+    println!("  Chunks:        {}", documents.len());
 
     Ok(())
 }

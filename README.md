@@ -192,6 +192,39 @@ bsl-analyzer check-config .bsl-analyzer.json
 
 Для workspace-профиля env больше не переключает backend сам по себе: если в конфиге не выбран `postgres`, будет использован локальный SQLite. Для `reference` user-scope без project root по-прежнему допускается env-only режим.
 
+Типовой workflow для centralized baseline:
+
+```bash
+# 1. Проверить, что проектный конфиг разрешается в нужный backend/snapshot
+bsl-analyzer check-config .bsl-analyzer.json
+
+# 2. Опубликовать workspace baseline в PostgreSQL
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline sync-pg \
+  --source-dir ./my-project \
+  --branch main \
+  --commit "$CI_COMMIT_SHA"
+
+# 3. Опубликовать shared reference baseline
+BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
+bsl-analyzer search baseline sync-pg \
+  --corpus reference
+```
+
+`sync-pg` печатает итоговые параметры публикации:
+
+- `Corpus`
+- `Snapshot`
+- `Schema`
+- `Branch`
+- `Commit`
+- количество файлов и чанков
+
+После установки или запуска MCP проверьте runtime-состояние через инструмент `search` с `action=status`:
+
+- в `workspace` профиле статус покажет `Configured baseline`, `Code lexical source` и `External baseline`;
+- в `reference` профиле статус покажет `Configured baseline`, `Docs lexical source`, `External baseline` и `Freshness`.
+
 С подключением к 1С (для выполнения запросов и кода):
 
 ```bash
