@@ -1,6 +1,6 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
-use crate::state::{ExternalBaselineSource, ExternalBaselineState};
+use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineSource, ExternalBaselineState};
 use bsl_search::{lexical_hits_for_resolved_view, IndexProgress, SearchEngine};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
@@ -188,9 +188,22 @@ pub fn search_docs(
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
+    configured_baseline: Option<ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineSource>>,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
+
+    if let Some(configured_baseline) = configured_baseline.as_ref() {
+        let _ = writeln!(out, "Configured baseline:");
+        let _ = writeln!(out, "  Backend:  {}", configured_baseline.backend);
+        let _ = writeln!(out, "  Select:   {}", configured_baseline.selection);
+        let _ = writeln!(
+            out,
+            "  Status:   {}",
+            configured_baseline.issue.as_deref().unwrap_or("ready")
+        );
+        let _ = writeln!(out);
+    }
 
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
@@ -463,7 +476,7 @@ fn shorten_fingerprint(fingerprint: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{search_docs, search_status, ExternalBaselineSource};
+    use super::{search_docs, search_status, ConfiguredBaselineStatus, ExternalBaselineSource};
     use bsl_search::{
         lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
         IndexedDocument, ResolvedView, SearchEngine,
@@ -489,6 +502,11 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local workspace index".to_owned(),
+                issue: None,
+            }),
             None,
         )
         .unwrap();
@@ -518,11 +536,18 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(None)),
             &Arc::new(IndexProgress::default()),
+            Some(ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "branch main".to_owned(),
+                issue: None,
+            }),
             Some(Arc::new(source)),
         )
         .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
+        assert!(text.contains("Configured baseline:"));
+        assert!(text.contains("Select:   branch main"));
         assert!(text.contains("External baseline: configured"));
         assert!(text.contains("Backend:  postgres"));
         assert!(text.contains("Status:   error"));
@@ -550,6 +575,11 @@ mod tests {
         let result = search_status(
             &Arc::new(Mutex::new(Some(engine))),
             &Arc::new(IndexProgress::default()),
+            Some(ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "local reference index".to_owned(),
+                issue: None,
+            }),
             None,
         )
         .unwrap();

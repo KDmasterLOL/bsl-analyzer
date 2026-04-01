@@ -224,6 +224,9 @@ pub struct ProjectConfig {
     /// ```
     #[serde(default)]
     pub extensions: Vec<String>,
+
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 impl ProjectConfig {
@@ -342,4 +345,113 @@ pub struct FormattingConfig {
 
 fn default_indent_size() -> u32 {
     4
+}
+
+/// Search subsystem configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchConfig {
+    #[serde(default)]
+    pub baseline: SearchBaselineConfig,
+}
+
+/// Shared baseline configuration for centralized search backends.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselineConfig {
+    #[serde(default)]
+    pub backend: SearchBaselineBackend,
+
+    #[serde(default)]
+    pub postgres: SearchPostgresConfig,
+
+    #[serde(default)]
+    pub workspace_code: SearchBaselineTargetConfig,
+
+    #[serde(default)]
+    pub reference: SearchBaselineTargetConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchBaselineBackend {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPostgresConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+
+    #[serde(default)]
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBaselineTargetConfig {
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+
+    #[serde(default)]
+    pub branch: Option<String>,
+
+    #[serde(default)]
+    pub commit: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectConfig, SearchBaselineBackend};
+
+    #[test]
+    fn project_config_defaults_search_baseline_to_sqlite() {
+        let config: ProjectConfig = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(config.search.baseline.backend, SearchBaselineBackend::Sqlite);
+        assert!(config.search.baseline.postgres.url.is_none());
+        assert!(config.search.baseline.workspace_code.branch.is_none());
+        assert!(config.search.baseline.reference.snapshot_id.is_none());
+    }
+
+    #[test]
+    fn project_config_deserializes_search_baseline_settings() {
+        let config: ProjectConfig = serde_json::from_str(
+            r#"{
+                "search": {
+                    "baseline": {
+                        "backend": "postgres",
+                        "postgres": {
+                            "url": "postgres://shared-search",
+                            "schema": "corp_search"
+                        },
+                        "workspaceCode": {
+                            "branch": "main",
+                            "commit": "abc123"
+                        },
+                        "reference": {
+                            "snapshotId": "reference:0.1.104"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.search.baseline.backend, SearchBaselineBackend::Postgres);
+        assert_eq!(
+            config.search.baseline.postgres.url.as_deref(),
+            Some("postgres://shared-search")
+        );
+        assert_eq!(config.search.baseline.postgres.schema.as_deref(), Some("corp_search"));
+        assert_eq!(config.search.baseline.workspace_code.branch.as_deref(), Some("main"));
+        assert_eq!(config.search.baseline.workspace_code.commit.as_deref(), Some("abc123"));
+        assert_eq!(
+            config.search.baseline.reference.snapshot_id.as_deref(),
+            Some("reference:0.1.104")
+        );
+    }
 }

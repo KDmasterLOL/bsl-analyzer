@@ -1282,7 +1282,7 @@ fn run_mcp_server(
             }
             state
         }
-        mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(),
+        mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(source_dir),
     };
 
     let server = mcp_server::McpServer::new(profile, state);

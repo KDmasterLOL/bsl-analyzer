@@ -5,6 +5,7 @@
 //! capabilities LSP doesn't cover: metadata browsing, platform docs,
 //! ad-hoc query validation.
 
+mod baseline;
 mod state;
 mod tools;
 
@@ -269,9 +270,15 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::search_status(&engine, &progress, external_baseline)
+                    tools::search::search_status(
+                        &engine,
+                        &progress,
+                        configured_baseline,
+                        external_baseline,
+                    )
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -463,9 +470,15 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let configured_baseline = self.state.configured_baseline();
                 let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::search_status(&engine, &progress, external_baseline)
+                    tools::search::search_status(
+                        &engine,
+                        &progress,
+                        configured_baseline,
+                        external_baseline,
+                    )
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?

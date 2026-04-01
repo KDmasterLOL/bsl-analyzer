@@ -58,7 +58,40 @@ For `reference`, the default snapshot id is `reference:<package-version>`.
 
 ## Runtime read-side configuration
 
-Workspace MCP profile uses:
+Runtime backend selection is now config-first.
+
+Example `.bsl-analyzer.json`:
+
+```json
+{
+  "search": {
+    "baseline": {
+      "backend": "postgres",
+      "postgres": {
+        "schema": "bsl_search"
+      },
+      "workspaceCode": {
+        "branch": "main"
+      },
+      "reference": {
+        "snapshotId": "reference:0.1.104"
+      }
+    }
+  }
+}
+```
+
+Rules:
+
+- `search.baseline.backend=sqlite` or missing config keeps the local SQLite path.
+- `search.baseline.backend=postgres` enables centralized baseline mode.
+- environment variables no longer choose the backend for workspace mode;
+  they only provide secrets and runtime overrides.
+- reference profile may still use env-only PostgreSQL settings when it is started
+  without a project root, because user-scope MCP installation has no
+  `.bsl-analyzer.json` to read from.
+
+Workspace MCP profile reads these PostgreSQL overrides:
 
 - `BSL_SEARCH_BASELINE_PG_URL`
 - `BSL_SEARCH_BASELINE_PG_SCHEMA`
@@ -66,7 +99,7 @@ Workspace MCP profile uses:
 - `BSL_SEARCH_BASELINE_BRANCH`
 - `BSL_SEARCH_BASELINE_COMMIT`
 
-Reference MCP profile uses:
+Reference MCP profile reads:
 
 - `BSL_SEARCH_REFERENCE_PG_URL`
 - `BSL_SEARCH_REFERENCE_PG_SCHEMA`
@@ -78,6 +111,12 @@ Reference profile also falls back to shared connection settings:
 
 - `BSL_SEARCH_BASELINE_PG_URL`
 - `BSL_SEARCH_BASELINE_PG_SCHEMA`
+
+Resolution order for PostgreSQL mode:
+
+1. backend is selected from `.bsl-analyzer.json`;
+2. connection/schema are taken from env when present, otherwise from config;
+3. snapshot/branch/commit are taken from env when present, otherwise from config.
 
 ## Why full snapshot first
 
