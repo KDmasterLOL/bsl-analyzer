@@ -226,8 +226,10 @@ bsl-analyzer search baseline sync-pg \
 Если `--parent-snapshot-id` не передан, `sync-pg` сам выберет последний опубликованный snapshot
 в том же `corpus/branch`. Для `reference` без branch будет выбран последний snapshot того же corpus.
 
-При наличии parent snapshot publish теперь не переписывает все mappings заново из CLI:
-неизменённые файлы копируются внутри PostgreSQL из parent snapshot, а заново записываются только изменённые.
+Publish теперь использует shared file-object storage в PostgreSQL:
+- каждый logical file получает общий `file_object`;
+- если такой объект уже есть, snapshot только ссылается на него;
+- `snapshot_items` остаётся как legacy fallback для старых snapshot'ов.
 
 Для проверки содержимого shared PostgreSQL storage доступны read-only команды:
 

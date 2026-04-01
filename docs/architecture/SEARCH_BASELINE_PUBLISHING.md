@@ -30,11 +30,12 @@ Behavior:
 1. Build a temporary local FTS index from the configuration sources.
 2. Export indexed `workspace-code` documents from that index.
 3. Ensure PostgreSQL schema/tables/indexes exist.
-4. Compare logical files with the selected parent snapshot when one exists.
+4. Resolve one shared file object for each logical file.
 5. Publish one immutable snapshot into:
    - `snapshots`
    - `snapshot_files`
-   - `snapshot_items`
+   - `file_objects`
+   - `file_object_items`
    - `content_objects`
 
 The published snapshot may also carry parent lineage metadata:
@@ -46,11 +47,12 @@ The published snapshot may also carry parent lineage metadata:
 This does not change runtime resolution yet, but it establishes immutable
 ancestry for future delta publication.
 
-When a parent snapshot is available, publish reuses it in the write path:
+Publish now reuses a shared file-object store in the write path:
 
-- unchanged logical files are detected by per-file fingerprint;
-- unchanged file mappings are copied inside PostgreSQL from the parent snapshot;
-- only changed files insert fresh `snapshot_items` rows from the current CLI run.
+- each logical file is fingerprinted independently;
+- snapshots point to shared `file_objects` instead of duplicating chunk mappings;
+- if the same file object already exists, only the `snapshot_files` mapping is written;
+- legacy `snapshot_items` remain readable for snapshots published by older versions.
 
 If `--snapshot-id` is omitted, the CLI derives it automatically:
 

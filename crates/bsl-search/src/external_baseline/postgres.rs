@@ -8,7 +8,7 @@ use crate::external_baseline::{
 };
 use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use postgres::{Client, NoTls, Row, Transaction};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 
 /// PostgreSQL adapter for centralized baseline storage.
 ///
@@ -27,15 +27,22 @@ use std::collections::{BTreeMap, HashMap};
 ///   `path TEXT NOT NULL`
 ///   `file_fingerprint TEXT NOT NULL`
 ///   `document_count INTEGER NOT NULL`
-/// - `<schema>.snapshot_items`
-///   `snapshot_id TEXT NOT NULL`
+///   `file_object_id TEXT NULL`
+/// - `<schema>.file_objects`
+///   `id TEXT PRIMARY KEY`
 ///   `collection TEXT NOT NULL`
-///   `path TEXT NOT NULL`
+///   `file_fingerprint TEXT NOT NULL`
+///   `document_count INTEGER NOT NULL`
+/// - `<schema>.file_object_items`
+///   `file_object_id TEXT NOT NULL`
+///   `ordinal INTEGER NOT NULL`
 ///   `symbol_name TEXT NOT NULL`
 ///   `kind TEXT NOT NULL`
 ///   `line_start INTEGER NOT NULL`
 ///   `line_end INTEGER NOT NULL`
 ///   `content_hash TEXT NOT NULL`
+/// - `<schema>.snapshot_items`
+///   legacy fallback for snapshots published before file-object materialization
 /// - `<schema>.content_objects`
 ///   `content_hash TEXT PRIMARY KEY`
 ///   `text TEXT NOT NULL`
@@ -117,15 +124,44 @@ impl PostgresBaselineAdapter {
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
+                    id TEXT PRIMARY KEY,
+                    collection TEXT NOT NULL,
+                    file_fingerprint TEXT NOT NULL,
+                    document_count INTEGER NOT NULL
+                )",
+                self.table("file_objects")
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    file_object_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
+                    ordinal INTEGER NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL REFERENCES {}(content_hash) ON DELETE RESTRICT,
+                    PRIMARY KEY (file_object_id, ordinal)
+                )",
+                self.table("file_object_items"),
+                self.table("file_objects"),
+                self.table("content_objects")
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
                     snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
                     collection TEXT NOT NULL,
                     path TEXT NOT NULL,
                     file_fingerprint TEXT NOT NULL,
                     document_count INTEGER NOT NULL,
+                    file_object_id TEXT NULL,
                     PRIMARY KEY (snapshot_id, collection, path)
                 )",
                 self.table("snapshot_files"),
                 self.table("snapshots")
+            ),
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS file_object_id TEXT NULL",
+                self.table("snapshot_files")
             ),
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (
@@ -161,10 +197,28 @@ impl PostgresBaselineAdapter {
                 self.table("snapshot_files")
             ),
             format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_files_object
+                 ON {} (file_object_id)",
+                self.schema,
+                self.table("snapshot_files")
+            ),
+            format!(
                 "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_items_snapshot_path
                  ON {} (snapshot_id, collection, path)",
                 self.schema,
                 self.table("snapshot_items")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_file_objects_fingerprint
+                 ON {} (collection, file_fingerprint)",
+                self.schema,
+                self.table("file_objects")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_file_object_items_object
+                 ON {} (file_object_id, ordinal)",
+                self.schema,
+                self.table("file_object_items")
             ),
         ]
     }
@@ -190,13 +244,23 @@ impl PostgresBaselineAdapter {
                     s.branch,
                     s.commit_sha,
                     s.created_at::TEXT AS created_at,
-                    COUNT(si.content_hash) AS documents,
-                    COUNT(DISTINCT si.path) AS files
+                    COALESCE(
+                        (SELECT SUM(sf.document_count) FROM {} sf WHERE sf.snapshot_id = s.id),
+                        (SELECT COUNT(*) FROM {} si WHERE si.snapshot_id = s.id),
+                        0
+                    ) AS documents,
+                    COALESCE(
+                        (SELECT COUNT(*) FROM {} sf WHERE sf.snapshot_id = s.id),
+                        (SELECT COUNT(DISTINCT si.path) FROM {} si WHERE si.snapshot_id = s.id),
+                        0
+                    ) AS files
              FROM {} s
-             LEFT JOIN {} si ON si.snapshot_id = s.id
              WHERE 1 = 1",
+            self.table("snapshot_files"),
+            self.table("snapshot_items"),
+            self.table("snapshot_files"),
+            self.table("snapshot_items"),
             self.table("snapshots"),
-            self.table("snapshot_items")
         );
 
         let mut params = Vec::<&(dyn postgres::types::ToSql + Sync)>::new();
@@ -212,11 +276,7 @@ impl PostgresBaselineAdapter {
             query.push_str(&format!(" AND s.commit_sha = ${}", params.len() + 1));
             params.push(commit);
         }
-        query.push_str(
-            " GROUP BY s.id, s.corpus, s.fingerprint, s.parent_snapshot_id,
-                       s.branch, s.commit_sha, s.created_at
-              ORDER BY s.created_at DESC",
-        );
+        query.push_str(" ORDER BY s.created_at DESC");
         query.push_str(&format!(" LIMIT ${}", params.len() + 1));
         params.push(&limit);
 
@@ -238,43 +298,80 @@ impl PostgresBaselineAdapter {
                     s.branch,
                     s.commit_sha,
                     s.created_at::TEXT AS created_at,
-                    COUNT(si.content_hash) AS documents,
-                    COUNT(DISTINCT si.path) AS files
+                    COALESCE(
+                        (SELECT SUM(sf.document_count) FROM {} sf WHERE sf.snapshot_id = s.id),
+                        (SELECT COUNT(*) FROM {} si WHERE si.snapshot_id = s.id),
+                        0
+                    ) AS documents,
+                    COALESCE(
+                        (SELECT COUNT(*) FROM {} sf WHERE sf.snapshot_id = s.id),
+                        (SELECT COUNT(DISTINCT si.path) FROM {} si WHERE si.snapshot_id = s.id),
+                        0
+                    ) AS files
              FROM {} s
-             LEFT JOIN {} si ON si.snapshot_id = s.id
              WHERE s.id = $1
-             GROUP BY s.id, s.corpus, s.fingerprint, s.parent_snapshot_id,
-                      s.branch, s.commit_sha, s.created_at
              LIMIT 1",
+            self.table("snapshot_files"),
+            self.table("snapshot_items"),
+            self.table("snapshot_files"),
+            self.table("snapshot_items"),
             self.table("snapshots"),
-            self.table("snapshot_items")
         );
         let Some(snapshot_row) = client.query_opt(&summary_query, &[&snapshot_id])? else {
             return Ok(None);
         };
         let snapshot = snapshot_record_from_row(snapshot_row);
+        let collections = self.snapshot_collection_records(&mut client, snapshot_id)?;
 
-        let collections_query = format!(
-            "SELECT si.collection,
-                    COUNT(si.content_hash) AS documents,
-                    COUNT(DISTINCT si.path) AS files
-             FROM {} si
-             WHERE si.snapshot_id = $1
-             GROUP BY si.collection
-             ORDER BY si.collection",
+        Ok(Some(BaselineSnapshotDetails { snapshot, collections }))
+    }
+
+    fn snapshot_collection_records(
+        &self,
+        client: &mut Client,
+        snapshot_id: &str,
+    ) -> Result<Vec<BaselineCollectionRecord>, SearchError> {
+        let snapshot_files_query = format!(
+            "SELECT collection,
+                    COUNT(*) AS files,
+                    SUM(document_count) AS documents
+             FROM {}
+             WHERE snapshot_id = $1
+             GROUP BY collection
+             ORDER BY collection",
+            self.table("snapshot_files")
+        );
+        let rows = client.query(&snapshot_files_query, &[&snapshot_id])?;
+        if !rows.is_empty() {
+            return Ok(rows
+                .into_iter()
+                .map(|row| BaselineCollectionRecord {
+                    collection: row.get("collection"),
+                    files: row.get::<_, i64>("files") as usize,
+                    documents: row.get::<_, i64>("documents") as usize,
+                })
+                .collect());
+        }
+
+        let legacy_query = format!(
+            "SELECT collection,
+                    COUNT(DISTINCT path) AS files,
+                    COUNT(*) AS documents
+             FROM {}
+             WHERE snapshot_id = $1
+             GROUP BY collection
+             ORDER BY collection",
             self.table("snapshot_items")
         );
-        let collections = client
-            .query(&collections_query, &[&snapshot_id])?
+        Ok(client
+            .query(&legacy_query, &[&snapshot_id])?
             .into_iter()
             .map(|row| BaselineCollectionRecord {
                 collection: row.get("collection"),
                 files: row.get::<_, i64>("files") as usize,
                 documents: row.get::<_, i64>("documents") as usize,
             })
-            .collect();
-
-        Ok(Some(BaselineSnapshotDetails { snapshot, collections }))
+            .collect())
     }
 }
 
@@ -285,8 +382,7 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
 
         let row = if let Some(snapshot_id) = &baseline.snapshot_id {
             let query = format!(
-                "SELECT id, corpus, fingerprint
-                 , parent_snapshot_id
+                "SELECT id, corpus, fingerprint, parent_snapshot_id
                  FROM {}
                  WHERE id = $1 AND corpus = $2
                  LIMIT 1",
@@ -318,7 +414,33 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
         snapshot: &Snapshot,
     ) -> Result<Vec<IndexedDocument>, SearchError> {
         let mut client = self.connect()?;
-        let query = format!(
+        let shared_query = format!(
+            "SELECT sf.collection,
+                    sf.path,
+                    foi.symbol_name,
+                    foi.kind,
+                    foi.line_start,
+                    foi.line_end,
+                    co.text,
+                    foi.content_hash
+             FROM {} sf
+             JOIN {} foi ON foi.file_object_id = sf.file_object_id
+             JOIN {} co ON co.content_hash = foi.content_hash
+             WHERE sf.snapshot_id = $1 AND sf.file_object_id IS NOT NULL
+             ORDER BY sf.collection, sf.path, foi.ordinal",
+            self.table("snapshot_files"),
+            self.table("file_object_items"),
+            self.table("content_objects")
+        );
+        let shared_rows = client.query(&shared_query, &[&snapshot.id.0])?;
+        let shared_documents: Vec<IndexedDocument> =
+            shared_rows.into_iter().map(indexed_document_from_row).collect();
+        let shared_paths: HashSet<(String, String)> = shared_documents
+            .iter()
+            .map(|document| (document.collection.clone(), document.path.clone()))
+            .collect();
+
+        let legacy_query = format!(
             "SELECT si.collection,
                     si.path,
                     si.symbol_name,
@@ -334,21 +456,33 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
             self.table("snapshot_items"),
             self.table("content_objects")
         );
-
-        let rows = client.query(&query, &[&snapshot.id.0])?;
-        Ok(rows
+        let legacy_documents = client
+            .query(&legacy_query, &[&snapshot.id.0])?
             .into_iter()
-            .map(|row| IndexedDocument {
-                collection: row.get("collection"),
-                path: row.get("path"),
-                symbol_name: row.get("symbol_name"),
-                kind: row.get("kind"),
-                line_start: row.get::<_, i32>("line_start") as u32,
-                line_end: row.get::<_, i32>("line_end") as u32,
-                text: row.get("text"),
-                content_hash: row.get("content_hash"),
-            })
-            .collect())
+            .map(indexed_document_from_row)
+            .filter(|document| {
+                !shared_paths.contains(&(document.collection.clone(), document.path.clone()))
+            });
+
+        let mut documents = shared_documents;
+        documents.extend(legacy_documents);
+        documents.sort_by(|lhs, rhs| {
+            (
+                lhs.collection.as_str(),
+                lhs.path.as_str(),
+                lhs.line_start,
+                lhs.line_end,
+                lhs.symbol_name.as_str(),
+            )
+                .cmp(&(
+                    rhs.collection.as_str(),
+                    rhs.path.as_str(),
+                    rhs.line_start,
+                    rhs.line_end,
+                    rhs.symbol_name.as_str(),
+                ))
+        });
+        Ok(documents)
     }
 }
 
@@ -377,12 +511,6 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
 
         let mut client = self.connect()?;
         let mut tx = client.transaction()?;
-        let parent_snapshot_id = snapshot.parent_id.as_ref().map(|parent| parent.0.as_str());
-        let parent_fingerprints = if let Some(parent_snapshot_id) = parent_snapshot_id {
-            load_parent_file_fingerprints(&mut tx, self, parent_snapshot_id)?
-        } else {
-            HashMap::new()
-        };
         let file_groups = group_documents_by_file(documents);
 
         let upsert_snapshot = format!(
@@ -415,34 +543,17 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
             format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_items"));
         tx.execute(&delete_items, &[&snapshot.id.0])?;
 
-        let upsert_content = format!(
-            "INSERT INTO {} (content_hash, text)
-             VALUES ($1, $2)
-             ON CONFLICT (content_hash) DO UPDATE SET text = EXCLUDED.text",
-            self.table("content_objects")
-        );
-        let insert_item = format!(
-            "INSERT INTO {} (
-                snapshot_id, collection, path, symbol_name, kind, line_start, line_end, content_hash
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            self.table("snapshot_items")
-        );
-
         let insert_snapshot_file = format!(
-            "INSERT INTO {} (snapshot_id, collection, path, file_fingerprint, document_count)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO {} (
+                snapshot_id, collection, path, file_fingerprint, document_count, file_object_id
+             ) VALUES ($1, $2, $3, $4, $5, $6)",
             self.table("snapshot_files")
         );
 
         let mut stats = SnapshotPublishStats::default();
         for file_group in file_groups {
-            let fingerprint_matches_parent = parent_snapshot_id.is_some_and(|parent_snapshot_id| {
-                parent_fingerprints
-                    .get(&(file_group.collection.clone(), file_group.path.clone()))
-                    .is_some_and(|fingerprint| fingerprint == &file_group.file_fingerprint)
-                    && parent_snapshot_id != snapshot.id.0
-            });
-
+            let file_object_id =
+                file_object_id_for(&file_group.collection, &file_group.file_fingerprint);
             tx.execute(
                 &insert_snapshot_file,
                 &[
@@ -451,52 +562,18 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
                     &file_group.path,
                     &file_group.file_fingerprint,
                     &(file_group.documents.len() as i32),
+                    &file_object_id,
                 ],
             )?;
 
-            if fingerprint_matches_parent {
-                let copied = copy_snapshot_items_from_parent(
-                    &mut tx,
-                    self,
-                    parent_snapshot_id.expect("checked above"),
-                    &snapshot.id.0,
-                    &file_group.collection,
-                    &file_group.path,
-                )?;
-                if copied == file_group.documents.len() {
-                    stats.reused_files += 1;
-                    stats.reused_documents += copied;
-                    continue;
-                }
-                if copied > 0 {
-                    delete_snapshot_items_for_file(
-                        &mut tx,
-                        self,
-                        &snapshot.id.0,
-                        &file_group.collection,
-                        &file_group.path,
-                    )?;
-                }
+            if !try_insert_file_object(&mut tx, self, &file_object_id, &file_group)? {
+                stats.reused_files += 1;
+                stats.reused_documents += file_group.documents.len();
+                continue;
             }
 
             stats.written_files += 1;
             stats.written_documents += file_group.documents.len();
-            for document in &file_group.documents {
-                tx.execute(&upsert_content, &[&document.content_hash, &document.text])?;
-                tx.execute(
-                    &insert_item,
-                    &[
-                        &snapshot.id.0,
-                        &document.collection,
-                        &document.path,
-                        &document.symbol_name,
-                        &document.kind,
-                        &(document.line_start as i32),
-                        &(document.line_end as i32),
-                        &document.content_hash,
-                    ],
-                )?;
-            }
         }
 
         tx.commit()?;
@@ -566,123 +643,80 @@ fn fingerprint_file_documents(documents: &[IndexedDocument]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn load_parent_file_fingerprints(
+fn file_object_id_for(collection: &str, file_fingerprint: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(collection.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(file_fingerprint.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn try_insert_file_object(
     tx: &mut Transaction<'_>,
     adapter: &PostgresBaselineAdapter,
-    parent_snapshot_id: &str,
-) -> Result<HashMap<(String, String), String>, SearchError> {
-    let snapshot_files_query = format!(
-        "SELECT collection, path, file_fingerprint
-         FROM {}
-         WHERE snapshot_id = $1",
-        adapter.table("snapshot_files")
+    file_object_id: &str,
+    file_group: &PublishedFileGroup,
+) -> Result<bool, SearchError> {
+    let insert_file_object = format!(
+        "INSERT INTO {} (id, collection, file_fingerprint, document_count)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO NOTHING",
+        adapter.table("file_objects")
     );
-    let rows = tx.query(&snapshot_files_query, &[&parent_snapshot_id])?;
-    if !rows.is_empty() {
-        return Ok(rows
-            .into_iter()
-            .map(|row| {
-                (
-                    (row.get::<_, String>("collection"), row.get::<_, String>("path")),
-                    row.get::<_, String>("file_fingerprint"),
-                )
-            })
-            .collect());
+    let inserted = tx.execute(
+        &insert_file_object,
+        &[
+            &file_object_id,
+            &file_group.collection,
+            &file_group.file_fingerprint,
+            &(file_group.documents.len() as i32),
+        ],
+    )?;
+    if inserted == 0 {
+        return Ok(false);
     }
 
-    let fallback_query = format!(
-        "SELECT si.collection,
-                si.path,
-                si.symbol_name,
-                si.kind,
-                si.line_start,
-                si.line_end,
-                si.content_hash,
-                co.text
-         FROM {} si
-         JOIN {} co ON co.content_hash = si.content_hash
-         WHERE si.snapshot_id = $1
-         ORDER BY si.collection, si.path, si.line_start, si.line_end, si.symbol_name",
-        adapter.table("snapshot_items"),
+    let upsert_content = format!(
+        "INSERT INTO {} (content_hash, text)
+         VALUES ($1, $2)
+         ON CONFLICT (content_hash) DO UPDATE SET text = EXCLUDED.text",
         adapter.table("content_objects")
     );
-    let rows = tx.query(&fallback_query, &[&parent_snapshot_id])?;
-    let mut grouped = BTreeMap::<(String, String), Vec<IndexedDocument>>::new();
-    for row in rows {
-        let collection = row.get::<_, String>("collection");
-        let path = row.get::<_, String>("path");
-        grouped.entry((collection.clone(), path.clone())).or_default().push(IndexedDocument {
-            collection,
-            path,
-            symbol_name: row.get("symbol_name"),
-            kind: row.get("kind"),
-            line_start: row.get::<_, i32>("line_start") as u32,
-            line_end: row.get::<_, i32>("line_end") as u32,
-            text: row.get("text"),
-            content_hash: row.get("content_hash"),
-        });
-    }
-
-    Ok(grouped
-        .into_iter()
-        .map(|(key, mut documents)| {
-            documents.sort_by(|lhs, rhs| {
-                (
-                    lhs.line_start,
-                    lhs.line_end,
-                    lhs.symbol_name.as_str(),
-                    lhs.kind.as_str(),
-                    lhs.content_hash.as_str(),
-                )
-                    .cmp(&(
-                        rhs.line_start,
-                        rhs.line_end,
-                        rhs.symbol_name.as_str(),
-                        rhs.kind.as_str(),
-                        rhs.content_hash.as_str(),
-                    ))
-            });
-            (key, fingerprint_file_documents(&documents))
-        })
-        .collect())
-}
-
-fn copy_snapshot_items_from_parent(
-    tx: &mut Transaction<'_>,
-    adapter: &PostgresBaselineAdapter,
-    parent_snapshot_id: &str,
-    snapshot_id: &str,
-    collection: &str,
-    path: &str,
-) -> Result<usize, SearchError> {
-    let insert = format!(
+    let insert_item = format!(
         "INSERT INTO {} (
-            snapshot_id, collection, path, symbol_name, kind, line_start, line_end, content_hash
-         )
-         SELECT $1, collection, path, symbol_name, kind, line_start, line_end, content_hash
-         FROM {}
-         WHERE snapshot_id = $2 AND collection = $3 AND path = $4",
-        adapter.table("snapshot_items"),
-        adapter.table("snapshot_items")
+            file_object_id, ordinal, symbol_name, kind, line_start, line_end, content_hash
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        adapter.table("file_object_items")
     );
-    let copied = tx.execute(&insert, &[&snapshot_id, &parent_snapshot_id, &collection, &path])?;
-    Ok(copied as usize)
+    for (ordinal, document) in file_group.documents.iter().enumerate() {
+        tx.execute(&upsert_content, &[&document.content_hash, &document.text])?;
+        tx.execute(
+            &insert_item,
+            &[
+                &file_object_id,
+                &(ordinal as i32),
+                &document.symbol_name,
+                &document.kind,
+                &(document.line_start as i32),
+                &(document.line_end as i32),
+                &document.content_hash,
+            ],
+        )?;
+    }
+    Ok(true)
 }
 
-fn delete_snapshot_items_for_file(
-    tx: &mut Transaction<'_>,
-    adapter: &PostgresBaselineAdapter,
-    snapshot_id: &str,
-    collection: &str,
-    path: &str,
-) -> Result<(), SearchError> {
-    let delete = format!(
-        "DELETE FROM {}
-         WHERE snapshot_id = $1 AND collection = $2 AND path = $3",
-        adapter.table("snapshot_items")
-    );
-    tx.execute(&delete, &[&snapshot_id, &collection, &path])?;
-    Ok(())
+fn indexed_document_from_row(row: Row) -> IndexedDocument {
+    IndexedDocument {
+        collection: row.get("collection"),
+        path: row.get("path"),
+        symbol_name: row.get("symbol_name"),
+        kind: row.get("kind"),
+        line_start: row.get::<_, i32>("line_start") as u32,
+        line_end: row.get::<_, i32>("line_end") as u32,
+        text: row.get("text"),
+        content_hash: row.get("content_hash"),
+    }
 }
 
 fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
@@ -712,7 +746,10 @@ fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint_file_documents, group_documents_by_file, PostgresBaselineAdapter};
+    use super::{
+        file_object_id_for, fingerprint_file_documents, group_documents_by_file,
+        PostgresBaselineAdapter,
+    };
     use crate::domain::{CorpusId, ExternalBaselineConfig};
     use crate::ports::{SnapshotCatalog, SnapshotPublisher};
     use crate::{BaselineRef, IndexedDocument};
@@ -785,6 +822,16 @@ mod tests {
             vec![indexed_document("code", "src/A.bsl", "A", 10, "hash-a", "changed-text")];
 
         assert_ne!(fingerprint_file_documents(&documents), fingerprint_file_documents(&changed));
+    }
+
+    #[test]
+    fn file_object_id_is_stable_for_same_collection_and_fingerprint() {
+        let id_a = file_object_id_for("code", "abc");
+        let id_b = file_object_id_for("code", "abc");
+        let id_c = file_object_id_for("platform", "abc");
+
+        assert_eq!(id_a, id_b);
+        assert_ne!(id_a, id_c);
     }
 
     fn indexed_document(

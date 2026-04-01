@@ -52,10 +52,14 @@ Introduce a search architecture based on `baseline + overlay + resolved view`.
   How the runtime selects the baseline snapshot for a workspace.
 - `ContentObject`
   Deduplicated chunk content identified by `content_hash`.
+- `FileObject`
+  Deduplicated logical file representation identified by per-file fingerprint.
 - `Embedding`
   Vector representation for `content_hash + model_id`.
 - `SnapshotItem`
-  Mapping of a content object into a logical file/document path with metadata.
+  Legacy mapping of a content object into a logical file/document path.
+- `SnapshotFile`
+  Snapshot-local mapping from a logical path to a shared `FileObject`.
 - `OverlayChange`
   Local replacement or deletion relative to the baseline.
 - `ResolvedView`
@@ -72,6 +76,7 @@ The current iteration already includes:
 - local SQLite baseline adapters;
 - PostgreSQL baseline read adapters;
 - CLI publishing of full snapshots into PostgreSQL.
+- shared file-object materialization for PostgreSQL publish/read paths;
 
 The default standalone developer path still uses local SQLite. PostgreSQL is an
 additional backend for shared baseline scenarios.
@@ -100,6 +105,7 @@ Pure types and invariants:
 - snapshot identity;
 - snapshot lineage;
 - corpus identity;
+- file-object identity;
 - file-level overlay changes;
 - rules for resolved visibility.
 
@@ -118,7 +124,7 @@ Use cases:
 Adapters:
 
 - current SQLite store and local HNSW index;
-- PostgreSQL catalog and shared content storage;
+- PostgreSQL catalog, shared file storage, and shared content storage;
 - future PostgreSQL delta materialization and vector storage;
 - future GitLab ingestion worker.
 
@@ -150,7 +156,7 @@ After the first iteration stabilizes:
 1. Keep local overlays ephemeral and workspace-specific.
 2. Run GitLab ingestion after merge to update shared baselines incrementally.
 3. Add parent-linked delta publication on top of immutable snapshot lineage.
-4. Reuse shared `ContentObject` and `Embedding` records across branches and
+4. Reuse shared `Embedding` records across branches and
    snapshots.
 
 ## Consequences
