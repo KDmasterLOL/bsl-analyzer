@@ -1,4 +1,7 @@
-use crate::domain::{BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, Snapshot};
+use crate::domain::{
+    BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, Snapshot,
+    SnapshotPublishMetadata,
+};
 use crate::error::SearchError;
 use crate::external_baseline::{
     BaselineCollectionRecord, BaselineSnapshotDetails, BaselineSnapshotRecord,
@@ -13,6 +16,7 @@ use postgres::{Client, NoTls, Row};
 ///   `id TEXT PRIMARY KEY`
 ///   `corpus TEXT NOT NULL`
 ///   `fingerprint TEXT NULL`
+///   `parent_snapshot_id TEXT NULL`
 ///   `branch TEXT NULL`
 ///   `commit_sha TEXT NULL`
 ///   `created_at TIMESTAMPTZ NOT NULL`
@@ -57,12 +61,14 @@ impl PostgresBaselineAdapter {
         let corpus = CorpusId::from_storage(row.get::<_, String>("corpus"));
         let mut snapshot = Snapshot::new(row.get::<_, String>("id"), corpus);
         snapshot.fingerprint = row.get("fingerprint");
+        snapshot.parent_id =
+            row.get::<_, Option<String>>("parent_snapshot_id").map(crate::SnapshotId::new);
         snapshot
     }
 
     fn latest_snapshot_query(&self, with_filter: &str) -> String {
         format!(
-            "SELECT id, corpus, fingerprint
+            "SELECT id, corpus, fingerprint, parent_snapshot_id
              FROM {}
              WHERE {}
              ORDER BY created_at DESC
@@ -80,6 +86,7 @@ impl PostgresBaselineAdapter {
                     id TEXT PRIMARY KEY,
                     corpus TEXT NOT NULL,
                     fingerprint TEXT NULL,
+                    parent_snapshot_id TEXT NULL,
                     branch TEXT NULL,
                     commit_sha TEXT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -88,6 +95,10 @@ impl PostgresBaselineAdapter {
             ),
             format!(
                 "ALTER TABLE {} ADD COLUMN IF NOT EXISTS fingerprint TEXT NULL",
+                self.table("snapshots")
+            ),
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS parent_snapshot_id TEXT NULL",
                 self.table("snapshots")
             ),
             format!(
@@ -150,6 +161,7 @@ impl PostgresBaselineAdapter {
             "SELECT s.id,
                     s.corpus,
                     s.fingerprint,
+                    s.parent_snapshot_id,
                     s.branch,
                     s.commit_sha,
                     s.created_at::TEXT AS created_at,
@@ -176,7 +188,8 @@ impl PostgresBaselineAdapter {
             params.push(commit);
         }
         query.push_str(
-            " GROUP BY s.id, s.corpus, s.fingerprint, s.branch, s.commit_sha, s.created_at
+            " GROUP BY s.id, s.corpus, s.fingerprint, s.parent_snapshot_id,
+                       s.branch, s.commit_sha, s.created_at
               ORDER BY s.created_at DESC",
         );
         query.push_str(&format!(" LIMIT ${}", params.len() + 1));
@@ -196,6 +209,7 @@ impl PostgresBaselineAdapter {
             "SELECT s.id,
                     s.corpus,
                     s.fingerprint,
+                    s.parent_snapshot_id,
                     s.branch,
                     s.commit_sha,
                     s.created_at::TEXT AS created_at,
@@ -204,7 +218,8 @@ impl PostgresBaselineAdapter {
              FROM {} s
              LEFT JOIN {} si ON si.snapshot_id = s.id
              WHERE s.id = $1
-             GROUP BY s.id, s.corpus, s.fingerprint, s.branch, s.commit_sha, s.created_at
+             GROUP BY s.id, s.corpus, s.fingerprint, s.parent_snapshot_id,
+                      s.branch, s.commit_sha, s.created_at
              LIMIT 1",
             self.table("snapshots"),
             self.table("snapshot_items")
@@ -246,6 +261,7 @@ impl SnapshotCatalog for PostgresBaselineAdapter {
         let row = if let Some(snapshot_id) = &baseline.snapshot_id {
             let query = format!(
                 "SELECT id, corpus, fingerprint
+                 , parent_snapshot_id
                  FROM {}
                  WHERE id = $1 AND corpus = $2
                  LIMIT 1",
@@ -323,8 +339,7 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,
-        branch: Option<&str>,
-        commit: Option<&str>,
+        metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
     ) -> Result<(), SearchError> {
         self.ensure_storage()?;
@@ -333,18 +348,26 @@ impl SnapshotPublisher for PostgresBaselineAdapter {
         let mut tx = client.transaction()?;
 
         let upsert_snapshot = format!(
-            "INSERT INTO {} (id, corpus, fingerprint, branch, commit_sha)
-             VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO {} (id, corpus, fingerprint, parent_snapshot_id, branch, commit_sha)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (id) DO UPDATE SET
                 corpus = EXCLUDED.corpus,
                 fingerprint = EXCLUDED.fingerprint,
+                parent_snapshot_id = EXCLUDED.parent_snapshot_id,
                 branch = EXCLUDED.branch,
                 commit_sha = EXCLUDED.commit_sha",
             self.table("snapshots")
         );
         tx.execute(
             &upsert_snapshot,
-            &[&snapshot.id.0, &snapshot.corpus.as_str(), &snapshot.fingerprint, &branch, &commit],
+            &[
+                &snapshot.id.0,
+                &snapshot.corpus.as_str(),
+                &snapshot.fingerprint,
+                &snapshot.parent_id.as_ref().map(|value| value.0.as_str()),
+                &metadata.branch.as_deref(),
+                &metadata.commit.as_deref(),
+            ],
         )?;
 
         let delete_items =
@@ -402,6 +425,7 @@ fn snapshot_record_from_row(row: Row) -> BaselineSnapshotRecord {
         snapshot_id: row.get("id"),
         corpus: row.get("corpus"),
         fingerprint: row.get("fingerprint"),
+        parent_snapshot_id: row.get("parent_snapshot_id"),
         branch: row.get("branch"),
         commit: row.get("commit_sha"),
         created_at: row.get("created_at"),

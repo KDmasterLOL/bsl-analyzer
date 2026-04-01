@@ -1,4 +1,6 @@
-use crate::domain::{BaselineRef, IndexedDocument, SearchOverlay, Snapshot};
+use crate::domain::{
+    BaselineRef, IndexedDocument, SearchOverlay, Snapshot, SnapshotPublishMetadata,
+};
 use crate::error::SearchError;
 use crate::resolver::ResolvedView;
 use std::path::Path;
@@ -23,8 +25,7 @@ pub trait SnapshotPublisher {
     fn publish_snapshot(
         &self,
         snapshot: &Snapshot,
-        branch: Option<&str>,
-        commit: Option<&str>,
+        metadata: &SnapshotPublishMetadata,
         documents: &[IndexedDocument],
     ) -> Result<(), SearchError>;
 }

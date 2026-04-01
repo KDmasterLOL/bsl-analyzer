@@ -104,17 +104,30 @@ pub struct Snapshot {
     pub id: SnapshotId,
     pub corpus: CorpusId,
     pub fingerprint: Option<String>,
+    pub parent_id: Option<SnapshotId>,
 }
 
 impl Snapshot {
     pub fn new(id: impl Into<String>, corpus: CorpusId) -> Self {
-        Self { id: SnapshotId::new(id), corpus, fingerprint: None }
+        Self { id: SnapshotId::new(id), corpus, fingerprint: None, parent_id: None }
     }
 
     pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.fingerprint = Some(fingerprint.into());
         self
     }
+
+    pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
+        self.parent_id = Some(SnapshotId::new(parent_id));
+        self
+    }
+}
+
+/// Operational metadata associated with snapshot publication.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SnapshotPublishMetadata {
+    pub branch: Option<String>,
+    pub commit: Option<String>,
 }
 
 /// File-like identifier inside a corpus collection.

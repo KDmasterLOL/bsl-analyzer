@@ -21,6 +21,7 @@ useful step is a full immutable snapshot publish that CI can run after merge.
 ```bash
 bsl-analyzer-app search baseline sync-pg \
   --source-dir . \
+  --parent-snapshot-id workspace-code:main@previous \
   --branch main \
   --commit "$CI_COMMIT_SHA"
 ```
@@ -34,6 +35,10 @@ Behavior:
    - `snapshots`
    - `snapshot_items`
    - `content_objects`
+
+The published snapshot may also carry optional parent lineage metadata via
+`--parent-snapshot-id`. This does not change runtime resolution yet, but it
+establishes immutable ancestry for future delta publication.
 
 If `--snapshot-id` is omitted, the CLI derives it automatically:
 
@@ -169,6 +174,7 @@ bsl-analyzer-app search baseline sync-pg \
 - selected corpus;
 - published snapshot id;
 - target PostgreSQL schema;
+- optional parent snapshot id;
 - branch and commit labels;
 - indexed files, resolved files, and chunk counts.
 
@@ -191,6 +197,7 @@ bsl-analyzer-app search baseline show-pg \
 `list-pg` is intended for operators to verify:
 
 - which snapshots are present in shared storage;
+- what their parent lineage is;
 - which branch/commit labels were recorded;
 - whether the expected file/chunk counts and fingerprints exist.
 

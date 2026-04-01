@@ -33,7 +33,7 @@ pub use document::Document;
 pub use domain::{
     BaselineRef, BaselineSourceConfig, CorpusId, DocumentPath, ExternalBaselineBackend,
     ExternalBaselineConfig, FileOverlay, IndexedDocument, OverlayChange, SearchOverlay, Snapshot,
-    SnapshotId,
+    SnapshotId, SnapshotPublishMetadata,
 };
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{IndexProgress, SearchConfig, SearchEngine, SearchHit};

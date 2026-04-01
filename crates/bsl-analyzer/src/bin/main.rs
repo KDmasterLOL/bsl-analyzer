@@ -254,6 +254,10 @@ struct SearchBaselineSyncPgArgs {
     /// Falls back to CI_COMMIT_SHA or GITHUB_SHA.
     #[arg(long)]
     commit: Option<String>,
+
+    /// Optional parent snapshot identifier for lineage tracking.
+    #[arg(long = "parent-snapshot-id")]
+    parent_snapshot_id: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -680,7 +684,7 @@ fn run_search_baseline_sync_pg(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use bsl_search::{
         fingerprint_documents, fingerprint_indexed_documents, CorpusId, ExternalBaselineAdapter,
-        ExternalBaselineConfig, Snapshot, SnapshotPublisher,
+        ExternalBaselineConfig, Snapshot, SnapshotPublishMetadata, SnapshotPublisher,
     };
 
     let project = project_model::Project::new(&args.source_dir);
@@ -737,9 +741,16 @@ fn run_search_baseline_sync_pg(
         }
         CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
     };
-    let snapshot = Snapshot::new(snapshot_id, corpus.clone()).with_fingerprint(fingerprint);
+    let mut snapshot = Snapshot::new(snapshot_id, corpus.clone()).with_fingerprint(fingerprint);
+    if let Some(parent_snapshot_id) =
+        args.parent_snapshot_id.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    {
+        snapshot = snapshot.with_parent(parent_snapshot_id);
+    }
+    let publish_metadata =
+        SnapshotPublishMetadata { branch: branch.clone(), commit: commit.clone() };
     adapter.ensure_storage()?;
-    adapter.publish_snapshot(&snapshot, branch.as_deref(), commit.as_deref(), &documents)?;
+    adapter.publish_snapshot(&snapshot, &publish_metadata, &documents)?;
 
     let published_files = documents
         .iter()
@@ -753,6 +764,10 @@ fn run_search_baseline_sync_pg(
     println!("  Corpus:        {}", corpus.as_str());
     println!("  Snapshot:      {}", snapshot.id.0);
     println!("  Schema:        {}", schema_label);
+    println!(
+        "  Parent:        {}",
+        snapshot.parent_id.as_ref().map(|value| value.0.as_str()).unwrap_or("-")
+    );
     println!("  Branch:        {}", branch_label);
     println!("  Commit:        {}", commit_label);
     println!("  Indexed files: {}", indexed_files);
@@ -787,6 +802,7 @@ fn run_search_baseline_list_pg(
         println!("  Snapshot:  {}", snapshot.snapshot_id);
         println!("  Corpus:    {}", snapshot.corpus);
         println!("  Created:   {}", snapshot.created_at);
+        println!("  Parent:    {}", snapshot.parent_snapshot_id.as_deref().unwrap_or("-"));
         println!("  Branch:    {}", snapshot.branch.as_deref().unwrap_or("-"));
         println!("  Commit:    {}", snapshot.commit.as_deref().unwrap_or("-"));
         println!("  Files:     {}", snapshot.files);
@@ -818,6 +834,7 @@ fn run_search_baseline_show_pg(
     println!("  Snapshot:    {}", details.snapshot.snapshot_id);
     println!("  Corpus:      {}", details.snapshot.corpus);
     println!("  Created:     {}", details.snapshot.created_at);
+    println!("  Parent:      {}", details.snapshot.parent_snapshot_id.as_deref().unwrap_or("-"));
     println!("  Branch:      {}", details.snapshot.branch.as_deref().unwrap_or("-"));
     println!("  Commit:      {}", details.snapshot.commit.as_deref().unwrap_or("-"));
     println!("  Files:       {}", details.snapshot.files);

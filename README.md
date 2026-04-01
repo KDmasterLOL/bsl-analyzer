@@ -202,6 +202,7 @@ bsl-analyzer check-config .bsl-analyzer.json
 BSL_SEARCH_BASELINE_PG_URL=postgres://shared-search \
 bsl-analyzer search baseline sync-pg \
   --source-dir ./my-project \
+  --parent-snapshot-id workspace-code:main@previous \
   --branch main \
   --commit "$CI_COMMIT_SHA"
 
@@ -216,6 +217,7 @@ bsl-analyzer search baseline sync-pg \
 - `Corpus`
 - `Snapshot`
 - `Schema`
+- `Parent`
 - `Branch`
 - `Commit`
 - количество файлов и чанков
@@ -241,6 +243,7 @@ bsl-analyzer search baseline show-pg --snapshot-id workspace-code:main@abcdef
 - `Snapshot`
 - `Corpus`
 - `Created`
+- `Parent`
 - `Branch`
 - `Commit`
 - `Files`
