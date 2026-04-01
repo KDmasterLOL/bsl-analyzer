@@ -1,8 +1,8 @@
 use bsl_platform::PlatformDataInner;
 use bsl_search::{
     fingerprint_documents, BaselineRef, CorpusId, Document, ExternalBaselineAdapter,
-    ExternalBaselineBackend, ExternalBaselineConfig, ResolvedView, SearchEngine, SnapshotCatalog,
-    SnapshotContentStore,
+    ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, ResolvedView, SearchEngine,
+    SnapshotCatalog, SnapshotContentStore,
 };
 use project_model::{
     ProjectConfig, SearchBaselineBackend, SearchBaselineConfig, SearchBaselineTargetConfig,
@@ -23,6 +23,13 @@ pub struct BaselineResolutionSummary {
 pub struct BaselineConfigDiagnostics {
     pub workspace: BaselineResolutionSummary,
     pub reference: BaselineResolutionSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReferenceSnapshotDocuments {
+    pub snapshot_id: String,
+    pub fingerprint: Option<String>,
+    pub documents: Vec<IndexedDocument>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +247,24 @@ impl ExternalBaselineSource {
         let documents = self.adapter.load_snapshot_documents(&snapshot)?;
         let baseline = BaselineRef::for_snapshot(snapshot.corpus.clone(), snapshot.id.0.clone());
         Ok(Some(ResolvedView::new(baseline, documents)))
+    }
+
+    pub(crate) fn load_reference_snapshot_documents(
+        &self,
+    ) -> Result<Option<ReferenceSnapshotDocuments>, bsl_search::SearchError> {
+        if !matches!(self.baseline.corpus, CorpusId::Reference) {
+            return Ok(None);
+        }
+
+        let Some(snapshot) = self.adapter.resolve_baseline(&self.baseline)? else {
+            return Ok(None);
+        };
+        let documents = self.adapter.load_snapshot_documents(&snapshot)?;
+        Ok(Some(ReferenceSnapshotDocuments {
+            snapshot_id: snapshot.id.0,
+            fingerprint: snapshot.fingerprint,
+            documents,
+        }))
     }
 
     pub(crate) fn corpus(&self) -> &CorpusId {

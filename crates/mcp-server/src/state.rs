@@ -1,6 +1,8 @@
 //! Shared state for MCP server tools.
 
-use crate::baseline::{BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineSource};
+use crate::baseline::{
+    BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineSource, ReferenceSnapshotDocuments,
+};
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{CorpusId, Document, IndexProgress, SearchEngine};
@@ -430,13 +432,72 @@ impl SharedState {
             if let Err(error) = engine.remove_file("platform://docs") {
                 tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
             }
+            if let Some(external_baseline) = external_baseline.as_ref() {
+                match external_baseline.load_reference_snapshot_documents() {
+                    Ok(Some(snapshot)) => {
+                        Self::index_external_reference_docs(&mut engine, progress, snapshot);
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "external reference baseline is configured but no snapshot was resolved"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to load external reference baseline snapshot for local semantic cache: {error}"
+                        );
+                    }
+                }
+            }
             tracing::info!(
-                "external reference baseline is configured; local platform docs indexing is skipped"
+                "external reference baseline is configured; lexical search uses the shared snapshot and semantic cache is synchronized locally"
             );
         } else {
             Self::index_platform_docs(&mut engine, progress);
         }
         Some(engine)
+    }
+
+    fn index_external_reference_docs(
+        engine: &mut SearchEngine,
+        progress: &Arc<IndexProgress>,
+        snapshot: ReferenceSnapshotDocuments,
+    ) {
+        let documents = snapshot
+            .documents
+            .iter()
+            .map(|document| Document {
+                title: document.symbol_name.clone(),
+                body: document.text.clone(),
+                kind: document.kind.clone(),
+            })
+            .collect::<Vec<_>>();
+        let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
+
+        tracing::info!(
+            snapshot = %version,
+            documents = documents.len(),
+            "synchronizing external reference snapshot into local semantic cache"
+        );
+
+        match engine.index_documents(
+            "platform",
+            "platform://docs",
+            version.as_bytes(),
+            &documents,
+            Some(progress),
+        ) {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(count, "external reference docs cached locally");
+                } else {
+                    tracing::info!("external reference docs cache is up to date");
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to cache external reference docs locally: {error}");
+            }
+        }
     }
 
     /// Index platform reference documentation into the search engine.

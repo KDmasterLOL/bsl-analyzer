@@ -175,8 +175,22 @@ bsl-analyzer-app search baseline sync-pg \
 MCP `search(action=status)` is the runtime verification step:
 
 - `workspace` should show `Configured baseline`, `Code lexical source`, and `External baseline`;
-- `reference` should show `Configured baseline`, `Docs lexical source`, `External baseline`,
-  and `Freshness`.
+- `reference` should show `Configured baseline`, `Docs lexical source`, `Docs semantic source`,
+  `External baseline`, and `Freshness`.
+
+## Centralized Reference Semantic Search
+
+`reference` now supports semantic search in centralized baseline mode.
+
+The runtime model is intentionally hybrid:
+
+- lexical `find_docs` resolves directly from the shared PostgreSQL snapshot;
+- semantic `search_docs` uses a local SQLite cache in the user profile;
+- that cache is synchronized from the selected shared snapshot on startup;
+- cache refresh is skipped when the snapshot fingerprint or snapshot id is unchanged.
+
+This keeps the shared baseline as the canonical published source while avoiding
+re-embedding the same platform help on every startup or in every project.
 
 ## Why full snapshot first
 

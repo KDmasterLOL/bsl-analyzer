@@ -141,21 +141,10 @@ pub fn find_docs(
 /// Semantic search across platform documentation.
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
-    external_baseline: Option<Arc<ExternalBaselineSource>>,
+    _external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
-    if external_baseline
-        .as_ref()
-        .is_some_and(|baseline| matches!(baseline.corpus(), bsl_search::CorpusId::Reference))
-    {
-        return Err(McpError::invalid_params(
-            "Semantic search for centralized reference baseline is not available yet. \
-             Use find_docs or keep local reference indexing.",
-            None,
-        ));
-    }
-
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
     if guard.is_none() {
@@ -251,6 +240,12 @@ pub fn search_status(
                         Err(_) => "local sqlite",
                     };
                     let _ = writeln!(out, "  Docs lexical source: {docs_lexical_source}");
+                    let docs_semantic_source = if semantic {
+                        "local semantic cache of external baseline"
+                    } else {
+                        "not configured (set EMBEDDING_URL)"
+                    };
+                    let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
                 }
                 bsl_search::CorpusId::Custom(_) => {}
             }
@@ -258,6 +253,9 @@ pub fn search_status(
             let _ = writeln!(out, "  Code lexical source: local sqlite + local overlay");
         } else {
             let _ = writeln!(out, "  Docs lexical source: local sqlite");
+            let docs_semantic_source =
+                if semantic { "local sqlite" } else { "not configured (set EMBEDDING_URL)" };
+            let _ = writeln!(out, "  Docs semantic source: {docs_semantic_source}");
         }
 
         if let Some(overlay) = workspace_overlay {
@@ -586,10 +584,14 @@ mod tests {
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Docs lexical source: local sqlite"));
+        assert!(text.contains("Docs semantic source: not configured (set EMBEDDING_URL)"));
     }
 
     #[test]
-    fn search_docs_rejects_external_reference_baseline_for_now() {
+    fn search_docs_with_external_reference_baseline_uses_standard_semantic_validation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
         let source = ExternalBaselineSource::new(
             bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
             bsl_search::BaselineRef {
@@ -601,10 +603,12 @@ mod tests {
         )
         .unwrap();
 
-        let error = search_docs(&Arc::new(Mutex::new(None)), Some(Arc::new(source)), "Массив", 10)
-            .unwrap_err();
+        let error =
+            search_docs(&Arc::new(Mutex::new(Some(engine))), Some(Arc::new(source)), "Массив", 10)
+                .unwrap_err();
 
-        assert!(error.message.contains("Semantic search for centralized reference baseline"));
+        assert!(error.message.contains("Semantic search not available"));
+        assert!(!error.message.contains("centralized reference baseline"));
     }
 
     #[test]

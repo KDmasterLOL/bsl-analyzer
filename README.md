@@ -223,7 +223,13 @@ bsl-analyzer search baseline sync-pg \
 После установки или запуска MCP проверьте runtime-состояние через инструмент `search` с `action=status`:
 
 - в `workspace` профиле статус покажет `Configured baseline`, `Code lexical source` и `External baseline`;
-- в `reference` профиле статус покажет `Configured baseline`, `Docs lexical source`, `External baseline` и `Freshness`.
+- в `reference` профиле статус покажет `Configured baseline`, `Docs lexical source`, `Docs semantic source`, `External baseline` и `Freshness`.
+
+Для centralized `reference` semantic search работает так:
+
+- lexical (`find_docs`) читается из shared PostgreSQL baseline;
+- semantic (`search_docs`) использует локальный user-scope cache этого snapshot;
+- cache синхронизируется при старте reference MCP и не переэмбеддится, если fingerprint/snapshot не изменился.
 
 С подключением к 1С (для выполнения запросов и кода):
 
