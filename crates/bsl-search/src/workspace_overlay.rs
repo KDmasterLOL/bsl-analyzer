@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineHashMode {
+    RawFileBytes,
+    NormalizedChunks,
+}
+
 #[derive(Debug, Clone)]
 pub struct OverlayVectorDocument {
     pub document: IndexedDocument,
@@ -73,13 +79,20 @@ impl WorkspaceOverlayCache {
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        hash_mode: BaselineHashMode,
     ) -> Result<(), SearchError> {
         let baseline_files: HashMap<String, Vec<u8>> =
             store.all_files_in_collection("code")?.into_iter().collect();
         if !self.initialized || !self.watcher_mode {
-            self.full_refresh(&baseline_files, workspace_root, embedder, batch_size)?;
+            self.full_refresh(&baseline_files, workspace_root, embedder, batch_size, hash_mode)?;
         } else if !self.dirty_paths.is_empty() {
-            self.refresh_dirty_paths(&baseline_files, workspace_root, embedder, batch_size)?;
+            self.refresh_dirty_paths(
+                &baseline_files,
+                workspace_root,
+                embedder,
+                batch_size,
+                hash_mode,
+            )?;
         }
         self.initialized = true;
         Ok(())
@@ -91,6 +104,7 @@ impl WorkspaceOverlayCache {
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        hash_mode: BaselineHashMode,
     ) -> Result<(), SearchError> {
         let workspace_files = scan_workspace_files(workspace_root);
         let mut seen_paths = HashSet::new();
@@ -133,7 +147,7 @@ impl WorkspaceOverlayCache {
                 Ok(content) => content,
                 Err(_) => continue,
             };
-            let file_hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
+            let file_hash = compute_file_hash(&content, hash_mode);
             if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
                 self.entries.remove(&file.rel_path);
                 continue;
@@ -173,6 +187,7 @@ impl WorkspaceOverlayCache {
         workspace_root: &Path,
         embedder: Option<&Embedder>,
         batch_size: usize,
+        hash_mode: BaselineHashMode,
     ) -> Result<(), SearchError> {
         let dirty_paths: Vec<String> = self.dirty_paths.drain().collect();
 
@@ -228,7 +243,7 @@ impl WorkspaceOverlayCache {
                 Ok(content) => content,
                 Err(_) => continue,
             };
-            let file_hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
+            let file_hash = compute_file_hash(&content, hash_mode);
             if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
                 self.entries.remove(&rel_path);
                 self.hidden_paths.remove(&rel_path);
@@ -391,6 +406,55 @@ fn build_overlay_entry(
     })
 }
 
+fn compute_file_hash(content: &str, hash_mode: BaselineHashMode) -> Vec<u8> {
+    match hash_mode {
+        BaselineHashMode::RawFileBytes => blake3::hash(content.as_bytes()).as_bytes().to_vec(),
+        BaselineHashMode::NormalizedChunks => normalized_file_hash_for_content(content),
+    }
+}
+
+pub(crate) fn normalized_file_hash_for_content(content: &str) -> Vec<u8> {
+    let chunks = Chunker::chunk(content);
+    normalized_file_hash_for_chunks(chunks.iter().map(|chunk| {
+        (
+            chunk.kind.label(),
+            chunk.name.as_str(),
+            chunk.line_start,
+            chunk.line_end,
+            chunk.text.as_str(),
+        )
+    }))
+}
+
+pub(crate) fn normalized_file_hash_for_indexed_documents(documents: &[IndexedDocument]) -> Vec<u8> {
+    normalized_file_hash_for_chunks(documents.iter().map(|document| {
+        (
+            document.kind.as_str(),
+            document.symbol_name.as_str(),
+            document.line_start,
+            document.line_end,
+            document.text.as_str(),
+        )
+    }))
+}
+
+fn normalized_file_hash_for_chunks<'a>(
+    chunks: impl Iterator<Item = (&'a str, &'a str, u32, u32, &'a str)>,
+) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    for (kind, name, line_start, line_end, text) in chunks {
+        hasher.update(kind.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&line_start.to_le_bytes());
+        hasher.update(&line_end.to_le_bytes());
+        hasher.update(text.as_bytes());
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().as_bytes().to_vec()
+}
+
 fn build_overlay_documents(rel_path: &str, content: &str) -> (Vec<IndexedDocument>, Vec<String>) {
     let chunks = Chunker::chunk(content);
     let module_path = file_path_to_module_path(rel_path);
@@ -524,7 +588,7 @@ fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{lexical_hits, WorkspaceOverlayCache, WorkspaceOverlayStats};
+    use super::{lexical_hits, BaselineHashMode, WorkspaceOverlayCache, WorkspaceOverlayStats};
     use crate::store::Store;
     use std::fs;
     use tempfile::tempdir;
@@ -551,7 +615,7 @@ mod tests {
         fs::remove_file(&file_b).unwrap();
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         let overlay = cache.snapshot();
 
         assert!(overlay.hidden_paths.contains("A.bsl"));
@@ -570,7 +634,7 @@ mod tests {
         let db_path = workspace.join("search.db");
         let store = Store::open(&db_path).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         let overlay = cache.snapshot();
 
         let hits = lexical_hits(&overlay, "НоваяПроцедура123", 10);
@@ -588,16 +652,16 @@ mod tests {
         let db_path = workspace.join("search.db");
         let store = Store::open(&db_path).unwrap();
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         let first = cache.snapshot();
         assert_eq!(first.lexical_documents[0].symbol_name, "ВерсияОдин111");
 
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         let second = cache.snapshot();
         assert_eq!(second.lexical_documents[0].symbol_name, "ВерсияОдин111");
 
         fs::write(&file, "Процедура ВерсияДва222222()\nКонецПроцедуры").unwrap();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         let third = cache.snapshot();
         assert_eq!(third.lexical_documents[0].symbol_name, "ВерсияДва222222");
     }
@@ -624,7 +688,7 @@ mod tests {
         fs::remove_file(&file_b).unwrap();
 
         let mut cache = WorkspaceOverlayCache::default();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
 
         assert_eq!(
             cache.stats(),
@@ -656,12 +720,12 @@ mod tests {
 
         let mut cache = WorkspaceOverlayCache::default();
         cache.enable_watcher_mode();
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
         assert_eq!(cache.stats().overlay_files, 0);
 
         fs::write(&file, "Процедура ИзWatcher()\nКонецПроцедуры").unwrap();
         cache.mark_dirty_path("A.bsl");
-        cache.refresh(&store, workspace, None, 32).unwrap();
+        cache.refresh(&store, workspace, None, 32, BaselineHashMode::RawFileBytes).unwrap();
 
         let overlay = cache.snapshot();
         assert_eq!(overlay.lexical_documents.len(), 1);

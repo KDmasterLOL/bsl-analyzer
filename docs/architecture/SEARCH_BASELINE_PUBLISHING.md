@@ -198,9 +198,27 @@ bsl-analyzer-app search baseline show-pg \
 
 MCP `search(action=status)` is the runtime verification step:
 
-- `workspace` should show `Configured baseline`, `Code lexical source`, and `External baseline`;
+- `workspace` should show `Configured baseline`, `Code lexical source`,
+  `Code semantic source`, and `External baseline`;
 - `reference` should show `Configured baseline`, `Docs lexical source`, `Docs semantic source`,
   `External baseline`, and `Freshness`.
+
+## Centralized Workspace Semantic Search
+
+`workspace-code` now supports semantic search in centralized baseline mode too.
+
+The runtime model is also hybrid:
+
+- lexical `find_code` resolves from the selected shared PostgreSQL snapshot;
+- local workspace additions, edits, and deletions are applied as an overlay;
+- semantic `search_code` uses a local SQLite cache synchronized from that same
+  shared snapshot;
+- cache refresh is skipped when the normalized chunk fingerprint of one file is
+  unchanged;
+- local workspace changes are still embedded only for the overlay layer.
+
+This keeps PostgreSQL as the shared published baseline for team-visible code
+while preserving immediate local relevance for the current checkout.
 
 ## Centralized Reference Semantic Search
 
@@ -262,8 +280,9 @@ It does not embed PostgreSQL logic directly into MCP runtime code.
 
 ## Next steps
 
-1. Add reference-corpus publishing for shared platform help.
-2. Add branch policy helpers such as `main`, `release/*`, feature snapshots.
-3. Introduce delta publishing so snapshots can reuse unchanged file mappings
+1. Add branch policy helpers such as `main`, `release/*`, feature snapshots.
+2. Introduce delta publishing so snapshots can reuse unchanged file mappings
    instead of rewriting the full branch state each time.
-4. Add shared embedding storage keyed by `content_hash + model_id`.
+3. Add shared embedding storage keyed by `content_hash + model_id`.
+4. Split operator workflows for publishing, inspection, and maintenance into a
+   dedicated baseline operations document.

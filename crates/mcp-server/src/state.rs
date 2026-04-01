@@ -1,11 +1,11 @@
 //! Shared state for MCP server tools.
 
 use crate::baseline::{
-    BaselineRuntime, ConfiguredBaselineStatus, ExternalBaselineSource, ReferenceSnapshotDocuments,
+    BaselineRuntime, BaselineSnapshotDocuments, ConfiguredBaselineStatus, ExternalBaselineSource,
 };
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
-use bsl_search::{CorpusId, Document, IndexProgress, SearchEngine};
+use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -69,11 +69,13 @@ impl SharedState {
             let progress_arc = Arc::clone(&index_progress);
             let root = source_dir.clone();
             let watcher_ready = Arc::clone(&watcher_ready);
+            let external_baseline = baseline_runtime.external_baseline.clone();
             std::thread::Builder::new()
                 .name("bsl-search-init".to_owned())
                 .spawn(move || {
                     tracing::info!("search engine initialization started in background");
-                    let mut engine = Self::init_workspace_search_engine(&root, &progress_arc);
+                    let mut engine =
+                        Self::init_workspace_search_engine(&root, &progress_arc, external_baseline);
                     if watcher_ready.load(Ordering::SeqCst) {
                         if let Some(engine) = engine.as_mut() {
                             engine.enable_workspace_watcher_mode();
@@ -345,6 +347,7 @@ impl SharedState {
     fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
         progress: &Arc<IndexProgress>,
+        external_baseline: Option<Arc<ExternalBaselineSource>>,
     ) -> Option<SearchEngine> {
         let build_dir = workspace_root.join(".build");
         std::fs::create_dir_all(&build_dir).ok();
@@ -377,36 +380,74 @@ impl SharedState {
             let project = project_model::Project::new(workspace_root);
             let source_path = project.source_path();
             engine.set_workspace_root(source_path.to_path_buf());
-
-            if engine.has_semantic() {
-                // Always call index_directory — it skips files by hash.
-                // Files without embeddings had their hashes cleared above.
-                match engine.index_directory(source_path, Some(progress)) {
-                    Ok(indexed) => {
-                        if indexed > 0 {
-                            tracing::info!(indexed, "FTS + semantic index updated");
-                        }
+            if external_baseline
+                .as_ref()
+                .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::WorkspaceCode))
+            {
+                engine.set_workspace_baseline_hash_mode(BaselineHashMode::NormalizedChunks);
+                if engine.has_semantic() {
+                    let cleared = engine.clear_file_hashes_without_embeddings("code").unwrap_or(0);
+                    if cleared > 0 {
+                        tracing::info!(
+                            cleared,
+                            "cleared hashes for workspace baseline files without embeddings"
+                        );
                     }
-                    Err(e) => {
-                        tracing::warn!("failed to build semantic index, falling back to FTS: {e}");
-                        if engine.chunk_count().unwrap_or(0) == 0 {
-                            match engine.index_directory_fts(source_path) {
-                                Ok(indexed) => {
-                                    tracing::info!(indexed, "FTS index built (fallback)")
-                                }
-                                Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
-                            }
+                }
+                if let Some(external_baseline) = external_baseline.as_ref() {
+                    match external_baseline.load_workspace_snapshot_documents() {
+                        Ok(Some(snapshot)) => {
+                            Self::index_external_workspace_docs(&mut engine, progress, snapshot);
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                "external workspace baseline is configured but no snapshot was resolved"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "failed to load external workspace baseline snapshot for local semantic cache: {error}"
+                            );
                         }
                     }
                 }
-            } else if engine.chunk_count().unwrap_or(0) == 0 {
-                tracing::info!(?source_path, "building FTS index from source files");
-                match engine.index_directory_fts(source_path) {
-                    Ok(indexed) => {
-                        tracing::info!(indexed, "FTS index built");
+                tracing::info!(
+                    "external workspace baseline is configured; lexical search resolves from the shared snapshot and semantic cache is synchronized locally"
+                );
+            } else {
+                engine.set_workspace_baseline_hash_mode(BaselineHashMode::RawFileBytes);
+                if engine.has_semantic() {
+                    // Always call index_directory — it skips files by hash.
+                    // Files without embeddings had their hashes cleared above.
+                    match engine.index_directory(source_path, Some(progress)) {
+                        Ok(indexed) => {
+                            if indexed > 0 {
+                                tracing::info!(indexed, "FTS + semantic index updated");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to build semantic index, falling back to FTS: {e}"
+                            );
+                            if engine.chunk_count().unwrap_or(0) == 0 {
+                                match engine.index_directory_fts(source_path) {
+                                    Ok(indexed) => {
+                                        tracing::info!(indexed, "FTS index built (fallback)")
+                                    }
+                                    Err(e2) => tracing::warn!("failed to build FTS index: {e2}"),
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("failed to build FTS index: {e}");
+                } else if engine.chunk_count().unwrap_or(0) == 0 {
+                    tracing::info!(?source_path, "building FTS index from source files");
+                    match engine.index_directory_fts(source_path) {
+                        Ok(indexed) => {
+                            tracing::info!(indexed, "FTS index built");
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to build FTS index: {e}");
+                        }
                     }
                 }
             }
@@ -433,6 +474,16 @@ impl SharedState {
                 tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
             }
             if let Some(external_baseline) = external_baseline.as_ref() {
+                if engine.has_semantic() {
+                    let cleared =
+                        engine.clear_file_hashes_without_embeddings("platform").unwrap_or(0);
+                    if cleared > 0 {
+                        tracing::info!(
+                            cleared,
+                            "cleared hashes for reference cache files without embeddings"
+                        );
+                    }
+                }
                 match external_baseline.load_reference_snapshot_documents() {
                     Ok(Some(snapshot)) => {
                         Self::index_external_reference_docs(&mut engine, progress, snapshot);
@@ -461,7 +512,7 @@ impl SharedState {
     fn index_external_reference_docs(
         engine: &mut SearchEngine,
         progress: &Arc<IndexProgress>,
-        snapshot: ReferenceSnapshotDocuments,
+        snapshot: BaselineSnapshotDocuments,
     ) {
         let documents = snapshot
             .documents
@@ -496,6 +547,37 @@ impl SharedState {
             }
             Err(error) => {
                 tracing::warn!("failed to cache external reference docs locally: {error}");
+            }
+        }
+    }
+
+    fn index_external_workspace_docs(
+        engine: &mut SearchEngine,
+        progress: &Arc<IndexProgress>,
+        snapshot: BaselineSnapshotDocuments,
+    ) {
+        let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
+
+        tracing::info!(
+            snapshot = %version,
+            documents = snapshot.documents.len(),
+            "synchronizing external workspace snapshot into local semantic cache"
+        );
+
+        match engine.sync_indexed_documents_in_collection(
+            "code",
+            &snapshot.documents,
+            Some(progress),
+        ) {
+            Ok(indexed_files) => {
+                if indexed_files > 0 {
+                    tracing::info!(indexed_files, "external workspace baseline cached locally");
+                } else {
+                    tracing::info!("external workspace baseline cache is up to date");
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to cache external workspace baseline locally: {error}");
             }
         }
     }
@@ -623,7 +705,11 @@ impl SharedState {
     /// Initialize search engine for LSP+MCP mode (called when workspace root is set).
     pub fn init_search(&self) {
         if let Some(ref root) = self.workspace_root {
-            let engine = Self::init_workspace_search_engine(root, &self.index_progress);
+            let engine = Self::init_workspace_search_engine(
+                root,
+                &self.index_progress,
+                self.external_baseline.clone(),
+            );
             if let Ok(mut guard) = self.search_engine.lock() {
                 *guard = engine;
             }

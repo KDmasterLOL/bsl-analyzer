@@ -232,6 +232,12 @@ pub fn search_status(
                         Err(_) => "local sqlite + local overlay",
                     };
                     let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
+                    let code_semantic_source = if semantic {
+                        "local semantic cache of external baseline + local overlay"
+                    } else {
+                        "not configured (set EMBEDDING_URL)"
+                    };
+                    let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
                 }
                 bsl_search::CorpusId::Reference => {
                     let docs_lexical_source = match source.resolve_reference_view() {
@@ -251,6 +257,12 @@ pub fn search_status(
             }
         } else if workspace_overlay.is_some() {
             let _ = writeln!(out, "  Code lexical source: local sqlite + local overlay");
+            let code_semantic_source = if semantic {
+                "local sqlite + local overlay"
+            } else {
+                "not configured (set EMBEDDING_URL)"
+            };
+            let _ = writeln!(out, "  Code semantic source: {code_semantic_source}");
         } else {
             let _ = writeln!(out, "  Docs lexical source: local sqlite");
             let docs_semantic_source =

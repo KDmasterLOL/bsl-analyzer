@@ -18,8 +18,8 @@ use crate::ports::{SnapshotCatalog, SnapshotContentStore};
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
 use crate::workspace_overlay::{
-    lexical_hits, semantic_hits, WorkspaceOverlayCache, WorkspaceOverlayIndex,
-    WorkspaceOverlayStats,
+    lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
+    WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
 };
 use crate::{BaselineOverlaySearchService, BaselineRef, CorpusId};
 use std::path::Path;
@@ -131,6 +131,7 @@ pub struct SearchEngine {
     concurrency: usize,
     workspace_root: Option<std::path::PathBuf>,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
+    workspace_baseline_hash_mode: BaselineHashMode,
 }
 
 impl SearchEngine {
@@ -159,6 +160,7 @@ impl SearchEngine {
             concurrency: config.concurrency,
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
+            workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
         })
     }
 
@@ -182,6 +184,7 @@ impl SearchEngine {
             concurrency: DEFAULT_CONCURRENCY,
             workspace_root: None,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
+            workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
         })
     }
 
@@ -601,6 +604,13 @@ impl SearchEngine {
         }
     }
 
+    pub fn set_workspace_baseline_hash_mode(&mut self, hash_mode: BaselineHashMode) {
+        self.workspace_baseline_hash_mode = hash_mode;
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.clear();
+        }
+    }
+
     /// Mark one workspace file as dirty for the overlay cache.
     ///
     /// The path can be absolute inside the configured workspace root or already relative.
@@ -648,7 +658,13 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.refresh(&self.store, workspace_root, None, self.batch_size)?;
+        cache.refresh(
+            &self.store,
+            workspace_root,
+            None,
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+        )?;
         Ok(Some(cache.stats()))
     }
 
@@ -865,8 +881,103 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.refresh(&self.store, workspace_root, embedder, self.batch_size)?;
+        cache.refresh(
+            &self.store,
+            workspace_root,
+            embedder,
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+        )?;
         Ok(cache.snapshot())
+    }
+
+    pub fn sync_indexed_documents_in_collection(
+        &mut self,
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<usize, SearchError> {
+        use std::collections::{BTreeMap, HashSet};
+
+        let mut grouped = BTreeMap::<String, Vec<crate::IndexedDocument>>::new();
+        for document in documents {
+            grouped.entry(document.path.clone()).or_default().push(document.clone());
+        }
+
+        let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
+        for (existing_path, _) in self.store.all_files_in_collection(collection)? {
+            if !desired_paths.contains(existing_path.as_str()) {
+                self.store.remove_file(&existing_path)?;
+            }
+        }
+
+        let total_chunks = documents.len();
+        if let Some(p) = progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(grouped.len(), Ordering::Relaxed);
+            p.total_chunks.store(total_chunks, Ordering::Relaxed);
+            p.total_batches.store(total_chunks.div_ceil(self.batch_size.max(1)), Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let mut indexed = 0usize;
+        for (path, mut file_documents) in grouped {
+            file_documents.sort_by(|lhs, rhs| {
+                (lhs.line_start, lhs.line_end, lhs.symbol_name.as_str()).cmp(&(
+                    rhs.line_start,
+                    rhs.line_end,
+                    rhs.symbol_name.as_str(),
+                ))
+            });
+
+            let file_hash = normalized_file_hash_for_indexed_documents(&file_documents);
+            if self.store.file_hash(&path)?.as_deref() == Some(file_hash.as_slice()) {
+                continue;
+            }
+
+            let embeddings = if let Some(embedder) = &self.embedder {
+                let texts = file_documents
+                    .iter()
+                    .map(|document| {
+                        format!(
+                            "Path: {}\nKind: {}\nSymbol: {}\n{}",
+                            document.path, document.kind, document.symbol_name, document.text
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut vectors = Vec::with_capacity(texts.len());
+                for batch in texts.chunks(self.batch_size.max(1)) {
+                    let refs = batch.iter().map(String::as_str).collect::<Vec<_>>();
+                    let batch_vectors = embedder.embed_batch(&refs)?;
+                    if let Some(p) = progress {
+                        p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                        p.done_batches.fetch_add(1, Ordering::Relaxed);
+                    }
+                    vectors.extend(batch_vectors);
+                }
+                Some(vectors)
+            } else {
+                None
+            };
+
+            self.store.reindex_indexed_documents_in_collection(
+                &path,
+                &file_hash,
+                collection,
+                &file_documents,
+                embeddings.as_deref(),
+            )?;
+            indexed += 1;
+        }
+
+        if let Some(p) = progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        let data = self.store.load_all_embeddings(self.dim)?;
+        self.index = VectorIndex::build(self.dim, &data)?;
+        Ok(indexed)
     }
 
     /// Number of indexed chunks.

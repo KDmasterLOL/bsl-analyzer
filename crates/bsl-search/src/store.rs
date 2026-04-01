@@ -327,6 +327,69 @@ impl Store {
         Ok(file_id)
     }
 
+    pub fn reindex_indexed_documents_in_collection(
+        &mut self,
+        path: &str,
+        hash: &[u8],
+        collection: &str,
+        documents: &[crate::IndexedDocument],
+        embeddings: Option<&[Vec<f32>]>,
+    ) -> Result<i64, SearchError> {
+        let tx = self.conn.transaction()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "INSERT INTO files (path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
+            params![path, hash, now, collection],
+        )?;
+        let file_id: i64 =
+            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding)
+                 VALUES (?1, ?2, ?3, 0, NULL, ?4, ?5, ?6, ?7)",
+            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+
+            for (idx, document) in documents.iter().enumerate() {
+                let embedding_blob: Option<Vec<u8>> = embeddings
+                    .and_then(|embs| embs.get(idx))
+                    .map(|embedding| embedding.iter().flat_map(|f| f.to_le_bytes()).collect());
+
+                stmt.execute(params![
+                    file_id,
+                    document.kind,
+                    document.symbol_name,
+                    document.line_start,
+                    document.line_end,
+                    document.text,
+                    embedding_blob,
+                ])?;
+
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, document.symbol_name, document.text])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(file_id)
+    }
+
     /// Load all embeddings with their chunk ids for building the HNSW index.
     /// Returns (chunk_id, embedding) pairs.
     pub fn load_all_embeddings(&self, dim: usize) -> Result<Vec<(i64, Vec<f32>)>, SearchError> {

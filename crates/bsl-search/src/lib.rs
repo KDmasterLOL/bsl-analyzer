@@ -52,4 +52,4 @@ pub use ports::{
 pub use resolved_view_search::lexical_hits as lexical_hits_for_resolved_view;
 pub use resolver::{InMemoryResolvedViewResolver, ResolvedView};
 pub use store::{ChunkInfo, Store, TextSearchResult};
-pub use workspace_overlay::WorkspaceOverlayStats;
+pub use workspace_overlay::{BaselineHashMode, WorkspaceOverlayStats};
