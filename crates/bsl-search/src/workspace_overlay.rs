@@ -3,6 +3,7 @@ use crate::context::{enrich_chunk_text, file_path_to_module_path};
 use crate::domain::{BaselineRef, CorpusId, DocumentPath, IndexedDocument, SearchOverlay};
 use crate::embedder::Embedder;
 use crate::error::SearchError;
+use crate::lexical::lexical_hits_for_documents;
 use crate::store::Store;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -470,25 +471,7 @@ pub fn lexical_hits(
     query: &str,
     limit: usize,
 ) -> Vec<crate::engine::SearchHit> {
-    let mut hits: Vec<crate::engine::SearchHit> = overlay
-        .lexical_documents
-        .iter()
-        .filter_map(|document| lexical_score(document, query).map(|score| (document, score)))
-        .map(|(document, score)| crate::engine::SearchHit {
-            collection: document.collection.clone(),
-            file_path: document.path.clone(),
-            symbol_name: document.symbol_name.clone(),
-            kind: document.kind.clone(),
-            text: document.text.clone(),
-            line_start: document.line_start,
-            line_end: document.line_end,
-            score,
-        })
-        .collect();
-
-    hits.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
-    hits.truncate(limit);
-    hits
+    lexical_hits_for_documents(overlay.lexical_documents.iter(), query, limit)
 }
 
 pub fn semantic_hits(
@@ -514,29 +497,6 @@ pub fn semantic_hits(
     hits.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
     hits.truncate(limit);
     hits
-}
-
-fn lexical_score(document: &IndexedDocument, query: &str) -> Option<f32> {
-    let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
-        return None;
-    }
-
-    let symbol = document.symbol_name.to_lowercase();
-    let text = document.text.to_lowercase();
-
-    if symbol == needle {
-        return Some(1.0);
-    }
-    if symbol.contains(&needle) {
-        return Some(0.95);
-    }
-    if text.contains(&needle) {
-        let occurrences = text.matches(&needle).count().min(10) as f32;
-        return Some((0.70 + occurrences * 0.02).min(0.90));
-    }
-
-    None
 }
 
 fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {

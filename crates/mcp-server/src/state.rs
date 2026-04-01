@@ -2,11 +2,16 @@
 
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
-use bsl_search::{Document, IndexProgress, SearchEngine};
+use bsl_search::{
+    BaselineRef, CorpusId, Document, ExternalBaselineAdapter, ExternalBaselineBackend,
+    ExternalBaselineConfig, IndexProgress, ResolvedView, SearchEngine, SnapshotCatalog,
+    SnapshotContentStore,
+};
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use onec_client::Client as OnecClient;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -33,6 +38,7 @@ pub struct SharedState {
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: Arc<Mutex<Option<SearchEngine>>>,
     index_progress: Arc<IndexProgress>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
 }
 
 impl SharedState {
@@ -55,6 +61,7 @@ impl SharedState {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let watcher_ready = Arc::new(AtomicBool::new(false));
+        let external_baseline = Self::external_baseline_source_from_env();
 
         // Spawn background thread so standalone() returns immediately.
         // MCP tools check engine readiness and return a friendly message while init is in progress.
@@ -119,6 +126,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
             index_progress,
+            external_baseline,
         }
     }
 
@@ -153,6 +161,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
             index_progress,
+            external_baseline: None,
         }
     }
 
@@ -168,6 +177,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(None)),
             index_progress: IndexProgress::new(),
+            external_baseline: None,
         }
     }
 
@@ -249,6 +259,11 @@ impl SharedState {
     /// Access the indexing progress tracker.
     pub fn index_progress(&self) -> &Arc<IndexProgress> {
         &self.index_progress
+    }
+
+    /// Access configured external baseline source.
+    pub(crate) fn external_baseline(&self) -> Option<Arc<ExternalBaselineSource>> {
+        self.external_baseline.clone()
     }
 
     /// Read embedding configuration from environment variables.
@@ -546,6 +561,45 @@ impl SharedState {
         None
     }
 
+    fn external_baseline_source_from_env() -> Option<Arc<ExternalBaselineSource>> {
+        let connection = match env::var("BSL_SEARCH_BASELINE_PG_URL") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return None,
+        };
+
+        let mut config = ExternalBaselineConfig::postgres(connection);
+        if let Ok(schema) = env::var("BSL_SEARCH_BASELINE_PG_SCHEMA") {
+            if !schema.trim().is_empty() {
+                config = config.with_schema(schema);
+            }
+        }
+
+        let baseline = BaselineRef {
+            corpus: CorpusId::WorkspaceCode,
+            snapshot_id: env::var("BSL_SEARCH_BASELINE_SNAPSHOT_ID")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(bsl_search::SnapshotId::new),
+            branch: env::var("BSL_SEARCH_BASELINE_BRANCH")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            commit: env::var("BSL_SEARCH_BASELINE_COMMIT")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        };
+
+        match ExternalBaselineSource::new(config, baseline) {
+            Ok(source) => {
+                tracing::info!("external baseline source configured");
+                Some(Arc::new(source))
+            }
+            Err(error) => {
+                tracing::warn!("failed to configure external baseline source: {error}");
+                None
+            }
+        }
+    }
+
     fn run_workspace_overlay_watcher(
         engine: Arc<Mutex<Option<SearchEngine>>>,
         watch_root: PathBuf,
@@ -605,5 +659,139 @@ impl SharedState {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalBaselineSource {
+    adapter: ExternalBaselineAdapter,
+    baseline: BaselineRef,
+}
+
+impl ExternalBaselineSource {
+    pub(crate) fn new(
+        config: ExternalBaselineConfig,
+        baseline: BaselineRef,
+    ) -> Result<Self, bsl_search::SearchError> {
+        let adapter = ExternalBaselineAdapter::new(config)?;
+        Ok(Self { adapter, baseline })
+    }
+
+    pub(crate) fn probe_status(&self) -> ExternalBaselineStatus {
+        let backend = match self.adapter.config().backend {
+            ExternalBaselineBackend::Postgres => "postgres",
+        };
+        let schema =
+            self.adapter.config().schema.clone().unwrap_or_else(|| "bsl_search".to_owned());
+        let selection = baseline_description(&self.baseline);
+
+        match self.adapter.resolve_baseline(&self.baseline) {
+            Ok(Some(snapshot)) => match self.adapter.load_snapshot_documents(&snapshot) {
+                Ok(documents) => {
+                    let files: HashSet<&str> =
+                        documents.iter().map(|document| document.path.as_str()).collect();
+                    ExternalBaselineStatus {
+                        backend,
+                        schema,
+                        selection,
+                        state: ExternalBaselineState::Ready {
+                            snapshot_id: snapshot.id.0,
+                            documents: documents.len(),
+                            files: files.len(),
+                        },
+                    }
+                }
+                Err(error) => ExternalBaselineStatus {
+                    backend,
+                    schema,
+                    selection,
+                    state: ExternalBaselineState::Error(error.to_string()),
+                },
+            },
+            Ok(None) => ExternalBaselineStatus {
+                backend,
+                schema,
+                selection,
+                state: ExternalBaselineState::Missing,
+            },
+            Err(error) => ExternalBaselineStatus {
+                backend,
+                schema,
+                selection,
+                state: ExternalBaselineState::Error(error.to_string()),
+            },
+        }
+    }
+
+    pub(crate) fn resolve_workspace_view(
+        &self,
+        engine: &SearchEngine,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        engine.resolve_workspace_code_view_with(
+            self.baseline.clone(),
+            self.adapter.clone(),
+            self.adapter.clone(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalBaselineStatus {
+    pub backend: &'static str,
+    pub schema: String,
+    pub selection: String,
+    pub state: ExternalBaselineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalBaselineState {
+    Ready { snapshot_id: String, documents: usize, files: usize },
+    Missing,
+    Error(String),
+}
+
+fn baseline_description(baseline: &BaselineRef) -> String {
+    if let Some(snapshot_id) = &baseline.snapshot_id {
+        return format!("snapshot {}", snapshot_id.0);
+    }
+    if let (Some(branch), Some(commit)) = (&baseline.branch, &baseline.commit) {
+        return format!("branch {branch} @ {commit}");
+    }
+    if let Some(branch) = &baseline.branch {
+        return format!("branch {branch}");
+    }
+    if let Some(commit) = &baseline.commit {
+        return format!("commit {commit}");
+    }
+    format!("latest {}", baseline.corpus.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{baseline_description, ExternalBaselineSource, ExternalBaselineState};
+    use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig};
+
+    #[test]
+    fn baseline_description_prefers_snapshot_id() {
+        let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snapshot-1");
+        assert_eq!(baseline_description(&baseline), "snapshot snapshot-1");
+    }
+
+    #[test]
+    fn external_baseline_probe_reports_connection_errors() {
+        let source = ExternalBaselineSource::new(
+            ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let status = source.probe_status();
+        assert_eq!(status.backend, "postgres");
+        assert!(matches!(status.state, ExternalBaselineState::Error(_)));
     }
 }

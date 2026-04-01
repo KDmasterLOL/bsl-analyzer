@@ -419,6 +419,60 @@ impl Store {
         Ok(count as usize)
     }
 
+    /// Load indexed documents, optionally filtered by collection.
+    pub fn load_indexed_documents(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
+        let query = if collection.is_some() {
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE f.collection = ?1
+             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+        } else {
+            "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+        };
+
+        let mut stmt = self.conn.prepare(query)?;
+        let rows = if let Some(collection) = collection {
+            stmt.query_map(params![collection], |row| {
+                let text: String = row.get(6)?;
+                Ok(crate::IndexedDocument {
+                    collection: row.get(0)?,
+                    path: row.get(1)?,
+                    symbol_name: row.get(2)?,
+                    kind: row.get(3)?,
+                    line_start: row.get::<_, i64>(4)? as u32,
+                    line_end: row.get::<_, i64>(5)? as u32,
+                    content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                    text,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| {
+                let text: String = row.get(6)?;
+                Ok(crate::IndexedDocument {
+                    collection: row.get(0)?,
+                    path: row.get(1)?,
+                    symbol_name: row.get(2)?,
+                    kind: row.get(3)?,
+                    line_start: row.get::<_, i64>(4)? as u32,
+                    line_end: row.get::<_, i64>(5)? as u32,
+                    content_hash: blake3::hash(text.as_bytes()).to_hex().to_string(),
+                    text,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
+    }
+
     /// Full-text search across chunk symbol names and text.
     ///
     /// If `collection` is `Some`, only searches within that collection.
@@ -744,5 +798,33 @@ mod tests {
 
         store.remove_file("test.bsl").unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn load_indexed_documents_filters_by_collection() {
+        let mut store = Store::in_memory().unwrap();
+        let code = crate::Chunker::chunk("Процедура Код()\nКонецПроцедуры");
+        store.reindex_file("A.bsl", b"hash-a", &code, None).unwrap();
+        store
+            .reindex_documents(
+                "platform",
+                "platform://docs",
+                b"hash-docs",
+                &[crate::Document {
+                    title: "Строка".to_owned(),
+                    body: "Описание".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let code_docs = store.load_indexed_documents(Some("code")).unwrap();
+        let platform_docs = store.load_indexed_documents(Some("platform")).unwrap();
+
+        assert_eq!(code_docs.len(), 1);
+        assert_eq!(code_docs[0].collection, "code");
+        assert_eq!(platform_docs.len(), 1);
+        assert_eq!(platform_docs[0].collection, "platform");
     }
 }

@@ -269,8 +269,9 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::search_status(&engine, &progress)
+                    tools::search::search_status(&engine, &progress, external_baseline)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -279,9 +280,12 @@ impl McpServer {
                 let query = require(p.query, "query", &p.action)?;
                 let limit = p.limit.unwrap_or(10).min(50);
                 let engine = self.state.search_engine().clone();
+                let external_baseline = self.state.external_baseline();
                 let action = p.action.clone();
                 tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_code" => tools::search::find_code(&engine, &query, limit),
+                    "find_code" => {
+                        tools::search::find_code(&engine, external_baseline, &query, limit)
+                    }
                     "search_code" => tools::search::search_code(&engine, &query, limit),
                     _ => unreachable!(),
                 })
@@ -459,8 +463,9 @@ impl McpServer {
             "status" => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
+                let external_baseline = self.state.external_baseline();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::search_status(&engine, &progress)
+                    tools::search::search_status(&engine, &progress, external_baseline)
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?

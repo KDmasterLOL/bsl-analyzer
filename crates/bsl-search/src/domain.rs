@@ -20,6 +20,15 @@ impl CorpusId {
             Self::Custom(id) => id.as_str(),
         }
     }
+
+    pub fn from_storage(id: impl Into<String>) -> Self {
+        let id = id.into();
+        match id.as_str() {
+            "workspace-code" => Self::WorkspaceCode,
+            "reference" => Self::Reference,
+            _ => Self::Custom(id),
+        }
+    }
 }
 
 impl fmt::Display for CorpusId {
@@ -50,6 +59,42 @@ pub struct BaselineRef {
 impl BaselineRef {
     pub fn for_snapshot(corpus: CorpusId, snapshot_id: impl Into<String>) -> Self {
         Self { corpus, snapshot_id: Some(SnapshotId::new(snapshot_id)), branch: None, commit: None }
+    }
+}
+
+/// Baseline source selection for a resolved search view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineSourceConfig {
+    Local,
+    External(ExternalBaselineConfig),
+}
+
+/// Supported backend types for centralized baseline storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalBaselineBackend {
+    Postgres,
+}
+
+/// External baseline connection configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalBaselineConfig {
+    pub backend: ExternalBaselineBackend,
+    pub connection: String,
+    pub schema: Option<String>,
+}
+
+impl ExternalBaselineConfig {
+    pub fn postgres(connection: impl Into<String>) -> Self {
+        Self {
+            backend: ExternalBaselineBackend::Postgres,
+            connection: connection.into(),
+            schema: None,
+        }
+    }
+
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
     }
 }
 

@@ -13,11 +13,15 @@ use crate::document::Document;
 use crate::embedder::{Embedder, EmbedderConfig};
 use crate::error::SearchError;
 use crate::index::VectorIndex;
+use crate::local_baseline::LocalStoreBaselineAdapter;
+use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
 use crate::store::Store;
 use crate::workspace_overlay::{
     lexical_hits, semantic_hits, WorkspaceOverlayCache, WorkspaceOverlayIndex,
     WorkspaceOverlayStats,
 };
+use crate::{BaselineOverlaySearchService, BaselineRef, CorpusId};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -648,6 +652,48 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// Materialize the current workspace code view from the persisted local
+    /// baseline plus the live workspace overlay.
+    ///
+    /// This does not replace the current search runtime yet. It provides a
+    /// real runtime integration point for the baseline + overlay architecture
+    /// so diagnostics and future backend switching can reuse the same flow.
+    pub fn resolve_workspace_code_view(&self) -> Result<Option<ResolvedView>, SearchError> {
+        self.resolve_workspace_code_view_with(
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline"),
+            LocalStoreBaselineAdapter::workspace_code(&self.store),
+            LocalStoreBaselineAdapter::workspace_code(&self.store),
+        )
+    }
+
+    /// Materialize the current workspace code view against an arbitrary
+    /// baseline source.
+    ///
+    /// This is the bridge between the local live overlay and pluggable
+    /// baseline backends such as SQLite today and PostgreSQL later.
+    pub fn resolve_workspace_code_view_with<C, S>(
+        &self,
+        baseline: BaselineRef,
+        catalog: C,
+        content_store: S,
+    ) -> Result<Option<ResolvedView>, SearchError>
+    where
+        C: SnapshotCatalog,
+        S: SnapshotContentStore,
+    {
+        if self.workspace_root.is_none() {
+            return Ok(None);
+        }
+
+        let overlay = self.workspace_overlay_snapshot(None)?;
+        let mut overlay = overlay.overlay;
+        overlay.baseline = baseline.clone();
+        let service =
+            BaselineOverlaySearchService::new(catalog, content_store, InMemoryResolvedViewResolver);
+
+        service.resolve_view(baseline, overlay)
+    }
+
     /// Semantic search, optionally filtered by collection.
     ///
     /// If `collection` is `None`, searches across all collections.
@@ -886,8 +932,41 @@ struct FileResult {
 #[cfg(test)]
 mod tests {
     use super::SearchEngine;
+    use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::fs;
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct TestCatalog {
+        snapshots: HashMap<String, Snapshot>,
+    }
+
+    impl SnapshotCatalog for TestCatalog {
+        fn resolve_baseline(
+            &self,
+            baseline: &BaselineRef,
+        ) -> Result<Option<Snapshot>, SearchError> {
+            let id = baseline.snapshot_id.as_ref().map(|id| id.0.as_str()).unwrap_or_default();
+            Ok(self.snapshots.get(id).cloned())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestContentStore {
+        documents: HashMap<String, Vec<IndexedDocument>>,
+    }
+
+    impl SnapshotContentStore for TestContentStore {
+        fn load_snapshot_documents(
+            &self,
+            snapshot: &Snapshot,
+        ) -> Result<Vec<IndexedDocument>, SearchError> {
+            Ok(self.documents.get(&snapshot.id.0).cloned().unwrap_or_default())
+        }
+    }
 
     #[test]
     fn text_search_sees_workspace_overlay_without_reindex() {
@@ -945,6 +1024,89 @@ mod tests {
         assert_eq!(stats.deleted_files, 0);
         assert_eq!(stats.hidden_paths, 1);
         assert_eq!(stats.lexical_chunks, 1);
+    }
+
+    #[test]
+    fn resolved_workspace_view_combines_local_baseline_with_overlay() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let changed = workspace.join("ChangedModule.bsl");
+        let stable = workspace.join("StableModule.bsl");
+        fs::write(&changed, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+        fs::write(&stable, "Процедура СтабильнаяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&changed, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let view = engine.resolve_workspace_code_view().unwrap().unwrap();
+        let symbols: HashSet<&str> =
+            view.documents().iter().map(|document| document.symbol_name.as_str()).collect();
+
+        assert!(symbols.contains("НоваяПроцедура"));
+        assert!(symbols.contains("СтабильнаяПроцедура"));
+        assert!(!symbols.contains("СтараяПроцедура"));
+    }
+
+    #[test]
+    fn resolved_workspace_view_can_target_explicit_baseline_snapshot() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let changed = workspace.join("ChangedModule.bsl");
+        fs::write(&changed, "Процедура ЛокальнаяВерсия()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+
+        fs::write(&changed, "Процедура OverlayВерсия()\nКонецПроцедуры").unwrap();
+
+        let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "external-main");
+        let snapshot = Snapshot::new("external-main", CorpusId::WorkspaceCode);
+        let mut catalog = TestCatalog::default();
+        catalog.snapshots.insert(snapshot.id.0.clone(), snapshot.clone());
+
+        let mut content_store = TestContentStore::default();
+        content_store.documents.insert(
+            snapshot.id.0.clone(),
+            vec![
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "ChangedModule.bsl".to_owned(),
+                    symbol_name: "БазоваяВерсия".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "базовая".to_owned(),
+                    content_hash: "base-changed".to_owned(),
+                },
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "StableModule.bsl".to_owned(),
+                    symbol_name: "СтабильноИзBaseline".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "stable".to_owned(),
+                    content_hash: "base-stable".to_owned(),
+                },
+            ],
+        );
+
+        let view = engine
+            .resolve_workspace_code_view_with(baseline, catalog, content_store)
+            .unwrap()
+            .unwrap();
+        let symbols: HashSet<&str> =
+            view.documents().iter().map(|document| document.symbol_name.as_str()).collect();
+
+        assert!(symbols.contains("OverlayВерсия"));
+        assert!(symbols.contains("СтабильноИзBaseline"));
+        assert!(!symbols.contains("БазоваяВерсия"));
     }
 
     #[test]

@@ -1,15 +1,19 @@
 //! Search tools: full-text and semantic search across code and documentation.
 
-use bsl_search::{IndexProgress, SearchEngine};
+use crate::state::{ExternalBaselineSource, ExternalBaselineState};
+use bsl_search::{lexical_hits_for_resolved_view, IndexProgress, SearchEngine};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 /// Full-text search across indexed BSL code.
 pub fn find_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
@@ -22,9 +26,24 @@ pub fn find_code(
     }
     let engine = guard.as_ref().expect("checked above");
 
-    let hits = engine
-        .text_search(query, limit, Some("code"))
-        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+    let hits = if let Some(source) = external_baseline {
+        match source.resolve_workspace_view(engine) {
+            Ok(Some(view)) => lexical_hits_for_resolved_view(&view, query, limit, Some("code")),
+            Ok(None) => engine
+                .text_search(query, limit, Some("code"))
+                .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?,
+            Err(error) => {
+                warn!("failed to resolve external baseline view for lexical search: {error}");
+                engine
+                    .text_search(query, limit, Some("code"))
+                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+            }
+        }
+    } else {
+        engine
+            .text_search(query, limit, Some("code"))
+            .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+    };
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
@@ -131,6 +150,7 @@ pub fn search_docs(
 pub fn search_status(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     progress: &Arc<IndexProgress>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
 ) -> Result<CallToolResult, McpError> {
     let mut out = String::new();
 
@@ -160,11 +180,33 @@ pub fn search_status(
         );
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
+        let code_lexical_source = if let Some(source) = external_baseline.as_ref() {
+            match source.resolve_workspace_view(engine) {
+                Ok(Some(_)) => "external baseline + local overlay",
+                Ok(None) => "local sqlite + local overlay",
+                Err(_) => "local sqlite + local overlay",
+            }
+        } else {
+            "local sqlite + local overlay"
+        };
+        let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
 
         if let Some(overlay) = engine
             .workspace_overlay_stats()
             .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?
         {
+            if let Some(view) = engine.resolve_workspace_code_view().map_err(|e| {
+                McpError::internal_error(format!("resolved workspace view error: {e}"), None)
+            })? {
+                let files: HashSet<&str> =
+                    view.documents().iter().map(|document| document.path.as_str()).collect();
+                let _ = writeln!(out);
+                let _ = writeln!(out, "Resolved workspace view: ready");
+                let _ = writeln!(out, "  Baseline: {}", format_baseline_ref(view.baseline()));
+                let _ = writeln!(out, "  Files:    {}", files.len());
+                let _ = writeln!(out, "  Chunks:   {}", view.documents().len());
+            }
+
             let _ = writeln!(out);
             let _ = writeln!(out, "Workspace overlay: enabled");
             let _ = writeln!(out, "  Files:    {}", overlay.overlay_files);
@@ -182,6 +224,51 @@ pub fn search_status(
         }
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
+    }
+
+    if let Some(external_baseline) = external_baseline {
+        let status = external_baseline.probe_status();
+        let _ = writeln!(out);
+        let _ = writeln!(out, "External baseline: configured");
+        let _ = writeln!(out, "  Backend:  {}", status.backend);
+        let _ = writeln!(out, "  Schema:   {}", status.schema);
+        let _ = writeln!(out, "  Select:   {}", status.selection);
+        match status.state {
+            ExternalBaselineState::Ready { snapshot_id, documents, files } => {
+                let _ = writeln!(out, "  Status:   ready");
+                let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
+                let _ = writeln!(out, "  Files:    {}", files);
+                let _ = writeln!(out, "  Chunks:   {}", documents);
+                if let Some(engine) = guard.as_ref() {
+                    match external_baseline.resolve_workspace_view(engine) {
+                        Ok(Some(view)) => {
+                            let resolved_files: HashSet<&str> = view
+                                .documents()
+                                .iter()
+                                .map(|document| document.path.as_str())
+                                .collect();
+                            let _ = writeln!(out, "  Resolved view: ready");
+                            let _ = writeln!(out, "  Resolved files: {}", resolved_files.len());
+                            let _ = writeln!(out, "  Resolved chunks: {}", view.documents().len());
+                        }
+                        Ok(None) => {
+                            let _ = writeln!(out, "  Resolved view: unavailable");
+                        }
+                        Err(error) => {
+                            let _ = writeln!(out, "  Resolved view: error");
+                            let _ = writeln!(out, "  Resolved error: {}", error);
+                        }
+                    }
+                }
+            }
+            ExternalBaselineState::Missing => {
+                let _ = writeln!(out, "  Status:   not found");
+            }
+            ExternalBaselineState::Error(error) => {
+                let _ = writeln!(out, "  Status:   error");
+                let _ = writeln!(out, "  Error:    {}", error);
+            }
+        }
     }
 
     if progress.is_active() {
@@ -251,10 +338,29 @@ fn format_doc_hits(hits: &[bsl_search::SearchHit]) -> String {
     out
 }
 
+fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
+    if let Some(snapshot_id) = &baseline.snapshot_id {
+        return format!("snapshot {}", snapshot_id.0);
+    }
+    if let (Some(branch), Some(commit)) = (&baseline.branch, &baseline.commit) {
+        return format!("branch {branch} @ {commit}");
+    }
+    if let Some(branch) = &baseline.branch {
+        return format!("branch {branch}");
+    }
+    if let Some(commit) = &baseline.commit {
+        return format!("commit {commit}");
+    }
+    format!("latest {}", baseline.corpus.as_str())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::search_status;
-    use bsl_search::{IndexProgress, SearchEngine};
+    use super::{search_status, ExternalBaselineSource};
+    use bsl_search::{
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, IndexProgress, IndexedDocument,
+        ResolvedView, SearchEngine,
+    };
     use std::fs;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
@@ -273,13 +379,80 @@ mod tests {
 
         fs::write(&file, "Процедура НоваяПроцедура()\nКонецПроцедуры").unwrap();
 
-        let result =
-            search_status(&Arc::new(Mutex::new(Some(engine))), &Arc::new(IndexProgress::default()))
-                .unwrap();
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            None,
+        )
+        .unwrap();
         let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
 
+        assert!(text.contains("Code lexical source: local sqlite + local overlay"));
+        assert!(text.contains("Resolved workspace view: ready"));
+        assert!(text.contains("Baseline: snapshot local-workspace-baseline"));
         assert!(text.contains("Workspace overlay: enabled"));
         assert!(text.contains("Files:    1"));
         assert!(text.contains("Chunks:   1"));
+    }
+
+    #[test]
+    fn search_status_shows_external_baseline_probe_errors() {
+        let source = ExternalBaselineSource::new(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            bsl_search::BaselineRef {
+                corpus: bsl_search::CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(IndexProgress::default()),
+            Some(Arc::new(source)),
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("External baseline: configured"));
+        assert!(text.contains("Backend:  postgres"));
+        assert!(text.contains("Status:   error"));
+    }
+
+    #[test]
+    fn resolved_view_lexical_search_returns_exact_match_first() {
+        let view = ResolvedView::new(
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snapshot-1"),
+            vec![
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "A.bsl".to_owned(),
+                    symbol_name: "НайтиПроцедуру".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "body".to_owned(),
+                    content_hash: "a".to_owned(),
+                },
+                IndexedDocument {
+                    collection: "code".to_owned(),
+                    path: "B.bsl".to_owned(),
+                    symbol_name: "Другая".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: "внутри НайтиПроцедуру".to_owned(),
+                    content_hash: "b".to_owned(),
+                },
+            ],
+        );
+
+        let hits = lexical_hits_for_resolved_view(&view, "НайтиПроцедуру", 10, Some("code"));
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].file_path, "A.bsl");
+        assert!(hits[0].score > hits[1].score);
     }
 }
