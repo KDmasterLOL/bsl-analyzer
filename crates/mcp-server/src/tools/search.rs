@@ -89,21 +89,47 @@ pub fn search_code(
 /// Full-text search across platform documentation (types, methods, global functions).
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    external_baseline: Option<Arc<ExternalBaselineSource>>,
     query: &str,
     limit: usize,
 ) -> Result<CallToolResult, McpError> {
     let guard =
         engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    if guard.is_none() {
-        return Ok(CallToolResult::success(vec![Content::text(
-            "Search index is being built, please try again in a moment.",
-        )]));
-    }
-    let engine = guard.as_ref().expect("checked above");
-
-    let hits = engine
-        .text_search(query, limit, Some("platform"))
-        .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
+    let hits = if let Some(source) = external_baseline {
+        match source.resolve_reference_view() {
+            Ok(Some(view)) => lexical_hits_for_resolved_view(&view, query, limit, Some("platform")),
+            Ok(None) => {
+                let Some(engine) = guard.as_ref() else {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "Search index is being built, please try again in a moment.",
+                    )]));
+                };
+                engine
+                    .text_search(query, limit, Some("platform"))
+                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+            }
+            Err(error) => {
+                warn!("failed to resolve external reference baseline view for lexical search: {error}");
+                let Some(engine) = guard.as_ref() else {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "Search index is being built, please try again in a moment.",
+                    )]));
+                };
+                engine
+                    .text_search(query, limit, Some("platform"))
+                    .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+            }
+        }
+    } else {
+        let Some(engine) = guard.as_ref() else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Search index is being built, please try again in a moment.",
+            )]));
+        };
+        engine
+            .text_search(query, limit, Some("platform"))
+            .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
+    };
 
     if hits.is_empty() {
         return Ok(CallToolResult::success(vec![Content::text("No results found.")]));
@@ -180,21 +206,36 @@ pub fn search_status(
         );
         let _ = writeln!(out, "  FTS:      {}", if chunks > 0 { "available" } else { "empty" });
         let _ = writeln!(out, "  Collections: code, platform");
-        let code_lexical_source = if let Some(source) = external_baseline.as_ref() {
-            match source.resolve_workspace_view(engine) {
-                Ok(Some(_)) => "external baseline + local overlay",
-                Ok(None) => "local sqlite + local overlay",
-                Err(_) => "local sqlite + local overlay",
-            }
-        } else {
-            "local sqlite + local overlay"
-        };
-        let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
-
-        if let Some(overlay) = engine
+        let workspace_overlay = engine
             .workspace_overlay_stats()
-            .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?
-        {
+            .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
+        if let Some(source) = external_baseline.as_ref() {
+            match source.corpus() {
+                bsl_search::CorpusId::WorkspaceCode => {
+                    let code_lexical_source = match source.resolve_workspace_view(engine) {
+                        Ok(Some(_)) => "external baseline + local overlay",
+                        Ok(None) => "local sqlite + local overlay",
+                        Err(_) => "local sqlite + local overlay",
+                    };
+                    let _ = writeln!(out, "  Code lexical source: {code_lexical_source}");
+                }
+                bsl_search::CorpusId::Reference => {
+                    let docs_lexical_source = match source.resolve_reference_view() {
+                        Ok(Some(_)) => "external baseline",
+                        Ok(None) => "local sqlite",
+                        Err(_) => "local sqlite",
+                    };
+                    let _ = writeln!(out, "  Docs lexical source: {docs_lexical_source}");
+                }
+                bsl_search::CorpusId::Custom(_) => {}
+            }
+        } else if workspace_overlay.is_some() {
+            let _ = writeln!(out, "  Code lexical source: local sqlite + local overlay");
+        } else {
+            let _ = writeln!(out, "  Docs lexical source: local sqlite");
+        }
+
+        if let Some(overlay) = workspace_overlay {
             if let Some(view) = engine.resolve_workspace_code_view().map_err(|e| {
                 McpError::internal_error(format!("resolved workspace view error: {e}"), None)
             })? {
@@ -239,8 +280,38 @@ pub fn search_status(
                 let _ = writeln!(out, "  Snapshot: {}", snapshot_id);
                 let _ = writeln!(out, "  Files:    {}", files);
                 let _ = writeln!(out, "  Chunks:   {}", documents);
-                if let Some(engine) = guard.as_ref() {
-                    match external_baseline.resolve_workspace_view(engine) {
+                match external_baseline.corpus() {
+                    bsl_search::CorpusId::WorkspaceCode => {
+                        if let Some(engine) = guard.as_ref() {
+                            match external_baseline.resolve_workspace_view(engine) {
+                                Ok(Some(view)) => {
+                                    let resolved_files: HashSet<&str> = view
+                                        .documents()
+                                        .iter()
+                                        .map(|document| document.path.as_str())
+                                        .collect();
+                                    let _ = writeln!(out, "  Resolved view: ready");
+                                    let _ =
+                                        writeln!(out, "  Resolved files: {}", resolved_files.len());
+                                    let _ = writeln!(
+                                        out,
+                                        "  Resolved chunks: {}",
+                                        view.documents().len()
+                                    );
+                                }
+                                Ok(None) => {
+                                    let _ = writeln!(out, "  Resolved view: unavailable");
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(out, "  Resolved view: error");
+                                    let _ = writeln!(out, "  Resolved error: {}", error);
+                                }
+                            }
+                        }
+                    }
+                    bsl_search::CorpusId::Reference => match external_baseline
+                        .resolve_reference_view()
+                    {
                         Ok(Some(view)) => {
                             let resolved_files: HashSet<&str> = view
                                 .documents()
@@ -258,7 +329,8 @@ pub fn search_status(
                             let _ = writeln!(out, "  Resolved view: error");
                             let _ = writeln!(out, "  Resolved error: {}", error);
                         }
-                    }
+                    },
+                    bsl_search::CorpusId::Custom(_) => {}
                 }
             }
             ExternalBaselineState::Missing => {
@@ -358,8 +430,8 @@ fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
 mod tests {
     use super::{search_status, ExternalBaselineSource};
     use bsl_search::{
-        lexical_hits_for_resolved_view, BaselineRef, CorpusId, IndexProgress, IndexedDocument,
-        ResolvedView, SearchEngine,
+        lexical_hits_for_resolved_view, BaselineRef, CorpusId, Document, IndexProgress,
+        IndexedDocument, ResolvedView, SearchEngine,
     };
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -419,6 +491,36 @@ mod tests {
         assert!(text.contains("External baseline: configured"));
         assert!(text.contains("Backend:  postgres"));
         assert!(text.contains("Status:   error"));
+    }
+
+    #[test]
+    fn search_status_shows_reference_docs_source() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .index_documents(
+                "platform",
+                "platform://docs",
+                b"v1",
+                &[Document {
+                    title: "Массив / Array".to_owned(),
+                    body: "Тип: Массив / Array".to_owned(),
+                    kind: "type".to_owned(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let result = search_status(
+            &Arc::new(Mutex::new(Some(engine))),
+            &Arc::new(IndexProgress::default()),
+            None,
+        )
+        .unwrap();
+        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+
+        assert!(text.contains("Docs lexical source: local sqlite"));
     }
 
     #[test]

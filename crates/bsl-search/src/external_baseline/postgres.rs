@@ -1,6 +1,6 @@
 use crate::domain::{BaselineRef, CorpusId, ExternalBaselineConfig, IndexedDocument, Snapshot};
 use crate::error::SearchError;
-use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 use postgres::{Client, NoTls, Row};
 
 /// PostgreSQL adapter for centralized baseline storage.
@@ -64,6 +64,62 @@ impl PostgresBaselineAdapter {
             self.table("snapshots"),
             with_filter
         )
+    }
+
+    fn ensure_schema_statements(&self) -> Vec<String> {
+        vec![
+            format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    id TEXT PRIMARY KEY,
+                    corpus TEXT NOT NULL,
+                    branch TEXT NULL,
+                    commit_sha TEXT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )",
+                self.table("snapshots")
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    content_hash TEXT PRIMARY KEY,
+                    text TEXT NOT NULL
+                )",
+                self.table("content_objects")
+            ),
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (
+                    snapshot_id TEXT NOT NULL REFERENCES {}(id) ON DELETE CASCADE,
+                    collection TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    symbol_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL REFERENCES {}(content_hash) ON DELETE RESTRICT
+                )",
+                self.table("snapshot_items"),
+                self.table("snapshots"),
+                self.table("content_objects")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_corpus_created_at
+                 ON {} (corpus, created_at DESC)",
+                self.schema,
+                self.table("snapshots")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_snapshots_branch_commit
+                 ON {} (corpus, branch, commit_sha, created_at DESC)",
+                self.schema,
+                self.table("snapshots")
+            ),
+            format!(
+                "CREATE INDEX IF NOT EXISTS idx_{}_snapshot_items_snapshot_path
+                 ON {} (snapshot_id, collection, path)",
+                self.schema,
+                self.table("snapshot_items")
+            ),
+        ]
     }
 }
 
@@ -140,6 +196,80 @@ impl SnapshotContentStore for PostgresBaselineAdapter {
     }
 }
 
+impl SnapshotPublisher for PostgresBaselineAdapter {
+    fn ensure_storage(&self) -> Result<(), SearchError> {
+        let mut client = self.connect()?;
+        for statement in self.ensure_schema_statements() {
+            client.batch_execute(&statement)?;
+        }
+        Ok(())
+    }
+
+    fn publish_snapshot(
+        &self,
+        snapshot: &Snapshot,
+        branch: Option<&str>,
+        commit: Option<&str>,
+        documents: &[IndexedDocument],
+    ) -> Result<(), SearchError> {
+        self.ensure_storage()?;
+
+        let mut client = self.connect()?;
+        let mut tx = client.transaction()?;
+
+        let upsert_snapshot = format!(
+            "INSERT INTO {} (id, corpus, branch, commit_sha)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE SET
+                corpus = EXCLUDED.corpus,
+                branch = EXCLUDED.branch,
+                commit_sha = EXCLUDED.commit_sha",
+            self.table("snapshots")
+        );
+        tx.execute(
+            &upsert_snapshot,
+            &[&snapshot.id.0, &snapshot.corpus.as_str(), &branch, &commit],
+        )?;
+
+        let delete_items =
+            format!("DELETE FROM {} WHERE snapshot_id = $1", self.table("snapshot_items"));
+        tx.execute(&delete_items, &[&snapshot.id.0])?;
+
+        let upsert_content = format!(
+            "INSERT INTO {} (content_hash, text)
+             VALUES ($1, $2)
+             ON CONFLICT (content_hash) DO UPDATE SET text = EXCLUDED.text",
+            self.table("content_objects")
+        );
+        let insert_item = format!(
+            "INSERT INTO {} (
+                snapshot_id, collection, path, symbol_name, kind, line_start, line_end, content_hash
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            self.table("snapshot_items")
+        );
+
+        for document in documents {
+            tx.execute(&upsert_content, &[&document.content_hash, &document.text])?;
+            tx.execute(
+                &insert_item,
+                &[
+                    &snapshot.id.0,
+                    &document.collection,
+                    &document.path,
+                    &document.symbol_name,
+                    &document.kind,
+                    &(document.line_start as i32),
+                    &(document.line_end as i32),
+                    &document.content_hash,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+}
+
 fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
     if identifier.is_empty()
         || !identifier.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
@@ -155,7 +285,7 @@ fn validate_identifier(identifier: &str) -> Result<(), SearchError> {
 mod tests {
     use super::PostgresBaselineAdapter;
     use crate::domain::{CorpusId, ExternalBaselineConfig};
-    use crate::ports::SnapshotCatalog;
+    use crate::ports::{SnapshotCatalog, SnapshotPublisher};
     use crate::BaselineRef;
 
     #[test]
@@ -187,6 +317,17 @@ mod tests {
         let baseline = BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snapshot-1");
 
         let error = adapter.resolve_baseline(&baseline).unwrap_err();
+        assert!(error.to_string().contains("postgres"));
+    }
+
+    #[test]
+    fn connection_errors_surface_from_storage_initialization() {
+        let adapter = PostgresBaselineAdapter::new(ExternalBaselineConfig::postgres(
+            "postgres://127.0.0.1:1",
+        ))
+        .unwrap();
+
+        let error = adapter.ensure_storage().unwrap_err();
         assert!(error.to_string().contains("postgres"));
     }
 }

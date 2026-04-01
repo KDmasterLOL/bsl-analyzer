@@ -136,6 +136,7 @@ impl SharedState {
     pub fn reference() -> Self {
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
+        let external_baseline = Self::reference_external_baseline_source_from_env();
 
         {
             let engine_arc = Arc::clone(&search_engine);
@@ -161,7 +162,7 @@ impl SharedState {
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
             index_progress,
-            external_baseline: None,
+            external_baseline,
         }
     }
 
@@ -562,39 +563,62 @@ impl SharedState {
     }
 
     fn external_baseline_source_from_env() -> Option<Arc<ExternalBaselineSource>> {
-        let connection = match env::var("BSL_SEARCH_BASELINE_PG_URL") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return None,
-        };
+        Self::external_baseline_source_from_env_for_corpus(
+            CorpusId::WorkspaceCode,
+            "BSL_SEARCH_BASELINE",
+            &["BSL_SEARCH_BASELINE_PG_URL"],
+            &["BSL_SEARCH_BASELINE_PG_SCHEMA"],
+        )
+    }
+
+    fn reference_external_baseline_source_from_env() -> Option<Arc<ExternalBaselineSource>> {
+        Self::external_baseline_source_from_env_for_corpus(
+            CorpusId::Reference,
+            "BSL_SEARCH_REFERENCE",
+            &["BSL_SEARCH_REFERENCE_PG_URL", "BSL_SEARCH_BASELINE_PG_URL"],
+            &["BSL_SEARCH_REFERENCE_PG_SCHEMA", "BSL_SEARCH_BASELINE_PG_SCHEMA"],
+        )
+    }
+
+    fn external_baseline_source_from_env_for_corpus(
+        corpus: CorpusId,
+        selection_prefix: &str,
+        connection_keys: &[&str],
+        schema_keys: &[&str],
+    ) -> Option<Arc<ExternalBaselineSource>> {
+        let connection = connection_keys
+            .iter()
+            .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))?;
 
         let mut config = ExternalBaselineConfig::postgres(connection);
-        if let Ok(schema) = env::var("BSL_SEARCH_BASELINE_PG_SCHEMA") {
-            if !schema.trim().is_empty() {
-                config = config.with_schema(schema);
-            }
+        if let Some(schema) = schema_keys
+            .iter()
+            .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))
+        {
+            config = config.with_schema(schema);
         }
 
         let baseline = BaselineRef {
-            corpus: CorpusId::WorkspaceCode,
-            snapshot_id: env::var("BSL_SEARCH_BASELINE_SNAPSHOT_ID")
+            corpus: corpus.clone(),
+            snapshot_id: env::var(format!("{selection_prefix}_SNAPSHOT_ID"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(bsl_search::SnapshotId::new),
-            branch: env::var("BSL_SEARCH_BASELINE_BRANCH")
+            branch: env::var(format!("{selection_prefix}_BRANCH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            commit: env::var("BSL_SEARCH_BASELINE_COMMIT")
+            commit: env::var(format!("{selection_prefix}_COMMIT"))
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
         };
 
         match ExternalBaselineSource::new(config, baseline) {
             Ok(source) => {
-                tracing::info!("external baseline source configured");
+                tracing::info!(corpus = %corpus, "external baseline source configured");
                 Some(Arc::new(source))
             }
             Err(error) => {
-                tracing::warn!("failed to configure external baseline source: {error}");
+                tracing::warn!(corpus = %corpus, "failed to configure external baseline source: {error}");
                 None
             }
         }
@@ -732,6 +756,21 @@ impl ExternalBaselineSource {
             self.adapter.clone(),
             self.adapter.clone(),
         )
+    }
+
+    pub(crate) fn resolve_reference_view(
+        &self,
+    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
+        let Some(snapshot) = self.adapter.resolve_baseline(&self.baseline)? else {
+            return Ok(None);
+        };
+        let documents = self.adapter.load_snapshot_documents(&snapshot)?;
+        let baseline = BaselineRef::for_snapshot(snapshot.corpus.clone(), snapshot.id.0.clone());
+        Ok(Some(ResolvedView::new(baseline, documents)))
+    }
+
+    pub(crate) fn corpus(&self) -> &CorpusId {
+        &self.baseline.corpus
     }
 }
 

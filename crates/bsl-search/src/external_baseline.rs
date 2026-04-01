@@ -2,7 +2,7 @@ use crate::domain::{
     BaselineRef, ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, Snapshot,
 };
 use crate::error::SearchError;
-use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+use crate::ports::{SnapshotCatalog, SnapshotContentStore, SnapshotPublisher};
 
 mod postgres;
 
@@ -47,6 +47,28 @@ impl SnapshotContentStore for ExternalBaselineAdapter {
     ) -> Result<Vec<IndexedDocument>, SearchError> {
         match self {
             Self::Postgres(adapter) => adapter.load_snapshot_documents(snapshot),
+        }
+    }
+}
+
+impl SnapshotPublisher for ExternalBaselineAdapter {
+    fn ensure_storage(&self) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => adapter.ensure_storage(),
+        }
+    }
+
+    fn publish_snapshot(
+        &self,
+        snapshot: &Snapshot,
+        branch: Option<&str>,
+        commit: Option<&str>,
+        documents: &[IndexedDocument],
+    ) -> Result<(), SearchError> {
+        match self {
+            Self::Postgres(adapter) => {
+                adapter.publish_snapshot(snapshot, branch, commit, documents)
+            }
         }
     }
 }

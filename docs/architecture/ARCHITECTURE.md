@@ -195,6 +195,7 @@ File Change → VFS → Salsa Invalidation → Recompute affected queries only
 этап архитектуры описан в отдельном ADR:
 
 - [Search Baseline + Overlay](./SEARCH_BASELINE_OVERLAY.md)
+- [Search Baseline Publishing](./SEARCH_BASELINE_PUBLISHING.md)
 
 Цель этой модели:
 

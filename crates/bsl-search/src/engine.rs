@@ -889,6 +889,14 @@ impl SearchEngine {
         self.store.embedding_count_by_collection(collection)
     }
 
+    /// Export indexed documents, optionally filtered by collection.
+    pub fn load_indexed_documents(
+        &self,
+        collection: Option<&str>,
+    ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
+        self.store.load_indexed_documents(collection)
+    }
+
     /// Clear file hashes for a collection (forces re-indexing).
     pub fn clear_file_hashes(&self, collection: &str) -> Result<usize, SearchError> {
         self.store.clear_file_hashes(collection)

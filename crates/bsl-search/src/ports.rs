@@ -16,6 +16,19 @@ pub trait SnapshotContentStore {
     ) -> Result<Vec<IndexedDocument>, SearchError>;
 }
 
+/// Publishes immutable baseline snapshots into a backing store.
+pub trait SnapshotPublisher {
+    fn ensure_storage(&self) -> Result<(), SearchError>;
+
+    fn publish_snapshot(
+        &self,
+        snapshot: &Snapshot,
+        branch: Option<&str>,
+        commit: Option<&str>,
+        documents: &[IndexedDocument],
+    ) -> Result<(), SearchError>;
+}
+
 /// Builds a local overlay relative to the selected baseline.
 pub trait OverlayBuilder {
     fn build_overlay(

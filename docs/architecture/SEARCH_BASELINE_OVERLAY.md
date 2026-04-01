@@ -1,6 +1,6 @@
 # Architecture Decision Record: Search Baseline + Overlay Model
 
-**Status**: Proposed
+**Status**: In Progress
 **Date**: 2026-04-01
 **Authors**: Codex + User
 
@@ -62,17 +62,19 @@ Introduce a search architecture based on `baseline + overlay + resolved view`.
   Final visible set of searchable documents after applying overlay changes to a
   baseline.
 
-### First-iteration storage strategy
+### Current implementation state
 
-The first iteration does not add PostgreSQL yet. It introduces:
+The current iteration already includes:
 
 - domain types for snapshots and overlays;
-- ports for future storage adapters;
+- ports for storage-agnostic baseline access and publishing;
 - an in-memory resolver that merges baseline documents and overlay changes;
-- tests for merge semantics.
+- local SQLite baseline adapters;
+- PostgreSQL baseline read adapters;
+- CLI publishing of full snapshots into PostgreSQL.
 
-The existing SQLite implementation remains the only concrete storage backend in
-production for now.
+The default standalone developer path still uses local SQLite. PostgreSQL is an
+additional backend for shared baseline scenarios.
 
 ## Architectural boundaries
 

@@ -169,6 +169,12 @@ enum Commands {
     /// Start DAP debug adapter (Debug Adapter Protocol via stdio)
     Dap,
 
+    /// Search infrastructure commands
+    Search {
+        #[command(subcommand)]
+        command: SearchCommand,
+    },
+
     /// Export diagnostic rules metadata
     Rules {
         #[command(subcommand)]
@@ -183,6 +189,62 @@ enum McpCommand {
 
     /// Install MCP config into supported AI tools
     Install(McpInstallArgs),
+}
+
+#[derive(Subcommand)]
+enum SearchCommand {
+    /// Baseline storage operations for centralized search
+    Baseline {
+        #[command(subcommand)]
+        command: SearchBaselineCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SearchBaselineCommand {
+    /// Build a local code snapshot and publish it into PostgreSQL
+    SyncPg(SearchBaselineSyncPgArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SearchBaselineCorpusCli {
+    WorkspaceCode,
+    Reference,
+}
+
+#[derive(Args, Clone)]
+struct SearchBaselineSyncPgArgs {
+    /// Corpus to publish into centralized baseline storage
+    #[arg(long, value_enum, default_value_t = SearchBaselineCorpusCli::WorkspaceCode)]
+    corpus: SearchBaselineCorpusCli,
+
+    /// Source directory containing 1C configuration (with Configuration.xml)
+    #[arg(short = 's', long = "source-dir", default_value = ".")]
+    source_dir: PathBuf,
+
+    /// PostgreSQL connection string for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_URL.
+    #[arg(long = "pg-url")]
+    pg_url: Option<String>,
+
+    /// PostgreSQL schema for centralized baseline storage.
+    /// Falls back to BSL_SEARCH_BASELINE_PG_SCHEMA.
+    #[arg(long = "pg-schema")]
+    pg_schema: Option<String>,
+
+    /// Immutable snapshot identifier. Optional when --branch/--commit are provided.
+    #[arg(long = "snapshot-id")]
+    snapshot_id: Option<String>,
+
+    /// Optional branch name associated with the snapshot.
+    /// Falls back to CI_COMMIT_BRANCH or CI_COMMIT_REF_NAME.
+    #[arg(long)]
+    branch: Option<String>,
+
+    /// Optional commit SHA associated with the snapshot.
+    /// Falls back to CI_COMMIT_SHA or GITHUB_SHA.
+    #[arg(long)]
+    commit: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -398,6 +460,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Commands::Mcp { command }) => run_mcp_command(command),
         Some(Commands::Extension { command }) => run_extension_command(command),
         Some(Commands::Dap) => run_dap_server(),
+        Some(Commands::Search { command }) => run_search_command(command),
         Some(Commands::Rules { command }) => run_rules_command(command),
         Some(Commands::Lsp) | None => run_lsp_server(),
     }
@@ -407,6 +470,14 @@ fn run_mcp_command(command: McpCommand) -> Result<(), Box<dyn Error + Send + Syn
     match command {
         McpCommand::Serve(args) => run_mcp_serve(args),
         McpCommand::Install(args) => run_mcp_install(args),
+    }
+}
+
+fn run_search_command(command: SearchCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match command {
+        SearchCommand::Baseline { command } => match command {
+            SearchBaselineCommand::SyncPg(args) => run_search_baseline_sync_pg(args),
+        },
     }
 }
 
@@ -545,6 +616,232 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
     }
 
     Ok(())
+}
+
+fn run_search_baseline_sync_pg(
+    args: SearchBaselineSyncPgArgs,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    use bsl_search::{
+        CorpusId, ExternalBaselineAdapter, ExternalBaselineConfig, Snapshot, SnapshotPublisher,
+    };
+
+    let project = project_model::Project::new(&args.source_dir);
+    let source_path = project.source_path().to_path_buf();
+    let branch = pick_first_non_empty([
+        args.branch.as_deref(),
+        env::var("CI_COMMIT_BRANCH").ok().as_deref(),
+        env::var("CI_COMMIT_REF_NAME").ok().as_deref(),
+    ]);
+    let commit = pick_first_non_empty([
+        args.commit.as_deref(),
+        env::var("CI_COMMIT_SHA").ok().as_deref(),
+        env::var("GITHUB_SHA").ok().as_deref(),
+    ]);
+    let corpus = match args.corpus {
+        SearchBaselineCorpusCli::WorkspaceCode => CorpusId::WorkspaceCode,
+        SearchBaselineCorpusCli::Reference => CorpusId::Reference,
+    };
+    let snapshot_id = resolve_snapshot_id(
+        &corpus,
+        args.snapshot_id.as_deref(),
+        branch.as_deref(),
+        commit.as_deref(),
+    )?;
+    let pg_url = pick_first_non_empty([
+        args.pg_url.as_deref(),
+        env::var("BSL_SEARCH_BASELINE_PG_URL").ok().as_deref(),
+    ])
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--pg-url or BSL_SEARCH_BASELINE_PG_URL is required",
+        )
+    })?;
+    let pg_schema = pick_first_non_empty([
+        args.pg_schema.as_deref(),
+        env::var("BSL_SEARCH_BASELINE_PG_SCHEMA").ok().as_deref(),
+    ]);
+
+    let (indexed_files, documents) = match corpus {
+        CorpusId::WorkspaceCode => build_workspace_code_baseline_documents(&source_path)?,
+        CorpusId::Reference => build_reference_baseline_documents()?,
+        CorpusId::Custom(_) => unreachable!("CLI corpus variants are exhaustive"),
+    };
+
+    if documents.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("no documents were indexed for corpus {}", corpus.as_str()),
+        )
+        .into());
+    }
+
+    let mut config = ExternalBaselineConfig::postgres(pg_url);
+    if let Some(schema) = pg_schema {
+        config = config.with_schema(schema);
+    }
+
+    let adapter = ExternalBaselineAdapter::new(config)?;
+    let snapshot = Snapshot::new(snapshot_id, corpus.clone());
+    adapter.ensure_storage()?;
+    adapter.publish_snapshot(&snapshot, branch.as_deref(), commit.as_deref(), &documents)?;
+
+    println!(
+        "Published snapshot '{}' to PostgreSQL: indexed_files={}, files={}, chunks={}",
+        snapshot.id.0,
+        indexed_files,
+        documents
+            .iter()
+            .map(|document| document.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        documents.len(),
+    );
+
+    Ok(())
+}
+
+fn resolve_snapshot_id(
+    corpus: &bsl_search::CorpusId,
+    snapshot_id: Option<&str>,
+    branch: Option<&str>,
+    commit: Option<&str>,
+) -> Result<String, io::Error> {
+    if let Some(snapshot_id) = snapshot_id.filter(|value| !value.trim().is_empty()) {
+        return Ok(snapshot_id.to_owned());
+    }
+
+    let prefix = corpus.as_str();
+    match (
+        branch.filter(|value| !value.trim().is_empty()),
+        commit.filter(|value| !value.trim().is_empty()),
+    ) {
+        (Some(branch), Some(commit)) => Ok(format!("{prefix}:{branch}@{commit}")),
+        (None, Some(commit)) => Ok(format!("{prefix}:{commit}")),
+        _ if matches!(corpus, bsl_search::CorpusId::Reference) => {
+            Ok(format!("reference:{}", env!("CARGO_PKG_VERSION")))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--snapshot-id is required unless --commit is provided",
+        )),
+    }
+}
+
+fn pick_first_non_empty<'a>(
+    candidates: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn build_workspace_code_baseline_documents(
+    source_path: &std::path::Path,
+) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+    use bsl_search::SearchEngine;
+
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("baseline-sync.db");
+    let mut engine = SearchEngine::fts_only(&db_path)?;
+    let indexed_files = engine.index_directory_fts(source_path)?;
+    let documents = engine.load_indexed_documents(Some("code"))?;
+    Ok((indexed_files, documents))
+}
+
+fn build_reference_baseline_documents(
+) -> Result<(usize, Vec<bsl_search::IndexedDocument>), Box<dyn Error + Send + Sync>> {
+    use bsl_platform::PlatformDataInner;
+    use bsl_search::{Document, SearchEngine};
+
+    let platform = PlatformDataInner::instance();
+    let mut documents = Vec::new();
+
+    for ty in platform.all_types() {
+        let methods = platform.get_type_methods(&ty.name);
+        let method_list: String = methods
+            .iter()
+            .map(|method| format!("{} / {}", method.name, method.english_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        documents.push(Document {
+            title: format!("{} / {}", ty.name, ty.english_name),
+            body: format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name),
+            kind: "type".to_owned(),
+        });
+    }
+
+    for method in platform.all_methods() {
+        let mut body = format!(
+            "Тип: {}\nМетод: {} / {}\n",
+            method.type_name, method.name, method.english_name,
+        );
+        if let Some(ref ret) = method.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_method_docs(method.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+            for example in &docs.examples {
+                body.push_str(&format!("Пример: {}\n", example.code));
+            }
+        }
+        documents.push(Document {
+            title: format!(
+                "{}.{} / {}.{}",
+                method.type_name, method.name, method.type_name, method.english_name
+            ),
+            body,
+            kind: "method".to_owned(),
+        });
+    }
+
+    for func in platform.all_global_functions() {
+        let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name);
+        if let Some(ref ret) = func.return_type {
+            body.push_str(&format!("Возвращает: {ret}\n"));
+        }
+        if let Some(docs) = platform.get_global_function_docs(func.id) {
+            if !docs.syntax.is_empty() {
+                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
+            }
+            if !docs.description.is_empty() {
+                body.push_str(&format!("Описание: {}\n", docs.description));
+            }
+            for param in &docs.params {
+                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
+            }
+        }
+        documents.push(Document {
+            title: format!("{} / {}", func.name, func.english_name),
+            body,
+            kind: "global_function".to_owned(),
+        });
+    }
+
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("reference-baseline-sync.db");
+    let mut engine = SearchEngine::fts_only(&db_path)?;
+    let indexed_files = engine.index_documents(
+        "platform",
+        "platform://docs",
+        env!("CARGO_PKG_VERSION").as_bytes(),
+        &documents,
+        None,
+    )?;
+    let indexed_documents = engine.load_indexed_documents(Some("platform"))?;
+    Ok((indexed_files, indexed_documents))
 }
 
 fn resolve_scope(
@@ -1862,4 +2159,64 @@ fn setup_logging(
     bsl_analyzer::tracing::Config { writer, filter, profile_filter, json_profile_filter }.init()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pick_first_non_empty, resolve_snapshot_id};
+    use bsl_search::CorpusId;
+
+    #[test]
+    fn explicit_snapshot_id_has_priority() {
+        let snapshot_id = resolve_snapshot_id(
+            &CorpusId::WorkspaceCode,
+            Some("manual-snapshot"),
+            Some("main"),
+            Some("abc123"),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot_id, "manual-snapshot");
+    }
+
+    #[test]
+    fn snapshot_id_is_derived_from_branch_and_commit() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), Some("abc123"))
+                .unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:main@abc123");
+    }
+
+    #[test]
+    fn snapshot_id_is_derived_from_commit_when_branch_is_missing() {
+        let snapshot_id =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, None, Some("abc123")).unwrap();
+
+        assert_eq!(snapshot_id, "workspace-code:abc123");
+    }
+
+    #[test]
+    fn commit_or_snapshot_id_is_required() {
+        let error =
+            resolve_snapshot_id(&CorpusId::WorkspaceCode, None, Some("main"), None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--snapshot-id is required unless --commit is provided"));
+    }
+
+    #[test]
+    fn reference_snapshot_id_defaults_to_package_version() {
+        let snapshot_id = resolve_snapshot_id(&CorpusId::Reference, None, None, None).unwrap();
+
+        assert_eq!(snapshot_id, format!("reference:{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn pick_first_non_empty_skips_blank_values() {
+        let value = pick_first_non_empty([Some(""), Some("  "), None, Some("main")]);
+
+        assert_eq!(value.as_deref(), Some("main"));
+    }
 }

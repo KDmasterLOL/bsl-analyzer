@@ -260,6 +260,8 @@ dependencies = [
  "base-db",
  "bsl-debug",
  "bsl-metadata",
+ "bsl-platform",
+ "bsl-search",
  "clap",
  "crossbeam-channel",
  "expect-test",

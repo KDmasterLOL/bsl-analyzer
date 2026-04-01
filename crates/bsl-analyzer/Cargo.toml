@@ -18,6 +18,7 @@ parser.workspace = true
 ide-db.workspace = true
 base-db.workspace = true
 bsl-metadata.workspace = true
+bsl-platform.workspace = true
 project-model.workspace = true
 vfs.workspace = true
 vfs-notify.workspace = true
@@ -28,6 +29,7 @@ profile.workspace = true
 mcp-server.workspace = true
 bsl-debug.workspace = true
 onec-client.workspace = true
+bsl-search.workspace = true
 
 # LSP
 lsp-types.workspace = true
@@ -62,6 +64,7 @@ thiserror.workspace = true
 
 # Utilities
 walkdir.workspace = true
+tempfile.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Allocator (Unix only — reduces memory fragmentation in multithreaded workloads)
@@ -74,4 +77,3 @@ walkdir = "2.4"
 
 [dev-dependencies]
 expect-test.workspace = true
-tempfile.workspace = true
