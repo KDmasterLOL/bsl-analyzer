@@ -149,6 +149,8 @@ bsl-analyzer mcp install \
 - `preset 'workspace' does not support 'user' scope`
   Используйте `workspace + project` или `reference + user`.
 
+Если в конфиге уже есть старая single-server запись с именем `bsl-analyzer`, установка с `--force` автоматически мигрирует её в новую split-модель с отдельными `reference` и `workspace` серверами.
+
 С подключением к 1С (для выполнения запросов и кода):
 
 ```bash

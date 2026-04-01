@@ -243,6 +243,47 @@ fn gemini_project_force_updates_via_add() {
 }
 
 #[test]
+fn gemini_project_force_migrates_legacy_name() {
+    let harness = TestHarness::new();
+    harness.install_stub("gemini", &gemini_stub());
+    let settings_dir = harness.project_dir.join(".gemini");
+    fs::create_dir_all(&settings_dir).expect("settings dir");
+    fs::write(
+        settings_dir.join("settings.json"),
+        r#"{"mcpServers":{"bsl-analyzer":{"command":"old","args":["serve"]}}}"#,
+    )
+    .expect("settings");
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "gemini",
+            "--scope",
+            "project",
+            "--preset",
+            "workspace",
+            "--force",
+            "--source-dir",
+            harness.source_dir().to_str().expect("utf-8 path"),
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let invocations = harness.invocations();
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(invocations[0].args, vec!["mcp", "remove", "-s", "project", "bsl-analyzer"]);
+    assert_eq!(
+        invocations[1].args[0..5],
+        ["mcp", "add", "-s", "project", "bsl-analyzer-workspace"]
+    );
+}
+
+#[test]
 fn claude_project_force_runs_get_remove_add() {
     let harness = TestHarness::new();
     harness.install_stub("claude", &claude_stub());
@@ -283,6 +324,43 @@ fn claude_project_force_runs_get_remove_add() {
     );
     assert!(invocations[2].args.contains(&"-e".to_owned()));
     assert!(invocations[2].args.contains(&"NAPARNIK_TOKEN=test".to_owned()));
+}
+
+#[test]
+fn claude_project_force_migrates_legacy_name() {
+    let harness = TestHarness::new();
+    harness.install_stub("claude", &claude_stub());
+
+    let output = harness
+        .command()
+        .env("CLAUDE_GET_EXISTS_NAMES", "bsl-analyzer")
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "claude",
+            "--scope",
+            "project",
+            "--preset",
+            "workspace",
+            "--force",
+            "--source-dir",
+            harness.source_dir().to_str().expect("utf-8 path"),
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let invocations = harness.invocations();
+    assert_eq!(invocations.len(), 4);
+    assert_eq!(invocations[0].args, vec!["mcp", "get", "bsl-analyzer-workspace"]);
+    assert_eq!(invocations[1].args, vec!["mcp", "get", "bsl-analyzer"]);
+    assert_eq!(invocations[2].args, vec!["mcp", "remove", "-s", "project", "bsl-analyzer"]);
+    assert_eq!(
+        invocations[3].args[0..5],
+        ["mcp", "add", "-s", "project", "bsl-analyzer-workspace"]
+    );
 }
 
 #[test]
@@ -452,6 +530,12 @@ if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then
     echo "present"
     exit 0
   fi
+  case ",$CLAUDE_GET_EXISTS_NAMES," in
+    *,"$3",*)
+      echo "present"
+      exit 0
+      ;;
+  esac
   echo "No MCP server found with name: $3" >&2
   exit 1
 fi
