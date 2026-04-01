@@ -2231,6 +2231,7 @@ dependencies = [
  "dirs",
  "expect-test",
  "naparnik",
+ "notify",
  "onec-client",
  "parser",
  "project-model",

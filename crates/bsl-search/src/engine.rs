@@ -590,6 +590,48 @@ impl SearchEngine {
         }
     }
 
+    /// Enable watcher-driven overlay refresh mode.
+    pub fn enable_workspace_watcher_mode(&mut self) {
+        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
+            cache.enable_watcher_mode();
+        }
+    }
+
+    /// Mark one workspace file as dirty for the overlay cache.
+    ///
+    /// The path can be absolute inside the configured workspace root or already relative.
+    pub fn mark_workspace_path_dirty(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<bool, SearchError> {
+        let workspace_root = match &self.workspace_root {
+            Some(root) => root,
+            None => return Ok(false),
+        };
+        let path = path.as_ref();
+        let rel_path = if path.is_absolute() {
+            match path.strip_prefix(workspace_root) {
+                Ok(rel) => rel,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            path
+        };
+
+        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+            return Ok(false);
+        }
+
+        let rel_path = rel_path.to_string_lossy().to_string();
+        let mut cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        cache.enable_watcher_mode();
+        cache.mark_dirty_path(rel_path);
+        Ok(true)
+    }
+
     /// Get current workspace overlay statistics.
     ///
     /// Performs a lightweight refresh using file metadata and hashes, but does not
@@ -903,5 +945,30 @@ mod tests {
         assert_eq!(stats.deleted_files, 0);
         assert_eq!(stats.hidden_paths, 1);
         assert_eq!(stats.lexical_chunks, 1);
+    }
+
+    #[test]
+    fn watcher_mode_applies_dirty_file_updates() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура СтараяПроцедура()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.enable_workspace_watcher_mode();
+
+        let initial = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert!(initial.watcher_mode);
+        assert_eq!(initial.overlay_files, 0);
+
+        fs::write(&file, "Процедура ОбновленаЧерезWatcher()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+
+        let hits = engine.text_search("ОбновленаЧерезWatcher", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "ОбновленаЧерезWatcher");
     }
 }

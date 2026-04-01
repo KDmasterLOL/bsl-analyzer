@@ -36,6 +36,8 @@ pub struct WorkspaceOverlayStats {
     pub lexical_chunks: usize,
     pub semantic_chunks: usize,
     pub cached_embeddings: usize,
+    pub watcher_mode: bool,
+    pub pending_dirty_paths: usize,
 }
 
 #[derive(Debug, Default)]
@@ -43,12 +45,25 @@ pub struct WorkspaceOverlayCache {
     entries: HashMap<String, OverlayFileEntry>,
     hidden_paths: HashSet<String>,
     embedding_cache: HashMap<String, Vec<f32>>,
+    dirty_paths: HashSet<String>,
+    watcher_mode: bool,
+    initialized: bool,
 }
 
 impl WorkspaceOverlayCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.hidden_paths.clear();
+        self.dirty_paths.clear();
+        self.initialized = false;
+    }
+
+    pub fn enable_watcher_mode(&mut self) {
+        self.watcher_mode = true;
+    }
+
+    pub fn mark_dirty_path(&mut self, rel_path: impl Into<String>) {
+        self.dirty_paths.insert(rel_path.into());
     }
 
     pub fn refresh(
@@ -60,6 +75,22 @@ impl WorkspaceOverlayCache {
     ) -> Result<(), SearchError> {
         let baseline_files: HashMap<String, Vec<u8>> =
             store.all_files_in_collection("code")?.into_iter().collect();
+        if !self.initialized || !self.watcher_mode {
+            self.full_refresh(&baseline_files, workspace_root, embedder, batch_size)?;
+        } else if !self.dirty_paths.is_empty() {
+            self.refresh_dirty_paths(&baseline_files, workspace_root, embedder, batch_size)?;
+        }
+        self.initialized = true;
+        Ok(())
+    }
+
+    fn full_refresh(
+        &mut self,
+        baseline_files: &HashMap<String, Vec<u8>>,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
         let workspace_files = scan_workspace_files(workspace_root);
         let mut seen_paths = HashSet::new();
         let mut hidden_paths = HashSet::new();
@@ -131,6 +162,96 @@ impl WorkspaceOverlayCache {
         }
 
         self.hidden_paths = hidden_paths;
+        self.dirty_paths.clear();
+        Ok(())
+    }
+
+    fn refresh_dirty_paths(
+        &mut self,
+        baseline_files: &HashMap<String, Vec<u8>>,
+        workspace_root: &Path,
+        embedder: Option<&Embedder>,
+        batch_size: usize,
+    ) -> Result<(), SearchError> {
+        let dirty_paths: Vec<String> = self.dirty_paths.drain().collect();
+
+        for rel_path in dirty_paths {
+            let baseline_hash = baseline_files.get(&rel_path);
+            let abs_path = workspace_root.join(&rel_path);
+
+            if !abs_path.exists() {
+                self.entries.remove(&rel_path);
+                if baseline_hash.is_some() {
+                    self.hidden_paths.insert(rel_path);
+                } else {
+                    self.hidden_paths.remove(&rel_path);
+                }
+                continue;
+            }
+
+            let metadata = match std::fs::metadata(&abs_path) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            let fingerprint =
+                FileFingerprint { len: metadata.len(), modified: metadata.modified().ok() };
+
+            if let Some(entry) = self.entries.get_mut(&rel_path) {
+                if entry.fingerprint == fingerprint {
+                    if baseline_hash.is_some_and(|stored_hash| stored_hash == &entry.file_hash) {
+                        self.entries.remove(&rel_path);
+                        self.hidden_paths.remove(&rel_path);
+                    } else {
+                        if baseline_hash.is_some() {
+                            self.hidden_paths.insert(rel_path.clone());
+                        } else {
+                            self.hidden_paths.remove(&rel_path);
+                        }
+                        if let Some(embedder) = embedder {
+                            if entry.vector_documents.is_empty() {
+                                entry.vector_documents = build_overlay_vectors(
+                                    embedder,
+                                    batch_size,
+                                    &entry.lexical_documents,
+                                    &entry.embedding_inputs,
+                                    &mut self.embedding_cache,
+                                )?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let file_hash = blake3::hash(content.as_bytes()).as_bytes().to_vec();
+            if baseline_hash.is_some_and(|stored_hash| stored_hash == &file_hash) {
+                self.entries.remove(&rel_path);
+                self.hidden_paths.remove(&rel_path);
+                continue;
+            }
+
+            let entry = build_overlay_entry(
+                &rel_path,
+                &content,
+                fingerprint,
+                file_hash,
+                embedder,
+                batch_size,
+                &mut self.embedding_cache,
+            )?;
+
+            if baseline_hash.is_some() {
+                self.hidden_paths.insert(rel_path.clone());
+            } else {
+                self.hidden_paths.remove(&rel_path);
+            }
+            self.entries.insert(rel_path, entry);
+        }
+
         Ok(())
     }
 
@@ -185,6 +306,8 @@ impl WorkspaceOverlayCache {
             lexical_chunks,
             semantic_chunks,
             cached_embeddings: self.embedding_cache.len(),
+            watcher_mode: self.watcher_mode,
+            pending_dirty_paths: self.dirty_paths.len(),
         }
     }
 }
@@ -552,7 +675,38 @@ mod tests {
                 lexical_chunks: 1,
                 semantic_chunks: 0,
                 cached_embeddings: 0,
+                watcher_mode: false,
+                pending_dirty_paths: 0,
             }
         );
+    }
+
+    #[test]
+    fn watcher_mode_refreshes_only_marked_paths() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Базовая()\nКонецПроцедуры").unwrap();
+
+        let db_path = workspace.join("search.db");
+        let mut store = Store::open(&db_path).unwrap();
+        let chunks = crate::Chunker::chunk(&fs::read_to_string(&file).unwrap());
+        let hash = blake3::hash(fs::read(&file).unwrap().as_slice());
+        store.reindex_file("A.bsl", hash.as_bytes(), &chunks, None).unwrap();
+
+        let mut cache = WorkspaceOverlayCache::default();
+        cache.enable_watcher_mode();
+        cache.refresh(&store, workspace, None, 32).unwrap();
+        assert_eq!(cache.stats().overlay_files, 0);
+
+        fs::write(&file, "Процедура ИзWatcher()\nКонецПроцедуры").unwrap();
+        cache.mark_dirty_path("A.bsl");
+        cache.refresh(&store, workspace, None, 32).unwrap();
+
+        let overlay = cache.snapshot();
+        assert_eq!(overlay.lexical_documents.len(), 1);
+        assert_eq!(overlay.lexical_documents[0].symbol_name, "ИзWatcher");
+        assert_eq!(cache.stats().pending_dirty_paths, 0);
+        assert!(cache.stats().watcher_mode);
     }
 }

@@ -3,7 +3,11 @@
 use bsl_metadata::Configuration;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{Document, IndexProgress, SearchEngine};
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use onec_client::Client as OnecClient;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -50,6 +54,7 @@ impl SharedState {
 
         let search_engine: Arc<Mutex<Option<SearchEngine>>> = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
+        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         // Spawn background thread so standalone() returns immediately.
         // MCP tools check engine readiness and return a friendly message while init is in progress.
@@ -57,15 +62,33 @@ impl SharedState {
             let engine_arc = Arc::clone(&search_engine);
             let progress_arc = Arc::clone(&index_progress);
             let root = source_dir.clone();
+            let watcher_ready = Arc::clone(&watcher_ready);
             std::thread::Builder::new()
                 .name("bsl-search-init".to_owned())
                 .spawn(move || {
                     tracing::info!("search engine initialization started in background");
-                    let engine = Self::init_workspace_search_engine(&root, &progress_arc);
+                    let mut engine = Self::init_workspace_search_engine(&root, &progress_arc);
+                    if watcher_ready.load(Ordering::SeqCst) {
+                        if let Some(engine) = engine.as_mut() {
+                            engine.enable_workspace_watcher_mode();
+                        }
+                    }
                     if let Ok(mut guard) = engine_arc.lock() {
                         *guard = engine;
                     }
                     tracing::info!("search engine initialization complete");
+                })
+                .ok();
+        }
+
+        {
+            let engine_arc = Arc::clone(&search_engine);
+            let watch_root = config_path.to_path_buf();
+            let watcher_ready = Arc::clone(&watcher_ready);
+            std::thread::Builder::new()
+                .name("bsl-search-overlay-watch".to_owned())
+                .spawn(move || {
+                    Self::run_workspace_overlay_watcher(engine_arc, watch_root, watcher_ready);
                 })
                 .ok();
         }
@@ -521,5 +544,66 @@ impl SharedState {
         }
 
         None
+    }
+
+    fn run_workspace_overlay_watcher(
+        engine: Arc<Mutex<Option<SearchEngine>>>,
+        watch_root: PathBuf,
+        watcher_ready: Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(
+            move |event| {
+                let _ = tx.send(event);
+            },
+            NotifyConfig::default(),
+        ) {
+            Ok(watcher) => watcher,
+            Err(e) => {
+                tracing::warn!(?watch_root, "failed to create workspace watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&watch_root, RecursiveMode::Recursive) {
+            tracing::warn!(?watch_root, "failed to watch workspace for overlay updates: {e}");
+            return;
+        }
+
+        watcher_ready.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = engine.lock() {
+            if let Some(engine) = guard.as_mut() {
+                engine.enable_workspace_watcher_mode();
+            }
+        }
+        tracing::info!(?watch_root, "workspace overlay watcher started");
+
+        while let Ok(event) = rx.recv() {
+            match event {
+                Ok(event) => Self::handle_workspace_watch_event(&engine, &event),
+                Err(e) => tracing::warn!(?watch_root, "workspace watch event error: {e}"),
+            }
+        }
+    }
+
+    fn handle_workspace_watch_event(engine: &Arc<Mutex<Option<SearchEngine>>>, event: &Event) {
+        if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
+        {
+            return;
+        }
+
+        for path in &event.paths {
+            if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+                continue;
+            }
+
+            if let Ok(guard) = engine.lock() {
+                if let Some(engine) = guard.as_ref() {
+                    if let Err(e) = engine.mark_workspace_path_dirty(path) {
+                        tracing::warn!(?path, "failed to mark workspace file dirty: {e}");
+                    }
+                }
+            }
+        }
     }
 }

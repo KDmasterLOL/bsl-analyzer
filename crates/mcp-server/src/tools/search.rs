@@ -173,6 +173,12 @@ pub fn search_status(
             let _ = writeln!(out, "  Chunks:   {}", overlay.lexical_chunks);
             let _ = writeln!(out, "  Semantic: {}", overlay.semantic_chunks);
             let _ = writeln!(out, "  Cached embeddings: {}", overlay.cached_embeddings);
+            let _ = writeln!(
+                out,
+                "  Watcher mode: {}",
+                if overlay.watcher_mode { "enabled" } else { "polling" }
+            );
+            let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
         }
     } else {
         let _ = writeln!(out, "Search index: building (background initialization in progress)");
